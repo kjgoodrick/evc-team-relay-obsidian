@@ -688,6 +688,7 @@
 							<span class="evc-connection-path">{localFolderPath}</span>
 							<span class="evc-connection-status">{uiText("shareDetail.localFolder.connectedStatus")}</span>
 						</div>
+						<button class="evc-small-btn" on:click={() => live.shareRegistry.locate((sf) => sf.entityGuid === share.id)?.openManagedConflicts()}>Review file conflicts</button>
 						<button class="evc-btn-danger evc-small-btn" on:click={disconnectFolder}>{uiText("shareDetail.localFolder.disconnectButton")}</button>
 					</div>
 				{:else}

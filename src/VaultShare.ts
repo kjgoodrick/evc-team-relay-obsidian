@@ -3,6 +3,7 @@
 // Obsidian host API
 import {
 	App,
+	Notice,
 	FileManager,
 	TAbstractFile,
 	TFile,
@@ -14,6 +15,11 @@ import {
 
 // Path utilities (Node-shim for the Obsidian sandbox)
 import { dirname, join, sep } from "path-browserify";
+
+import * as Y from "yjs";
+import { CONFLICTS, select, touches, type Records, type StructuralConflict } from "./client/managedRecovery";
+import { prepareRecoveryBackup, sameCapture, type RecoveryCapture } from "./ManagedRecoveryBackup";
+import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
@@ -286,6 +292,17 @@ export class VaultShare extends ProviderBacked {
 		this.attachmentSettings = this._buildSyncSettingsManager();
 		this.folderIndex = this._buildSyncStore();
 		this._wireSyncStoreListener();
+		let notifiedCount = 0;
+		this.crdtDoc.getMap(CONFLICTS).observe(() => {
+			const count = this.crdtDoc.getMap(CONFLICTS).size;
+			if (count > notifiedCount) {
+				const message = document.createDocumentFragment();
+				message.appendText(`${count} file conflict(s) in ${this.path || "this vault"}. Local edits are retained. `);
+				message.createEl("button", { text: "Review conflicts" }).onclick = () => this.openManagedConflicts();
+				new Notice(message, 15000);
+			}
+			notifiedCount = count;
+		});
 		this.docActivity = new DocActivityChannel(this.crdtDoc);
 
 		this.rootRelative = withRootRelativePaths(this, this.path, (globalPath: string) => {
@@ -376,6 +393,7 @@ export class VaultShare extends ProviderBacked {
 	async ensureManagedEntry(path: string, record: ItemRecord): Promise<void> {
 		const index = this._liveProvider.managedIndex;
 		if (!index) return;
+		if (index.isBlocked(path, record.id)) throw new Error("Resolve the file conflict before publishing. Local edits are retained.");
 		if (!index.registered(path, record.id)) {
 			if (!await index.claim(path, record)) {
 				this.folderIndex.clearPendingUpload(path);
@@ -387,9 +405,104 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	canWriteManagedPath(path: string): boolean {
+		if (this._liveProvider?.managedIndex?.isBlocked(path)) return false;
 		const snapshot = this.crdtDoc.getMap<{ owner: boolean; permissions: Record<string, string> }>("managed_base_v1").get("snapshot");
 		if (snapshot) return snapshot.owner || snapshot.permissions[path] === "write";
 		return !this._liveProvider.managedIndex;
+	}
+
+	public isRecoveringStructure = false;
+	private recoveryMoves = new Map<string, string>();
+
+	isRecoveryMove(from: string, to: string): boolean {
+		return [...(this.recoveryMoves ?? [])].some(([source, target]) =>
+			(from === source && to === target) || (from.startsWith(source + "/") && to === target + from.slice(source.length)));
+	}
+
+	openManagedConflicts(): void { new ManagedConflictsModal(this.obsidianApp, this).open(); }
+
+	async resolveManagedConflict(id: string, choice: "server" | "local", reviewed: Records): Promise<string> {
+		const index = this._liveProvider.managedIndex;
+		if (!index) throw new Error("Reconnect the share to load its conflicts.");
+		let backupPath = "";
+		await index.resolve(id, choice, reviewed, async (conflict, server) => {
+			const involved = { ...conflict, paths: [...new Set([...conflict.paths, ...Object.keys(select(server.records, conflict))])] };
+			const records = [...Object.values(conflict.base), ...Object.values(conflict.local), ...Object.values(select(server.records, conflict))];
+			const affectedFiles = () => this.vaultApi.getAllLoadedFiles().filter(file => this.containsPath(file.path)
+				&& !isConflictCopyPath(file.path) && touches(involved, this.toVirtualPath(file.path)));
+			const capture = async (): Promise<RecoveryCapture> => {
+				const files = [];
+				for (const file of affectedFiles()) if (file instanceof TFile) files.push({ path: file.path, bytes: await this.vaultApi.readBinary(file) });
+				const documents = [];
+				const seen = new Set<string>();
+				for (const record of records) {
+					if (seen.has(record.id) || (record.type !== "markdown" && record.type !== "canvas")) continue;
+					seen.add(record.id);
+					const doc = new Y.Doc();
+					const store = new LocalDocumentStore(`${this.hostAppId}-relay-${record.type === "canvas" ? "canvas" : "doc"}-${record.id}`, doc);
+					try {
+						await store._dbref; // Includes replay and rejects on database-open failure.
+						const live = this.trackedEntries.get(record.id);
+						if (isDocument(live) || isCanvasDocument(live)) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
+						const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(record.id);
+						documents.push({ id: record.id, unsaved, update: Y.encodeStateAsUpdate(doc), text: record.type === "canvas" ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
+					} finally { await store.close(); doc.destroy(); }
+				}
+				return { files, documents, index: Y.encodeStateAsUpdate(this.crdtDoc) };
+			};
+			const mkdir = async (path: string) => {
+				let parent = "";
+				for (const part of path.split("/")) {
+					parent = parent ? `${parent}/${part}` : part;
+					if (!await this.vaultApi.adapter.exists(parent)) await this.vaultApi.createFolder(parent);
+				}
+			};
+			const backup = await prepareRecoveryBackup({ mkdir, write: (p, text) => this.vaultApi.adapter.write(p, text), writeBinary: (p, bytes) => this.vaultApi.adapter.writeBinary(p, bytes) }, capture,
+				{ shareId: this.entityGuid, sharePath: this.path, choice, conflict, server: select(server.records, conflict) });
+			backupPath = backup.path;
+			return async () => {
+				await backup.verify();
+				if (choice === "local") return;
+				const before = backup.initial;
+				this.isRecoveringStructure = true;
+				try {
+					// Rename originals, never delete them. A crash or partial move leaves
+					// both the completed backup and any moved originals recoverable.
+					const candidates = affectedFiles().sort((a, b) => a.path.length - b.path.length);
+					const roots = candidates.filter(file => !candidates.some(parent => parent !== file && file.path.startsWith(parent.path + "/")));
+					for (const file of roots) {
+						const target = `${backup.path}/originals/${file.path}`;
+						await mkdir(target.slice(0, target.lastIndexOf("/")));
+						(this.recoveryMoves ??= new Map()).set(file.path, target);
+						await this.vaultApi.rename(file, target);
+					}
+					// Catch editor changes during disk operations before tearing down any
+					// live document. On failure its IndexedDB history is still intact.
+					const after = await capture();
+					// IndexedDB reads above yield. Recheck every live editor synchronously
+					// at the final boundary so an edit to an earlier document cannot be
+					// missed while a later document's persistence is being read.
+					for (const saved of after.documents) {
+						const live = this.trackedEntries.get(saved.id);
+						if (!isDocument(live) && !isCanvasDocument(live)) continue;
+						const merged = new Y.Doc();
+						Y.applyUpdate(merged, saved.update); Y.applyUpdate(merged, Y.encodeStateAsUpdate(live.crdtDoc));
+						saved.update = Y.encodeStateAsUpdate(merged);
+						if (isDocument(live) && live._unsavedFile) saved.unsaved = live._unsavedFile.unsavedText;
+						merged.destroy();
+					}
+					after.index = Y.encodeStateAsUpdate(this.crdtDoc);
+					if (!sameCapture({ ...before, files: [] }, { ...after, files: [] })) throw new Error("Editing continued during recovery. Originals are in the recovery folder; local editing history is retained. Review and retry.");
+					for (const entry of [...this.trackedEntries.values()]) {
+						if (!touches(involved, entry.entryPath, { id: entry.entityGuid } as ItemRecord)) continue;
+						this._teardownDeletedFile(entry);
+						this.pathSet.delete(entry); this.trackedEntries.delete(entry.entityGuid);
+					}
+				} finally { this.isRecoveringStructure = false; }
+			};
+		});
+		await this.scanFileTree(this.folderIndex);
+		return backupPath;
 	}
 
 	private _wireSyncStoreListener(): void {
@@ -585,6 +698,7 @@ export class VaultShare extends ProviderBacked {
 			if (!moves.some((known) => known.from === move.from)) moves.push(move);
 		}
 		for (const { from, to } of moves) {
+			if (this._liveProvider?.managedIndex?.isBlocked(from) || this._liveProvider?.managedIndex?.isBlocked(to)) continue;
 			try {
 				const source = this.vaultApi.getAbstractFileByPath(this.absolutePath(from));
 				if (!source) continue;
@@ -1144,6 +1258,7 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	public isSyncableVaultFile(tfile: TAbstractFile): boolean {
+		if (isConflictCopyPath(tfile.path)) return false;
 		const inFolder = this.containsPath(tfile.path);
 		const vpath = this.toVirtualPath(tfile.path);
 		const isSupportedFileType = this.folderIndex.isSyncable(vpath);
@@ -1512,6 +1627,7 @@ export class VaultShare extends ProviderBacked {
 		knownGuids: Set<string>,
 		diffLog: string[],
 	): SyncOp {
+		if (this.isRecoveringStructure || this._liveProvider?.managedIndex?.isBlocked(path, guid)) return this._noop(path);
 		// Skip files that are being locally deleted — prevents race condition
 		// where scanFileTree runs between disk deletion and folderIndex removal
 		if (this.isDeletePending(path)) {
@@ -1707,6 +1823,7 @@ export class VaultShare extends ProviderBacked {
 		allRemotePaths: Set<string>,
 		diffLog: string[],
 	): DeleteOp | null {
+		if (this.isRecoveringStructure || this._liveProvider?.managedIndex?.isBlocked(this.toVirtualPath(file.path))) return null;
 		if (this._liveProvider.managedIndex) {
 			// Revocation is not deletion. Trash only an explicit tombstone for
 			// the same local file identity; preserve unknown/unshared local data.
@@ -2926,6 +3043,7 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	renameEntry(tfile: TAbstractFile, oldPath: string) {
+		if (this.isRecoveryMove(oldPath, tfile.path)) return;
 		const newPath = tfile.path;
 		const newVPath = this._tryGetVirtualPath(
 			newPath,
@@ -3117,6 +3235,7 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 	}
 
 	shareFor(path: string): VaultShare | null {
+		if (isConflictCopyPath(path)) return null;
 		// Purely a path-namespace match -- doesn't care whether `path` exists on disk.
 		return this.locate((vaultShare) => vaultShare.containsPath(path)) ?? null;
 	}

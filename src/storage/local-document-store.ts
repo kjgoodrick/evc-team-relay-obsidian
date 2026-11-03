@@ -195,6 +195,7 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 	private _attachState: Uint8Array | null = null;
 	private _storeTimeoutId: number | null = null;
 	private readonly _storeDebounceMs = 1000;
+	private readonly pendingWrites = new Set<Promise<unknown>>();
 	private readonly _updateHandler: (update: Uint8Array, origin: unknown) => void;
 	private readonly _destroyHandler = (): void => {
 		this.destroy();
@@ -253,16 +254,20 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 				update = Y.mergeUpdates([this._attachState, update]);
 				this._attachState = null;
 			}
-			void this._dbref.then(() => {
-				if (this._destroyed || !this.db) return;
+			const pending = this._dbref.then(() => {
+				// This update was accepted before close(). Drain it even if teardown
+				// began before the database-open promise's microtask ran.
+				if (!this.db) return;
 				const [updates] = idb.transact(this.db, [UPDATES_STORE]);
-				void idb
+				return idb
 					.addAutoKey(updates, update as unknown as ArrayBuffer)
 					.then((key) => {
 						if (typeof key === "number") this._lastKey = key;
-						if (++this._dbsize >= this._trimSize) this._scheduleCollapse();
+						if (++this._dbsize >= this._trimSize && !this._destroyed) this._scheduleCollapse();
 					});
 			});
+			this.pendingWrites.add(pending);
+			void pending.then(() => this.pendingWrites.delete(pending), () => { /* close() reports failed persistence */ });
 		};
 		doc.on("update", this._updateHandler);
 		this.close = this.close.bind(this);
@@ -311,7 +316,8 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 		this.doc.off("update", this._updateHandler);
 		this.doc.off("destroy", this._destroyHandler);
 		this._destroyed = true;
-		return this._dbref.then((db) => {
+		return this._dbref.then(async (db) => {
+			if (this.pendingWrites.size) await Promise.all(this.pendingWrites);
 			db.close();
 			return super.destroy();
 		});

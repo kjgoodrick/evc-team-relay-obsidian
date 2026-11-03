@@ -2,6 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as Y from "yjs";
 import { YSweetProvider } from "../../src/client/provider";
+import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
+import { prepareRecoveryBackup } from "../../src/ManagedRecoveryBackup";
+import { select } from "../../src/client/managedRecovery";
 import { ManagedIndexTransport } from "../../src/client/ManagedIndexTransport";
 
 // Only the Obsidian transport boundary is replaced; Yjs, provider, FastAPI,
@@ -69,6 +72,45 @@ run("real relay: inventory filtering, concurrent editing, offline/restart, read-
 	const restored = await peer(await grant(fixture.ownerToken));
 	const offlineRestored = await peer(await grant(fixture.bobToken), saved);
 	await until(() => restored.text.toString() === expected && offlineRestored.text.toString() === expected, "durable state restored exactly once");
+	// Two inventories rename one stable document while Bob edits it offline.
+	// The conflicting move must not block an unrelated new note, or lose text.
+	const ownerRoot = await grant(fixture.ownerToken, fixture.share);
+	const ownerDoc = new Y.Doc(); docs.push(ownerDoc);
+	const ownerIndex = new ManagedIndexTransport(ownerDoc, () => ({ endpoint: ownerRoot.relay_url + "/" + fixture.share, token: ownerRoot.token }), () => {}, () => {});
+	indexes.push(ownerIndex); await ownerIndex.flush();
+	inventory.stop(); offlineRestored.provider.disconnect();
+	offlineRestored.text.insert(offlineRestored.text.length, "edit during competing moves\n");
+	const localRecords = rootDoc.getMap<ItemRecord>("filemeta_v0"), ownerRecords = ownerDoc.getMap<ItemRecord>("filemeta_v0");
+	const original = localRecords.get("Note.md")!;
+	rootDoc.transact(() => { localRecords.delete("Note.md"); localRecords.set("Bob.md", original); localRecords.set("Unrelated.md", { id: crypto.randomUUID(), type: ItemKind.Document, version: 0 }); });
+	ownerDoc.transact(() => { ownerRecords.delete("Note.md"); ownerRecords.set("Alice.md", original); });
+	await ownerIndex.flush();
+	inventory.start(); await inventory.flush();
+	expect(inventory.conflicts).toHaveLength(1);
+	expect(inventory.snapshot.records["Unrelated.md"]).toBeDefined();
+	expect(localRecords.get("Bob.md")?.id).toBe(fixture.note);
+	expect(localRecords.has("Alice.md")).toBe(false);
+	const conflict = inventory.conflicts[0];
+	let savedBackup = "";
+	await inventory.resolve(conflict.id, "local", select(inventory.snapshot.records, conflict), async () => {
+		const capture = async () => ({ files: [{ path: "Bob.md", bytes: new TextEncoder().encode(offlineRestored.text.toString()).buffer }],
+			documents: [{ id: fixture.note, update: Y.encodeStateAsUpdate(offlineRestored.doc), text: offlineRestored.text.toString() }], index: Y.encodeStateAsUpdate(rootDoc) });
+		const base = fixture.restartDir;
+		const backup = await prepareRecoveryBackup({
+			mkdir: async p => { await fs.promises.mkdir(path.join(base, p), { recursive: true }); },
+			write: (p, text) => fs.promises.writeFile(path.join(base, p), text),
+			writeBinary: (p, bytes) => fs.promises.writeFile(path.join(base, p), new Uint8Array(bytes)),
+		}, capture, conflict);
+		savedBackup = backup.path;
+		return backup.verify;
+	});
+	expect(inventory.conflicts).toHaveLength(0);
+	expect(inventory.snapshot.records["Bob.md"]?.id).toBe(fixture.note);
+	const recoveryDoc = new Y.Doc(); docs.push(recoveryDoc);
+	Y.applyUpdate(recoveryDoc, fs.readFileSync(path.join(fixture.restartDir, savedBackup, `documents/${fixture.note}.yjs`)));
+	expect(recoveryDoc.getText("contents").toString()).toContain("edit during competing moves");
+	offlineRestored.provider.connect();
+	await until(() => restored.text.toString() === offlineRestored.text.toString() && restored.text.toString().includes("edit during competing moves"), "text survived structural recovery");
 	const rules = [{ user_id: fixture.bobId, path: "", recursive: true, permission: "read" }, { user_id: fixture.bobId, path: "Budget.md", recursive: false, permission: "none" }];
 	expect((await api(`/v1/managed/shares/${fixture.share}/rules`, fixture.ownerToken, rules, "PUT")).status).toBe(200);
 	await until(() => !offlineRestored.provider.wsconnected, "existing writer disconnected after downgrade");

@@ -1276,6 +1276,10 @@ export default class TeamRelayPlugin extends Plugin {
 		const fromFolder = this.shareRegistry.shareFor(oldPath);
 		const toFolder = this.shareRegistry.shareFor(file.path);
 		const folder = fromFolder || toFolder;
+		if (fromFolder?.isRecoveryMove(oldPath, file.path) || toFolder?.isRecoveryMove(oldPath, file.path)) {
+			void this._viewRegistry.refreshViews("structural recovery");
+			return;
+		}
 		if (folder) {
 			vaultLog("Rename", file.path, oldPath);
 			if (fromFolder && toFolder) {

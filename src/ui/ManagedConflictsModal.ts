@@ -1,0 +1,44 @@
+import { App, Modal, Notice, Setting } from "obsidian";
+import type { VaultShare } from "../VaultShare";
+import { CONFLICTS, select, type StructuralConflict } from "../client/managedRecovery";
+import { RECOVERY_FOLDER } from "../conflictCopyPath";
+
+export class ManagedConflictsModal extends Modal {
+	private busy = false;
+	private error = "";
+	private readonly changed = () => { if (!this.busy) this.render(); };
+	constructor(app: App, private share: VaultShare) { super(app); }
+	onOpen(): void { this.share.crdtDoc.getMap(CONFLICTS).observe(this.changed); this.render(); }
+	onClose(): void { this.share.crdtDoc.getMap(CONFLICTS).unobserve(this.changed); this.contentEl.empty(); }
+	private render(): void {
+		this.contentEl.empty();
+		this.contentEl.createEl("h2", { text: "File and folder conflicts" });
+		this.contentEl.createEl("p", { text: `Unrelated files continue syncing. Disputed files stay on this device until you choose. Each decision first saves file contents and local editing history under “${RECOVERY_FOLDER}”. These recovery files never sync.` });
+		if (this.error) this.contentEl.createEl("p", { text: this.error, cls: "mod-warning" });
+		const index = this.share._liveProvider.managedIndex;
+		const conflicts = [...this.share.crdtDoc.getMap<StructuralConflict>(CONFLICTS).values()];
+		if (!conflicts.length) this.contentEl.createEl("p", { text: "No file conflicts need a decision." });
+		for (const conflict of conflicts) {
+			this.contentEl.createEl("h3", { text: Object.keys(conflict.local).join(", ") || conflict.paths.join(", ") });
+			this.contentEl.createEl("p", { text: conflict.reason });
+			const reviewed = select(index?.snapshot.records ?? {}, conflict);
+			this.contentEl.createEl("p", { text: `This device: ${Object.keys(conflict.local).join(", ") || "Deleted locally"}` });
+			this.contentEl.createEl("p", { text: `Server (visible to you): ${Object.keys(reviewed).join(", ") || "Deleted or no longer accessible"}` });
+			new Setting(this.contentEl).setName("Use server layout")
+				.setDesc("Archive the affected local originals, then load the server layout. Local edits remain in the recovery folder and document history.")
+				.addButton(button => button.setButtonText("Use server layout").setDisabled(this.busy || !index).onClick(() => this.resolve(conflict.id, "server", reviewed)));
+			new Setting(this.contentEl).setName("Keep my local layout")
+				.setDesc("Retry your move, deletion, or file change against the current server state. Requires permission at every affected path. A deleted file identity cannot be restored this way; use the recovery copy to create a new file.")
+				.addButton(button => button.setButtonText("Keep my local layout").setDisabled(this.busy || !index).onClick(() => this.resolve(conflict.id, "local", reviewed)));
+		}
+	}
+	private async resolve(id: string, choice: "server" | "local", reviewed: ReturnType<typeof select>): Promise<void> {
+		if (this.busy) return;
+		this.busy = true; this.error = ""; this.render();
+		try {
+			const path = await this.share.resolveManagedConflict(id, choice, reviewed);
+			new Notice(`Conflict resolved. Recovery files: ${path}`, 12000);
+		} catch (error) { this.error = error instanceof Error ? error.message : String(error); }
+		finally { this.busy = false; this.render(); }
+	}
+}

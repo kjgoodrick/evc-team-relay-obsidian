@@ -9,6 +9,7 @@ import { dirname, join } from "path-browserify";
  * write side.
  */
 const CONFLICT_COPY_SUFFIX = /\((?:relay conflict|relay deleted)[^()]*\)(?:\.[^./]+)?$/;
+export const RECOVERY_FOLDER = "Relay Recovery (local only)";
 
 /**
  * True when `path` is one of the plugin's own recovery copies
@@ -17,7 +18,7 @@ const CONFLICT_COPY_SUFFIX = /\((?:relay conflict|relay deleted)[^()]*\)(?:\.[^.
  * nests them on the next conflict.
  */
 export function isConflictCopyPath(path: string): boolean {
-	return CONFLICT_COPY_SUFFIX.test(path);
+	return path.split("/").includes(RECOVERY_FOLDER) || CONFLICT_COPY_SUFFIX.test(path);
 }
 
 export function buildConflictCopyPath(docPath: string, label: string): string {

@@ -148,3 +148,15 @@ describe("LocalDocumentStore", () => {
 		expect(received).toEqual([store]);
 	});
 });
+
+test("closing immediately after an edit drains the accepted write before restart", async () => {
+	const name = `close-with-edit-${crypto.randomUUID()}`;
+	const doc = new Y.Doc(), store = new LocalDocumentStore(name, doc);
+	await store.whenSynced;
+	doc.getText("contents").insert(0, "last offline edit");
+	await store.close(); doc.destroy();
+	const restored = new Y.Doc(), reopened = new LocalDocumentStore(name, restored);
+	await reopened.whenSynced;
+	expect(restored.getText("contents").toString()).toBe("last offline edit");
+	await reopened.close(); restored.destroy();
+});

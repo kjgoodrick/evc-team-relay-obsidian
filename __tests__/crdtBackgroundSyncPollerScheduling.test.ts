@@ -54,12 +54,14 @@ import { resetTokenRequestClasses, tokenRequestClass } from "src/auth/tokenReque
 const flushPromises = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 interface FakeFile extends Pick<Document, "isOnline" | "entityGuid" | "entryPath"> {
+	isOnline: Document["isOnline"]; // Mutable test connection state.
 	__isDocument?: boolean;
 }
 
 type PullFn = (file: FakeFile, control: PullControl) => Promise<PullResult>;
 
 interface FakeFolder extends Pick<VaultShare, "workspaceId" | "isOnline" | "path"> {
+	isOnline: VaultShare["isOnline"]; // Mutable test connection state.
 	trackedEntries: Map<string, FakeFile>;
 	transfers: { pullIfUnchanged: jest.Mock<PullFn>; laneLimit: number };
 	docActivity: { subscribeRemote: (listener: RemoteActivityListener) => () => void };

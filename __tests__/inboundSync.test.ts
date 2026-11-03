@@ -115,7 +115,7 @@ describe("InboundSyncPoller", () => {
 		clientManager = makeMockClientManager();
 		webSyncManager = makeMockWebSyncManager();
 		fileDownloader = {
-			downloadShare: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+			downloadShare: jest.fn<() => Promise<"ran" | "skipped">>().mockResolvedValue("ran"),
 			isInboundWriting: jest.fn<() => boolean>().mockReturnValue(false),
 		};
 		poller = new InboundSyncPoller(

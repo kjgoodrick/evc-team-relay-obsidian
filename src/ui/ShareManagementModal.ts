@@ -509,6 +509,8 @@ export class ShareManagementModal extends Modal {
 		contentEl.createEl("h4", { text: "Local folder" });
 
 		if (localFolder) {
+			new Setting(contentEl).setName("File and folder conflicts").setDesc("Review changes that need a decision; recovery copies stay on this device.")
+				.addButton(button => button.setButtonText("Review conflicts").onClick(() => localFolder.openManagedConflicts()));
 			new Setting(contentEl)
 				.setName(localFolder.path)
 				.setDesc("Connected and syncing")

@@ -1,6 +1,6 @@
 # Team Relay permissions preview
 
-Experimental self-hosted fork of EVC Team Relay. It adds server-enforced file/folder permissions and a browser-based Pocket ID sign-in flow for Obsidian desktop/mobile APIs. Physical mobile validation is still pending.
+Experimental self-hosted fork of EVC Team Relay. It adds server-enforced file/folder permissions and a browser-based Pocket ID sign-in flow for Obsidian desktop/mobile APIs. It also recovers safe inventory conflicts automatically and provides a persisted conflict queue with verified local backups for decisions. Physical mobile validation is still pending.
 
 Use the matching [server fork and setup guide](https://github.com/kjgoodrick/evc-team-relay/blob/main/docs/permissions-preview.md). Build the installable `dist/` bundle with `npm ci --ignore-scripts` followed by `npm run build:preview`. Start in a disposable vault. This retains the upstream plugin ID, so it replaces the original plugin within that vault.
 
