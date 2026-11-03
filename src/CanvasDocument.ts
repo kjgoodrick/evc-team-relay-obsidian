@@ -1,3 +1,4 @@
+import { ItemKind } from "./ItemKinds";
 import type { TFile, Vault } from "obsidian";
 import { ProviderBacked } from "./ProviderBacked";
 import type { MimeTyped, SyncableEntry } from "./SyncableEntry";
@@ -331,6 +332,11 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 			return `${this._parent.path}/${this.entryPath}`;
 		}
 		return this.entryPath || "unknown";
+	}
+
+	override async requestProviderToken() {
+		await this.vaultShare.ensureManagedEntry?.(this.entryPath, { id: this.entityGuid, version: 0, type: ItemKind.Canvas });
+		return super.requestProviderToken();
 	}
 
 	public get obsidianFile(): TFile | null {

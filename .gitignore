@@ -32,3 +32,6 @@ vaults/
 # Editor and tooling state
 .cursor/
 
+
+# Reproducible fork preview bundles
+dist/

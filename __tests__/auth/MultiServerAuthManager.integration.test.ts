@@ -35,7 +35,7 @@ jest.mock("../../src/platformFetch");
 import { platformFetch } from "../../src/platformFetch";
 const mockFetch = platformFetch as jest.MockedFunction<typeof platformFetch>;
 
-jest.mock("../../src/auth/OAuthHandler");
+jest.mock("../../src/auth/NativeOAuthHandler");
 
 const mockStorage = createAuthStorageShim("test-vault-tr55");
 

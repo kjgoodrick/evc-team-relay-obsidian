@@ -8,6 +8,7 @@
 	import type { ShareMember, Invite, WebFolderEntry } from "../RelayOnPremShareClient";
 	import { LimitExceededApiError, VisibilityNotAllowedApiError } from "../RelayOnPremShareClient";
 	import type { ShareWithServer } from "../RelayOnPremShareClientManager";
+	import { PathPermissionsModal } from "../ui/PathPermissionsModal";
 	import { FolderPathPickerModal } from "../ui/FolderPathPickerModal";
 	import { confirmDialog, promptDialog, choiceDialog } from "../ui/dialogs";
 	import { withOutboundSyncGuard } from "../WebSyncManager";
@@ -103,6 +104,11 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	function managePathPermissions() {
+		const client = live.shareClientManager?.getClient(share.serverId) ?? live.shareClient;
+		if (client) new PathPermissionsModal(live.app, client, share.id, members).open();
 	}
 
 	async function loadServerInfo() {
@@ -695,6 +701,16 @@
 			</div>
 		{/if}
 
+		{#if currentShare.managed}
+			<div class="evc-section">
+				<div class="evc-section-title">File and folder permissions</div>
+				<p>Members need explicit access rules. Membership and invitation roles do not grant file access in this share.</p>
+				{#if isOwner}
+					<button class="mod-cta" on:click={managePathPermissions}>Manage permissions</button>
+				{/if}
+			</div>
+		{/if}
+
 		<!-- Members -->
 		<div class="evc-section">
 			<div class="evc-section-title">{uiText("shareDetail.members.heading")}</div>
@@ -773,8 +789,8 @@
 			</div>
 		{/if}
 
-		<!-- Agent Keys (owner only) -->
-		{#if isOwner}
+		<!-- Agent Keys (owner only, legacy shares) -->
+		{#if isOwner && !currentShare.managed}
 		<div class="evc-section">
 			<div class="evc-section-header">
 				<div class="evc-section-title">{uiText("shell.breadcrumb.agentKeys")}</div>
@@ -787,7 +803,7 @@
 		{/if}
 
 		<!-- Web Publishing (owner + server supports it) -->
-		{#if isOwner && webPublishEnabled}
+		{#if isOwner && webPublishEnabled && !currentShare.managed}
 			<div class="evc-section">
 				<div class="evc-section-title">{uiText("shareDetail.webPublish.heading")}</div>
 
@@ -868,6 +884,7 @@
 					<select
 						class="dropdown"
 						value={currentShare.visibility}
+						disabled={currentShare.managed}
 						on:change={(e) => updateVisibility(e.currentTarget.value)}
 					>
 						<option value="private">{uiText("shareDetail.actions.privateOption")}</option>

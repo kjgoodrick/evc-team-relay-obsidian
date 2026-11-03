@@ -27,7 +27,7 @@ import { platformFetch } from "../../src/platformFetch";
 import { createAuthStorageShim } from "../mocks/authStorageShim";
 const mockFetch = platformFetch as jest.MockedFunction<typeof platformFetch>;
 
-jest.mock("../../src/auth/OAuthHandler");
+jest.mock("../../src/auth/NativeOAuthHandler");
 
 const mockStorage = createAuthStorageShim("test-app-id");
 

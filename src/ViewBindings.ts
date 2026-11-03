@@ -4,6 +4,7 @@ import { EditorView } from "@codemirror/view";
 import {
 	App,
 	MarkdownView,
+	editorInfoField,
 	Platform,
 	requireApiVersion,
 	TFile,
@@ -23,7 +24,7 @@ import ServiceHealthMonitor from "./ServiceHealthMonitor";
 import { VaultShare, ShareRegistry } from "./VaultShare";
 import { namedLogger, Loggable, instanceLabels } from "./logging";
 import { ViewNoticeBar } from "./ui/ViewNoticeBar";
-import { LiveEdit } from "./y-codemirror.next/LiveEditPlugin";
+import { LiveEdit, ySyncAnnotation } from "./y-codemirror.next/LiveEditPlugin";
 import {
 	yRemoteSelections,
 	yRemoteSelectionsTheme,
@@ -1283,6 +1284,13 @@ export class ViewBindingRegistry {
 	 * via `clearExtensions()` + `updateOptions()`. */
 	private buildLiveExtensions(): Extension {
 		return [
+			EditorState.transactionFilter.of(transaction => {
+				if (!transaction.docChanged || transaction.annotation(ySyncAnnotation)) return transaction;
+				const file = transaction.startState.field(editorInfoField, false)?.file;
+				const folder = file && this.shareRegistry.shareFor(file.path);
+				if (folder && !folder.canWriteManagedPath(folder.toVirtualPath(file.path))) return [];
+				return transaction;
+			}),
 			this._extensionCompartment.of(ViewBindingStateField.init(() => this)),
 			LiveEdit,
 			LiveNode,

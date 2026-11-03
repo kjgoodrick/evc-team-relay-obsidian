@@ -5,7 +5,7 @@
  * Supports multi-server mode with optional serverId parameter
  */
 
-import { App, Modal, Notice, Platform } from "obsidian";
+import { App, Modal, Notice } from "obsidian";
 import type { AuthSession } from "../AuthSession";
 import type { RelayOnPremShareClient, OAuthProvider } from "../RelayOnPremShareClient";
 import { uiText } from "../wording/uiText";
@@ -142,12 +142,6 @@ export class RelayOnPremLoginModal extends Modal {
 		if (this.oauthProviders.length > 0) {
 			const oauthSection = form.createDiv({ cls: "relay-onprem-oauth-section evc-oauth-section" });
 
-			// OAuthCallbackServer needs Node's http module to receive the
-			// redirect (Electron-only) — on mobile/browser it just throws "only
-			// supported on desktop" the moment a button is clicked. Hide the
-			// buttons with an explanation instead of letting the user hit that
-			// raw error after already trying.
-			if (Platform.isDesktopApp) {
 				oauthSection.createDiv({
 					text: uiText("connect.login.orSignInWith"),
 					cls: "setting-item-name evc-oauth-label",
@@ -169,12 +163,7 @@ export class RelayOnPremLoginModal extends Modal {
 						void this.handleOAuthLogin(provider.name);
 					});
 				}
-			} else {
-				oauthSection.createDiv({
-					text: uiText("connect.login.ssoUnavailableMobile"),
-					cls: "evc-text-muted evc-text-sm",
-				});
-			}
+
 		}
 
 		// Focus email input

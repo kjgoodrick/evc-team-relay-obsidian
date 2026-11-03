@@ -1,3 +1,4 @@
+import { ManagedIndexTransport } from "./ManagedIndexTransport";
 /**
  * WebSocket provider for a Yjs doc.
  *
@@ -426,6 +427,7 @@ export interface ConnectTrace {
 }
 
 export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
+	managedIndex?: ManagedIndexTransport;
 	maxBackoffTime: number;
 	bcChannel: string;
 	url: string;
@@ -592,6 +594,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 	 */
 	get connectionState(): ConnectionState {
 		const intent = this.intent;
+		if (this.managedIndex) return { status: this.wsconnected ? "connected" : "disconnected", intent };
 		switch (this.ws?.readyState) {
 			case WebSocket.OPEN:
 				return { status: "connected", intent };
@@ -612,6 +615,15 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 
 	connect(): void {
 		this.shouldConnect = true;
+		if (this.isManagedIndexUrl()) {
+			if (!this.managedIndex) this.managedIndex = new ManagedIndexTransport(this.doc,
+				() => { const parsed = new URL(this.url); const token = parsed.searchParams.get("token") ?? ""; parsed.search = ""; return { endpoint: parsed.toString(), token }; },
+				connected => { this.wsconnected = connected; this.synced = connected; this.emit("status", [this.connectionState]); },
+				error => this.emit("connection-error", [error as unknown as Event, this]),
+			);
+			this.managedIndex.start();
+			return;
+		}
 		if (!this.wsconnected && this.ws === null && this.connectTicket === null) {
 			this.connectTrace = { calledAt: Date.now(), failedSockets: 0 };
 			setupWS(this);
@@ -625,6 +637,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 
 	disconnect(): void {
 		this.shouldConnect = false;
+		this.managedIndex?.stop();
 		this.disconnectBc();
 		releaseConnectTicket(this);
 		if (this.ws === null) this.wsconnecting = false;
@@ -705,7 +718,13 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 		return this.url === expectedUrl;
 	}
 
+	private isManagedIndexUrl(): boolean {
+		try { return new URL(this.url).pathname.includes("/v1/managed/index/"); }
+		catch { return false; }
+	}
+
 	destroy(): void {
+		this.managedIndex?.destroy();
 		if (this._resyncInterval !== 0) window.clearInterval(this._resyncInterval);
 		window.clearInterval(this._checkInterval);
 		if (this.ws !== null) {

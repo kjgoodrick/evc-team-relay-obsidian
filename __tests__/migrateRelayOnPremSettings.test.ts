@@ -5,16 +5,10 @@ import {
 	EVC_SERVER_ID,
 	EVC_CP_URL,
 	TR_RU_SERVER_ID,
-	TR_RU_CP_URL,
 } from "../src/RelayOnPremConfig";
 import type { RelayOnPremServer, RelayOnPremSettings } from "../src/RelayOnPremConfig";
 
-// Requirement: the second server is only for new users.
-// (the second default server is for NEW installs only). The fix is a single
-// entry added to DEFAULT_RELAY_ONPREM_SETTINGS.servers — no new migration
-// branch. These tests prove that decision holds: a fresh install gets both
-// servers, an established install gets neither more nor fewer servers than
-// it already had, and a user's own custom server is never touched.
+// Fresh fork installations have no hosted server presets. Existing servers survive.
 
 function makeServer(overrides: Partial<RelayOnPremServer> = {}): RelayOnPremServer {
 	return {
@@ -38,35 +32,12 @@ function makeSettings(
 }
 
 describe("migrateRelayOnPremSettings — fresh install", () => {
-	test("undefined settings (no data.json) get BOTH default servers", () => {
-		const result = migrateRelayOnPremSettings(undefined);
-		expect(result.changed).toBe(true);
-		expect(result.settings.servers).toHaveLength(2);
-		expect(result.settings.servers.map((s) => s.id)).toEqual([EVC_SERVER_ID, TR_RU_SERVER_ID]);
-	});
-
-	test("null settings get BOTH default servers", () => {
-		const result = migrateRelayOnPremSettings(null);
-		expect(result.settings.servers).toHaveLength(2);
-	});
-
-	test("defaultServerId stays on the EVC server, not the new RU one", () => {
-		const result = migrateRelayOnPremSettings(undefined);
-		expect(result.settings.defaultServerId).toBe(EVC_SERVER_ID);
-	});
-
-	test("the RU server has the expected id/name/url", () => {
-		const result = migrateRelayOnPremSettings(undefined);
-		const ru = result.settings.servers.find((s) => s.id === TR_RU_SERVER_ID);
-		expect(ru).toBeDefined();
-		expect(ru?.name).toBe("Team Relay RU");
-		expect(ru?.controlPlaneUrl).toBe(TR_RU_CP_URL);
-		expect(ru?.isValidated).toBe(false);
-	});
-
-	test("matches DEFAULT_RELAY_ONPREM_SETTINGS exactly", () => {
-		const result = migrateRelayOnPremSettings(undefined);
+	test.each([undefined, null])("starts without hosted servers or a default (%s)", old => {
+		const result = migrateRelayOnPremSettings(old);
 		expect(result.settings).toEqual(DEFAULT_RELAY_ONPREM_SETTINGS);
+		expect(result.settings.servers).toEqual([]);
+		expect(result.settings.defaultServerId).toBeUndefined();
+		expect(result.changed).toBe(true);
 	});
 });
 
@@ -115,7 +86,7 @@ describe("migrateRelayOnPremSettings — established install (servers[] already 
 		expect(survived).toEqual(custom);
 	});
 
-	test("a custom server with no EVC server present yet still gets EVC prepended, RU is NOT added", () => {
+	test("a custom server stays the only server and becomes the default", () => {
 		const custom = makeServer({
 			id: "my-custom-relay",
 			name: "My Custom Relay",
@@ -123,7 +94,8 @@ describe("migrateRelayOnPremSettings — established install (servers[] already 
 		});
 		const existing = makeSettings([custom]);
 		const result = migrateRelayOnPremSettings(existing);
-		expect(result.settings.servers.map((s) => s.id)).toEqual([EVC_SERVER_ID, "my-custom-relay"]);
+		expect(result.settings.servers.map((s) => s.id)).toEqual(["my-custom-relay"]);
+		expect(result.settings.defaultServerId).toBe("my-custom-relay");
 	});
 });
 

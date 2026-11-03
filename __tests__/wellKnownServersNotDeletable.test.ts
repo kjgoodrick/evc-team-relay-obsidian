@@ -36,9 +36,8 @@ describe("delete guard", () => {
 		}
 	});
 
-	test("the protected list has no duplicates and covers exactly the shipped set", () => {
-		const shipped = DEFAULT_RELAY_ONPREM_SETTINGS.servers.map((s) => s.id).sort();
-		expect([...WELL_KNOWN_SERVER_IDS].sort()).toEqual(shipped);
+	test("the legacy protected list has no duplicates", () => {
+		expect([...WELL_KNOWN_SERVER_IDS].sort()).toEqual([EVC_SERVER_ID, TR_RU_SERVER_ID].sort());
 		expect(new Set(WELL_KNOWN_SERVER_IDS).size).toBe(WELL_KNOWN_SERVER_IDS.length);
 	});
 });

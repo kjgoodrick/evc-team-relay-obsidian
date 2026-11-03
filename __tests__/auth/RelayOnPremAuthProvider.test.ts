@@ -24,11 +24,11 @@ jest.mock("../../src/platformFetch");
 import { platformFetch } from "../../src/platformFetch";
 const mockFetch = platformFetch as jest.MockedFunction<typeof platformFetch>;
 
-jest.mock("../../src/auth/OAuthHandler");
-import { OAuthHandler } from "../../src/auth/OAuthHandler";
+jest.mock("../../src/auth/NativeOAuthHandler");
+import { NativeOAuthHandler } from "../../src/auth/NativeOAuthHandler";
 import { testGlobal } from "../mocks/testGlobal";
 import { createAuthStorageShim } from "../mocks/authStorageShim";
-const MockOAuthHandler = OAuthHandler as jest.MockedClass<typeof OAuthHandler>;
+const MockNativeOAuthHandler = NativeOAuthHandler as jest.MockedClass<typeof NativeOAuthHandler>;
 
 const mockStorage = createAuthStorageShim("test-app-id");
 Object.defineProperty(testGlobal, "window", {
@@ -269,12 +269,12 @@ describe("RelayOnPremAuthProvider", () => {
 
 	describe("loginWithOAuth2()", () => {
 		test("P18: Stores refresh_token (regression test)", async () => {
-			const mockOAuthHandler = {
+			const mockNativeOAuthHandler = {
 				completeOAuthFlow: jest.fn(),
 				destroy: jest.fn(),
 			};
 
-			MockOAuthHandler.mockImplementation(() => mockOAuthHandler as any);
+			MockNativeOAuthHandler.mockImplementation(() => mockNativeOAuthHandler as any);
 
 			const mockAuthResponse: AuthResponse = {
 				user: {
@@ -289,7 +289,7 @@ describe("RelayOnPremAuthProvider", () => {
 				refreshToken: "oauth_refresh_token",
 			};
 
-			mockOAuthHandler.completeOAuthFlow.mockResolvedValue(mockAuthResponse);
+			mockNativeOAuthHandler.completeOAuthFlow.mockResolvedValue(mockAuthResponse);
 
 			const result = await provider.loginWithOAuth2("casdoor");
 
@@ -303,18 +303,18 @@ describe("RelayOnPremAuthProvider", () => {
 
 			const parsed = JSON.parse(stored!);
 			expect(parsed.refreshToken).toBe("oauth_refresh_token");
-			expect(mockOAuthHandler.destroy).toHaveBeenCalled();
+			expect(mockNativeOAuthHandler.destroy).toHaveBeenCalled();
 		});
 
 		test("P19: Error clears auth", async () => {
-			const mockOAuthHandler = {
+			const mockNativeOAuthHandler = {
 				completeOAuthFlow: jest.fn(),
 				destroy: jest.fn(),
 			};
 
-			MockOAuthHandler.mockImplementation(() => mockOAuthHandler as any);
+			MockNativeOAuthHandler.mockImplementation(() => mockNativeOAuthHandler as any);
 
-			mockOAuthHandler.completeOAuthFlow.mockRejectedValue(
+			mockNativeOAuthHandler.completeOAuthFlow.mockRejectedValue(
 				new Error("OAuth flow failed"),
 			);
 
@@ -323,15 +323,15 @@ describe("RelayOnPremAuthProvider", () => {
 			);
 
 			expect(provider.isLoggedIn()).toBe(false);
-			expect(mockOAuthHandler.destroy).toHaveBeenCalled();
+			expect(mockNativeOAuthHandler.destroy).toHaveBeenCalled();
 		});
 
 		test("A failed OAuth2 re-login while already logged in does NOT clear the existing valid session", async () => {
-			const successfulOAuthHandler = {
+			const successfulNativeOAuthHandler = {
 				completeOAuthFlow: jest.fn(),
 				destroy: jest.fn(),
 			};
-			MockOAuthHandler.mockImplementation(() => successfulOAuthHandler as any);
+			MockNativeOAuthHandler.mockImplementation(() => successfulNativeOAuthHandler as any);
 
 			const mockAuthResponse: AuthResponse = {
 				user: {
@@ -345,7 +345,7 @@ describe("RelayOnPremAuthProvider", () => {
 				},
 				refreshToken: "original_oauth_refresh_token",
 			};
-			successfulOAuthHandler.completeOAuthFlow.mockResolvedValue(mockAuthResponse);
+			successfulNativeOAuthHandler.completeOAuthFlow.mockResolvedValue(mockAuthResponse);
 
 			await provider.loginWithOAuth2("casdoor");
 			expect(provider.isLoggedIn()).toBe(true);
@@ -353,12 +353,12 @@ describe("RelayOnPremAuthProvider", () => {
 
 			// A second OAuth attempt (e.g. re-triggered for some other reason)
 			// fails — the original session must survive it.
-			const failingOAuthHandler = {
+			const failingNativeOAuthHandler = {
 				completeOAuthFlow: jest.fn(),
 				destroy: jest.fn(),
 			};
-			MockOAuthHandler.mockImplementation(() => failingOAuthHandler as any);
-			failingOAuthHandler.completeOAuthFlow.mockRejectedValue(
+			MockNativeOAuthHandler.mockImplementation(() => failingNativeOAuthHandler as any);
+			failingNativeOAuthHandler.completeOAuthFlow.mockRejectedValue(
 				new Error("OAuth flow failed"),
 			);
 
@@ -372,12 +372,12 @@ describe("RelayOnPremAuthProvider", () => {
 		});
 
 		test("Opens browser with window.open", async () => {
-			const mockOAuthHandler = {
+			const mockNativeOAuthHandler = {
 				completeOAuthFlow: jest.fn(),
 				destroy: jest.fn(),
 			};
 
-			MockOAuthHandler.mockImplementation(() => mockOAuthHandler as any);
+			MockNativeOAuthHandler.mockImplementation(() => mockNativeOAuthHandler as any);
 
 			const mockAuthResponse: AuthResponse = {
 				user: {
@@ -390,7 +390,7 @@ describe("RelayOnPremAuthProvider", () => {
 				},
 			};
 
-			mockOAuthHandler.completeOAuthFlow.mockImplementation(
+			mockNativeOAuthHandler.completeOAuthFlow.mockImplementation(
 				async (provider, openBrowser) => {
 					openBrowser("https://auth.example.com/authorize");
 					return mockAuthResponse;

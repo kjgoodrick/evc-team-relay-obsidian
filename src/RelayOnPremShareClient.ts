@@ -14,6 +14,7 @@ const log = namedLogger("[RelayOnPremShareClient]");
  * Share data from control plane API
  */
 export interface RelayOnPremShare {
+	managed?: boolean;
 	id: string;
 	kind: "doc" | "folder";
 	path: string;
@@ -57,6 +58,13 @@ export interface ShareMember {
 	updated_at?: string;
 }
 
+export interface PathRule {
+	user_id: string;
+	path: string;
+	recursive: boolean;
+	permission: "none" | "read" | "write";
+}
+
 /**
  * Account data from control plane
  */
@@ -73,6 +81,7 @@ export interface Account {
  * Request to create a new share
  */
 export interface CreateShareRequest {
+	managed?: boolean;
 	kind: "doc" | "folder";
 	path: string;
 	visibility: "private" | "public" | "protected";
@@ -175,6 +184,8 @@ export interface ServerInfo {
  * Server features
  */
 export interface ServerFeatures {
+	managed_shares?: boolean;
+	native_oidc?: boolean;
 	multi_user: boolean;
 	share_members: boolean;
 	audit_logging: boolean;
@@ -421,6 +432,10 @@ export class RelayOnPremShareClient {
 	 * Create a new share
 	 */
 	async createShare(request: CreateShareRequest): Promise<RelayOnPremShare> {
+		request = { ...request, managed: request.managed ?? (request.kind === "folder" && request.visibility === "private") };
+		if (request.managed && !(await this.getServerInfo()).features?.managed_shares) {
+			throw new Error("This server does not support file permissions. Install the matching server fork before creating this share.");
+		}
 		log(`Creating share: ${request.path}`);
 
 		try {
@@ -442,12 +457,26 @@ export class RelayOnPremShareClient {
 			}
 
 			const share = await response.json() as RelayOnPremShare;
+			if (request.managed && !share.managed) throw new Error("The server did not create a permission-controlled share.");
 			log(`Created share: ${share.id}`);
 			return share;
 		} catch (error: unknown) {
 			log("Error creating share:", error);
 			throw error;
 		}
+	}
+
+	async getPathRules(shareId: string): Promise<PathRule[]> {
+		const response = await platformFetch(`${this.normalizedUrl}/v1/managed/shares/${shareId}/rules`, { headers: await this.getHeaders() });
+		if (!response.ok) throw new Error(`Cannot load file permissions (${response.status})`);
+		return await response.json() as PathRule[];
+	}
+
+	async setPathRules(shareId: string, rules: PathRule[]): Promise<void> {
+		const response = await platformFetch(`${this.normalizedUrl}/v1/managed/shares/${shareId}/rules`, {
+			method: "PUT", headers: await this.getHeaders(), body: JSON.stringify(rules),
+		});
+		if (!response.ok) throw new Error(`Cannot save file permissions (${response.status})`);
 	}
 
 	/**

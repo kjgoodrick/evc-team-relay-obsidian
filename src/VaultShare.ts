@@ -372,6 +372,26 @@ export class VaultShare extends ProviderBacked {
 		);
 	}
 
+	/** Reserve the file identity in the server inventory before asking for content access. */
+	async ensureManagedEntry(path: string, record: ItemRecord): Promise<void> {
+		const index = this._liveProvider.managedIndex;
+		if (!index) return;
+		if (!index.registered(path, record.id)) {
+			if (!await index.claim(path, record)) {
+				this.folderIndex.clearPendingUpload(path);
+				throw new Error("Another client created this file first. Local content is retained; wait for the shared copy to sync.");
+			}
+		}
+		this.folderIndex.ensureMeta(path, record);
+		await index.flush();
+	}
+
+	canWriteManagedPath(path: string): boolean {
+		const snapshot = this.crdtDoc.getMap<{ owner: boolean; permissions: Record<string, string> }>("managed_base_v1").get("snapshot");
+		if (snapshot) return snapshot.owner || snapshot.permissions[path] === "write";
+		return !this._liveProvider.managedIndex;
+	}
+
 	private _wireSyncStoreListener(): void {
 		this.folderIndex.on(() => {
 			void this.scanFileTree(this.folderIndex);
@@ -680,6 +700,10 @@ export class VaultShare extends ProviderBacked {
 			}
 			syncTFiles = known;
 		}
+		if (this._liveProvider.managedIndex) {
+			const allowed = await this._liveProvider.managedIndex.publishablePaths(syncTFiles.map(file => this.toVirtualPath(file.path)));
+			syncTFiles = syncTFiles.filter(file => allowed.has(this.toVirtualPath(file.path)));
+		}
 		const newPaths = this.claimPaths(syncTFiles);
 
 		// Among the freshly-minted paths, Document/CanvasDocument vpaths can race: two
@@ -796,6 +820,17 @@ export class VaultShare extends ProviderBacked {
 	private async claimUploadPaths(
 		vpaths: string[],
 	): Promise<{ won: string[]; lost: string[] }> {
+		if (this._liveProvider.managedIndex) {
+			const won: string[] = [], lost: string[] = [];
+			// Reserve sequentially so a refresh cannot overwrite an in-flight claim.
+			for (const path of vpaths) {
+				const id = this.folderIndex.guidFor(path)!;
+				const record = path.endsWith(".canvas") ? makeCanvasRecord(id) : makeDocumentRecord(id);
+				if (await this._liveProvider.managedIndex.claim(path, record)) won.push(path);
+				else { this.folderIndex.clearPendingUpload(path); lost.push(path); }
+			}
+			return { won, lost };
+		}
 		if (vpaths.length === 0) {
 			return { won: [], lost: [] };
 		}
@@ -1672,6 +1707,14 @@ export class VaultShare extends ProviderBacked {
 		allRemotePaths: Set<string>,
 		diffLog: string[],
 	): DeleteOp | null {
+		if (this._liveProvider.managedIndex) {
+			// Revocation is not deletion. Trash only an explicit tombstone for
+			// the same local file identity; preserve unknown/unshared local data.
+			const removed = this.crdtDoc.getMap<{ deleted?: Record<string, string[]> }>("managed_base_v1").get("snapshot")?.deleted;
+			const ids = removed?.[this.toVirtualPath(file.path)] ?? [];
+			if (!ids.some(id => this.trackedEntries.has(id))) return null;
+			if (file instanceof TFolder && file.children.length > 0) return null;
+		}
 		const isSyncableFile = this.isSyncableVaultFile(file);
 		const fileInFolder = this.containsPath(file.path);
 		const vpath = this.toVirtualPath(file.path);
@@ -2789,6 +2832,10 @@ export class VaultShare extends ProviderBacked {
 			const pending = this.folderCreations?.get(vpath);
 			if (pending?.size) await Promise.allSettled(Array.from(pending));
 			if (this.discardedFolderNodes?.has(tfile) || this.isDeletePending(vpath)) return;
+		}
+		if (this._liveProvider.managedIndex) {
+			const allowed = await this._liveProvider.managedIndex.publishablePaths([vpath]);
+			if (!allowed.has(vpath)) return;
 		}
 		const newDocs = this.claimPaths([tfile]);
 		if (newDocs.length === 0) {

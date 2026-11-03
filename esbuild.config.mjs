@@ -34,6 +34,14 @@ if you want to view the source, please visit the github repository of this plugi
 // unavailable altogether the version comes from manifest.json, which the tarball
 // already ships.
 const gitTag = (() => {
+	// Explicit, validated version for locally packaged fork previews. No tag or
+	// upstream release workflow is required to reproduce the test artifact.
+	if (process.env.FORK_BUILD_VERSION) {
+		if (!/^\d+\.\d+\.\d+$/.test(process.env.FORK_BUILD_VERSION)) {
+			throw new Error("FORK_BUILD_VERSION must be a bare semantic version");
+		}
+		return process.env.FORK_BUILD_VERSION;
+	}
 	try {
 		return execSync("git describe --tags", {
 			encoding: "utf8",
@@ -142,7 +150,7 @@ const context = await esbuild.context({
 		GIT_TAG: `"${gitTag}"`,
 		API_URL: `"${apiUrl}"`,
 		AUTH_URL: `"${authUrl}"`,
-		REPOSITORY: `"entire-vc/evc-team-relay-obsidian"`,
+		REPOSITORY: `"kjgoodrick/evc-team-relay-obsidian"`,
 	},
 	treeShaking: true,
 	loader: {

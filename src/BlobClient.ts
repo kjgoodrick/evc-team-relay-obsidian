@@ -1,3 +1,4 @@
+import { ItemKind } from "./ItemKinds";
 import type { RelayCredentialCache } from "./RelayCredentialCache";
 import type { FileGrant } from "./relay/TokenShapes";
 import { ResourceAddress } from "./ResourceAddress";
@@ -92,6 +93,10 @@ export class BlobClient extends Loggable {
 		if (!(content && hash)) {
 			throw new Error("invalid caf");
 		}
+		await this.vaultShare.ensureManagedEntry(syncFile.entryPath, {
+			id: syncFile.entityGuid, version: 0, type: ItemKind.File,
+			mimetype: syncFile.mimeType, hash, synctime: Date.now(),
+		});
 		const token = await this.tokenFor(syncFile, hash, content.byteLength);
 		const response = await platformFetch(`${token.baseUrl}/upload-url`, {
 			method: "POST",

@@ -15,7 +15,8 @@
     "lint:obsidian-api": "eslint src/ --parser-options '{\"project\":\"./tsconfig.json\"}' --rule 'obsidianmd/no-unsupported-api:error' --rule '@typescript-eslint/no-floating-promises:error' --rule 'obsidianmd/prefer-create-el:error'",
     "typecheck:svelte": "bash scripts/check-svelte-types.sh",
     "typecheck:tests": "bash scripts/check-tests-types.sh",
-    "check:svelte-events": "bash scripts/check-svelte-events.sh"
+    "check:svelte-events": "bash scripts/check-svelte-events.sh",
+    "build:preview": "tsc -noEmit -skipLibCheck && FORK_BUILD_VERSION=0.2.0 node esbuild.config.mjs production dist"
   },
   "keywords": [
     "obsidian",
@@ -28,12 +29,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/entire-vc/evc-team-relay-obsidian.git"
+    "url": "git+https://github.com/kjgoodrick/evc-team-relay-obsidian.git"
   },
   "bugs": {
-    "url": "https://github.com/entire-vc/evc-team-relay-obsidian/issues"
+    "url": "https://github.com/kjgoodrick/evc-team-relay-obsidian/issues"
   },
-  "homepage": "https://github.com/entire-vc/evc-team-relay-obsidian#readme",
+  "homepage": "https://github.com/kjgoodrick/evc-team-relay-obsidian#readme",
   "devDependencies": {
     "@codemirror/state": "6.5.0",
     "@codemirror/view": "6.38.6",

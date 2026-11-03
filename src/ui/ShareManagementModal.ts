@@ -14,6 +14,7 @@ import { getDefaultServer, type RelayOnPremServer } from "../RelayOnPremConfig";
 import { confirmDialog, promptDialog } from "./dialogs";
 import { setDestructiveButton } from "./destructiveButton";
 import { withOutboundSyncGuard } from "../WebSyncManager";
+import { PathPermissionsModal } from "./PathPermissionsModal";
 import { buildVaultIdentity } from "../vaultIdentity";
 import { collectWebFolderItems, joinFolderPath, resolveShareFolder, toSharePath } from "../vaultRootPath";
 import { copyToClipboard } from "../utils/clipboard";
@@ -239,7 +240,7 @@ export class ShareManagementModal extends Modal {
 			})();
 
 			const agentKeysPromise = (async () => {
-				if (!this.isOwner) return [] as AgentKey[];
+				if (!this.isOwner || share.managed) return [] as AgentKey[];
 				try {
 					if (this.plugin.shareClientManager) {
 						return await this.plugin.shareClientManager.listAgentKeys(share.serverId, share.id);
@@ -385,7 +386,18 @@ export class ShareManagementModal extends Modal {
 		}
 
 		// Members section
+		if (this.selectedShare.managed && this.isOwner) {
+			new Setting(contentEl).setName("File and folder permissions")
+				.setDesc("Members need explicit access rules before they can see files.")
+				.addButton(button => button.setButtonText("Manage permissions").onClick(() => {
+					const client = this.plugin.shareClientManager?.getClient(this.selectedShare!.serverId) ?? this.plugin.shareClient;
+					if (client) new PathPermissionsModal(this.app, client, this.selectedShare!.id, this.members).open();
+				}));
+		}
 		contentEl.createEl("h4", { text: "Members" });
+		if (this.selectedShare.managed) {
+			contentEl.createEl("p", { text: "File access is controlled by permissions above. Membership roles and invitation roles do not grant file access in this share." });
+		}
 
 		if (this.members.length === 0) {
 			contentEl.createEl("p", {
@@ -468,12 +480,12 @@ export class ShareManagementModal extends Modal {
 		}
 
 		// Agent Keys section - only for owners
-		if (this.isOwner) {
+		if (this.isOwner && !this.selectedShare.managed) {
 			this.renderAgentKeysSection();
 		}
 
 		// Web Publishing section - only for owners when server supports it (moved here in v1.8.3)
-		if (this.isOwner && this.webPublishEnabled) {
+		if (this.isOwner && this.webPublishEnabled && !this.selectedShare.managed) {
 			this.renderWebPublishingSection();
 		}
 

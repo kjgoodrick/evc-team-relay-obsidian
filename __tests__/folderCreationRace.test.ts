@@ -44,6 +44,7 @@ function fixture(entryPath = "late", missingParent = false) {
 		subscribe: () => () => {},
 		awaitReady: () => Promise.resolve(share),
 		_localDb: { synced: true },
+		_liveProvider: {},
 		vaultApi: {
 			getAbstractFileByPath: (path: string) => nodes.get(path) ?? null,
 			createFolder: jest.fn(() => creation),

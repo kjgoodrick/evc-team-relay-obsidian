@@ -395,11 +395,11 @@ export class RelayOnPremAuthProvider implements IAuthProvider {
 		const previousRefreshToken = this.storedRefreshToken;
 
 		// Import dynamically to avoid circular dependencies
-		const { OAuthHandler } = await import("./OAuthHandler");
+		const { NativeOAuthHandler } = await import("./NativeOAuthHandler");
 
 		this.log(`Starting OAuth2 login with provider: ${provider}`);
 
-		const oauthHandler = new OAuthHandler(this.normalizedUrl, this.serverId);
+		const oauthHandler = new NativeOAuthHandler(this.normalizedUrl);
 
 		try {
 			// Prepare OAuth flow and open browser

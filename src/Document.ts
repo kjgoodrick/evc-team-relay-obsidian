@@ -1,3 +1,4 @@
+import { ItemKind } from "./ItemKinds";
 "use strict";
 import { LocalDocumentStore } from "./storage/local-document-store";
 import * as Y from "yjs";
@@ -227,6 +228,11 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 			return `${this._parent.path}/${this.entryPath}`;
 		}
 		return this.entryPath || "unknown";
+	}
+
+	override async requestProviderToken() {
+		await this.vaultShare.ensureManagedEntry?.(this.entryPath, { id: this.entityGuid, version: 0, type: ItemKind.Document });
+		return super.requestProviderToken();
 	}
 
 	public get obsidianFile(): TFile | null {

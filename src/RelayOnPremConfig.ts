@@ -145,30 +145,9 @@ interface LegacyRelayOnPremSettings {
 }
 
 export const DEFAULT_RELAY_ONPREM_SETTINGS: RelayOnPremSettings = {
-	// EVC Team Relay always uses relay-onprem mode (no hosted cloud backend)
+	// This fork starts with the user's own server; existing saved settings survive.
 	enabled: true,
-	servers: [
-		{
-			id: EVC_SERVER_ID,
-			name: "EVC Team Relay",
-			controlPlaneUrl: EVC_CP_URL,
-			isValidated: false,
-		},
-		{
-			id: TR_RU_SERVER_ID,
-			name: "Team Relay RU",
-			controlPlaneUrl: TR_RU_CP_URL,
-			isValidated: false,
-		},
-	],
-	// The second server is for NEW installs
-	// only — this default only applies via the `!oldSettings` branch of
-	// migrateRelayOnPremSettings() below. The existing-settings branch never
-	// adds a server that isn't already in the saved list, so an established
-	// install's servers[] is untouched by this addition. Stays on the EVC
-	// server (nothing forces
-	// a user already using EVC onto a different default).
-	defaultServerId: EVC_SERVER_ID,
+	servers: [],
 };
 
 /**
@@ -256,20 +235,11 @@ export function migrateRelayOnPremSettings(
 					servers = servers.filter((s) => !removeIds.has(s.id));
 				}
 				changed = true;
-			} else {
-				// No EVC server at all — prepend it
-				servers.unshift({
-					id: EVC_SERVER_ID,
-					name: "EVC Team Relay",
-					controlPlaneUrl: EVC_CP_URL,
-					isValidated: false,
-				});
-				changed = true;
 			}
 		}
 
-		if (!defaultServerId) {
-			defaultServerId = EVC_SERVER_ID;
+		if (!defaultServerId && servers.length > 0) {
+			defaultServerId = servers[0].id;
 			changed = true;
 		}
 

@@ -418,6 +418,9 @@ export class RelayOnPremTokenProvider {
 			}
 
 			if (response.status === 401 || response.status === 403) {
+				if (response.headers.get("X-Relay-Managed") === "true" && docId !== folderId) {
+					throw new Error(`Access to this file was revoked (${response.status})`);
+				}
 				this.refusedShares.add(folderId);
 				const errorText = await response.text().catch(() => "");
 				throw new RelayAccessDeniedError(
