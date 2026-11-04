@@ -585,3 +585,39 @@
 .is-mobile .relay-server-actions .relay-server-btn {
 	border: 1px solid var(--background-modifier-border);
 }
+
+/* Paths and member identifiers are untrusted-length content in recovery/ACL dialogs. */
+.evc-path-permissions, .evc-managed-conflicts {
+	overflow-wrap: anywhere;
+}
+.evc-path-permissions .setting-item-info,
+.evc-managed-conflicts .setting-item-info {
+	min-width: 0;
+}
+.is-mobile .evc-path-permissions .setting-item-control,
+.is-mobile .evc-managed-conflicts .setting-item-control {
+	flex-wrap: wrap;
+	max-width: 100%;
+}
+.is-mobile .evc-path-permissions button,
+.is-mobile .evc-managed-conflicts button {
+	min-height: 44px;
+	height: auto;
+	white-space: normal;
+}
+.is-mobile .evc-path-permissions input[type="text"],
+.is-mobile .evc-path-permissions select {
+	min-width: 0;
+	max-width: 100%;
+}
+.is-mobile .evc-share-detail .evc-connection-row {
+	flex-wrap: wrap;
+}
+.is-mobile .evc-share-detail .evc-connection-info {
+	flex-basis: 100%;
+}
+.is-mobile .evc-share-detail .evc-connection-row button {
+	min-height: 44px;
+	height: auto;
+	white-space: normal;
+}

@@ -1,0 +1,13 @@
+/* Approximate host chrome only. This is not Obsidian's stylesheet or native UI. */
+:root { color-scheme: light dark; --background-primary:#fff; --background-secondary:#eee; --background-modifier-border:#aaa; --text-normal:#222; --text-muted:#555; --text-accent:#6945bd; --interactive-accent:#6945bd; }
+@media(prefers-color-scheme:dark) { :root { --background-primary:#202020; --background-secondary:#303030; --text-normal:#eee; --text-muted:#bbb; --background-modifier-border:#666; } }
+* {box-sizing:border-box} body {margin:0;font:16px system-ui;background:var(--background-primary);color:var(--text-normal);padding:16px} h1 {font-size:23px} button,input,select,textarea {font:inherit;color:inherit;background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:8px;padding:10px} button {min-height:44px} main>button {margin:4px} textarea {width:100%;min-height:90px} #notice {position:sticky;top:0;background:var(--background-secondary);padding:8px;z-index:5;overflow-wrap:anywhere} pre {white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+.modal-container {position:fixed;inset:0;background:#0008;display:flex;align-items:center;justify-content:center;z-index:10;padding:10px}
+.modal {width:650px;max-width:100%;max-height:100%;background:var(--background-primary);border-radius:12px;padding:16px;display:flex;flex-direction:column}
+.modal-content {overflow:auto;min-height:0}.harness-close {align-self:flex-end;margin-bottom:8px;flex-shrink:0}
+.setting-item {display:flex;align-items:center;gap:12px;padding:16px 0;border-bottom:1px solid var(--background-modifier-border)} .setting-item-info {flex:1}.setting-item-description {font-size:14px;color:var(--text-muted);margin-top:5px}.setting-item-control {display:flex;gap:8px} .mod-warning {color:#ce5129}.mod-cta {background:var(--interactive-accent);color:#fff} input[type=checkbox] {width:44px;height:44px}
+@media(max-width:600px) { .setting-item {flex-wrap:wrap}.setting-item-info,.setting-item-control {width:100%} .setting-item-control input:not([type=checkbox]),.setting-item-control select {width:100%} }
+
+body {padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))} #telemetry {position:fixed;bottom:0;left:0;z-index:20;font-size:11px;background:#fff;color:#111;pointer-events:none;max-width:100%;overflow-wrap:anywhere}
+
+.harness-nav {display:flex;gap:8px;flex-shrink:0}.harness-nav button{font-size:12px} html{-webkit-text-size-adjust:100%}

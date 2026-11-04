@@ -6,6 +6,8 @@ Use the matching [server fork and setup guide](https://github.com/kjgoodrick/evc
 
 The guide records the security model, test coverage, and known preview limitations. The upstream documentation follows; legacy publishing and agent-key features are unavailable for managed shares.
 
+Preview 0.2.2 includes mobile layout/draft fixes and stable Yjs inventory client IDs. See the [mobile verification report and screenshots](tests/mobile/results/2026-11-03/README.md) and [reusable Simulator harness](tests/mobile/README.md). Desktop Obsidian mobile emulation and iOS Simulator Safari passed the documented checks; native Obsidian on a physical phone remains unverified.
+
 ---
 
 # Team Relay Sync

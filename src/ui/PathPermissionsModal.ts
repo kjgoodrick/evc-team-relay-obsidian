@@ -3,9 +3,11 @@ import type { PathRule, RelayOnPremShareClient, ShareMember } from "../RelayOnPr
 
 export class PathPermissionsModal extends Modal {
 	private rules: PathRule[] = [];
+	private draft = { user_id: "", path: "", recursive: true, permission: "read" as PathRule["permission"] };
 	constructor(app: App, private client: RelayOnPremShareClient, private shareId: string, private members: ShareMember[]) { super(app); }
 
 	async onOpen(): Promise<void> {
+		this.contentEl.addClass("evc-path-permissions");
 		this.contentEl.setText("Loading file permissions…");
 		try { this.rules = await this.client.getPathRules(this.shareId); this.render(); }
 		catch (error) { this.contentEl.setText(String(error)); }
@@ -22,25 +24,24 @@ export class PathPermissionsModal extends Modal {
 				.addButton(button => button.setButtonText("Remove rule").onClick(() => { this.rules.splice(index, 1); this.render(); }));
 		}
 		if (this.members.length) {
-			let user = this.members[0].user_id;
-			let path = "";
-			let recursive = true;
-			let permission: PathRule["permission"] = "read";
+			if (!this.draft.user_id) this.draft.user_id = this.members[0].user_id;
+			const draft = this.draft;
 			new Setting(this.contentEl).setName("Member").addDropdown(dropdown => {
 				for (const m of this.members) dropdown.addOption(m.user_id, m.user_email);
-				dropdown.setValue(user).onChange(value => { user = value; });
+				dropdown.setValue(draft.user_id).onChange(value => { draft.user_id = value; });
 			});
 			new Setting(this.contentEl).setName("Path within this share").setDesc("For example Projects or Projects/Budget.md. Leave empty for the whole share.")
-				.addText(text => text.setPlaceholder("Projects/Budget.md").onChange(value => { path = value; }));
+				.addText(text => text.setPlaceholder("Projects/Budget.md").setValue(draft.path).onChange(value => { draft.path = value; }));
 			new Setting(this.contentEl).setName("Include descendants").setDesc("Enable for a folder rule; disable for one exact file.")
-				.addToggle(toggle => toggle.setValue(true).onChange(value => { recursive = value; }));
+				.addToggle(toggle => toggle.setValue(draft.recursive).onChange(value => { draft.recursive = value; }));
 			new Setting(this.contentEl).setName("Access").addDropdown(dropdown => dropdown
 				.addOption("none", "Hidden").addOption("read", "Read only").addOption("write", "Read and write")
-				.setValue(permission).onChange(value => { permission = value as PathRule["permission"]; }));
+				.setValue(draft.permission).onChange(value => { draft.permission = value as PathRule["permission"]; }));
 			new Setting(this.contentEl).addButton(button => button.setButtonText("Add rule").onClick(() => {
-				const existing = this.rules.find(r => r.user_id === user && r.path === path && r.recursive === recursive);
-				if (existing) existing.permission = permission;
-				else this.rules.push({ user_id: user, path, recursive, permission });
+				const existing = this.rules.find(r => r.user_id === draft.user_id && r.path === draft.path && r.recursive === draft.recursive);
+				if (existing) existing.permission = draft.permission;
+				else this.rules.push({ ...draft });
+				this.draft = { ...draft, path: "" };
 				this.render();
 			}));
 		}

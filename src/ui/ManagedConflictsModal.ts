@@ -8,7 +8,7 @@ export class ManagedConflictsModal extends Modal {
 	private error = "";
 	private readonly changed = () => { if (!this.busy) this.render(); };
 	constructor(app: App, private share: VaultShare) { super(app); }
-	onOpen(): void { this.share.crdtDoc.getMap(CONFLICTS).observe(this.changed); this.render(); }
+	onOpen(): void { this.contentEl.addClass("evc-managed-conflicts"); this.share.crdtDoc.getMap(CONFLICTS).observe(this.changed); this.render(); }
 	onClose(): void { this.share.crdtDoc.getMap(CONFLICTS).unobserve(this.changed); this.contentEl.empty(); }
 	private render(): void {
 		this.contentEl.empty();

@@ -264,16 +264,18 @@
 	.evc-header-actions {
 		display: flex;
 		align-items: center;
-		gap: 2px;
-		flex: none;
+		gap: 6px;
+		flex-wrap: wrap;
+		flex: 0 1 auto;
 	}
 
 	.evc-ghost-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 30px;
-		height: 30px;
+		min-height: 44px;
+		padding: 8px;
+		white-space: nowrap;
 		border-radius: var(--radius-s, 6px);
 		color: var(--text-faint);
 		text-decoration: none;

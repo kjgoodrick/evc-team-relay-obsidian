@@ -257,3 +257,13 @@ test("keeping a folder layout cannot delete a server child absent from the offli
 	expect(prepare).not.toHaveBeenCalled(); expect(transport.conflicts).toHaveLength(1);
 	expect(fetchMock.mock.calls.at(-1)![1]?.method).toBe("GET");
 });
+
+test("JSON inventory refreshes preserve the local Yjs client identity", async () => {
+ const {doc,transport}=setup();const originalClient=doc.clientID;
+ fetchMock.mockResolvedValue(response(200,{...empty(),records:{'Note.md':note('one')}}));
+ for(let i=0;i<4;i++) await transport.flush();
+ expect(doc.clientID).toBe(originalClient);
+ fetchMock.mockResolvedValueOnce(response(200,{won:true,record:note('two'),permission:'write'}));
+ await transport.claim('Two.md',note('two'));
+ expect(doc.clientID).toBe(originalClient);
+});

@@ -9,6 +9,7 @@ import type { App } from "obsidian";
 jest.mock("obsidian", () => {
 	const enhance = (el: HTMLElement) => Object.assign(el, {
 		empty() { el.replaceChildren(); },
+		addClass(...names: string[]) { el.classList.add(...names); },
 		createEl(tag: string, options: { text?: string; cls?: string }) { const child = document.createElement(tag); child.textContent = options.text ?? ""; el.append(child); return child; },
 	});
 	class Modal { contentEl = enhance(document.createElement("div")); }

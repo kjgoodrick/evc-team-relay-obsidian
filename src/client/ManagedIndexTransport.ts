@@ -66,7 +66,7 @@ export class ManagedIndexTransport {
 			persisted.set("snapshot", { ...snapshot, records: { ...snapshot.records, [path]: result.record }, permissions: { ...snapshot.permissions, [path]: result.permission } });
 			this.doc.getMap<ItemRecord>("filemeta_v0").set(path, result.record);
 			if (result.record.type === "markdown") this.doc.getMap<string>("docs").set(path, result.record.id);
-		}, this, false);
+		}, this);
 		this.permissions = { ...this.permissions, [path]: result.permission };
 		return result.won;
 	}
@@ -152,6 +152,8 @@ export class ManagedIndexTransport {
 		}
 	}
 
+	// JSON snapshots create local Yjs operations; marking them remote rotates the
+	// client ID on every poll. The origin still suppresses an outbox echo.
 	private install(snapshot: ManagedManifest, sent: Records, markers: Record<string, string>, added: StructuralConflict[] = []): void {
 		const records = this.doc.getMap<ItemRecord>("filemeta_v0");
 		const later = records.toJSON() as Records;
@@ -172,7 +174,7 @@ export class ManagedIndexTransport {
 			for (const id of [...activity.keys()]) if (!(id in snapshot.activity) && activity.get(id) === markers[id]) activity.delete(id);
 			for (const [id, value] of Object.entries(snapshot.activity)) if (activity.get(id) === markers[id] && activity.get(id) !== value) activity.set(id, value);
 			this.doc.getMap<ManagedManifest>(BASE).set("snapshot", snapshot);
-		}, this, false);
+		}, this);
 		this.permissions = snapshot.permissions; this.owner = snapshot.owner;
 		this.connected = true; this.status(true); this.schedule(1000);
 	}
