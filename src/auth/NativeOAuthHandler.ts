@@ -62,13 +62,13 @@ export class NativeOAuthHandler {
 				}
 				if (!result.ok) throw new Error(`SSO failed or expired (${result.status}). Please try signing in again.`);
 				const data = await result.json() as {
-					user_id: string; user_email: string; user_name?: string;
+					user_id: string; user_email: string; user_name?: string; user_picture?: string;
 					access_token: string; refresh_token: string; expires_in: number;
 				};
 				checkCancelled();
 				completed = true;
 				return {
-					user: { id: data.user_id, email: data.user_email, name: data.user_name ?? data.user_email },
+					user: { id: data.user_id, email: data.user_email, name: data.user_name ?? data.user_email, picture: data.user_picture },
 					token: { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 },
 					refreshToken: data.refresh_token,
 				};

@@ -18,6 +18,7 @@ function loadSvelteComponent(filename, dependencies = {}) {
 		import path from "node:path";
 		import { compile, preprocess } from "svelte/compiler";
 		import { build } from "esbuild";
+		import esbuildSvelte from "esbuild-svelte";
 		import config from "./svelte.config.mjs";
 		const filename = process.argv[1];
 		const options = { ...config.compilerOptions };
@@ -30,6 +31,7 @@ function loadSvelteComponent(filename, dependencies = {}) {
 				resolveDir: path.dirname(filename), sourcefile: filename,
 			},
 			bundle: true, platform: "browser", format: "cjs", write: false,
+			plugins: [esbuildSvelte(config)],
 			external: JSON.parse(process.argv[2]),
 		});
 		process.stdout.write(bundle.outputFiles[0].text);

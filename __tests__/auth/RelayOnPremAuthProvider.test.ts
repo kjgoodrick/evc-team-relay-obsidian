@@ -629,6 +629,45 @@ describe("RelayOnPremAuthProvider", () => {
 	});
 
 	describe("restoreAuth()", () => {
+		test("refreshes a saved profile and persists its picture without another sign-in", async () => {
+			getAuthStore(APP_ID).persist(SERVER_ID, { user: { id: "user-123", email: "restored@example.com" }, token: "valid-token", refreshToken: "refresh", expiresAt: Date.now() + 3600000 });
+			mockFetch.mockResolvedValueOnce(await mockFetchResponse(200, { id: "user-123", email: "restored@example.com", name: "Pocket Name", picture: "https://id.example/picture.png" }));
+			const restored = new RelayOnPremAuthProvider({ controlPlaneUrl: CONTROL_PLANE_URL, appId: APP_ID, serverId: SERVER_ID });
+			await restored.waitForRestore();
+			expect(restored.getCurrentUser()).toMatchObject({ name: "Pocket Name", picture: "https://id.example/picture.png" });
+			expect(getAuthStore(APP_ID).load(SERVER_ID)?.user.picture).toBe("https://id.example/picture.png");
+			mockFetch.mockResolvedValueOnce(await mockFetchResponse(200, { access_token: "renewed", refresh_token: "next-refresh", expires_in: 3600 }));
+			mockFetch.mockResolvedValueOnce(await mockFetchResponse(200, { id: "user-123", email: "restored@example.com", name: "Pocket Name", picture: "https://id.example/new.png" }));
+			await restored.refreshToken();
+			expect(restored.getCurrentUser()?.picture).toBe("https://id.example/new.png");
+		});
+
+		test("offline profile lookup keeps the saved picture and authenticated session", async () => {
+			const user = { id: "user-123", email: "restored@example.com", picture: "https://id.example/saved.png" };
+			getAuthStore(APP_ID).persist(SERVER_ID, { user, token: "valid-token", expiresAt: Date.now() + 3600000 });
+			mockFetch.mockRejectedValueOnce(new Error("Offline"));
+			const restored = new RelayOnPremAuthProvider({ controlPlaneUrl: CONTROL_PLANE_URL, appId: APP_ID, serverId: SERVER_ID });
+			await restored.waitForRestore();
+			expect(restored.getCurrentUser()).toEqual(user);
+			expect(restored.isLoggedIn()).toBe(true);
+		});
+
+		test("profile timeout cannot apply a late response over the saved profile", async () => {
+			jest.useFakeTimers();
+			try {
+				const user = { id: "user-123", email: "restored@example.com", picture: "https://id.example/saved.png" };
+				getAuthStore(APP_ID).persist(SERVER_ID, { user, token: "valid-token", expiresAt: Date.now() + 3600000 });
+				let resolve!: (r: Response) => void;
+				mockFetch.mockReturnValueOnce(new Promise<Response>(r => { resolve = r; }));
+				const restored = new RelayOnPremAuthProvider({ controlPlaneUrl: CONTROL_PLANE_URL, appId: APP_ID, serverId: SERVER_ID });
+				await jest.advanceTimersByTimeAsync(5001);
+				await restored.waitForRestore();
+				resolve(await mockFetchResponse(200, { ...user, picture: "https://id.example/late.png" }));
+				await Promise.resolve(); await Promise.resolve();
+				expect(restored.getCurrentUser()).toEqual(user);
+			} finally { jest.useRealTimers(); }
+		});
+
 		test("P23: Restore with valid token", async () => {
 			const expiresAt = Date.now() + 3600000;
 			mockStorage.set(

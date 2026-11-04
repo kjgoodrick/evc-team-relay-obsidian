@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { CollaboratorPresence } from "./AvatarStack.svelte";
+	import PresenceAvatar from "./PresenceAvatar.svelte";
 
 	export let users: CollaboratorPresence[];
 </script>
@@ -11,16 +12,7 @@
 	<div class="evc-user-list">
 		{#each users as user, index (user.userId)}
 			<div class="evc-user-item" class:evc-current-user={index === 0}>
-				<div class="evc-avatar-with-border" style="border-color: {user.avatarColor};">
-					<div
-						class="evc-user-avatar"
-						style="background-color: {user.avatarColor}; width: 20px; height: 20px;"
-					>
-						<span class="evc-user-initial">
-							{user.displayName.charAt(0).toUpperCase()}
-						</span>
-					</div>
-				</div>
+				<PresenceAvatar {user} size="20px" />
 				<span class="evc-user-name"
 					>{user.displayName}{index === 0 ? " (You)" : ""}</span
 				>
@@ -102,33 +94,5 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-
-	.evc-avatar-with-border {
-		border-radius: 50%;
-		border: 2px solid;
-		display: inline-block;
-		overflow: hidden;
-		flex-shrink: 0;
-		background: var(--background-primary);
-		box-sizing: border-box;
-		padding: 1px;
-	}
-
-	.evc-user-avatar {
-		width: 2em;
-		height: 2em;
-		border-radius: 50%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		position: relative;
-	}
-
-	.evc-user-initial {
-		color: white;
-		font-size: 1em;
-		font-weight: 600;
 	}
 </style>

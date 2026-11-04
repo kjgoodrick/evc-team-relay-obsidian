@@ -8,7 +8,7 @@ beforeEach(() => { jest.resetAllMocks(); });
 
 test("browser sees only the authorize URL; completion holds the matching proof", async () => {
 	fetchMock.mockResolvedValueOnce(response(200, { id: "attempt", authorize_url: "https://id.example/authorize?state=opaque", expires_in: 300, interval: 2 }));
-	fetchMock.mockResolvedValueOnce(response(200, { user_id: "alice", user_email: "alice@example.com", access_token: "access", refresh_token: "refresh", expires_in: 60 }));
+	fetchMock.mockResolvedValueOnce(response(200, { user_id: "alice", user_email: "alice@example.com", user_name: "Alice", user_picture: "https://id.example/alice.png", access_token: "access", refresh_token: "refresh", expires_in: 60 }));
 	const browser = jest.fn();
 	const handler = new NativeOAuthHandler("https://cp.example");
 	const result = await handler.completeOAuthFlow("pocket-id", browser);
@@ -20,6 +20,7 @@ test("browser sees only the authorize URL; completion holds the matching proof",
 	expect(start.challenge).toBe(expected);
 	expect(JSON.stringify(start)).not.toContain(claim.verifier);
 	expect(result.refreshToken).toBe("refresh");
+	expect(result.user).toEqual({ id: "alice", email: "alice@example.com", name: "Alice", picture: "https://id.example/alice.png" });
 	handler.destroy();
 });
 

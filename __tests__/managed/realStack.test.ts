@@ -54,6 +54,15 @@ run("real relay: inventory filtering, concurrent editing, offline/restart, read-
 	a.text.insert(0, "base\n");
 	const b = await peer(bobGrant);
 	await until(() => b.text.toString() === "base\n", "initial text");
+	// Pictures travel through the real document-awareness channel, not note text.
+	const profile = { id: "fixture-alice", name: "Alice", avatarUrl: "https://id.example/alice.png" };
+	a.provider.awareness.setLocalStateField("user", profile);
+	await until(() => b.provider.awareness.getStates().get(a.doc.clientID)?.user?.avatarUrl === profile.avatarUrl, "peer picture received");
+	a.provider.awareness.setLocalStateField("user", { ...profile, avatarUrl: "https://id.example/updated.png" });
+	await until(() => b.provider.awareness.getStates().get(a.doc.clientID)?.user?.avatarUrl === "https://id.example/updated.png", "peer picture updated");
+	a.provider.awareness.setLocalStateField("user", { id: profile.id, name: profile.name });
+	await until(() => !b.provider.awareness.getStates().get(a.doc.clientID)?.user?.avatarUrl, "peer picture removed");
+	expect(a.text.toString()).toBe("base\n");
 	a.text.insert(a.text.length, "alice\n");
 	b.text.insert(b.text.length, "bob\n");
 	await until(() => a.text.toString() === b.text.toString() && a.text.toString().includes("bob"), "concurrent edits converge");

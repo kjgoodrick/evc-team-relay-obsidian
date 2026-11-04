@@ -6,6 +6,10 @@ Download the tested [0.2.3 plugin ZIP](https://github.com/kjgoodrick/evc-team-re
 
 Preview 0.2.3 fixes spurious conflict copies while creating and typing in a note. It checks the share's own server session and prevents background reconciliation or delayed editor tasks from replacing newer edits. See the [diagnosis and regression verification](tests/regressions/new-note-0.2.3.md). Existing conflict copies are retained for manual review.
 
+The next preview, 0.2.4, adds Pocket ID profile pictures to file presence and the
+active-user list, with initials as a fallback. It requires the matching server
+profile API update. See [implementation, coverage and the picture harness](tests/presence/README.md).
+
 Use the matching [server fork and setup guide](https://github.com/kjgoodrick/evc-team-relay/blob/main/docs/permissions-preview.md). To build from source, run `npm ci --ignore-scripts` followed by `npm run build:preview`. Start in a disposable vault. This retains the upstream plugin ID, so it replaces the original plugin within that vault.
 
 The guide records the security model, test coverage, and known preview limitations. The upstream documentation follows; legacy publishing and agent-key features are unavailable for managed shares.

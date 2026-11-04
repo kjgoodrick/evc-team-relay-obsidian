@@ -17,6 +17,7 @@ import { currentToggles } from "./featureToggleState";
 import { computeReconnectDelay } from "./reconnectThrottle";
 import { RelayAccessDeniedError } from "./auth/RelayOnPremTokenProvider";
 import { createPermanentUserData } from "./permanentUserData";
+import { safeAvatarUrl } from "./presenceAvatar";
 
 const EMPTY_TOKEN: DocumentGrant = {
 	token: "",
@@ -37,6 +38,7 @@ function seedAwareness(provider: YSweetProvider, user?: Account): void {
 		id: user.accountId,
 		color: user.presenceColor.color,
 		colorLight: user.presenceColor.light,
+		avatarUrl: safeAvatarUrl(user.avatarUrl),
 	});
 }
 
@@ -125,11 +127,13 @@ export class ProviderBacked extends Loggable {
 	private detachState: () => void;
 	private detachAccess: () => void;
 	private detachAuthSession?: () => void;
+	private detachProfileRefresh?: () => void;
 	// accountId last used to seed awareness/doc-identity, so a later auth
 	// notification can tell "still nothing to seed" apart from "the right
 	// user just became resolvable" without re-running the seed on every
 	// unrelated AuthSession notification.
 	private seededAccountId?: string;
+	private seededProfile?: string;
 
 	constructor(
 		public entityGuid: string,
@@ -170,6 +174,7 @@ export class ProviderBacked extends Loggable {
 			this.issuedToken, this.crdtDoc, user, () => this.refreshStaleProviderToken(),
 		);
 		this.seededAccountId = user?.accountId;
+		this.seededProfile = this.profileKey(user);
 
 		this.detachConnectionError = this.attachConnectionErrorHandler();
 		this.detachConnectionClose = this.attachConnectionCloseHandler();
@@ -196,6 +201,9 @@ export class ProviderBacked extends Loggable {
 		// re-seed once the identity for THIS server actually changes, rather
 		// than trusting it was already correct at construction time.
 		this.detachAuthSession = this.authSession?.on(() => this.reseedIdentityIfChanged());
+		this.detachProfileRefresh = this.authSession?.onTokenRefreshed?.((serverId) => {
+			if (!this.onpremServerId || serverId === this.onpremServerId) this.reseedIdentityIfChanged();
+		});
 	}
 
 	/**
@@ -209,12 +217,19 @@ export class ProviderBacked extends Loggable {
 	 */
 	private reseedIdentityIfChanged(): void {
 		const user = this.authSession?.getCurrentUserForServer(this.onpremServerId);
-		if (user?.accountId === this.seededAccountId) {
+		const profile = this.profileKey(user);
+		if (profile === this.seededProfile) {
 			return;
 		}
+		if (user?.accountId !== this.seededAccountId) seedDocIdentity(this.crdtDoc, user);
 		this.seededAccountId = user?.accountId;
-		seedDocIdentity(this.crdtDoc, user);
-		seedAwareness(this._liveProvider, user);
+		this.seededProfile = profile;
+		if (user) seedAwareness(this._liveProvider, user);
+		else this._liveProvider.awareness.setLocalStateField("user", null);
+	}
+
+	private profileKey(user?: Account): string | undefined {
+		return user ? JSON.stringify([user.accountId, user.fullName, safeAvatarUrl(user.avatarUrl)]) : undefined;
 	}
 
 	private attachConnectionErrorHandler(): () => void {
@@ -582,6 +597,7 @@ export class ProviderBacked extends Loggable {
 		this.detachConnectionClose?.();
 		this.detachState?.();
 		this.detachAuthSession?.();
+		this.detachProfileRefresh?.();
 		this._liveProvider?.destroy();
 		this.authSession = null as unknown as AuthSession;
 	}

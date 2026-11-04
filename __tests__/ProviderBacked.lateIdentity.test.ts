@@ -21,12 +21,17 @@ afterEach(() => {
 function makeClient() {
 	let user: Account | undefined;
 	const listeners = new Set<() => void>();
+	const refreshListeners = new Set<(serverId: string) => void>();
 	const auth = {
 		getCurrentUserForServer: (serverId?: string) =>
 			serverId === SERVER_ID ? user : undefined,
 		on: (listener: () => void) => {
 			listeners.add(listener);
 			return () => { listeners.delete(listener); };
+		},
+		onTokenRefreshed: (listener: (serverId: string) => void) => {
+			refreshListeners.add(listener);
+			return () => { refreshListeners.delete(listener); };
 		},
 	} as unknown as AuthSession;
 	const credentials = { peekToken: () => undefined } as unknown as RelayCredentialCache;
@@ -43,7 +48,12 @@ function makeClient() {
 	return {
 		provider,
 		listeners,
-		restoreIdentity(account: Account) {
+		refreshListeners,
+		refreshProfile(account: Account) {
+			user = account;
+			for (const listener of refreshListeners) listener(SERVER_ID);
+		},
+		restoreIdentity(account?: Account) {
 			user = account;
 			for (const listener of listeners) listener();
 		},
@@ -65,14 +75,32 @@ describe("ProviderBacked identity restoration", () => {
 			name: account.fullName,
 			color: account.presenceColor.color,
 			colorLight: account.presenceColor.light,
+			avatarUrl: undefined,
 		});
 		expect(permanentUsers.getUserByClientId(provider.crdtDoc.clientID)).toBe(account.accountId);
 	});
 
+	test("profile changes refresh live awareness without altering document history", () => {
+		const { provider, restoreIdentity, refreshProfile } = makeClient();
+		const account = new Account("local-user", "Local User", "user@example.com", "https://id.example/one.png", "");
+		restoreIdentity(account);
+		expect(provider._liveProvider.awareness.getLocalState()?.user.avatarUrl).toBe(account.avatarUrl);
+		const changed = jest.fn();
+		provider.crdtDoc.on("update", changed);
+		refreshProfile(new Account(account.accountId, "Updated Name", account.emailAddress, "https://id.example/two.png", ""));
+		expect(provider._liveProvider.awareness.getLocalState()?.user).toMatchObject({ name: "Updated Name", avatarUrl: "https://id.example/two.png" });
+		expect(changed).not.toHaveBeenCalled();
+		refreshProfile(new Account(account.accountId, "Updated Name", account.emailAddress, "", ""));
+		expect(provider._liveProvider.awareness.getLocalState()?.user.avatarUrl).toBeUndefined();
+		restoreIdentity(undefined);
+		expect(provider._liveProvider.awareness.getLocalState()?.user).toBeNull();
+	});
+
 	test("disposing a provider removes its authentication listener", () => {
-		const { provider, listeners } = makeClient();
+		const { provider, listeners, refreshListeners } = makeClient();
 		expect(listeners.size).toBe(1);
 		provider.dismantle();
 		expect(listeners.size).toBe(0);
+		expect(refreshListeners.size).toBe(0);
 	});
 });

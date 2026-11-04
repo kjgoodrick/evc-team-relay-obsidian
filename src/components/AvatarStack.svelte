@@ -4,10 +4,12 @@
 		userId: string;
 		avatarColor: string;
 		avatarColorLight: string;
+		avatarUrl?: string;
 	}
 </script>
 
 <script lang="ts">
+	import PresenceAvatar from "./PresenceAvatar.svelte";
 	export let users: CollaboratorPresence[];
 	export let totalCount: number;
 	export let visibleCount: number;
@@ -42,13 +44,7 @@
 			)}; transition: all 0.2s ease;"
 			aria-label={user.displayName}
 		>
-			<div class="evc-avatar-with-border" style="border-color: {user.avatarColor};">
-				<div class="evc-user-avatar" style="background-color: {user.avatarColor};">
-					<span class="evc-user-initial">
-						{user.displayName.charAt(0).toUpperCase()}
-					</span>
-				</div>
-			</div>
+			<PresenceAvatar {user} />
 		</div>
 	{/each}
 	{#if totalCount > visibleCount}
@@ -101,33 +97,5 @@
 		font-weight: 600;
 		color: var(--text-muted);
 		position: relative;
-	}
-
-	.evc-avatar-with-border {
-		border-radius: 50%;
-		border: 2px solid;
-		display: inline-block;
-		overflow: hidden;
-		flex-shrink: 0;
-		background: var(--background-primary);
-		box-sizing: border-box;
-		padding: 1px;
-	}
-
-	.evc-user-avatar {
-		width: 2em;
-		height: 2em;
-		border-radius: 50%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		position: relative;
-	}
-
-	.evc-user-initial {
-		color: white;
-		font-size: 1em;
-		font-weight: 600;
 	}
 </style>

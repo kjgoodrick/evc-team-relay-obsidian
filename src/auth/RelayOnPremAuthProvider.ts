@@ -33,6 +33,7 @@ interface MeResponse {
 	id: string;
 	email: string;
 	name?: string;
+	picture?: string;
 	is_admin: boolean;
 	created_at: string;
 }
@@ -103,6 +104,26 @@ export class RelayOnPremAuthProvider implements IAuthProvider {
 		return this.normalizedUrl;
 	}
 
+	private async loadProfile(): Promise<void> {
+		const userId = this.user?.id;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			// Obsidian's requestUrl transport cannot abort an in-flight request.
+			// Bound startup time and ignore a response arriving after the deadline.
+			const profile = await Promise.race([
+				platformFetch(`${this.normalizedUrl}/v1/auth/me`, {
+					headers: { Authorization: `Bearer ${this.token}` },
+				}).then(async response => {
+					if (!response.ok) throw new Error(`Profile unavailable (${response.status})`);
+					return await response.json() as MeResponse;
+				}),
+				new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Profile timed out")), 5000); }),
+			]);
+			if (profile.id !== userId || this.user?.id !== userId) throw new Error("Profile identity mismatch");
+			this.user = { id: profile.id, email: profile.email, name: profile.name || profile.email, picture: profile.picture };
+		} finally { if (timer !== undefined) clearTimeout(timer); }
+	}
+
 	/**
 	 * Restore authentication from local storage if available.
 	 * If the token is expired but we have a refresh token, attempt to refresh.
@@ -129,6 +150,12 @@ export class RelayOnPremAuthProvider implements IAuthProvider {
 
 			// Check if token is still valid
 			if (this.isTokenValid()) {
+				// Refresh display metadata for existing installations without making
+				// offline startup or a temporary profile failure sign the user out.
+				try {
+					await this.loadProfile();
+					this.persistAuth();
+				} catch { this.log("Profile unavailable; keeping the saved user profile"); }
 				this.log(`restoreAuth: token is valid, restored auth for ${this.user?.email} on server ${this.serverId}`);
 				return;
 			}
@@ -347,6 +374,7 @@ export class RelayOnPremAuthProvider implements IAuthProvider {
 				id: userData.id,
 				email: userData.email,
 				name: userData.name || userData.email,
+				picture: userData.picture,
 			};
 
 			// Persist auth to local storage
@@ -496,6 +524,7 @@ export class RelayOnPremAuthProvider implements IAuthProvider {
 						id: userData.id,
 						email: userData.email,
 						name: userData.name || userData.email,
+						picture: userData.picture,
 					};
 				}
 
@@ -533,6 +562,7 @@ export class RelayOnPremAuthProvider implements IAuthProvider {
 					id: userData.id,
 					email: userData.email,
 					name: userData.name || userData.email,
+					picture: userData.picture,
 				};
 
 				// Persist refreshed auth

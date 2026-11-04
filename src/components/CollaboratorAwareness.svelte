@@ -41,6 +41,7 @@
 				userId: user.id,
 				avatarColor: user.color || "#30bced",
 				avatarColorLight: user.colorLight || user.color + "33" || "",
+				avatarUrl: user.avatarUrl,
 			});
 		});
 
