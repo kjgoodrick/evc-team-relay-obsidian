@@ -2,7 +2,9 @@
 
 Experimental self-hosted fork of EVC Team Relay. It adds server-enforced file/folder permissions and a browser-based Pocket ID sign-in flow for Obsidian desktop/mobile APIs. It also recovers safe inventory conflicts automatically and provides a persisted conflict queue with verified local backups for decisions. Physical mobile validation is still pending.
 
-Use the matching [server fork and setup guide](https://github.com/kjgoodrick/evc-team-relay/blob/main/docs/permissions-preview.md). Build the installable `dist/` bundle with `npm ci --ignore-scripts` followed by `npm run build:preview`. Start in a disposable vault. This retains the upstream plugin ID, so it replaces the original plugin within that vault.
+Download the tested [0.2.2 plugin ZIP](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/download/0.2.2/team-relay-sync-permissions-preview-0.2.2.zip) from the [GitHub prerelease](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.2). It contains the exact tested bundle, with published SHA-256 checksums and installation notes.
+
+Use the matching [server fork and setup guide](https://github.com/kjgoodrick/evc-team-relay/blob/main/docs/permissions-preview.md). To build from source, run `npm ci --ignore-scripts` followed by `npm run build:preview`. Start in a disposable vault. This retains the upstream plugin ID, so it replaces the original plugin within that vault.
 
 The guide records the security model, test coverage, and known preview limitations. The upstream documentation follows; legacy publishing and agent-key features are unavailable for managed shares.
 
@@ -12,7 +14,7 @@ Preview 0.2.2 includes mobile layout/draft fixes and stable Yjs inventory client
 
 # Team Relay Sync
 
-[**Install from Obsidian community plugins →**](https://community.obsidian.md/plugins/team-relay-sync)
+[**Download the permissions-preview prerelease →**](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.2)
 
 **Real-time collaboration and web publishing for Obsidian.**
 
@@ -56,22 +58,21 @@ You love Obsidian, but your team needs more:
 
 ## Install
 
-### From Obsidian community plugins (recommended)
+1. Download the [tested 0.2.2 ZIP](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/download/0.2.2/team-relay-sync-permissions-preview-0.2.2.zip).
+2. Unzip it and copy the included `team-relay-sync` folder into
+   `<your vault>/.obsidian/plugins/`. The plugin folder must contain `main.js`,
+   `manifest.json` and `styles.css`.
+3. Restart Obsidian and enable **Team Relay Sync (permissions preview)** under
+   *Settings → Community plugins*.
+4. Add your control-plane URL in the plugin settings, leave the optional relay
+   URL blank, and sign in. To join an existing share, choose **Shares → select
+   share → Connect to local folder** and select the local vault root (`/`).
 
-Open [**Team Relay Sync** in the community plugin directory](https://community.obsidian.md/plugins/team-relay-sync) and click **Add to Obsidian**,
-or open `obsidian://show-plugin?id=team-relay-sync`, or search for "Team Relay Sync" in
-*Settings → Community plugins → Browse*. Then enable **Team Relay Sync**.
-
-### Manual install
-
-1. Download `main.js`, `manifest.json` and `styles.css` from the
-   [latest release](https://github.com/entire-vc/evc-team-relay-obsidian/releases)
-2. Create `<your vault>/.obsidian/plugins/team-relay-sync/` and copy the three
-   files into it
-3. Restart Obsidian, then enable **Team Relay Sync** in
-   *Settings → Community plugins*
-
-As a fallback, [BRAT](https://github.com/TfTHacker/obsidian42-brat) can install it from `entire-vc/evc-team-relay-obsidian`.
+The [release page](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.2)
+also provides the three individual installation files and `SHA256SUMS`.
+The community-directory version is the upstream plugin and does not contain
+this fork's permissions and recovery changes. Keep automatic upstream updates
+off for this pilot.
 
 ---
 
