@@ -965,6 +965,11 @@ export class ViewBindingRegistry {
 		return this.openFolders();
 	}
 
+	private isAuthenticatedForFolder(folder: VaultShare): boolean {
+		const serverId = folder.config.onpremServerId;
+		return serverId ? this.authSession.isLoggedInToServer(serverId) : this.authSession.isAuthenticated;
+	}
+
 	private async awaitOpenFoldersReady(): Promise<VaultShare[]> {
 		const folders = this.openFolders();
 		if (folders.length === 0) return [];
@@ -984,7 +989,7 @@ export class ViewBindingRegistry {
 		errorLabel: string,
 		makeLive: (folder: VaultShare) => ViewBinding,
 	): void {
-		if (!this.authSession.isAuthenticated) {
+		if (!this.isAuthenticatedForFolder(folder)) {
 			views.push(
 				new SignedOutViewBinding(this, view, () => this.authSession.presentLoginPage()),
 			);
@@ -1192,15 +1197,15 @@ export class ViewBindingRegistry {
 			return true; // no live views open
 		}
 
-		if (this.authSession.isAuthenticated && this.serviceHealth.isOnline) {
-			activeDocumentFolders.forEach((folder) => {
-				void folder.bringOnline();
-			});
-		} else {
-			this.shareRegistry.each((folder) => {
+		// The default server can be signed out while this share's server has
+		// a valid session. Use the same per-share auth as its token provider.
+		this.shareRegistry.each((folder) => {
+			if (!this.isAuthenticatedForFolder(folder) || !this.serviceHealth.isOnline) {
 				folder.goOffline();
-			});
-		}
+			} else if (activeDocumentFolders.includes(folder)) {
+				void folder.bringOnline();
+			}
+		});
 
 		const [matching, stale] = this.reconcileViewSets(views);
 		this.logViewSummary(ctx, "Releasing Views", stale);

@@ -1195,15 +1195,20 @@ export class TransferQueue extends Loggable {
 			this.log(`[uploadDocumentViaSocket] history gap in ${doc.entryPath}; not reconciling yet`);
 		}
 		let baseSettled = false;
-		if (usable && isRelayOnPrem && isDocument(doc)) {
+		if (usable && isRelayOnPrem && isDocument(doc) && !doc.editLock) {
 			// Typing can continue while the provider connects. Compare the
 			// current disk and CRDT contents, not the pre-connection snapshots.
+			const beforeRead = doc.content;
 			const currentVaultContents = await this.readVaultContents(doc);
-			if (currentVaultContents && !sameTextContent(doc.content, currentVaultContents)) {
+			if (!doc.editLock && doc.content !== beforeRead) {
+				this.log(`[uploadDocumentViaSocket] ${doc.entryPath}: text changed during disk read; deferring stale snapshot`);
+				return false;
+			}
+			if (!doc.editLock && currentVaultContents && !sameTextContent(doc.content, currentVaultContents)) {
 				const localText = await this.deliverIfNoLocalEdit(doc, currentVaultContents);
 				baseSettled = localText === undefined;
-				if (localText !== undefined && !sameTextContent(doc.content, localText)) {
-					await this.reconcileRelayContent(doc, localText);
+				if (!doc.editLock && localText !== undefined && !sameTextContent(doc.content, localText)) {
+					if (!await this.reconcileRelayContent(doc, localText)) return false;
 				}
 			}
 		}
@@ -1219,7 +1224,7 @@ export class TransferQueue extends Loggable {
 		// the base alone when it could not write: the CRDT may have moved on
 		// since, and a base ahead of the disk would read the stale file as a
 		// local edit on the next sync and push it over the peer's text.
-		if (usable && isRelayOnPrem && isDocument(doc) && !baseSettled) {
+		if (usable && isRelayOnPrem && isDocument(doc) && !doc.editLock && !baseSettled) {
 			await doc.setSyncBase(doc.content);
 		}
 
@@ -1264,11 +1269,13 @@ export class TransferQueue extends Loggable {
 	 */
 	private async deliverIfNoLocalEdit(doc: Document, vaultContents: string): Promise<string | undefined> {
 		const base = await doc.getSyncBase();
+		if (doc.editLock) return undefined;
 		if (base === undefined || !sameTextContent(vaultContents, base)) return vaultContents;
 		const remoteText = doc.content;
 		if (!hasPreservableContent(remoteText)) return vaultContents;
 		// The read above can be stale by now: never overwrite an edit made meanwhile.
 		const current = await this.readVaultContents(doc);
+		if (doc.editLock) return undefined;
 		// "" is also a failed read: nothing safe to write or to record.
 		if (current === "") return undefined;
 		if (!sameTextContent(current, base)) return current;
@@ -1929,7 +1936,8 @@ export class TransferQueue extends Loggable {
 	private async reconcileRelayContent(
 		doc: Document,
 		vaultContents: string,
-	): Promise<void> {
+	): Promise<boolean> {
+		if (doc.editLock) return true;
 		const syncedText = doc.content;
 		if (!syncedText) {
 			// Two clients opening the same brand-new shared folder at once
@@ -1943,6 +1951,7 @@ export class TransferQueue extends Loggable {
 			// The claim also yields to concurrent edits. Seed the latest file,
 			// and check ownership after the read in case a peer inserted meanwhile.
 			const currentVaultContents = await this.readVaultContents(doc);
+			if (doc.editLock) return true;
 			const text = doc.crdtDoc.getText("contents");
 			if (currentVaultContents && wonInitClaim(doc.crdtDoc, text)) {
 				this.log(
@@ -1976,6 +1985,8 @@ export class TransferQueue extends Loggable {
 			// preserving as before -- noisy-but-safe over silently discarding
 			// someone else's edit.
 			const base = await doc.getSyncBase();
+			if (doc.editLock) return true;
+			if (doc.content !== syncedText) return false;
 			if (base !== undefined && base === syncedText) {
 				// This snapshot alone can't tell "only I moved" apart from "a
 				// GENUINELY CONCURRENT client is about to reach the exact same
@@ -2015,6 +2026,7 @@ export class TransferQueue extends Loggable {
 					),
 					RECONCILE_SETTLE_OUTER_TIMEOUT_MS,
 				);
+				if (doc.editLock) return true;
 				if (settled === undefined) {
 					this.warn(
 						`[uploadDocumentViaSocket] reconcile claim settle exceeded its own ` +
@@ -2022,7 +2034,7 @@ export class TransferQueue extends Loggable {
 							`treating as lost, preserving vault content rather than risk applying ` +
 							`against a claim state that never confirmed settled`,
 					);
-					await this.reconcileWithVaultFileSafely(doc, vaultContents, syncedText);
+					if (!await this.reconcileWithVaultFileSafely(doc, vaultContents, syncedText)) return false;
 				} else if (wonReconcileClaim(doc.crdtDoc) && doc.content === base) {
 					// Won the claim AND the settled text still matches what we
 					// started with -- re-checked, not assumed, in case some
@@ -2041,10 +2053,10 @@ export class TransferQueue extends Loggable {
 					// fall back to the safe, conflict-preserving path below
 					// rather than risk the concatenation this claim exists to
 					// prevent.
-					await this.reconcileWithVaultFileSafely(doc, vaultContents, syncedText);
+					if (!await this.reconcileWithVaultFileSafely(doc, vaultContents, syncedText)) return false;
 				}
 			} else {
-				await this.reconcileWithVaultFileSafely(doc, vaultContents, syncedText);
+				if (!await this.reconcileWithVaultFileSafely(doc, vaultContents, syncedText)) return false;
 			}
 		}
 
@@ -2054,6 +2066,7 @@ export class TransferQueue extends Loggable {
 		// be sitting in bufferedAmount well past a fixed timer, and
 		// disconnecting at that point drops it silently.
 		await waitForBufferFlush(doc._liveProvider.ws);
+		return true;
 	}
 
 	/**
@@ -2072,7 +2085,7 @@ export class TransferQueue extends Loggable {
 		doc: Document,
 		vaultContents: string,
 		priorSyncedText: string,
-	): Promise<void> {
+	): Promise<boolean> {
 		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 		const result = await reconcileWithConflictCopy(
 			doc.crdtDoc,
@@ -2081,6 +2094,7 @@ export class TransferQueue extends Loggable {
 				doc.vaultShare.writeConflictCopy(doc, relayContent, `relay conflict ${timestamp}`),
 			undefined,
 			(...args) => this.log("[uploadDocumentViaSocket]", ...args),
+			() => !doc.editLock,
 		);
 		if (result.reconciled) {
 			this.log(
@@ -2094,6 +2108,7 @@ export class TransferQueue extends Loggable {
 					`could not safely preserve relay content before overwriting`,
 			);
 		}
+		return result.reconciled || sameTextContent(doc.content, vaultContents);
 	}
 
 	/**
@@ -2359,7 +2374,7 @@ export class TransferQueue extends Loggable {
 	): Promise<boolean> {
 		try {
 			const synced = await this.uploadDocumentViaSocket(doc);
-			if (synced && doc.vaultShare.folderIndex.tracks(doc.entryPath) && shouldFlush()) {
+			if (synced && !(isDocument(doc) && doc.editLock) && doc.vaultShare.folderIndex.tracks(doc.entryPath) && shouldFlush()) {
 				await flush();
 				this.log(`[${label}] WS sync fallback successful, flushed to disk`);
 				return true;

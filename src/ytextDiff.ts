@@ -105,11 +105,12 @@ export async function reconcileWithConflictCopy(
 	writeConflictCopy: ConflictCopyWriter,
 	origin?: unknown,
 	log: (...args: unknown[]) => void = () => {},
+	canApply: () => boolean = () => true,
 ): Promise<ReconcileResult> {
 	const ytext = ydoc.getText("contents");
 	const currentContent = ytext.toJSON();
 
-	if (sameTextContent(currentContent, vaultContent)) {
+	if (!canApply() || sameTextContent(currentContent, vaultContent)) {
 		return { reconciled: false };
 	}
 
@@ -130,6 +131,12 @@ export async function reconcileWithConflictCopy(
 		return { reconciled: false };
 	}
 
+	// A backup write yields to live edits. That backup covers only the old
+	// snapshot; it does not authorize replacing text that arrived meanwhile.
+	if (!canApply() || ytext.toString() !== currentContent) {
+		log("Content changed or an editor opened during backup; deferring reconciliation.");
+		return { reconciled: false, conflictPath };
+	}
 	applyDiffToYText(ydoc, vaultContent, origin);
 	return { reconciled: true, conflictPath };
 }

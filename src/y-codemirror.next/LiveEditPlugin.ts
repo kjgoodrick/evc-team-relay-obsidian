@@ -392,72 +392,42 @@ export class LiveCMPluginValue implements PluginValue {
 	}
 
 	async resync() {
-		if (isBoundMarkdown(this.view) && !this.view.isTracking && !this.destroyed) {
-			await this.view.boundDocument.awaitFirstSync();
-			await this.waitForProviderSync();
-			// Guard: if relay returned empty content but the editor has text,
-			// upload the editor content to Y.Text instead of wiping the editor.
-			// This prevents data loss when opening a file before background sync
-			// has uploaded its content to a newly created share.
-			if (this.view.boundDocument.content === "" && this.editor.state.doc.length > 0) {
-				const editorContent = this.editor.state.doc.toString();
-				// Same concurrent-first-connect race as TransferQueue.ts:
-				// two clients opening this file at once could both see an empty
-				// relay and both upload — claim + settle + only-winner-inserts.
-				const ydoc = this.view.boundDocument.crdtDoc;
-				claimInitIfUnclaimed(ydoc, this.view.boundDocument._liveProvider.awareness);
-				await awaitClaimSettled(ydoc, {
-					socket: this.view.boundDocument._liveProvider.ws,
-				});
-				const text = ydoc.getText("contents");
-				if (wonInitClaim(ydoc, text)) {
-					this.warn("[resync] relay is empty but editor has content — uploading to Y.Text");
-					text.insert(0, editorContent);
-					markInitDone(ydoc);
-				} else if (text.length === 0) {
-					this.warn("[resync] lost the init claim to a concurrently-connecting client — skipping upload");
-				}
-				this.view.isTracking = true;
-				return;
+		const editor = this.editor, view = this.view;
+		const bindingNeedsSync = isBoundMarkdown(view) && !view.isTracking;
+		const doc = bindingNeedsSync ? view.boundDocument : this.active(view) ? this.document : undefined;
+		if (this.destroyed || !editor || !doc) return;
+		// Renaming/reconfiguring a view can destroy this binding while any of
+		// these awaits is pending. A completed old task never owns the new view.
+		const isCurrent = () => !this.destroyed && this.editor === editor && this.view === view && this.document === doc;
+		await doc.awaitFirstSync();
+		if (!isCurrent()) return;
+		await this.waitForProviderSync();
+		if (!isCurrent()) return;
+
+		if (doc.content === "" && editor.state.doc.length > 0) {
+			const ydoc = doc.crdtDoc;
+			claimInitIfUnclaimed(ydoc, doc._liveProvider.awareness);
+			await awaitClaimSettled(ydoc, { socket: doc._liveProvider.ws });
+			if (!isCurrent()) return;
+			const text = ydoc.getText("contents");
+			if (wonInitClaim(ydoc, text)) {
+				// Typing may have continued during the claim; seed the current buffer.
+				this.warn("[resync] relay is empty but editor has content — uploading to Y.Text");
+				text.insert(0, editor.state.doc.toString());
+				markInitDone(ydoc);
+			} else if (text.length === 0) {
+				this.warn("[resync] lost the init claim to a concurrently-connecting client — skipping upload");
 			}
-			const keyFrame = await this.getKeyFrame();
-			if (isBoundMarkdown(this.view) && !this.view.isTracking && !this.destroyed) {
-				this.editor.dispatch({
-					changes: keyFrame,
-					annotations: [ySyncAnnotation.of(this.editor)],
-				});
-			}
-		} else if (this.active(this.view) && this.document) {
-			await this.document.awaitFirstSync();
-			await this.waitForProviderSync();
-			// Same guard for embedded/VaultShare documents
-			if (this.document.content === "" && this.editor.state.doc.length > 0) {
-				const editorContent = this.editor.state.doc.toString();
-				// Same guard as the isBoundMarkdown branch above — this document
-				// might be racing another client opening the same embedded/shared
-				// file for the first time.
-				const ydoc = this.document.crdtDoc;
-				claimInitIfUnclaimed(ydoc, this.document._liveProvider.awareness);
-				await awaitClaimSettled(ydoc, {
-					socket: this.document._liveProvider.ws,
-				});
-				const text = ydoc.getText("contents");
-				if (wonInitClaim(ydoc, text)) {
-					this.warn("[resync] relay is empty but editor has content — uploading to Y.Text");
-					text.insert(0, editorContent);
-					markInitDone(ydoc);
-				} else if (text.length === 0) {
-					this.warn("[resync] lost the init claim to a concurrently-connecting client — skipping upload");
-				}
-				return;
-			}
-			const keyFrame = await this.getKeyFrame();
-			if (this.active(this.view) && !this.destroyed) {
-				this.editor.dispatch({
-					changes: keyFrame,
-					annotations: [ySyncAnnotation.of(this.editor)],
-				});
-			}
+			if (isBoundMarkdown(view) && doc.content === editor.state.doc.toString()) view.isTracking = true;
+			return;
+		}
+
+		const before = editor.state;
+		const keyFrame = await this.getKeyFrame();
+		// A keyframe is calculated for one editor state. Applying it after a
+		// keystroke would overwrite that keystroke with an earlier snapshot.
+		if (isCurrent() && editor.state === before && (!bindingNeedsSync || !view!.isTracking)) {
+			editor.dispatch({ changes: keyFrame, annotations: [ySyncAnnotation.of(editor)] });
 		}
 	}
 

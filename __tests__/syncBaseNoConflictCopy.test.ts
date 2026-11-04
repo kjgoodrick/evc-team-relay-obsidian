@@ -63,7 +63,7 @@ function makeFakeDoc(opts: FakeDocOptions) {
 	Object.defineProperty(fakeDoc, "path", { value: "note.md" });
 	Object.defineProperty(fakeDoc, "entityGuid", { value: "test-guid" });
 	Object.defineProperty(fakeDoc, "crdtDoc", { value: ydoc });
-	Object.defineProperty(fakeDoc, "editLock", { value: false });
+	Object.defineProperty(fakeDoc, "editLock", { value: false, writable: true });
 	Object.defineProperty(fakeDoc, "awaitFirstSync", { value: async () => {} });
 	Object.defineProperty(fakeDoc, "content", {
 		get: () => ydoc.getText("contents").toJSON(),
@@ -99,6 +99,75 @@ function makeQueue(): TransferQueue {
 }
 
 describe("uploadDocumentViaSocket — sync-base gates the conflict-copy preserve step", () => {
+	test("an active editor owns its newer live text while the disk save lags", async () => {
+		const { fakeDoc, writeConflictCopy, writeContents, getBase } = makeFakeDoc({
+			syncedText: "hello world!!123", vaultContents: "hello world!!", initialBase: "",
+		});
+		fakeDoc.editLock = true;
+		await makeQueue().uploadDocumentViaSocket(fakeDoc);
+		expect(fakeDoc.content).toBe("hello world!!123");
+		expect(writeConflictCopy).not.toHaveBeenCalled();
+		expect(writeContents).not.toHaveBeenCalled();
+		expect(getBase()).toBe("");
+	});
+
+	test("typing during an asynchronous disk read invalidates the older upload snapshot", async () => {
+		const { fakeDoc, ydoc, writeConflictCopy, getBase } = makeFakeDoc({
+			syncedText: "hello world!!", vaultContents: "hello world!!", initialBase: "",
+		});
+		let reads = 0;
+		fakeDoc.vaultShare.readContents = async () => {
+			const snapshot = "hello world!!";
+			if (++reads === 2) ydoc.getText("contents").insert(snapshot.length, "123");
+			return snapshot;
+		};
+		expect(await makeQueue().uploadDocumentViaSocket(fakeDoc)).toBe(false);
+		expect(fakeDoc.content).toBe("hello world!!123");
+		expect(writeConflictCopy).not.toHaveBeenCalled();
+		expect(getBase()).toBe("");
+	});
+
+	test("an editor opened during the disk read prevents background reconciliation", async () => {
+		const { fakeDoc, writeConflictCopy, writeContents, getBase } = makeFakeDoc({
+			syncedText: "hello world!!123", vaultContents: "hello world!!", initialBase: "",
+		});
+		let reads = 0;
+		fakeDoc.vaultShare.readContents = async () => {
+			if (++reads === 2) fakeDoc.editLock = true;
+			return "hello world!!";
+		};
+		await makeQueue().uploadDocumentViaSocket(fakeDoc);
+		expect(fakeDoc.content).toBe("hello world!!123");
+		expect(writeConflictCopy).not.toHaveBeenCalled();
+		expect(writeContents).not.toHaveBeenCalled();
+		expect(getBase()).toBe("");
+	});
+
+	test.each(["editor opened", "new text"])("%s during conflict backup cannot be overwritten or acknowledged", async change => {
+		const { fakeDoc, ydoc, writeConflictCopy, getBase } = makeFakeDoc({
+			syncedText: "remote version", vaultContents: "offline version", initialBase: "base",
+		});
+		writeConflictCopy.mockImplementation(async () => {
+			if (change === "editor opened") fakeDoc.editLock = true;
+			else ydoc.getText("contents").insert(14, " + new edit");
+			return "preserved.md";
+		});
+		expect(await makeQueue().uploadDocumentViaSocket(fakeDoc)).toBe(false);
+		expect(fakeDoc.content).toBe(change === "editor opened" ? "remote version" : "remote version + new edit");
+		expect(getBase()).toBe("base");
+	});
+
+	test("a background fetch does not flush over a live editor", async () => {
+		const { fakeDoc, writeContents } = makeFakeDoc({
+			syncedText: "live editor", vaultContents: "old disk", initialBase: "old disk",
+		});
+		fakeDoc.editLock = true;
+		(fakeDoc.vaultShare as any).folderIndex = { tracks: () => true };
+		await (makeQueue() as unknown as { fetchDocument(doc: Document): Promise<void> }).fetchDocument(fakeDoc);
+		expect(writeContents).not.toHaveBeenCalled();
+		expect(fakeDoc.content).toBe("live editor");
+	});
+
 	test("own not-yet-pushed edit, relay unchanged since last sync: reconciles WITHOUT a conflict copy", async () => {
 		// This is the exact trace: base/syncedText = pre-edit content
 		// (what we last agreed on with the relay), vaultContents = this
