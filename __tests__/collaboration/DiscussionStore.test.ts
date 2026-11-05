@@ -1,5 +1,5 @@
 import { IDBFactory } from "fake-indexeddb";
-import { DiscussionStore, QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 
 const identity = { serverId: "server", accountId: "alice", vaultId: "vault", shareId: "share" };
 function command(operationId: string, dependsOn: string[] = []): QueuedCommand {
@@ -86,4 +86,31 @@ test("older panes cannot overwrite a newer draft and invalid payloads are not si
 		await expect(store.enqueue({ ...command("bad"), payload: { n: NaN } })).rejects.toThrow("JSON");
 		expect(await store.getOperation("bad")).toBeUndefined();
 	} finally { store.close(); }
+});
+
+test("version-1 upgrade preserves drafts/outbox and adds scope cleanup without touching other accounts", async () => {
+	const factory = new IDBFactory();
+	const name = "team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
+	await new Promise<void>((resolve, reject) => {
+		const opening = factory.open(name, 1);
+		opening.onupgradeneeded = () => {
+			const db = opening.result;
+			db.createObjectStore("drafts", { keyPath: "id" }).add({ id: "old", scopeId: "note", revision: 0, body: "saved text" });
+			const outbox = db.createObjectStore("outbox", { keyPath: "operationId" });
+			outbox.createIndex("state", "state"); outbox.createIndex("scope", "scopeId");
+			db.createObjectStore("entities", { keyPath: ["scopeId", "id"] }).add({ scopeId: "note", id: "message", revision: 1, value: "remote" });
+			db.createObjectStore("cursors").put("old-cursor", "note");
+		};
+		opening.onsuccess = () => { opening.result.close(); resolve(); }; opening.onerror = () => reject(opening.error);
+	});
+	const store = await DiscussionStore.open(identity, factory);
+	const other = await DiscussionStore.open({ ...identity, accountId: "other" }, factory);
+	try {
+		expect((await store.getDraft("old"))?.body).toBe("saved text");
+		await store.clearRemoteScope("note"); expect(await store.entity("note", "message")).toBeUndefined();
+		await other.saveDraft({ id: "other", scopeId: "note", revision: 0, body: "other text" });
+		await store.enqueue(command("pending")); await store.clearAll();
+		expect(await store.getDraft("old")).toBeUndefined(); expect(await store.getOperation("pending")).toBeUndefined();
+		expect((await other.getDraft("other"))?.body).toBe("other text");
+	} finally { store.close(); other.close(); }
 });

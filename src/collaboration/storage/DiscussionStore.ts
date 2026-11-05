@@ -63,24 +63,27 @@ function requiredId(value: string): void {
 const commandTypes = new Set(["thread.create", "reply.create", "message.edit", "reaction.set"]);
 
 export class DiscussionStore {
-	private constructor(private db: IDBDatabase) {}
+	private constructor(private db: IDBDatabase, readonly identity: Readonly<StoreIdentity>) {}
 
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 1);
-		open.onupgradeneeded = () => {
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 2);
+		open.onupgradeneeded = event => {
 			const db = open.result;
-			db.createObjectStore("drafts", { keyPath: "id" });
-			const outbox = db.createObjectStore("outbox", { keyPath: "operationId" });
-			outbox.createIndex("state", "state");
-			outbox.createIndex("scope", "scopeId");
-			db.createObjectStore("entities", { keyPath: ["scopeId", "id"] });
-			db.createObjectStore("cursors");
+			if (event.oldVersion < 1) {
+				db.createObjectStore("drafts", { keyPath: "id" });
+				const outbox = db.createObjectStore("outbox", { keyPath: "operationId" });
+				outbox.createIndex("state", "state");
+				outbox.createIndex("scope", "scopeId");
+				db.createObjectStore("entities", { keyPath: ["scopeId", "id"] });
+				db.createObjectStore("cursors");
+			}
+			open.transaction!.objectStore("entities").createIndex("scope", "scopeId");
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
-		return new DiscussionStore(db);
+		return new DiscussionStore(db, Object.freeze({ ...identity }));
 	}
 
 	close(): void { this.db.close(); }
@@ -104,6 +107,7 @@ export class DiscussionStore {
 	async saveDraft(draft: Draft): Promise<void> {
 		requiredId(draft.id); requiredId(draft.scopeId); boundedJson(draft.body);
 		if (!Number.isSafeInteger(draft.revision) || draft.revision < 0) throw new Error("Invalid draft revision");
+		draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
 		await this.transaction(["drafts"], "readwrite", async tx => {
 			const store = tx.objectStore("drafts"), current: Draft | undefined = await request(store.get(draft.id));
 			if (current && (current.scopeId !== draft.scopeId || current.revision >= draft.revision)) {
@@ -126,7 +130,12 @@ export class DiscussionStore {
 			throw new Error("Invalid queued command");
 		}
 		command.dependsOn.forEach(requiredId);
+		if (command.type === "reply.create" && command.payload !== null && typeof command.payload === "object" &&
+			!Array.isArray(command.payload) && (command.payload.reopen === true || command.payload.expected_state_revision != null)) {
+			throw new Error("Send and reopen requires an online command");
+		}
 		const identity = boundedJson(command as unknown as Json);
+		command = JSON.parse(identity) as QueuedCommand;
 		return this.transaction(["outbox"], "readwrite", async tx => {
 			const store = tx.objectStore("outbox"), previous: OutboxOperation | undefined = await request(store.get(command.operationId));
 			if (previous) {
@@ -146,6 +155,42 @@ export class DiscussionStore {
 
 	async getOperation(id: string): Promise<OutboxOperation | undefined> {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
+	}
+
+	/** Earliest runnable retry/lease; rejected dependencies do not cause polling. */
+	async nextWakeAt(): Promise<number | undefined> {
+		return this.transaction(["outbox"], "readonly", async tx => {
+			const store = tx.objectStore("outbox"), states = store.index("state");
+			const ops: OutboxOperation[] = [...await request(states.getAll("queued")), ...await request(states.getAll("sending"))];
+			let earliest: number | undefined;
+			for (const op of ops) {
+				let ready = true;
+				for (const id of op.dependsOn) {
+					const dependency: OutboxOperation | undefined = await request(store.get(id));
+					if (dependency?.state !== "accepted") { ready = false; break; }
+				}
+				if (!ready) continue;
+				const due = op.state === "sending" ? op.lease?.expiresAt : op.nextAttemptAt;
+				if (due !== undefined && (earliest === undefined || due < earliest)) earliest = due;
+			}
+			return earliest;
+		});
+	}
+
+	/** Remote authorization loss clears cached content, never pending local text. */
+	async clearRemoteScope(scopeId: string): Promise<void> {
+		await this.transaction(["entities", "cursors"], "readwrite", async tx => {
+			const store = tx.objectStore("entities");
+			for (const key of await request(store.index("scope").getAllKeys(scopeId))) await request(store.delete(key));
+			await request(tx.objectStore("cursors").delete(scopeId));
+		});
+	}
+
+	/** Explicit local account cleanup; callers must stop workers first. */
+	async clearAll(): Promise<void> {
+		await this.transaction(["drafts", "outbox", "entities", "cursors"], "readwrite", async tx => {
+			for (const name of ["drafts", "outbox", "entities", "cursors"]) await request(tx.objectStore(name).clear());
+		});
 	}
 
 	/** Read/write transactions serialize claims even across two plugin windows. */

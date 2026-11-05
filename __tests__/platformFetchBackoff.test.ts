@@ -3,6 +3,7 @@ import { requestUrl } from "obsidian";
 import { platformFetch } from "../src/platformFetch";
 import { setVerboseLogging } from "../src/logging";
 import { RelayHttpError, isTransientRelayFailure } from "../src/relayRequestErrors";
+import { FeatureToggleState } from "../src/featureToggleState";
 
 const request = requestUrl as jest.MockedFunction<typeof requestUrl>;
 function response(status: number) {
@@ -77,5 +78,17 @@ describe("transient request backoff", () => {
 		request.mockResolvedValue(response(403));
 		expect((await platformFetch("https://relay.example/v1/shares/x")).status).toBe(403);
 		expect(request).toHaveBeenCalledTimes(1);
+	});
+
+	test("sensitive requests omit response bodies and cursor URLs even with network logging enabled", async () => {
+		const log = jest.spyOn(console, "debug").mockImplementation(() => {});
+		const state = FeatureToggleState.getShared(), original = state.currentToggles;
+		state.currentToggles = { ...original, enableNetworkLogging: true }; setVerboseLogging(true);
+		try {
+			request.mockResolvedValue({ ...response(503), text: "private-comment", headers: { "retry-after": "60" } });
+			await expect(platformFetch("https://relay.example/changes?cursor=private-cursor", { method: "POST", sensitive: true }))
+				.rejects.toMatchObject({ message: "Relay request failed", retryAfterMs: 60000 });
+			expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-comment|private-cursor/);
+		} finally { state.currentToggles = original; setVerboseLogging(false); log.mockRestore(); }
 	});
 });

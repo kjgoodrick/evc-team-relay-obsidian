@@ -4,7 +4,7 @@ import { Platform } from "obsidian";
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import { namedLogger } from "./logging";
 import { currentToggles } from "./featureToggleState";
-import { RelayHttpError, isTransientRelayFailure } from "./relayRequestErrors";
+import { RelayHttpError, isTransientRelayFailure, parseRetryAfterMs } from "./relayRequestErrors";
 
 declare const GIT_TAG: string;
 
@@ -150,9 +150,14 @@ function toFetchResponse(response: RequestUrlResponse): Response {
 	return fetchResponse;
 }
 
+export interface PlatformRequestInit extends RequestInit {
+	/** Omit response content and URL from diagnostics (comments, replay cursors). */
+	sensitive?: boolean;
+}
+
 export const platformFetch = async (
 	url: RequestInfo | URL,
-	config?: RequestInit,
+	config?: PlatformRequestInit,
 ): Promise<Response> => {
 	const urlString = url instanceof URL ? url.toString() : (url as string);
 	const method = config?.method || "GET";
@@ -177,10 +182,11 @@ export const platformFetch = async (
 		});
 	}
 
-	logIfEnabled(result, method, urlString);
+	if (!config?.sensitive) logIfEnabled(result, method, urlString);
 
 	if (result.status >= 500) {
-		throw new RelayHttpError(result.status, result.text);
+		throw new RelayHttpError(result.status, config?.sensitive ? "Relay request failed" : result.text,
+			parseRetryAfterMs(result.headers["retry-after"] ?? result.headers["Retry-After"]));
 	}
 
 	return toFetchResponse(result);

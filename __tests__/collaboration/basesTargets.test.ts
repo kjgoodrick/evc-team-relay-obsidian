@@ -1,4 +1,4 @@
-import { BaseTarget, baseTargetKey } from "../../src/collaboration/anchors/bases";
+import { type BaseTarget, baseTargetKey } from "../../src/collaboration/anchors/bases";
 
 const view = { baseId: "base-a", viewId: "planning-board" };
 const cell: BaseTarget = { ...view, type: "base-cell", recordId: "task-a", property: { source: "note", id: "status" } };
