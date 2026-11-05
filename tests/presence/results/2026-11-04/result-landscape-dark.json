@@ -1,0 +1,68 @@
+{
+  "viewport": [
+    750,
+    292
+  ],
+  "dark": true,
+  "results": [
+    "PASS stack capped at four",
+    "PASS overflow count",
+    "PASS real images loaded",
+    "PASS no image referrer",
+    "PASS popover lists all users",
+    "PASS popover picture loaded",
+    "PASS failed picture falls back",
+    "PASS new URL retries after failure",
+    "PASS removed picture falls back",
+    "PASS file URLs rejected",
+    "PASS no horizontal page overflow",
+    "PASS no runtime errors",
+    "Completed 750×292"
+  ],
+  "errors": [],
+  "images": [
+    {
+      "src": "http://127.0.0.1:4177/avatar.svg",
+      "width": 32,
+      "complete": true,
+      "classes": "evc-user-picture svelte-fye1s0 evc-picture-loaded",
+      "referrer": "no-referrer"
+    },
+    {
+      "src": "http://127.0.0.1:4177/avatar.svg",
+      "width": 32,
+      "complete": true,
+      "classes": "evc-user-picture svelte-fye1s0 evc-picture-loaded",
+      "referrer": "no-referrer"
+    },
+    {
+      "src": "http://127.0.0.1:4177/avatar.svg",
+      "width": 20,
+      "complete": true,
+      "classes": "evc-user-picture svelte-fye1s0 evc-picture-loaded",
+      "referrer": "no-referrer"
+    },
+    {
+      "src": "http://127.0.0.1:4177/avatar.svg",
+      "width": 20,
+      "complete": true,
+      "classes": "evc-user-picture svelte-fye1s0 evc-picture-loaded",
+      "referrer": "no-referrer"
+    },
+    {
+      "src": "http://127.0.0.1:4177/avatar.svg",
+      "width": 20,
+      "complete": true,
+      "classes": "evc-user-picture svelte-fye1s0 evc-picture-loaded",
+      "referrer": "no-referrer"
+    },
+    {
+      "src": "http://127.0.0.1:4177/avatar.svg",
+      "width": 20,
+      "complete": true,
+      "classes": "evc-user-picture svelte-fye1s0 evc-picture-loaded",
+      "referrer": "no-referrer"
+    }
+  ],
+  "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Mobile/15E148 Safari/604.1"
+}

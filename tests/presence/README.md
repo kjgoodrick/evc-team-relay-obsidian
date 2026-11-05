@@ -43,7 +43,7 @@ The harness supplies seven synthetic identities, a generated SVG portrait,
 missing/broken image cases and a long display name. The only substituted host
 global is Obsidian's `activeDocument`, mapped to the page document; these
 components import no other Obsidian APIs. Results/errors are displayed and saved
-in localStorage. No real credentials, profiles or vault files are used.
+in localStorage and posted to the loopback server for JSON capture in `dist/presence-harness/`. No real credentials, profiles or vault files are used.
 
 Tap the stack to open the list; check scrolling, image cropping, display-name
 overflow and picture replacement/removal in portrait and landscape, light and
@@ -51,7 +51,26 @@ dark appearance. `Run checks` exercises browser image decoding and fallback.
 There are no changed forms, date/time inputs, drag actions or persisted editor
 drafts in this feature. Image/profile updates have no Undo action.
 
-Actual Obsidian integration and iOS Simulator visual checks are pending access
-to the unlocked Mac. A standalone Safari pass would cover WebKit with a
-substitute host, not native Obsidian on iPhone. Native plugin loading, vault
-access, background/resume and device performance remain separate checks.
+## Manual verification — 2026-11-04
+
+Evidence and per-orientation results are in [results/2026-11-04](results/2026-11-04/README.md).
+
+- Actual Obsidian 1.13.7 in a disposable vault, with `app.emulateMobile(true)`
+  and DevTools at 390×844 and 844×390: the production plugin displayed decoded
+  pictures in the title stack and active-user popover. Login settings, saved
+  session reload, note editing, Undo/Redo and saved text passed. Desktop mode
+  and device emulation were restored afterwards.
+- iPhone 17 Pro Simulator, iOS 26.5, Safari: all 12 harness assertions passed
+  in portrait/light and landscape/dark, with no captured runtime errors.
+  Actual Simulator taps opened the list and changed/removed the picture;
+  rotating with the list open preserved its state. Cropping and long-name
+  truncation were visually checked.
+- Automation drags did not produce a usable swipe, so touch scrolling remains
+  unverified for this popover. No changed text inputs require a software
+  keyboard; desktop editor typing does not establish iOS keyboard behavior.
+
+The Safari result covers production components in WebKit with a substitute
+host. Neither it nor desktop mobile emulation proves behavior inside native
+Obsidian on an iPhone. Native plugin loading, real vault access, native UI,
+background/resume, keyboard interaction and device performance remain checks
+for a physical device.

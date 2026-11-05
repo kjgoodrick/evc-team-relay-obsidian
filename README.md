@@ -2,11 +2,11 @@
 
 Experimental self-hosted fork of EVC Team Relay. It adds server-enforced file/folder permissions and a browser-based Pocket ID sign-in flow for Obsidian desktop/mobile APIs. It also recovers safe inventory conflicts automatically and provides a persisted conflict queue with verified local backups for decisions. Physical mobile validation is still pending.
 
-Download the tested [0.2.3 plugin ZIP](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/download/0.2.3/team-relay-sync-permissions-preview-0.2.3.zip) from the [GitHub prerelease](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.3). It contains the exact tested bundle, with published SHA-256 checksums and installation notes.
+Download the tested [0.2.4 plugin ZIP](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/download/0.2.4/team-relay-sync-permissions-preview-0.2.4.zip) from the [GitHub prerelease](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.4). It contains the exact tested bundle, with published SHA-256 checksums and installation notes.
 
 Preview 0.2.3 fixes spurious conflict copies while creating and typing in a note. It checks the share's own server session and prevents background reconciliation or delayed editor tasks from replacing newer edits. See the [diagnosis and regression verification](tests/regressions/new-note-0.2.3.md). Existing conflict copies are retained for manual review.
 
-The next preview, 0.2.4, adds Pocket ID profile pictures to file presence and the
+Preview 0.2.4 adds Pocket ID profile pictures to file presence and the
 active-user list, with initials as a fallback. It requires the matching server
 profile API update. See [implementation, coverage and the picture harness](tests/presence/README.md).
 
@@ -20,7 +20,7 @@ Preview 0.2.2 includes mobile layout/draft fixes and stable Yjs inventory client
 
 # Team Relay Sync
 
-[**Download the permissions-preview prerelease →**](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.3)
+[**Download the permissions-preview prerelease →**](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.4)
 
 **Real-time collaboration and web publishing for Obsidian.**
 
@@ -64,7 +64,7 @@ You love Obsidian, but your team needs more:
 
 ## Install
 
-1. Download the [tested 0.2.3 ZIP](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/download/0.2.3/team-relay-sync-permissions-preview-0.2.3.zip).
+1. Download the [tested 0.2.4 ZIP](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/download/0.2.4/team-relay-sync-permissions-preview-0.2.4.zip).
 2. Unzip it and copy the included `team-relay-sync` folder into
    `<your vault>/.obsidian/plugins/`. The plugin folder must contain `main.js`,
    `manifest.json` and `styles.css`.
@@ -77,11 +77,11 @@ You love Obsidian, but your team needs more:
 **Upgrading an existing installation:** quit Obsidian, then replace only
 `main.js`, `manifest.json` and `styles.css` inside the existing
 `<your vault>/.obsidian/plugins/team-relay-sync/` folder. Preserve `data.json`,
-the vault and Obsidian's local storage. Restart and confirm version **0.2.3**.
+the vault and Obsidian's local storage. Restart and confirm version **0.2.4**.
 Keep existing conflict-copy notes until you have checked them for newer text;
-upgrading does not merge or remove them. No server update is required for 0.2.3.
+upgrading does not merge or remove them. Pictures require the server profile API update linked above; the plugin retains initials with older servers.
 
-The [release page](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.3)
+The [release page](https://github.com/kjgoodrick/evc-team-relay-obsidian/releases/tag/0.2.4)
 also provides the three individual installation files and `SHA256SUMS`.
 The community-directory version is the upstream plugin and does not contain
 this fork's permissions and recovery changes. Keep automatic upstream updates
