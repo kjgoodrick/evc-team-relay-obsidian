@@ -38,4 +38,7 @@ deleted.getText("secret").insert(0, "secret");
 record("wrong-shared-type", deleted, { ...afterDelete,
 	start: Buffer.from(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(deleted.getText("secret"), 1))).toString("base64") });
 deleted.destroy(); stale.destroy();
+const empty = document("");
+record("empty-note-caret", empty, captureTextAnchor(empty.getText("contents"), "note", "generation", 0, 0));
+empty.destroy();
 process.stdout.write(JSON.stringify({ version: 1, yjsVersion: require("yjs/package.json").version, fixtures }, null, 2) + "\n");
