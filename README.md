@@ -6,6 +6,11 @@ Download the tested [0.2.4 plugin ZIP](https://github.com/kjgoodrick/evc-team-re
 
 Preview 0.2.3 fixes spurious conflict copies while creating and typing in a note. It checks the share's own server session and prevents background reconciliation or delayed editor tasks from replacing newer edits. See the [diagnosis and regression verification](tests/regressions/new-note-0.2.3.md). Existing conflict copies are retained for manual review.
 
+Preview 0.2.5 adds automatic checks for this fork’s GitHub releases and an
+**Update** button in plugin settings. Installation verifies checksums and keeps
+a rollback copy; save your edits and restart Obsidian afterwards. See the
+[updater behavior and verification](tests/updates/README.md).
+
 Preview 0.2.4 adds Pocket ID profile pictures to file presence and the
 active-user list, with initials as a fallback. It requires the matching server
 profile API update. See [implementation, coverage and the picture harness](tests/presence/README.md).

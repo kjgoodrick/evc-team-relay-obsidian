@@ -18,8 +18,11 @@ import {
 	Menu,
 	App,
 	type PluginManifest,
+	requestUrl,
 } from "obsidian";
 import { Platform } from "obsidian";
+import { PluginUpdater } from "./updates/PluginUpdater";
+import { UpdateFiles } from "./updates/UpdateFiles";
 
 /** Internal Obsidian App properties not exposed in the public API */
 interface ObsidianApp {
@@ -227,6 +230,8 @@ export default class TeamRelayPlugin extends Plugin {
 	// Auth + settings UI
 	authSession!: AuthSession;
 	settingsPage!: RelaySettingsPage;
+	updater!: PluginUpdater;
+	private updaterBlockedStartup = false;
 	pluginSettings!: Settings<StoredSettings>;
 
 	// Persisted-settings namespaces
@@ -514,6 +519,19 @@ export default class TeamRelayPlugin extends Plugin {
 	}
 
 	async onload() {
+		this.updater = new PluginUpdater(
+			new UpdateFiles(this.app.vault.adapter, this.manifest.dir || normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`)),
+			this.manifest.version,
+			async (url) => {
+				const response = await requestUrl({ url, headers: { Accept: url.startsWith("https://api.github.com/") ? "application/vnd.github+json" : "application/octet-stream" }, throw: false });
+				return { status: response.status, arrayBuffer: response.arrayBuffer };
+			},
+			requireApiVersion, Platform.isMobile,
+			(message) => { new Notice(message, 10000); },
+		);
+		if (!await this.updater.initialize()) { this.updaterBlockedStartup = true; return; }
+		this.updater.start();
+
 		this.instanceAppId = (this.app as unknown as ObsidianApp).appId;
 		registerAuthStorageHost(this.instanceAppId, this.app);
 		const start = moment.now();
@@ -2232,6 +2250,8 @@ export default class TeamRelayPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.updater?.dispose();
+		if (this.updaterBlockedStartup) return;
 		// Save settings before cleanup to persist any changes
 		// Must await to ensure settings are persisted before destroying namespaced settings
 		void this.pluginSettings?.persist();

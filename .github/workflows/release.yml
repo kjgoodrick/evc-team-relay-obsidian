@@ -116,6 +116,8 @@ jobs:
                   raise SystemExit('built artifact differs from accepted bytes: ' + name)
           print('Accepted artifact digests match')
           PY_DIGEST
+      - name: Generate updater checksums from the accepted runtime files
+        run: sha256sum main.js manifest.json styles.css > SHA256SUMS
       - name: Push the release tag (workflow_dispatch, new tag only)
         # Only after build and accepted-byte checks; the manifest was restored from the commit.
         if: github.event_name == 'workflow_dispatch' && steps.dispatch.outputs.exists != 'true'
@@ -147,4 +149,4 @@ jobs:
             echo '::error::stable release already exists; replacing accepted bytes is forbidden'
             exit 1
           fi
-          gh release create "$TAG" main.js manifest.json styles.css --verify-tag --title "$TAG" --notes "Release $TAG"
+          gh release create "$TAG" main.js manifest.json styles.css SHA256SUMS --verify-tag --title "$TAG" --notes "Release $TAG"
