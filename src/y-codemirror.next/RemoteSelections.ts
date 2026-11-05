@@ -45,7 +45,7 @@ interface AwarenessState {
 }
 import { namedLogger } from "src/logging";
 import { type TextFileView, editorInfoField } from "obsidian";
-import type { Document } from "../Document";
+import type { Document as RelayDocument } from "../Document";
 
 export const yRemoteSelectionsTheme = EditorView.baseTheme({
 	".cm-ySelection": {},
@@ -177,6 +177,10 @@ type AwarenessChangeHandler = (
 	awareness: Awareness,
 ) => void;
 
+// Several leaves can share one provider. An inactive leaf must never clear
+// another leaf's foreground selection when it receives a remote update.
+const cursorOwners = new WeakMap<Awareness, YRemoteSelectionsPluginValue>();
+
 export class YRemoteSelectionsPluginValue implements PluginValue {
 	editor: EditorView;
 	connectionManager?: ViewBindingRegistry;
@@ -184,11 +188,18 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 	decorations: DecorationSet;
 	_awareness?: Awareness;
 	_listener?: AwarenessChangeHandler;
-	document?: Document;
+	document?: RelayDocument;
 	private destroyed = false;
+	private renderDirty = true;
+	private ownerDocument: Document;
+	private clearOnBlur = () => this.clearOwnedCursor();
+	private clearOnHidden = () => {
+		if (this.ownerDocument.visibilityState === "hidden") this.clearOwnedCursor();
+	};
 
 	constructor(editor: EditorView) {
 		this.editor = editor;
+		this.ownerDocument = editor.dom.ownerDocument;
 		this.decorations = RangeSet.of([]);
 		this.connectionManager = this.editor.state.field(
 			ViewBindingStateField,
@@ -208,27 +219,43 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 			return;
 		}
 
-		this.view = this.connectionManager?.locateMarkdownView(editor);
-		if (this.view && this.view instanceof DocumentViewBinding) {
-			const provider = this.view.boundDocument?._liveProvider;
-			this._listener = ({ added, updated, removed }, s, t) => {
-				const clients = added.concat(updated).concat(removed);
-				if (
-					clients.findIndex((id) => id !== this._awareness?.doc.clientID) >= 0
-				) {
-					editor.dispatch({
-						annotations: [yRemoteSelectionsAnnotation.of([])],
-					});
-				}
-			};
-			if (provider) {
-				this._awareness = provider.awareness;
-				this._awareness.on("change", this._listener);
+		this._listener = ({ added, updated, removed }) => {
+			const clients = added.concat(updated).concat(removed);
+			if (
+				!this.destroyed &&
+				clients.findIndex((id) => id !== this._awareness?.doc.clientID) >= 0
+			) {
+				this.renderDirty = true;
+				editor.dispatch({
+					annotations: [yRemoteSelectionsAnnotation.of([])],
+				});
 			}
+		};
+		this.view = this.connectionManager?.locateMarkdownView(editor);
+		if (this.view instanceof DocumentViewBinding) this.bindAwareness(this.view.boundDocument?._liveProvider?.awareness);
+		this.ownerDocument.defaultView?.addEventListener("blur", this.clearOnBlur);
+		this.ownerDocument.defaultView?.addEventListener("pagehide", this.clearOnBlur);
+		this.ownerDocument.addEventListener("visibilitychange", this.clearOnHidden);
+	}
+
+	private clearOwnedCursor() {
+		const awareness = this._awareness;
+		if (awareness && cursorOwners.get(awareness) === this) {
+			cursorOwners.delete(awareness);
+			if (awareness.getLocalState()?.cursor != null) awareness.setLocalStateField("cursor", null);
 		}
 	}
 
-	getDocument(): Document | undefined {
+	private bindAwareness(awareness?: Awareness) {
+		if (this._awareness === awareness) return;
+		this.clearOwnedCursor();
+		if (this._listener) this._awareness?.off("change", this._listener);
+		this._awareness = awareness;
+		if (this._listener) awareness?.on("change", this._listener);
+		this.renderDirty = true;
+	}
+
+	getDocument(): RelayDocument | undefined {
 		const fileInfo = this.editor.state.field(editorInfoField);
 		const file = fileInfo.file;
 		
@@ -250,10 +277,11 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 
 	destroy() {
 		this.destroyed = true;
-		if (this._listener) {
-			this._awareness?.off("change", this._listener);
-			this._listener = undefined;
-		}
+		this.bindAwareness(undefined);
+		this._listener = undefined;
+		this.ownerDocument.defaultView?.removeEventListener("blur", this.clearOnBlur);
+		this.ownerDocument.defaultView?.removeEventListener("pagehide", this.clearOnBlur);
+		this.ownerDocument.removeEventListener("visibilitychange", this.clearOnHidden);
 		this.connectionManager = null as unknown as ViewBindingRegistry | undefined;
 		this.view = null as unknown as DocumentViewBinding<TextFileView> | undefined;
 		this.editor = null as unknown as EditorView;
@@ -266,23 +294,27 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 		this.document = this.getDocument();
 		const ytext = this.document?.crdtText;
 		if (!(this.document && ytext && ytext.doc)) {
+			this.bindAwareness(undefined);
+			this.decorations = Decoration.none;
 			return;
 		}
 		const provider = this.document._liveProvider;
 		if (!provider) {
+			this.bindAwareness(undefined);
+			this.decorations = Decoration.none;
 			return;
 		}
-		this._awareness = provider.awareness;
-		const awareness = this._awareness;
+		this.bindAwareness(provider.awareness);
+		const awareness = provider.awareness;
 
 		const ydoc: Y.Doc = ytext.doc;
 		const decorations: Array<Range<Decoration>> = [];
-		const localAwarenessState = this._awareness.getLocalState() as AwarenessState | null;
+		const localAwarenessState = awareness.getLocalState() as AwarenessState | null;
 
 		// set local awareness state (update cursors)
 		if (localAwarenessState != null) {
 			const hasFocus =
-				update.view.hasFocus && update.view.dom.ownerDocument.hasFocus();
+				update.view.hasFocus && this.ownerDocument.hasFocus() && this.ownerDocument.visibilityState !== "hidden";
 			const sel = hasFocus ? update.state.selection.main : null;
 			const currentAnchor =
 				localAwarenessState.cursor == null
@@ -300,6 +332,7 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 						);
 
 			if (sel != null) {
+				cursorOwners.set(awareness, this);
 				const anchor = Y.createRelativePositionFromTypeIndex(ytext, sel.anchor);
 				const head = Y.createRelativePositionFromTypeIndex(ytext, sel.head);
 				if (
@@ -312,13 +345,16 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 						head,
 					});
 				}
-			} else if (localAwarenessState.cursor != null && hasFocus) {
-				awareness.setLocalStateField("cursor", null);
+			} else {
+				this.clearOwnedCursor();
 			}
 		}
+		if (!this.renderDirty && !update.docChanged && !update.viewportChanged) return;
+		this.renderDirty = false;
 
 		// update decorations (remote selections)
 		awareness.getStates().forEach((rawState, clientid) => {
+			if (!rawState || typeof rawState !== "object") return;
 			const state = rawState as AwarenessState;
 			if (clientid === awareness.doc.clientID) {
 				return;
@@ -327,14 +363,17 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 			if (cursor == null || cursor.anchor == null || cursor.head == null) {
 				return;
 			}
-			const anchor = Y.createAbsolutePositionFromRelativePosition(
-				cursor.anchor,
-				ydoc,
-			);
-			const head = Y.createAbsolutePositionFromRelativePosition(
-				cursor.head,
-				ydoc,
-			);
+			let anchor: Y.AbsolutePosition | null, head: Y.AbsolutePosition | null;
+			try {
+				anchor = Y.createAbsolutePositionFromRelativePosition(
+					cursor.anchor,
+					ydoc,
+				);
+				head = Y.createAbsolutePositionFromRelativePosition(
+					cursor.head,
+					ydoc,
+				);
+			} catch { return; }
 			if (
 				anchor == null ||
 				head == null ||
@@ -361,67 +400,73 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 			const { color, light: colorLight } = presenceColorForUser(user);
 			const start = math.min(anchor.index, head.index);
 			const end = math.max(anchor.index, head.index);
-			const startLine = update.view.state.doc.lineAt(start);
-			const endLine = update.view.state.doc.lineAt(end);
-			if (startLine.number === endLine.number) {
-				// selected content in a single line.
-				decorations.push({
-					from: start,
-					to: end,
-					value: Decoration.mark({
-						attributes: {
-							style: `background-color: ${colorLight}`,
-						},
-						class: "cm-ySelection",
-					}),
-				});
-			} else {
-				// selected content in multiple lines
-				// first, render text-selection in the first line
-				decorations.push({
-					from: start,
-					to: startLine.from + startLine.length,
-					value: Decoration.mark({
-						attributes: {
-							style: `background-color: ${colorLight}`,
-						},
-						class: "cm-ySelection",
-					}),
-				});
-				// render text-selection in the last line
-				decorations.push({
-					from: endLine.from,
-					to: end,
-					value: Decoration.mark({
-						attributes: {
-							style: `background-color: ${colorLight}`,
-						},
-						class: "cm-ySelection",
-					}),
-				});
-				for (let i = startLine.number + 1; i < endLine.number; i++) {
-					const linePos = update.view.state.doc.line(i).from;
+			for (const visible of update.view.visibleRanges) {
+				const visibleStart = Math.max(start, visible.from), visibleEnd = Math.min(end, visible.to);
+				if (visibleStart >= visibleEnd) continue;
+				const startLine = update.view.state.doc.lineAt(visibleStart);
+				const endLine = update.view.state.doc.lineAt(visibleEnd);
+				if (startLine.number === endLine.number) {
+					// selected content in a single line.
 					decorations.push({
-						from: linePos,
-						to: linePos,
-						value: Decoration.line({
+						from: visibleStart,
+						to: visibleEnd,
+						value: Decoration.mark({
 							attributes: {
 								style: `background-color: ${colorLight}`,
-								class: "cm-yLineSelection",
 							},
+							class: "cm-ySelection",
 						}),
 					});
+				} else {
+					// selected content in multiple lines
+					// first, render text-selection in the first line
+					decorations.push({
+						from: visibleStart,
+						to: startLine.from + startLine.length,
+						value: Decoration.mark({
+							attributes: {
+								style: `background-color: ${colorLight}`,
+							},
+							class: "cm-ySelection",
+						}),
+					});
+					// render text-selection in the last line
+					decorations.push({
+						from: endLine.from,
+						to: visibleEnd,
+						value: Decoration.mark({
+							attributes: {
+								style: `background-color: ${colorLight}`,
+							},
+							class: "cm-ySelection",
+						}),
+					});
+					for (let i = startLine.number + 1; i < endLine.number; i++) {
+						const linePos = update.view.state.doc.line(i).from;
+						decorations.push({
+							from: linePos,
+							to: linePos,
+							value: Decoration.line({
+								attributes: {
+									style: `background-color: ${colorLight}`,
+									class: "cm-yLineSelection",
+								},
+							}),
+						});
+					}
 				}
 			}
-			decorations.push({
-				from: head.index,
-				to: head.index,
-				value: Decoration.widget({
-					side: head.index - anchor.index > 0 ? -1 : 1, // the local cursor should be rendered outside the remote selection
-					block: false,
-					widget: new YRemoteCaretWidget(color, name),
-				}),
-			});
+			if (update.view.visibleRanges.some(range => head!.index >= range.from && head!.index <= range.to)) {
+				decorations.push({
+					from: head.index,
+					to: head.index,
+					value: Decoration.widget({
+						side: head.index - anchor.index > 0 ? -1 : 1, // the local cursor should be rendered outside the remote selection
+						block: false,
+						widget: new YRemoteCaretWidget(color, name),
+					}),
+				});
+			}
 		});
 		this.decorations = Decoration.set(decorations, true);
 	}

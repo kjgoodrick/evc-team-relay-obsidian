@@ -92,7 +92,7 @@ export class UpdateFiles {
 			for (const f of RUNTIME_FILES) await this.writeVerified(`${this.pluginDir}/${f}`, await this.storage.readBinary(this.path(`${f}.next`)));
 			if (!await this.matches(after)) throw new Error("Installed files failed verification.");
 			await this.journal({ ...j, state: "installed" });
-		} catch (error) {
+		} catch {
 			try { await this.restore(j); }
 			catch { throw new Error("Update interrupted and automatic restoration failed. Keep .relay-update and reinstall the previous release before restarting Obsidian."); }
 			throw new Error("Update failed. The previous plugin files were restored; your running session was kept.");

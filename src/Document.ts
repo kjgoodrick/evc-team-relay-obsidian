@@ -1,5 +1,4 @@
 import { ItemKind } from "./ItemKinds";
-"use strict";
 import { LocalDocumentStore } from "./storage/local-document-store";
 import * as Y from "yjs";
 import { ProviderBacked } from "./ProviderBacked";

@@ -17,7 +17,7 @@ import {
 import { dirname, join, sep } from "path-browserify";
 
 import * as Y from "yjs";
-import { CONFLICTS, select, touches, type Records, type StructuralConflict } from "./client/managedRecovery";
+import { CONFLICTS, select, touches, type Records } from "./client/managedRecovery";
 import { prepareRecoveryBackup, sameCapture, type RecoveryCapture } from "./ManagedRecoveryBackup";
 import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
