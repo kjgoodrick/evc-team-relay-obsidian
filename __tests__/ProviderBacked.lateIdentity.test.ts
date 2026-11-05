@@ -18,7 +18,7 @@ afterEach(() => {
 	}
 });
 
-function makeClient() {
+function makeClient(documentId = DOCUMENT_ID) {
 	let user: Account | undefined;
 	const listeners = new Set<() => void>();
 	const refreshListeners = new Set<(serverId: string) => void>();
@@ -38,8 +38,8 @@ function makeClient() {
 	// Keep the real provider disconnected: this test exercises real awareness
 	// and Yjs identity state without depending on a network connection.
 	const provider = new ProviderBacked(
-		DOCUMENT_ID,
-		new RemoteDocumentAddress("relay-onprem", SHARE_ID, DOCUMENT_ID),
+		documentId,
+		new RemoteDocumentAddress("relay-onprem", SHARE_ID, documentId),
 		credentials,
 		auth,
 		SERVER_ID,
@@ -61,6 +61,20 @@ function makeClient() {
 }
 
 describe("ProviderBacked identity restoration", () => {
+	test("independent notes advertise the same color after account restoration and profile refresh", () => {
+		const first = makeClient();
+		const second = makeClient("00000000-0000-4000-8000-000000000003");
+		first.restoreIdentity(new Account("local-user", "Local User", "user@example.com", "", ""));
+		second.restoreIdentity(new Account("local-user", "Local User", "user@example.com", "", ""));
+		const color = first.provider._liveProvider.awareness.getLocalState()?.user.color;
+		expect(second.provider._liveProvider.awareness.getLocalState()?.user.color).toBe(color);
+		const changed = jest.fn();
+		second.provider.crdtDoc.on("update", changed);
+		second.refreshProfile(new Account("local-user", "New Name", "user@example.com", "https://id.example/new.png", "new-token"));
+		expect(second.provider._liveProvider.awareness.getLocalState()?.user.color).toBe(color);
+		expect(changed).not.toHaveBeenCalled();
+	});
+
 	test("a later server login seeds both presence and the document user mapping", () => {
 		const { provider, restoreIdentity } = makeClient();
 		const permanentUsers = createPermanentUserData(provider.crdtDoc);

@@ -24,7 +24,8 @@ import {
 
 import * as Y from "yjs";
 import type { RelativePosition } from "yjs";
-import { Awareness } from "y-protocols/awareness.js";
+import type { Awareness } from "y-protocols/awareness.js";
+import { presenceColorForUser } from "../presenceColor";
 
 interface AwarenessCursor {
 	anchor: RelativePosition;
@@ -32,6 +33,7 @@ interface AwarenessCursor {
 }
 
 interface AwarenessUser {
+	id?: string;
 	name?: string;
 	color?: string;
 	colorLight?: string;
@@ -42,8 +44,8 @@ interface AwarenessState {
 	user?: AwarenessUser;
 }
 import { namedLogger } from "src/logging";
-import { TextFileView, editorInfoField } from "obsidian";
-import { Document } from "../Document";
+import { type TextFileView, editorInfoField } from "obsidian";
+import type { Document } from "../Document";
 
 export const yRemoteSelectionsTheme = EditorView.baseTheme({
 	".cm-ySelection": {},
@@ -143,11 +145,11 @@ export class YRemoteCaretWidget extends WidgetType {
 	}
 
 	eq(widget: YRemoteCaretWidget) {
-		return widget.color === this.color;
+		return widget.color === this.color && widget.name === this.name;
 	}
 
 	compare(widget: YRemoteCaretWidget) {
-		return widget.color === this.color;
+		return this.eq(widget);
 	}
 
 	updateDOM() {
@@ -355,8 +357,8 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 				return;
 			}
 			const user: AwarenessUser = state.user ?? {};
-			const { color = "#30bced", name = "Anonymous" } = user;
-			const colorLight = user.colorLight ?? color + "33";
+			const { name = "Anonymous" } = user;
+			const { color, light: colorLight } = presenceColorForUser(user);
 			const start = math.min(anchor.index, head.index);
 			const end = math.max(anchor.index, head.index);
 			const startLine = update.view.state.doc.lineAt(start);

@@ -159,8 +159,8 @@ describe("resolveCurrentUserForServer", () => {
 		// This is the actual bug fix: previously this case returned
 		// `globalUser` regardless (the code only ever read `currentUser`),
 		// which is wrong whenever this doc's server isn't the active one.
-		// getCurrentUserFromProvider always builds a FRESH Account (random
-		// presenceColor), so compare identity fields, not object/reference
+		// getCurrentUserFromProvider always builds a FRESH Account, so
+		// compare identity fields, not object/reference
 		// equality — resolveCurrentUserForServer's own contract is "the
 		// right account", not "the exact same instance".
 		const resolved = resolveCurrentUserForServer(globalUser, providerFor(serverUser), "srv-1");

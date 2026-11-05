@@ -1,6 +1,31 @@
 const path = require("node:path");
 const { loadSvelteComponent } = require("../scripts/test/svelteDOM.cjs");
 
+test("the same person has the same stack and popover border in independent notes with older peer colors", () => {
+	const { dom, default: Component, mountComponent, flushSync } = loadSvelteComponent(path.resolve(__dirname, "../src/components/CollaboratorAwareness.svelte"));
+	const notes = ["#ff0000", "#0000ff"].map(color => {
+		const listeners = new Set();
+		const states = new Map([[1, { user: { id: "alice", name: "Alice", color } }], [2, { user: { id: "bob", name: "Bob", color } }]]);
+		const awareness = { getStates: () => states, getLocalState: () => states.get(1), on: (_event, cb) => listeners.add(cb), off: (_event, cb) => listeners.delete(cb) };
+		const target = dom.window.document.body.appendChild(dom.window.document.createElement("section"));
+		return { target, states, listeners, component: mountComponent(Component, { target, props: { collabAwareness: awareness } }) };
+	});
+	const border = (note, name) => note.target.querySelector(`.evc-stacked-avatar[aria-label="${name}"] .evc-avatar-with-border`).style.borderColor;
+	try {
+		flushSync();
+		const alice = border(notes[0], "Alice"), bob = border(notes[0], "Bob");
+		expect(alice).toBeTruthy();
+		expect(border(notes[1], "Alice")).toBe(alice);
+		expect(border(notes[1], "Bob")).toBe(bob);
+		notes[1].states.get(1).user = { id: "alice", name: "Renamed Alice", color: "#ffffff" };
+		notes[1].listeners.forEach(cb => cb()); flushSync();
+		expect(border(notes[1], "Renamed Alice")).toBe(alice);
+		notes[1].target.querySelector(".evc-avatar-stack").click(); flushSync();
+		expect(notes[1].target.querySelector(".evc-user-popover .evc-avatar-with-border").style.borderColor).toBe(alice);
+	} finally { notes.forEach(note => note.component.destroy()); dom.window.close(); }
+	expect(notes.every(note => note.listeners.size === 0)).toBe(true);
+});
+
 test("actual presence components render pictures, recover from load failure and refresh without remounting", () => {
 	const { dom, default: Component, mountComponent, flushSync } = loadSvelteComponent(path.resolve(__dirname, "../src/components/CollaboratorAwareness.svelte"));
 	const listeners = new Set();

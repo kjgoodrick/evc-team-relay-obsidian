@@ -1,4 +1,29 @@
-# Pocket ID presence pictures (0.2.4)
+# Presence pictures and consistent colors (0.2.6)
+
+## Consistent colors
+
+Color now derives from the stable account ID using the existing eight-color
+palette. New Account objects, different notes, reconnects, name/picture changes
+and app restarts keep the same color without saving any extra state. Different
+people can share a palette color. Anonymous legacy cursors without an account ID
+retain their advertised color.
+
+Both outgoing awareness and local rendering use the same function. This keeps
+avatar borders, active-user lists, cursor labels and selection highlights in
+agreement even when an older peer advertises random colors in different notes.
+Cursor widgets also compare display names before reusing their DOM, so a changed
+name refreshes without requiring a color change. No server update is required.
+
+Validation: 1,436 tests passed in 141 suites (one real-stack suite separately
+gated), production build passed, Svelte type checks have zero errors, and the
+test type gate has no new errors beyond its inherited baseline. New tests cover
+independent real providers, production Svelte components in two notes, and real
+CodeMirror editors with Yjs cursor positions. The cursor test substitutes only
+the host's document lookup; it checks actual rendered borders, selections and
+name refreshes. The browser harness now mounts two notes whose peers advertise
+different colors and checks that their rendered borders agree.
+
+## Pocket ID pictures (introduced in 0.2.4)
 
 The file-title presence stack and its active-user list now use the profile
 picture supplied by the share's own authenticated account. Initials remain

@@ -4,6 +4,7 @@
 	import { derived, writable } from "svelte/store";
 	import AvatarStack, { type CollaboratorPresence } from "./AvatarStack.svelte";
 	import UserPopover from "./UserPopover.svelte";
+	import { presenceColorForUser } from "../presenceColor";
 
 	export let collabAwareness: Awareness;
 
@@ -36,11 +37,12 @@
 			const user = state.user;
 			if (!user?.name || !user?.id || seen.has(user.id)) return;
 			seen.add(user.id);
+			const { color, light } = presenceColorForUser(user);
 			users.push({
 				displayName: user.name,
 				userId: user.id,
-				avatarColor: user.color || "#30bced",
-				avatarColorLight: user.colorLight || user.color + "33" || "",
+				avatarColor: color,
+				avatarColorLight: light,
 				avatarUrl: user.avatarUrl,
 			});
 		});
