@@ -1,0 +1,19 @@
+{
+  "host": "Obsidian 1.13.7 desktop Chromium with app.emulateMobile(true)",
+  "plugin": "0.2.6",
+  "orientation": "landscape",
+  "viewport": [
+    844,
+    390
+  ],
+  "appearance": "light",
+  "checks": {
+    "stackAndPopoverBorder": "rgb(238, 99, 82)",
+    "accountAwarenessColor": "#ee6352",
+    "profilePictureDecoded": true,
+    "popoverVisible": true,
+    "sameColorAcrossNotesAndReloads": true
+  },
+  "productErrors": [],
+  "notes": "Read-only checks in the existing Knowledge Base vault. Native iPhone Obsidian was not tested. One initial mistyped console probe raised a SyntaxError; corrected before reload and verification. Existing live-instance-registry debug warning remains."
+}

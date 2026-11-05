@@ -23,6 +23,10 @@ the host's document lookup; it checks actual rendered borders, selections and
 name refreshes. The browser harness now mounts two notes whose peers advertise
 different colors and checks that their rendered borders agree.
 
+Hands-on Obsidian and iOS WebKit verification is recorded in
+[the 0.2.6 results](results/2026-11-04-colors/README.md). Both orientations passed;
+0.2.6 was installed through the real updater with notes and settings preserved.
+
 ## Pocket ID pictures (introduced in 0.2.4)
 
 The file-title presence stack and its active-user list now use the profile
