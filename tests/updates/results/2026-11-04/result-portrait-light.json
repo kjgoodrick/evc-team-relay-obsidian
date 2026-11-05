@@ -1,0 +1,26 @@
+{
+  "viewport": [
+    402,
+    714
+  ],
+  "dark": false,
+  "results": [
+    "PASS published preview discovered",
+    "PASS Update button available",
+    "PASS verified update installed",
+    "PASS settings and local edits preserved",
+    "PASS restart is explicit; no live reload",
+    "PASS installation survives reopen",
+    "PASS hash failure reported",
+    "PASS hash leaves previous files intact",
+    "PASS disk failure reported",
+    "PASS disk leaves previous files intact",
+    "PASS offline error leaves updater usable",
+    "PASS automatic-check preference persists",
+    "PASS no horizontal overflow",
+    "PASS no runtime errors",
+    "Completed 402×714"
+  ],
+  "errors": [],
+  "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Mobile/15E148 Safari/604.1"
+}

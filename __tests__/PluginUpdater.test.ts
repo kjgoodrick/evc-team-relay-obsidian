@@ -13,7 +13,7 @@ class MemoryStorage implements UpdateStorage {
 	async mkdir(p: string) { this.dirs.add(p); }
 	async readBinary(p: string) { if (!this.files.has(p)) throw Error(`Missing ${p}`); return this.files.get(p)!.slice(0); }
 	async writeBinary(p: string, b: ArrayBuffer) { this.fault?.("write", p); this.writes.push(p); this.files.set(p, b.slice(0)); }
-	async rename(p: string, dest: string) { this.fault?.("rename", dest); if (!this.files.has(p)) throw Error("missing source"); this.writes.push(dest); this.files.set(dest, this.files.get(p)!); this.files.delete(p); }
+	async process(p: string, fn: (text: string) => string) { this.fault?.("process", p); const text = fn(decode(await this.readBinary(p))); this.writes.push(p); this.files.set(p, bytes(text)); return text; }
 }
 async function fixture(version = "0.2.6") {
 	const storage = new MemoryStorage();
@@ -92,17 +92,22 @@ test("verified installation preserves settings/notes, does not execute code, and
 });
 test.each(RUNTIME_FILES)("a failed replacement of %s rolls all runtime files back", async name => {
 	const f = await fixture(); let failed = false;
-	f.storage.fault = (op, p) => { if (!failed && op === "rename" && p === `${dir}/${name}`) { failed = true; throw Error("disk failure"); } };
+	f.storage.fault = (op, p) => { if (!failed && op === "process" && p === `${dir}/${name}`) { failed = true; throw Error("disk failure"); } };
 	await expect(f.files.install(f.bundle, "0.2.5", "0.2.6")).rejects.toThrow("previous plugin files were restored");
 	expectOriginal(f); expect(await f.files.recover()).toEqual({});
 });
-test("a host that cannot replace files via rename is refused before modifying the plugin", async () => {
-	const f = await fixture(); f.storage.fault = (op, p) => { if (op === "rename" && f.storage.files.has(p)) throw Error("destination exists"); };
-	await expect(f.files.install(f.bundle, "0.2.5", "0.2.6")).rejects.toThrow(); expectOriginal(f);
+test("a partial host write is detected and the previous runtime is restored", async () => {
+	const f = await fixture(); const original = f.storage.process.bind(f.storage); let partial = true;
+	f.storage.process = async (p, fn) => {
+		if (partial && p === `${dir}/main.js`) { partial = false; f.storage.files.set(p, bytes("partial")); return "partial"; }
+		return original(p, fn);
+	};
+	await expect(f.files.install(f.bundle, "0.2.5", "0.2.6")).rejects.toThrow("previous plugin files were restored");
+	expectOriginal(f);
 });
 test("startup recovers an interrupted replacement with verified backups, and requires restart", async () => {
 	const f = await fixture(); let blocked = false;
-	f.storage.fault = (op, p) => { if (op === "rename" && (p === `${dir}/styles.css` || (blocked && p.startsWith(dir) && !p.includes(".relay-update")))) { blocked = true; throw Error("device disappeared"); } };
+	f.storage.fault = (op, p) => { if (op === "process" && (p === `${dir}/styles.css` || (blocked && p.startsWith(dir) && !p.includes(".relay-update")))) { blocked = true; throw Error("device disappeared"); } };
 	await expect(f.files.install(f.bundle, "0.2.5", "0.2.6")).rejects.toThrow("automatic restoration failed");
 	expect(f.storage.files.get(`${dir}/main.js`)).toEqual(f.bundle["main.js"]);
 	f.storage.fault = undefined;
@@ -129,7 +134,7 @@ test("a completed update does not roll back a later manual version", async () =>
 test("failed staging and stale running versions leave all existing files alone", async () => {
 	const f = await fixture();
 	await expect(f.files.install(f.bundle, "0.2.4", "0.2.6")).rejects.toThrow("changed since startup");
-	f.storage.fault = (op, p) => { if (op === "write" && p.endsWith("styles.css.next.tmp")) throw Error("out of space"); };
+	f.storage.fault = (op, p) => { if (op === "write" && p.endsWith("styles.css.next")) throw Error("out of space"); };
 	await expect(f.files.install(f.bundle, "0.2.5", "0.2.6")).rejects.toThrow("out of space");
 	expectOriginal(f);
 });

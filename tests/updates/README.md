@@ -20,16 +20,15 @@ version and mobile support before touching installed files. Checksums detect
 changed/corrupt downloads; trust still rests on this repository and HTTPS, not
 an independent release-signing key.
 
-The installer uses the public Obsidian DataAdapter APIs, including a probe that
-requires rename to replace an existing file. It stages and verifies new files,
+The installer uses the public Obsidian DataAdapter APIs, using `process` to coordinate writes through the host file queue. It stages and verifies new files,
 keeps verified copies of the previous runtime files, and records a recovery
 journal in `<plugin directory>/.relay-update/`. It replaces `main.js`,
-`styles.css`, and finally `manifest.json` using rename. It never removes or
-truncates the running main.js as a fallback when rename is unsupported.
+`styles.css`, and finally `manifest.json` using the host APIs. This coordinates individual writes; it is not a filesystem
+transaction that commits all three files together.
 
-A write failure restores all three previous files. An interrupted transaction
-is recovered before sync starts on the next load; that recovery asks for another
-restart. Completed transactions do not override a subsequent manual version
+A recoverable write failure restores all three previous files. An interrupted
+transaction is recovered before sync starts on the next load when the plugin
+and journal can still be read; that recovery asks for another restart. Completed transactions do not override a subsequent manual version
 installation. Installation does not reload the active plugin or close editors.
 Save your edits and restart Obsidian when convenient to load the new version.
 
@@ -69,14 +68,42 @@ the loopback server under `dist/updates-harness/`. Rebuild after source edits:
 `node tests/updates/serve.mjs --build-only`, then reload Safari.
 
 The harness tests the production updater, including real WebCrypto hashes,
-with a substitute host. It cannot establish native DataAdapter rename semantics,
+with a substitute host. It cannot establish native DataAdapter write semantics,
 real GitHub request handling, plugin discovery/loading, vault durability,
 background/resume behavior or performance inside native iPhone Obsidian.
 
-Manual host and Simulator verification is pending an unlocked Mac. The actual
-host test uses a disposable vault with the new code labelled 0.2.3 only in its
-fixture manifest, allowing it to discover/install the real published 0.2.4.
-That label is never used in a published bundle or production vault.
+## Manual verification — 2026-11-04
+
+See [per-orientation results and screenshots](results/2026-11-04/README.md).
+Actual Obsidian 1.13.7 mobile emulation passed at 390×844 and 844×390. The
+fixture discovered and installed the real published 0.2.4 from GitHub, retained
+settings and local edits, kept its old running session until restart, then loaded
+0.2.4 with the exact saved note. An injected failure using the real DataAdapter
+restored all previous runtime files byte-for-byte. The saved preference and
+available update survived reload. No console errors occurred in the final run.
+
+The first host check discovered that DataAdapter.rename rejects an existing
+destination; the initial memory adapter had allowed it. The updater now uses
+DataAdapter.process. The failed check did not change runtime files, and all
+checks were rerun after correcting the implementation and adapter. The existing
+settings shortcut also used the old upstream plugin ID; it now uses the actual
+manifest ID and opens the right settings page.
+
+The disposable host test labels the new code 0.2.3 only in its fixture manifest,
+allowing it to discover/install the real 0.2.4. This label is never used in a
+published bundle or production vault.
+
+Simulator Safari on iPhone 17 Pro / iOS 26.5 passed 14/14 assertions in portrait
+(402×714, light) and landscape (874×292, dark), with zero captured runtime
+errors. Actual taps exercised Check and Update, and rotation preserved the
+state. Tool drags and scrolling did not move the Simulator page, so actual
+swipe scrolling remains unverified. This feature has no text input or native
+date/time control; keyboard behavior is not established by these tests.
+
+These checks cover desktop Chromium with the actual Obsidian host and real
+WebKit with a substitute host. Native iPhone Obsidian plugin loading, GitHub
+requests, real vault/filesystem behavior, native UI, background/resume, touch
+scrolling and device performance remain physical-device checks.
 
 ## Publishing future releases
 

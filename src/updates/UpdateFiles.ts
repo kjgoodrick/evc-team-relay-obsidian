@@ -1,13 +1,14 @@
 import type { DataAdapter } from "obsidian";
 import { RUNTIME_FILES, sha256, versionParts, type Bundle, type Hashes } from "./releases";
 
-export type UpdateStorage = Pick<DataAdapter, "exists" | "mkdir" | "readBinary" | "writeBinary" | "rename">;
+export type UpdateStorage = Pick<DataAdapter, "exists" | "mkdir" | "readBinary" | "writeBinary" | "process">;
 type Journal = { format: 1; state: "prepared" | "installed" | "restored" | "superseded"; from: string; to: string; before: Hashes; after: Hashes };
 const encode = (value: unknown): ArrayBuffer => new TextEncoder().encode(JSON.stringify(value)).buffer as ArrayBuffer;
 
-/** All writes are confined to the plugin's runtime files and its private update directory.
- * Rename must replace an existing file. We deliberately do not unlink the live main.js
- * first or fall back to truncating it when a host cannot do that. */
+/** All writes are confined to runtime files and the private update directory.
+ * DataAdapter.process coordinates replacement with the host's file queue on
+ * desktop and mobile. It is not a filesystem transaction across multiple files;
+ * verified backups and the journal handle recoverable interruptions. */
 export class UpdateFiles {
 	readonly directory: string;
 	constructor(private readonly storage: UpdateStorage, readonly pluginDir: string) {
@@ -18,17 +19,20 @@ export class UpdateFiles {
 	private async ensureDirectory(): Promise<void> {
 		if (!await this.storage.exists(this.directory)) await this.storage.mkdir(this.directory);
 	}
-	async writeState(value: unknown): Promise<void> { await this.ensureDirectory(); await this.atomicWrite(this.path("checks.json"), encode(value)); }
+	async writeState(value: unknown): Promise<void> { await this.ensureDirectory(); await this.writeVerified(this.path("checks.json"), encode(value)); }
 	async readState(): Promise<unknown> {
 		if (!await this.storage.exists(this.path("checks.json"))) return undefined;
 		return JSON.parse(new TextDecoder().decode(await this.storage.readBinary(this.path("checks.json"))));
 	}
-	private async atomicWrite(path: string, bytes: ArrayBuffer): Promise<void> {
-		await this.storage.writeBinary(`${path}.tmp`, bytes);
-		if (await sha256(await this.storage.readBinary(`${path}.tmp`)) !== await sha256(bytes)) throw new Error("Update staging verification failed.");
-		await this.storage.rename(`${path}.tmp`, path);
+	private async writeVerified(path: string, bytes: ArrayBuffer): Promise<void> {
+		// Preserve a possible BOM and reject invalid UTF-8 before a text-based host
+		// write. Plugin code, CSS, manifests and updater metadata are UTF-8 files.
+		const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+		if (await this.storage.exists(path)) await this.storage.process(path, () => text);
+		else await this.storage.writeBinary(path, bytes);
+		if (await sha256(await this.storage.readBinary(path)) !== await sha256(bytes)) throw new Error("Update file verification failed.");
 	}
-	private async journal(value: Journal): Promise<void> { await this.atomicWrite(this.path("journal.json"), encode(value)); }
+	private async journal(value: Journal): Promise<void> { await this.writeVerified(this.path("journal.json"), encode(value)); }
 	private async matches(hashes: Hashes): Promise<boolean> {
 		for (const file of RUNTIME_FILES) {
 			if (!await this.storage.exists(`${this.pluginDir}/${file}`) || await sha256(await this.storage.readBinary(`${this.pluginDir}/${file}`)) !== hashes[file]) return false;
@@ -42,7 +46,7 @@ export class UpdateFiles {
 			backup[f] = await this.storage.readBinary(this.path(`${f}.previous`));
 			if (await sha256(backup[f]) !== j.before[f]) throw new Error("The update backup is damaged. Keep .relay-update and reinstall the previous release manually.");
 		}
-		for (const f of RUNTIME_FILES) await this.atomicWrite(`${this.pluginDir}/${f}`, backup[f]);
+		for (const f of RUNTIME_FILES) await this.writeVerified(`${this.pluginDir}/${f}`, backup[f]);
 		if (!await this.matches(j.before)) throw new Error("Could not verify the restored plugin files.");
 		await this.journal({ ...j, state: "restored" });
 	}
@@ -71,9 +75,6 @@ export class UpdateFiles {
 	}
 	async install(bundle: Bundle, from: string, to: string): Promise<void> {
 		await this.ensureDirectory();
-		// Exercise replacement on disposable files before relying on host rename semantics.
-		await this.atomicWrite(this.path("rename-probe"), encode("before"));
-		await this.atomicWrite(this.path("rename-probe"), encode("after"));
 		const recovery = await this.recover();
 		if (recovery.restored) throw new Error("An interrupted update was restored. Restart Obsidian before trying again.");
 		const existing = JSON.parse(new TextDecoder().decode(await this.storage.readBinary(`${this.pluginDir}/manifest.json`)));
@@ -82,13 +83,13 @@ export class UpdateFiles {
 		for (const f of RUNTIME_FILES) {
 			const previous = await this.storage.readBinary(`${this.pluginDir}/${f}`);
 			before[f] = await sha256(previous); after[f] = await sha256(bundle[f]);
-			await this.atomicWrite(this.path(`${f}.previous`), previous);
-			await this.atomicWrite(this.path(`${f}.next`), bundle[f]);
+			await this.writeVerified(this.path(`${f}.previous`), previous);
+			await this.writeVerified(this.path(`${f}.next`), bundle[f]);
 		}
 		const j: Journal = { format: 1, state: "prepared", from, to, before, after };
 		await this.journal(j); // durable recovery information before the first live replacement
 		try {
-			for (const f of RUNTIME_FILES) await this.storage.rename(this.path(`${f}.next`), `${this.pluginDir}/${f}`);
+			for (const f of RUNTIME_FILES) await this.writeVerified(`${this.pluginDir}/${f}`, await this.storage.readBinary(this.path(`${f}.next`)));
 			if (!await this.matches(after)) throw new Error("Installed files failed verification.");
 			await this.journal({ ...j, state: "installed" });
 		} catch (error) {

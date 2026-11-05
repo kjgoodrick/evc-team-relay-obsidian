@@ -1881,7 +1881,7 @@ export default class TeamRelayPlugin extends Plugin {
 	async showSettingsTab(path: string = "/") {
 		const setting = (this.app as unknown as ObsidianApp).setting;
 		await setting.open();
-		await setting.openTabById("team-relay");
+		await setting.openTabById(this.manifest.id);
 		this.settingsPage.showPath(path);
 	}
 
