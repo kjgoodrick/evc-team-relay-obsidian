@@ -10,7 +10,7 @@ export interface ManagedManifest {
 	activity: Record<string, string>;
 	owner: boolean;
 	deleted?: Record<string, string[]>;
-	base_content?: { protocol_version: number; enabled: boolean; recovery: boolean; versions: Record<string, string> };
+	base_content?: { protocol_version: number; enabled: boolean; recovery: boolean; versions: Record<string, string>; retired?: Record<string, string> };
 }
 
 const BASE = "managed_base_v1";

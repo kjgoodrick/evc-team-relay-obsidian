@@ -1,14 +1,20 @@
 import { v4 as uuidv4 } from "uuid";
-import { BASE_LOCAL_QUOTA, baseId, copyBaseBytes, copyBasePending, parseBaseAccepted, validateBaseSnapshot,
+import { BASE_LOCAL_QUOTA, baseId, basePath, copyBaseBytes, copyBasePending, parseBaseAccepted, validateBaseSnapshot,
 	type BaseSnapshot, type BasePending, type BaseWithdrawal, type BaseAccepted } from "./BaseContentProtocol";
+import { RECOVERY_FOLDER } from "../conflictCopyPath";
 
 export interface BaseStoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface BaseConflict { reason: string; local: ArrayBuffer | null; remote: BaseSnapshot }
 export interface BaseDownload { id: string; before: ArrayBuffer | null; remote: BaseSnapshot }
+export interface BaseRetirement {
+	path: string; local: ArrayBuffer | null;
+	move?: { path: string; local: ArrayBuffer; state: "prepared" | "complete" };
+}
 export interface BaseSyncRecord {
 	entryId: string; revision: number; baseline?: BaseSnapshot; pending?: BasePending;
 	conflict?: BaseConflict; download?: BaseDownload;
 	reviewRequired?: "withdrawn";
+	retirement?: BaseRetirement;
 }
 export interface BaseRecovery { entryId: string; id: string; createdAt: number; record: BaseSyncRecord }
 
@@ -21,7 +27,8 @@ function completion(tx: IDBTransaction): Promise<void> {
 function footprint(record: BaseSyncRecord): number {
 	return (record.baseline?.bytes?.byteLength ?? 0) + (record.pending?.bytes.byteLength ?? 0) +
 		(record.conflict?.local?.byteLength ?? 0) + (record.conflict?.remote.bytes?.byteLength ?? 0) +
-		(record.download?.before?.byteLength ?? 0) + (record.download?.remote.bytes?.byteLength ?? 0);
+		(record.download?.before?.byteLength ?? 0) + (record.download?.remote.bytes?.byteLength ?? 0) +
+		(record.retirement?.local?.byteLength ?? 0) + (record.retirement?.move?.local.byteLength ?? 0);
 }
 
 /** Private IndexedDB state, isolated by server/account/vault/share. All mutation
@@ -82,7 +89,38 @@ export class BaseSyncStore {
 		if (record.pending || record.download) throw new Error("Finish pending Bases work before replacing it");
 	}
 	private reviewed(record: BaseSyncRecord): void {
-		if (record.conflict || record.reviewRequired) throw new Error("Review the retained Bases conflict first");
+		if (record.conflict || record.reviewRequired || record.retirement) throw new Error("Review the retained Bases conflict first");
+	}
+
+	/** A tombstone never settles or discards an unknown pending publication.
+	 * Retain the whole previous state and the observed local bytes together. */
+	async retainRetirement(entryId: string, revision: number, path: string, localBytes: ArrayBuffer | null): Promise<void> {
+		if (!basePath(path)) throw new Error("Invalid retired Bases path");
+		const local = localBytes === null ? null : copyBaseBytes(localBytes);
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId); this.check(before, revision);
+			if (before.retirement) return;
+			await this.write(tx, before, { ...before, retirement: { path, local } },
+				{ entryId, id: uuidv4(), createdAt: Date.now(), record: before });
+		});
+	}
+	async prepareRetirementMove(entryId: string, revision: number, path: string, localBytes: ArrayBuffer): Promise<void> {
+		if (!basePath(path) || !path.startsWith(RECOVERY_FOLDER + "/")) throw new Error("Invalid Bases recovery destination");
+		const local = copyBaseBytes(localBytes);
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId); this.check(before, revision);
+			if (!before.retirement || before.retirement.move && (before.retirement.move.path !== path || before.retirement.move.state === "complete")) throw new Error("Review the current Bases removal first");
+			await this.write(tx, before, { ...before, retirement: { ...before.retirement, move: { path, local, state: "prepared" } } },
+				before.retirement.move ? { entryId, id: uuidv4(), createdAt: Date.now(), record: before } : undefined);
+		});
+	}
+	async completeRetirementMove(entryId: string, path: string): Promise<void> {
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId), retired = before.retirement;
+			if (!retired?.move || retired.move.path !== path) throw new Error("Bases recovery destination changed");
+			if (retired.move.state === "complete") return;
+			await this.write(tx, before, { ...before, retirement: { ...retired, move: { ...retired.move, state: "complete" } } });
+		});
 	}
 
 	async adopt(entryId: string, revision: number, snapshot: BaseSnapshot): Promise<void> {
@@ -153,6 +191,7 @@ export class BaseSyncStore {
 		if (choice === "local" ? local === null : remote.bytes === null) throw new Error("The chosen Bases copy is unavailable");
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
+			if (before.retirement) throw new Error("This Bases identity was removed. Recover it as a separate file.");
 			if (!before.conflict && !before.reviewRequired) throw new Error("The Bases conflict was already reviewed");
 			const after = { ...before }; delete after.conflict; delete after.reviewRequired;
 			if (choice === "local") after.pending = { operationId: uuidv4(), expected: remote.state, bytes: local! };

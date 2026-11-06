@@ -157,6 +157,31 @@ test("network retries are bounded while explicit retry is immediately actionable
 	} finally { s.close(); }
 });
 
+test.each(["before", "during"])("an explicit tombstone %s inventory refresh cannot reclaim or upload its old identity", async timing => {
+	const s = await fixture(); try {
+		await s.file.runSync(); fetchMock.mockClear();
+		const remove = () => {
+			delete s.manifest.records[path];
+			Object.assign(s.manifest, { deleted: { [path]: [entryId] } });
+			Object.assign(s.manifest.base_content, { retired: { [entryId]: path } });
+		};
+		if (timing === "before") remove(); else s.index.flush.mockImplementationOnce(async () => remove());
+		await s.host.retry(s.folder, s.file);
+		expect(s.index.claim).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled();
+		expect(s.file.lastUploadError).toContain("removed on the server");
+	} finally { s.close(); }
+});
+
+test("retired guards cover renamed-away files but do not classify a replacement identity at the same path", async () => {
+	const s = await fixture(); try {
+		Object.assign(s.manifest, { deleted: { "Former.txt": [entryId] } });
+		Object.assign(s.manifest.base_content, { retired: { [entryId]: "Former.txt" } });
+		expect(s.folder.usesBaseSync("Former.txt")).toBe(true);
+		s.manifest.records["Former.txt"] = { id: id(88), version: 0, type: "file" };
+		expect(s.folder.usesBaseSync("Former.txt", id(88))).toBe(false);
+	} finally { s.close(); }
+});
+
 test("local recovery export includes exact copies and stays outside synchronization", async () => {
 	const s = await fixture("local", "server"); try {
 		await s.file.runSync(); await s.host.resolve(s.folder, s.file, await s.host.review(s.folder, s.file), "server");

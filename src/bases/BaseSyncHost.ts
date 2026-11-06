@@ -6,12 +6,13 @@ import type { ShareRegistry, VaultShare } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
 import { RECOVERY_FOLDER } from "../conflictCopyPath";
-import { baseId, encodeBaseBytes } from "./BaseContentProtocol";
+import { baseId, encodeBaseBytes, retiredBaseEntries } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseSyncRecord } from "./BaseSyncStore";
 import { BaseSyncRunner, type BaseConflictReview, type BaseSyncAccess } from "./BaseSyncRunner";
 import { NativeBaseFile, nativeBaseLock } from "./NativeBaseFile";
 import { BaseSyncModal } from "./BaseSyncModal";
+import { BaseRetirementController, type BaseRetirementReview } from "./BaseRetirement";
 
 export interface BaseSyncDelegate { sync(file: AttachmentFile): Promise<void>; open(): void }
 export interface BaseSyncRow { entryId: string; path: string; message: string; record: BaseSyncRecord; file?: AttachmentFile }
@@ -19,6 +20,7 @@ interface EntryRun { fingerprint: string; retryAt: number; failures: number; mes
 interface Slot {
 	folder: VaultShare; key: string; current(): boolean; cancelled: boolean; store?: BaseSyncStore; runner?: BaseSyncRunner;
 	ready: Promise<void>; failed: boolean; entries: Map<string, EntryRun>; unsubscribe(): void; delegate: BaseSyncDelegate;
+	retirements?: BaseRetirementController; retirementRuns: Map<string, { retryAt: number; message: string }>;
 }
 
 export function baseSyncMessage(error: unknown): string {
@@ -33,6 +35,7 @@ export function baseSyncMessage(error: unknown): string {
 		base_invalid_utf8: "This Bases file is not valid UTF-8. Export the retained copies before repairing it.",
 		base_local_too_large: "This Bases file exceeds the 256 KiB sync limit. Local edits are retained.",
 		base_content_too_large: "This Bases file exceeds the 256 KiB sync limit. Local edits are retained.",
+		base_entry_retired: "This Bases file was removed on the server. Review its retained local copies.",
 	};
 	return messages[error.code] ?? (error.action === "retry" ? "Bases sync will retry when the server is available." :
 		error.action === "authenticate" ? "Sign in to this shared folder’s server to resume Bases sync." : "Bases sync needs review. Local edits are retained.");
@@ -78,7 +81,7 @@ export class BaseSyncHost extends Component {
 			const key = JSON.stringify([server?.id, server?.controlPlaneUrl, account?.id]);
 			if (this.slots.get(folder)?.key === key) continue;
 			const old = this.slots.get(folder); if (old) this.cancel(old);
-			const slot: Slot = { folder, key, cancelled: false, failed: false, ready: Promise.resolve(), entries: new Map(),
+			const slot: Slot = { folder, key, cancelled: false, failed: false, ready: Promise.resolve(), entries: new Map(), retirementRuns: new Map(),
 				current: () => false, unsubscribe: () => {}, delegate: { sync: file => this.sync(slot, file), open: () => new BaseSyncModal(this.plugin.app, this, folder).open() } };
 			this.slots.set(folder, slot); folder.basesSync = slot.delegate;
 			if (!server || !account || !baseId(account.id) || !baseId(folder.entityGuid)) continue;
@@ -97,6 +100,12 @@ export class BaseSyncHost extends Component {
 			}); } catch { slot.failed = true; continue; }
 			slot.ready = BaseSyncStore.open({ ...transport.identity, vaultId: this.vaultId }).then(store => {
 				if (!slot.current()) { store.close(); return; }
+				const lock = nativeBaseLock(store.identity);
+				slot.retirements = new BaseRetirementController(store, this.plugin.app.vault, {
+					current: (entryId, path) => this.retiredCurrent(slot, entryId, path),
+					absolute: path => folder.absolutePath(path),
+					refresh: async () => { if (!slot.current()) throw new BaseContentFailure("pause", "base_context_changed"); await folder._liveProvider?.managedIndex?.flush(); },
+				}, lock);
 				slot.store = store; slot.runner = new BaseSyncRunner(store, {
 					read: entryId => transport.read(entryId),
 					publish: async (entryId, pending) => {
@@ -109,7 +118,7 @@ export class BaseSyncHost extends Component {
 						if (receipt.status === "accepted" && slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, receipt.result.state);
 						return receipt;
 					},
-				}, nativeBaseLock(store.identity)); this.scan();
+				}, lock); this.scan();
 			}).catch(() => { slot.failed = true; });
 			const unsubscribe = folder.attachmentSettings.subscribe(() => this.scan());
 			slot.unsubscribe = unsubscribe;
@@ -133,13 +142,36 @@ export class BaseSyncHost extends Component {
 	private enabled(slot: Slot): boolean {
 		return slot.current() && slot.folder.wantsConnection && slot.folder.isOnline && slot.folder.attachmentSettings.readValue().bases === true;
 	}
+	private retiredCurrent(slot: Slot, entryId: string, path: string): boolean {
+		const folder = slot.folder, index = folder._liveProvider?.managedIndex, localId = folder.folderIndex.guidFor(path);
+		return this.enabled(slot) && !!index && index.snapshot.base_content?.protocol_version === 1 && index.snapshot.base_content.recovery === true &&
+			retiredBaseEntries(index.snapshot).some(([id, oldPath]) => id === entryId && oldPath === path) && !index.snapshot.records[path] &&
+			!Object.values(index.snapshot.records).some(record => record.id === entryId) && (!localId || localId === entryId) &&
+			!folder.isRecoveringStructure && !folder.isDeletePending(path) && !index.isBlocked(path, entryId);
+	}
+	private scanRetired(slot: Slot): void {
+		if (!slot.retirements || this.running >= 2) return;
+		const candidate = retiredBaseEntries(slot.folder._liveProvider?.managedIndex?.snapshot ?? {}).find(([id, path]) =>
+			this.retiredCurrent(slot, id, path) && (slot.retirementRuns.get(id)?.retryAt ?? 0) <= Date.now());
+		if (!candidate) return;
+		const [id, path] = candidate, state = { retryAt: Infinity, message: "" };
+		slot.retirementRuns.set(id, state); this.running++;
+		void slot.retirements.observe(id, path).then(changed => {
+			if (changed === undefined) state.retryAt = Date.now() + 2000;
+			if (changed && slot.current()) this.notify();
+		}).catch(error => {
+			state.message = baseSyncMessage(error); state.retryAt = Date.now() + 30_000;
+		}).finally(() => { this.running--; });
+	}
 	private scan(): void {
 		if (this.stopped || this.running >= 2) return;
 		for (const slot of this.slots.values()) {
 			if (!slot.runner || !this.enabled(slot)) continue;
+			this.scanRetired(slot);
+			const retired = new Set(retiredBaseEntries(slot.folder._liveProvider?.managedIndex?.snapshot ?? {}).map(([id]) => id));
 			for (const file of slot.folder.trackedEntries.values()) {
 				if (this.running >= 2) return;
-				if (isAttachmentFile(file) && slot.folder.usesBaseSync(file.path, file.entityGuid)) void this.sync(slot, file).catch(() => {});
+				if (isAttachmentFile(file) && !retired.has(file.entityGuid) && slot.folder.usesBaseSync(file.path, file.entityGuid)) void this.sync(slot, file).catch(() => {});
 			}
 		}
 	}
@@ -190,12 +222,16 @@ export class BaseSyncHost extends Component {
 	private async perform(slot: Slot, file: AttachmentFile) {
 		file.guardedBase = true;
 		const folder = slot.folder, index = folder._liveProvider?.managedIndex;
+		const retired = () => !!index && retiredBaseEntries(index.snapshot).some(([id]) => id === file.entityGuid);
+		if (retired()) throw new BaseContentFailure("pause", "base_entry_retired");
 		const capability = index?.snapshot.base_content;
 		if (!index || capability?.protocol_version !== 1 || capability.recovery !== true) throw new BaseContentFailure("pause", "base_content_protocol_required");
 		if (!capability.enabled) throw new BaseContentFailure("pause", "base_content_disabled");
 		let access = this.access(slot, file, false, true); if (!access.current()) throw new BaseContentFailure("pause", "base_context_changed");
 		// Publish already-staged structural changes before content arbitration.
-		await index.flush(); if (!access.current()) throw new BaseContentFailure("pause", "base_context_changed");
+		await index.flush();
+		if (retired()) throw new BaseContentFailure("pause", "base_entry_retired");
+		if (!access.current()) throw new BaseContentFailure("pause", "base_context_changed");
 		let initialized = false;
 		if (!index.registered(file.path, file.entityGuid) || !index.snapshot.records[file.path]?.hash && access.writable()) {
 			const record = { id: file.entityGuid, version: 0, type: ItemKind.File } as ItemRecord;
@@ -217,10 +253,20 @@ export class BaseSyncHost extends Component {
 		for (const file of folder.trackedEntries.values()) if (isAttachmentFile(file) && folder.usesBaseSync(file.path, file.entityGuid) && !records.has(file.entityGuid)) records.set(file.entityGuid, { entryId: file.entityGuid, revision: 0 });
 		return [...records.values()].map(record => {
 			const entry = folder.trackedEntries.get(record.entryId), file = entry && isAttachmentFile(entry) ? entry : undefined;
-			return { entryId: record.entryId, file, record, path: file?.path ?? record.pending?.expected.path ?? record.conflict?.remote.state.path ?? record.baseline?.state.path ?? record.entryId,
-				message: !this.enabled(slot) ? "Bases sync is paused. Saved edits are retained." : slot.entries.get(record.entryId)?.message ||
+			return { entryId: record.entryId, file, record, path: record.retirement?.path ?? file?.path ?? record.pending?.expected.path ?? record.conflict?.remote.state.path ?? record.baseline?.state.path ?? record.entryId,
+				message: record.retirement ? record.retirement.move?.state === "complete" ? `Removed from sync. Local recovery: ${record.retirement.move.path}` : "Removed on the server. Review the local file and retain it outside sync." :
+					!this.enabled(slot) ? "Bases sync is paused. Saved edits are retained." : slot.retirementRuns.get(record.entryId)?.message || slot.entries.get(record.entryId)?.message ||
 					(record.pending ? "A saved edit is awaiting confirmed delivery." : record.conflict || record.reviewRequired ? "Both copies are retained for review." : "Up to date") };
 		});
+	}
+	async reviewRemoval(folder: VaultShare, entryId: string): Promise<BaseRetirementReview> {
+		const slot = await this.requireSlot(folder), review = await slot.retirements!.review(entryId);
+		if (!review) throw new Error("Another window is syncing this file. Try again shortly."); return review;
+	}
+	async moveRemoved(folder: VaultShare, entryId: string, reviewed: BaseRetirementReview): Promise<void> {
+		const slot = await this.requireSlot(folder), path = await slot.retirements!.move(entryId, reviewed);
+		if (!path) throw new Error("Another window is syncing this file. Try again shortly.");
+		new Notice(`Removed Bases file retained at ${path}`); this.notify();
 	}
 	async retry(folder: VaultShare, file: AttachmentFile): Promise<void> {
 		const slot = await this.requireSlot(folder); await slot.entries.get(file.entityGuid)?.pending;

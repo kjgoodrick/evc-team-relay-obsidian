@@ -21,11 +21,20 @@ export const baseObject = (value: unknown): value is Record<string, unknown> =>
 const digest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const invalid = (): never => { throw new Error("Invalid Bases content protocol data"); };
 
+export const basePath = (path: unknown): path is string => typeof path === "string" && !!path && path.length <= 512 &&
+	path === path.normalize("NFC") && !/[\\:]/.test(path) && ![...path].some(character => character.charCodeAt(0) < 32) &&
+	!path.split("/").some(part => !part || part.startsWith("."));
+
+/** Require both the guarded marker and an explicit matching tombstone. */
+export function retiredBaseEntries(manifest: { base_content?: { retired?: Record<string, string> }; deleted?: Record<string, string[]> }): [string, string][] {
+	return Object.entries(manifest.base_content?.retired ?? {}).filter(([id, path]) => baseId(id) && basePath(path) &&
+		Array.isArray(manifest.deleted?.[path]) && manifest.deleted[path].includes(id));
+}
+
 export function parseBaseState(value: unknown, entryId: string): BaseContentState {
 	if (!baseId(entryId) || !baseObject(value) || !baseObject(value.record)) return invalid();
 	const { path, record, generation, content_version } = value;
-	if (typeof path !== "string" || !path || path.length > 512 || path !== path.normalize("NFC") ||
-		/[\\:]/.test(path) || [...path].some(character => character.charCodeAt(0) < 32) || path.split("/").some(part => !part || part.startsWith(".")) ||
+	if (!basePath(path) ||
 		record.id !== entryId || record.version !== 0 || record.type !== "file" ||
 		generation !== null && !baseId(generation) || content_version !== null && !baseId(content_version) ||
 		content_version !== null && (generation === null || !digest(record.hash)) ||

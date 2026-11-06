@@ -39,6 +39,7 @@ function fixture() {
 	const review = { record: row.record, local: { bytes: bytes("views: []\n# local"), identity: {} }, remote: { bytes: bytes("views: []\n# server") } } as BaseConflictReview;
 	let changed = (_reset: boolean) => {};
 	const host = { rows: jest.fn(async () => [row]), review: jest.fn(async () => review), resolve: jest.fn(async () => {}), retry: jest.fn(async () => {}),
+		reviewRemoval: jest.fn(async () => ({ record: row.record, local: review.local })), moveRemoved: jest.fn(async () => {}),
 		withdraw: jest.fn(async () => {}), export: jest.fn(async () => "export"), onChange: (listener: typeof changed) => { changed = listener; return () => {}; } };
 	const folder = { canWriteManagedPath: jest.fn(() => true) };
 	const modal = new BaseSyncModal({} as App, host as unknown as BaseSyncHost, folder as unknown as VaultShare);
@@ -82,5 +83,18 @@ test("pending delivery is checked only by an explicit action, and closing ignore
 		s.button("Check delivery / withdraw").click(); await flush(); expect(s.host.withdraw).toHaveBeenCalledWith(s.folder, s.row.file);
 		let finish!: (rows: BaseSyncRow[]) => void; s.host.rows.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
 		s.changed(false); s.modal.onClose(); finish([s.row]); await flush(); expect(s.modal.contentEl.textContent).toBe("");
+	} finally { s.modal.onClose(); }
+});
+
+test("removed identities expose local recovery without retrying pending publication", async () => {
+	const s = fixture(); try {
+		Object.assign(s.row.record, { pending: {}, retirement: { path: s.row.path, local: bytes("original local copy") } });
+		await flush(); expect(s.button("Retry sync")).toBeUndefined(); expect(s.button("Check delivery / withdraw")).toBeUndefined();
+		s.button("Review removal").click(); await flush();
+		const previews = s.modal.contentEl.querySelectorAll("textarea");
+		expect(previews[0].value).toContain("# local"); expect(previews[1].value).toBe("original local copy");
+		s.button("Move to local recovery").click(); await flush();
+		expect(s.host.moveRemoved).toHaveBeenCalledWith(s.folder, s.row.entryId, { record: s.row.record, local: s.review.local });
+		expect(s.host.retry).not.toHaveBeenCalled(); expect(s.host.withdraw).not.toHaveBeenCalled();
 	} finally { s.modal.onClose(); }
 });

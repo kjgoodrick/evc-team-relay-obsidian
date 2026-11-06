@@ -66,6 +66,7 @@ import { withRootRelativePaths } from "./rootRelativeProxy";
 import { BlobClient } from "./BlobClient";
 import { AttachmentSyncSettings, type AttachmentToggles } from "./AttachmentSyncSettings";
 import type { BaseSyncDelegate } from "./bases/BaseSyncHost";
+import { retiredBaseEntries } from "./bases/BaseContentProtocol";
 import { currentToggles } from "./featureToggleState";
 import { findNestingConflictPath } from "./vaultShareNesting";
 import { isRootSharePath, resolveShareFolder } from "./vaultRootPath";
@@ -213,8 +214,10 @@ export class VaultShare extends ProviderBacked {
 
 	usesBaseSync(path: string, entryId?: string): boolean {
 		const tracked = entryId ? this.trackedEntries?.get(entryId) : undefined;
+		const manifest = this._liveProvider?.managedIndex?.snapshot;
 		return path.toLowerCase().endsWith(".base") || !!(tracked && isAttachmentFile(tracked) && tracked.guardedBase) ||
-			!!(entryId && this._liveProvider?.managedIndex?.snapshot.base_content?.versions?.[entryId]);
+			!!(entryId && manifest?.base_content?.versions?.[entryId]) || !!(manifest && !manifest.records[path] &&
+				retiredBaseEntries(manifest).some(([id, oldPath]) => oldPath === path && (!entryId || id === entryId)));
 	}
 	private isAuthority: boolean;
 	// Narrower than isAuthority (which the "migrate" recreate path in
@@ -1835,7 +1838,7 @@ export class VaultShare extends ProviderBacked {
 	): DeleteOp | null {
 		const basePath = this.toVirtualPath(file.path);
 		const guarded = [...(this.trackedEntries?.values() ?? [])].find(entry => entry.entryPath === basePath && isAttachmentFile(entry) && entry.guardedBase);
-		if (file instanceof TFile && (basePath.toLowerCase().endsWith(".base") || guarded)) {
+		if (file instanceof TFile && (this.usesBaseSync(basePath, this.folderIndex.guidFor(basePath)) || guarded)) {
 			// Bases deletion review must preserve unsent disk edits as well as the
 			// outbox. Never use the generic attachment/document trash fallback.
 			if (guarded && !allRemotePaths.has(basePath)) (guarded as AttachmentFile).lastUploadError = "This Bases file is unavailable on the server. The local copy is retained for recovery.";

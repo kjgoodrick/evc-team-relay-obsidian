@@ -44,6 +44,7 @@ export class BaseSyncRunner {
 	private async run(entryId: string, access: BaseSyncAccess): Promise<BaseSyncResult> {
 		this.check(access);
 		let record = await this.store.get(entryId);
+		if (record.retirement) throw new BaseContentFailure("pause", "base_entry_retired");
 		if (record.conflict) return "conflict";
 		if (record.pending) {
 			await this.send(entryId, access, record);

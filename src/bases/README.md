@@ -75,11 +75,34 @@ lifecycle matrix remain unverified.
   explicit delivery checks/withdrawal, retry and local recovery export. Exports
   retain exact bytes without credentials under the excluded recovery folder.
 
-Remaining sync work includes remote/local deletion and restore review, durable
-protection for renamed-away entries after deletion/restart, parent-folder and
-native rename races, quota reclamation, and mobile/resource acceptance. The current
-remote-deletion guard retains recognized Bases files instead of applying generic
-trash. It is a preservation fallback, not completed deletion synchronization.
+`BaseRetirement.ts` handles explicit server removal. The server's guarded retired
+ID/path marker must match its ordinary tombstone; an absent/hidden file is not a
+deletion. The current account must already have durable state for that identity.
+The initial local bytes, baseline and pending requests are retained atomically.
+Review reads fresh local contents, checks current inventory/permissions, and can
+move the entire file to the excluded local recovery folder. Move intent and the
+reviewed snapshot commit before native rename. An interrupted move can acknowledge
+its verified destination after restart without moving twice. Stale reviews,
+replacement files, occupied destinations and quota failures preserve the originals.
+A final native rename also preserves an edit arriving after its final read.
+
+The removed identity cannot resume old publication or be reclaimed. Its pending
+requests remain available for export; deletion never pretends to confirm their
+delivery or withdrawal. Another identity at the same path blocks removal review.
+Recognized removed files stay in place until that explicit recovery choice.
+
+Native Obsidian 1.13.7 verified a server-directed rename away from `.base`, restart,
+remote deletion while the vault was closed, retention of an offline local edit,
+and review/move/export. The server entry remained deleted; the recovery directory
+was absent from inventory. Native checks precede the final extra guard against
+startup reclaim attempts, which has regression coverage. A separate external
+filesystem rename to `.txt` was reported as deletion by Obsidian; the renamed
+bytes remained on disk but their managed identity was not preserved.
+
+Remaining sync work includes guided restoration as a separate file/coherent
+identity restore, complete local deletion recovery, unsupported external renames,
+parent-folder and native rename races, quota reclamation, and mobile/resource
+acceptance. No Bases comment targets are available yet.
 
 Native testing on November 6, 2026 used a disposable vault and actual local
 Python/Rust services. A UI column change reached the server; a conditional server
@@ -91,7 +114,15 @@ complete native offline/network-loss matrix. Renaming a selected view externally
 can leave Obsidian showing its old view name as missing; saved-view identity and
 navigation integration must address this before Bases comments are complete.
 
-Validation: 1,821 plugin tests passed (nine opt-in tests skipped), including 73
+Removal-recovery validation: **1,835 plugin tests passed**, with nine opt-in tests
+skipped and 87 Bases unit tests included. Forty server content/managed-share tests
+passed. Preview build, main TypeScript, changed-source lint and test-type gates
+passed with the existing warning/type baselines. The disposable native services
+and temporary database were removed; the test vault and local recovery artifacts
+remain at `/private/tmp/evc-bases-retirement-20261106`. No live vault or production
+deployment was changed.
+
+Native-sync checkpoint validation: 1,821 plugin tests passed (nine opt-in tests skipped), including 73
 focused Bases unit tests; the actual HTTP fixture passed separately. Preview
 build, main TypeScript, Svelte type/event gates and changed-source lint passed.
 The existing 15 build warnings and test-type baseline remain (206 errors across
