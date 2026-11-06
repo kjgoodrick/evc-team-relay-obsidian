@@ -75,6 +75,19 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 export type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
 export type WithdrawalResult = { status: "withdrawn" } | { status: "accepted"; result: CommandResult };
 
+function onlineEnvelope(shareId: string, operation: OnlineOperation): string {
+	const command = operation.payload;
+	if (!isId(shareId) || !isId(operation.operationId) || !isId(operation.scopeId) || !object(command) || !isId(command.thread_id) ||
+		!["reply.create", "thread.state", "message.delete", "thread.remove"].includes(String(command.type)) ||
+		(["reply.create", "message.delete"].includes(String(command.type)) && !isId(command.message_id))) {
+		throw new DiscussionFailure("reject", "invalid_local_command");
+	}
+	const body = JSON.stringify({ protocol_version: 1, operation_id: operation.operationId, share_id: shareId,
+		entry_id: operation.scopeId, command });
+	if (new TextEncoder().encode(body).byteLength > 65536) throw new DiscussionFailure("reject", "command_too_large");
+	return body;
+}
+
 function accepted(value: unknown, op: OnlineOperation): CommandResult {
 	const command = op.payload as Record<string, Json>;
 	const message = command.message_id !== undefined;
@@ -120,6 +133,12 @@ export class DiscussionTransport implements DiscussionSender {
 	async withdraw(operation: QueuedCommand): Promise<WithdrawalResult> {
 		// A timeout never proves withdrawal; validate the exact operation/scope.
 		const body = queuedEnvelope(this.identity.shareId, operation);
+		return this.withdrawEnvelope(operation, body);
+	}
+	async withdrawOnline(operation: OnlineOperation): Promise<WithdrawalResult> {
+		return this.withdrawEnvelope(operation, onlineEnvelope(this.identity.shareId, operation));
+	}
+	private async withdrawEnvelope(operation: OnlineOperation, body: string): Promise<WithdrawalResult> {
 		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
 		const value = await this.request("/commands/withdraw", body);
 		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
@@ -131,15 +150,7 @@ export class DiscussionTransport implements DiscussionSender {
 
 	/** One online-only attempt. Retain this operation ID for an explicit retry after an ambiguous failure. */
 	async sendOnline(operation: OnlineOperation): Promise<CommandResult> {
-		const command = operation.payload;
-		if (!isId(operation.operationId) || !isId(operation.scopeId) || !object(command) || !isId(command.thread_id) ||
-			!["reply.create", "thread.state", "message.delete", "thread.remove"].includes(String(command.type)) ||
-			(["reply.create", "message.delete"].includes(String(command.type)) && !isId(command.message_id))) {
-			throw new DiscussionFailure("reject", "invalid_local_command");
-		}
-		const body = JSON.stringify({ protocol_version: 1, operation_id: operation.operationId, share_id: this.identity.shareId,
-			entry_id: operation.scopeId, command });
-		if (new TextEncoder().encode(body).byteLength > 65536) throw new DiscussionFailure("reject", "command_too_large");
+		const body = onlineEnvelope(this.identity.shareId, operation);
 		const immutable = JSON.parse(body) as { command: Json };
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}

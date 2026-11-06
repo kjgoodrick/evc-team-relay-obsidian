@@ -13,6 +13,7 @@ import { renderCommentBody } from "../../src/collaboration/ui/CommentBody";
 import { PendingComments } from "../../src/collaboration/ui/PendingComments";
 import { DiscussionDrafts } from "../../src/collaboration/ui/DiscussionDrafts";
 import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
+import type { OnlineOperation } from "../../src/collaboration/DiscussionTransport";
 
 jest.mock("obsidian", () => ({
 	ItemView: class {
@@ -177,6 +178,37 @@ test("incoming sidebar refresh preserves the focused draft and closes the old no
 		expect((await store.getDraft("new:" + entry))?.body).toMatchObject({ text: "Unsent text" });
 		currentSession = undefined; notify();
 		expect(view.contentEl.querySelector("textarea")).toBeNull(); // No debounce window exposing the old account.
+	} finally { await view.onClose(); store.close(); }
+});
+
+test("Send and reopen after recovery uses a fresh identity and the reviewed draft", async () => {
+	const { store, session, typed } = await fixture();
+	const thread: ThreadSummary = { id: id(4), author_id: id(1), state: "resolved", state_revision: 2, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 2, created_at: "2026-11-05T00:00:00Z" };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockResolvedValue({ messages: [], hasMore: false });
+	const draftId = `reply:${entry}:${thread.id}`;
+	await store.saveDraft({ id: draftId, scopeId: entry, revision: 0, body: "Unconfirmed reply" }, null);
+	const original: OnlineOperation = { operationId: id(20), scopeId: entry, payload: { type: "reply.create", thread_id: thread.id, message_id: id(21),
+		body: protocolJson(bodyFromText("Unconfirmed reply")), reopen: true, expected_state_revision: 2 } };
+	await store.prepareOnlineDraft(draftId, 0, original);
+	const send = jest.fn(async (draft: { id: string; revision: number }, operation: OnlineOperation) => {
+		await store.prepareOnlineDraft(draft.id, draft.revision, operation); await store.completeOnlineDraft(draft.id, draft.revision, operation.operationId);
+	});
+	Object.assign(typed, { canRecoverOnlineDraft: true, onlineDraft: send, recoverOnlineDraft: async () => ({ status: "editable", draft: await store.withdrawOnlineDraft(draftId, 0, original) }) });
+	const host = { focusedThread: jest.fn(), onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	const find = (text: string) => [...view.contentEl.querySelectorAll("button")].find(button => button.textContent === text)!;
+	try {
+		await view.onOpen(); await until(() => !!find("Show replies")); find("Show replies").click();
+		await until(() => !!view.contentEl.querySelector<HTMLTextAreaElement>('textarea[aria-label="Reply"]')?.readOnly);
+		find("Check delivery and edit").click(); await until(() => view.contentEl.textContent!.includes("ready to edit"));
+		const reply = view.contentEl.querySelector<HTMLTextAreaElement>('textarea[aria-label="Reply"]')!;
+		reply.value = "Reviewed reply"; reply.dispatchEvent(new Event("input")); find("Send and reopen").click();
+		await until(() => send.mock.calls.length === 1 && reply.value === "");
+		expect(send.mock.calls[0][1].operationId).not.toBe(original.operationId);
+		expect(send.mock.calls[0][1].payload).toMatchObject({ expected_state_revision: 2, body: bodyFromText("Reviewed reply") });
+		expect(await store.getDraft(draftId)).toBeUndefined();
 	} finally { await view.onClose(); store.close(); }
 });
 

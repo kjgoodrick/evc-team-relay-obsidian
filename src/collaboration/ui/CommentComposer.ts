@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import { parseAnchor, sourceAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
 import type { DiscussionSession } from "../DiscussionSession";
-import type { Json, QueuedCommand } from "../storage/DiscussionStore";
+import type { Draft, Json, QueuedCommand } from "../storage/DiscussionStore";
 import { prepareLocalPicture, type PictureBlock } from "../PictureProtocol";
 import { inspectPicture, PictureInputError, readPictureFile } from "../PictureInput";
 import { CommentPicture } from "./CommentPicture";
@@ -25,6 +25,8 @@ export class CommentComposer {
 	private pictures: PictureBlock[] = [];
 	private pictureList: HTMLElement;
 	private attach: HTMLButtonElement;
+	private refreshPictures: HTMLButtonElement;
+	private recoverSend: HTMLButtonElement;
 	private fileInput: HTMLInputElement;
 	private pictureViews = new Map<string, { el: HTMLElement; view: CommentPicture; alt: HTMLInputElement; remove: HTMLButtonElement }>();
 	private people: HTMLSelectElement;
@@ -72,6 +74,11 @@ export class CommentComposer {
 		});
 		this.send = actions.createEl("button", { text: "Send", cls: "mod-cta", attr: { type: "submit" } });
 		this.send.disabled = true;
+		this.refreshPictures = actions.createEl("button", { text: "Refresh picture uploads", attr: { type: "button", title: "Keep the saved pictures and prepare fresh uploads for your next send." } });
+		this.refreshPictures.onclick = () => { void this.recover(true); };
+		this.recoverSend = actions.createEl("button", { text: "Check delivery and edit", attr: { type: "button", title: "Check whether the reply was sent before making this draft editable again." } });
+		this.recoverSend.onclick = () => { void this.recover(false); };
+		this.refreshPictures.hidden = this.recoverSend.hidden = true;
 		this.status = this.el.createDiv({ cls: "relay-comment-save-status", attr: { role: "status", "aria-live": "polite" } });
 		this.el.addEventListener("submit", event => { event.preventDefault(); if (!this.composing) void this.submit(); });
 		this.textarea.addEventListener("compositionstart", () => { this.composing = true; });
@@ -113,7 +120,7 @@ export class CommentComposer {
 			if (this.disposed) return;
 			this.textarea.disabled = false;
 			this.textarea.readOnly = this.onlinePending;
-			if (this.onlinePending) this.status.setText("A previous send is unconfirmed. Reconnect and retry the same send.");
+			if (this.onlinePending) this.status.setText("A previous send is unconfirmed. Reconnect to retry it or check delivery before editing.");
 			if (!draft && (restored.text || restored.pictures?.length)) this.persist();
 			this.update();
 		}).catch(() => {
@@ -122,6 +129,7 @@ export class CommentComposer {
 		}));
 	}
 	onRevealTarget(reveal: (anchor: DiscussionAnchor) => void): void { this.reveal = reveal; }
+	get hasUnconfirmedSend(): boolean { return this.onlinePending; }
 	async flush(): Promise<boolean> { await this.ready; await this.attachmentFlight; await this.chain; return !this.saveFailed; }
 	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>, available: () => boolean = () => true): void {
 		this.extraAvailable = available;
@@ -144,6 +152,10 @@ export class CommentComposer {
 		this.people.disabled = this.busy || this.onlinePending || this.textarea.disabled || !people.length;
 		this.attach.hidden = !this.session.canAttachPictures;
 		this.attach.disabled = blocked || this.onlinePending || this.textarea.disabled || this.pictures.length >= 10;
+		this.refreshPictures.hidden = !this.pictures.length || this.onlinePending;
+		this.refreshPictures.disabled = blocked || this.textarea.disabled || !this.session.canAttachPictures;
+		this.recoverSend.hidden = !this.onlinePending;
+		this.recoverSend.disabled = blocked || !this.session.canRecoverOnlineDraft;
 		this.renderPictures();
 		const label = this.target?.type === "image_file" ? "Image file: " + (this.target.geometry.type === "whole" ? "whole image" : this.target.geometry.type) : this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
 			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
@@ -154,6 +166,51 @@ export class CommentComposer {
 				const reveal = this.targetEl.createEl("button", { text: "Show selection", attr: { type: "button" } });
 				reveal.onclick = () => { if (this.target) this.reveal?.(this.target); };
 			}
+		}
+	}
+	private restoreRecoveredDraft(draft: Draft): void {
+		const restored = readCommentDraft(draft.body);
+		for (const card of this.pictureViews.values()) { card.view.dispose(); card.el.remove(); }
+		this.pictureViews.clear();
+		this.revision = draft.revision; this.savedValue = JSON.stringify(restored);
+		this.mentions = restored.mentions; this.pictures = restored.pictures ?? [];
+		this.textarea.value = this.previousText = restored.text;
+	}
+	private async recover(pictures: boolean): Promise<void> {
+		await this.ready;
+		if (this.disposed || this.busy || this.saveFailed || this.composing || !this.session.permission(this.entryId)?.comment ||
+			(pictures ? this.onlinePending || !this.session.canAttachPictures : !this.onlinePending || !this.session.canRecoverOnlineDraft)) return;
+		if (pictures) this.persist();
+		this.busy = true; this.textarea.readOnly = true; this.update();
+		try {
+			await this.chain; if (this.saveFailed) return;
+			const draft = { id: this.draftId, scopeId: this.entryId, revision: this.revision };
+			this.status.setText(pictures ? "Preparing saved pictures…" : "Checking whether your reply was sent…");
+			if (pictures) {
+				const refreshed = await this.session.refreshDraftPictures(draft);
+				if (this.disposed) return;
+				this.restoreRecoveredDraft(refreshed);
+				this.status.setText("Pictures refreshed. Your draft is saved; send it when ready.");
+			} else {
+				const result = await this.session.recoverOnlineDraft(draft);
+				if (this.disposed) return;
+				this.onlinePending = false;
+				if (result.status === "accepted") {
+					this.revision = -1; this.savedValue = ""; this.textarea.value = this.previousText = ""; this.mentions = []; this.pictures = [];
+					this.status.setText("Your reply was already sent. The saved draft has been cleared."); this.onSent();
+				} else {
+					this.restoreRecoveredDraft(result.draft);
+					this.status.setText("Your draft is ready to edit. Review it and send again when ready.");
+				}
+			}
+		} catch (error) {
+			if (!this.disposed) this.status.setText(error instanceof Error && error.message.includes("100 MiB") ?
+				"Local picture storage is full. Your draft is retained. Send or remove other draft pictures before retrying." :
+				error instanceof Error && error.message.includes("No saved picture originals") ? "No saved originals are available. Remove and add the affected pictures again." :
+				"Recovery was not confirmed. Your draft is retained. Check the connection and permissions, or reopen it if another window changed it.");
+		} finally {
+			try { this.onlinePending = !!await this.session.store.preference("online:" + this.draftId); } catch { /* Keep locked if storage/account is unavailable. */ }
+			this.busy = false; this.textarea.readOnly = this.onlinePending; if (!this.disposed) this.update();
 		}
 	}
 	private renderPictures(): void {

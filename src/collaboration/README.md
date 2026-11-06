@@ -370,8 +370,8 @@ the thumbnail. Cache quota failures do not prevent displaying authorized bytes.
 Desktop Obsidian 1.13.7 has native evidence for picker, draft reload, picture-only
 send, edit/history, Send and reopen, scrolling and offline cache reload. Clipboard
 paste has automated DOM coverage; native clipboard/mobile/large-format and
-resource acceptance remain. Draft/Send-and-reopen expiry repair, rejected dependency
-editing, complete storage accounting and backup/restore also remain. Server
+resource acceptance remain. Draft/Send-and-reopen recovery is described below;
+rejected dependency editing, complete storage accounting and backup/restore remain. Server
 expiry/orphan cleanup has separate PostgreSQL/MinIO evidence. Keep the server
 creation flag disabled outside controlled fixtures until those parts are ready.
 
@@ -381,7 +381,7 @@ The pending-comment panel now offers **Refresh picture uploads and retry** when
 online with picture/comment permission and the negotiated `discussion_recovery`
 capability. It preserves the exact text, rich blocks, descriptions, thread/message
 identity and target. This action refreshes saved local picture originals; it does
-not yet edit/remove rejected attachments or repair online-only Send and reopen.
+not yet edit/remove rejected attachments.
 
 The transport first posts the exact original envelope to `/commands/withdraw`.
 An accepted receipt reconciles the existing comment without another upload. If
@@ -409,5 +409,27 @@ The normal suite includes storage, cross-window, source-quota, transport,
 session and DOM-control checks. The actual HTTP/MinIO fixture seeds an expired
 reservation, repairs it as a comment-only reviewer, verifies one resulting
 message and rejection of a late original send, then reconciles a deliberately
-lost successful comment acknowledgment without another upload. Native recovery
-button and mobile acceptance remain separate checks.
+lost successful comment acknowledgment without another upload.
+
+Unsent drafts offer **Refresh picture uploads**, including offline. This rotates
+only retained local originals, preserves already-published pictures, text,
+mentions, descriptions and the target, and creates no outbox work. A single
+transaction checks the revision and absence of a pending online intent, transfers
+one original at a time, and increments the draft revision. Stale preflight uploads
+and competing editors cannot subsequently submit or overwrite that draft.
+Shared originals remain referenced; quota or storage failure rolls back the transfer.
+
+An unconfirmed **Send and reopen** offers **Check delivery and edit** while online
+with comment permission and recovery support. It posts the exact persisted online
+envelope to the same withdrawal endpoint. An accepted reply clears its draft;
+confirmed withdrawal clears the intent and increments the draft revision while
+retaining all content. Neither outcome resends or reopens. Unknown outcomes keep
+the draft locked. A later explicit send reads the current durable intent, uses a
+fresh operation/message identity when appropriate, and checks the current thread
+revision. Old in-memory requests cannot revive a withdrawn action. No schema
+upgrade beyond version 8 is needed, and the online action never enters the outbox.
+
+The actual HTTP/MinIO fixture also proves an expired unsent upload, offline
+refresh, a stale-state Send and reopen rejection, withdrawal and late-send
+rejection, and reconciliation after a successful retry's response is lost.
+Native recovery buttons and mobile acceptance remain separate checks.

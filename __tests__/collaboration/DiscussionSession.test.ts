@@ -20,6 +20,7 @@ function remote() {
 		sendOnline: jest.fn().mockResolvedValue({ changed: true }),
 		uploadPicture: jest.fn().mockResolvedValue({ state: "verified" }),
 		withdraw: jest.fn().mockResolvedValue({ status: "withdrawn" }),
+		withdrawOnline: jest.fn().mockResolvedValue({ status: "withdrawn" }),
 	};
 }
 const command = () => ({ operationId: id(4), scopeId: entry, type: "thread.create" as const, dependsOn: [], payload: {
@@ -229,6 +230,50 @@ test("a rejected picture leaves the online draft editable and a concurrent draft
 		await expect(session.onlineDraft({ id: "reply", revision: 0 }, operation)).rejects.toThrow("another view");
 		expect(await store.preference("online:reply")).toBeUndefined(); expect(transport.sendOnline).not.toHaveBeenCalled();
 		expect((await store.getDraft("reply"))?.body).toBe("Other window removed the picture");
+	} finally { await close(); }
+});
+
+test.each(["withdrawn", "accepted", "lost response"])("online draft recovery handles %s without automatically resending or reopening", async outcome => {
+	const { session, store, transport, close } = await fixture();
+	const operation = { operationId: id(71), scopeId: entry, payload: { type: "reply.create", thread_id: id(5), message_id: id(72),
+		body: bodyFromText("Retain me"), reopen: true, expected_state_revision: 2 } };
+	const reference = { id: "reply", scopeId: entry, revision: 0 };
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, ...{ recovery: true } }); await session.refresh();
+		await store.saveDraft({ ...reference, body: "Retain me" }, null); await store.prepareOnlineDraft("reply", 0, operation);
+		if (outcome === "accepted") transport.withdrawOnline.mockResolvedValue({ status: "accepted", ...{ result: await transport.send() } });
+		if (outcome === "lost response") transport.withdrawOnline.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		if (outcome === "lost response") {
+			await expect(session.recoverOnlineDraft(reference)).rejects.toMatchObject({ action: "retry" });
+			expect(await store.preference("online:reply")).toBeDefined(); expect((await store.getDraft("reply"))?.revision).toBe(0);
+		} else {
+			expect((await session.recoverOnlineDraft(reference)).status).toBe(outcome === "accepted" ? "accepted" : "editable");
+			expect(await store.preference("online:reply")).toBeUndefined();
+			expect(await store.getDraft("reply")).toEqual(outcome === "accepted" ? undefined : { ...reference, revision: 1, body: "Retain me" });
+		}
+		expect(transport.withdrawOnline).toHaveBeenCalledWith(operation); expect(transport.sendOnline).not.toHaveBeenCalled(); expect(await store.pending(entry)).toEqual([]);
+		session.setForeground(false); await expect(session.recoverOnlineDraft(reference)).rejects.toThrow("Reconnect");
+	} finally { await close(); }
+});
+
+test("refreshing an offline draft keeps its originals and never submits the stale preflight from another window", async () => {
+	const { session, store, transport, close } = await fixture();
+	const source = await prepareLocalPicture(id(70), entry, new Uint8Array([1, 2, 3]).buffer);
+	const reference = { id: "reply", scopeId: entry, revision: 0 }, pictures = [{ type: "picture", picture_id: source.id, alt: "Keep" }];
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, ...{ pictures: true } }); await session.refresh();
+		await store.saveDraft({ ...reference, body: { text: "Original", mentions: [], pictures } }, null, [source]);
+		transport.uploadPicture.mockImplementationOnce(async () => {
+			session.setForeground(false);
+			await session.refreshDraftPictures(reference);
+			return { state: "verified" };
+		});
+		await expect(session.onlineDraft(reference, { operationId: id(71), scopeId: entry, payload: { type: "reply.create", thread_id: id(5), message_id: id(72),
+			body: { version: 1, blocks: pictures }, reopen: true, expected_state_revision: 2 } })).rejects.toThrow("another view");
+		const restored = (await store.getDraft("reply"))!;
+		expect(restored).toMatchObject({ revision: 1, body: { text: "Original" } });
+		expect(transport.sendOnline).not.toHaveBeenCalled(); expect(await store.pending(entry)).toEqual([]);
+		expect(await store.preference("online:reply")).toBeUndefined(); expect(await store.pictureSource(source.id, entry)).toBeUndefined();
 	} finally { await close(); }
 });
 

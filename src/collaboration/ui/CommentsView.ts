@@ -92,7 +92,6 @@ class ThreadCard {
 	private after = 0;
 	private pages: number[] = [];
 	private generation = 0;
-	private pendingReopen?: OnlineOperation;
 	private stateOperation?: OnlineOperation;
 	private error: HTMLElement;
 	private disposed = false;
@@ -106,12 +105,6 @@ class ThreadCard {
 		this.content = this.el.createDiv({ cls: "relay-comment-messages" });
 		this.error = this.el.createDiv({ attr: { role: "status" } });
 		this.composerContainer = this.el.createDiv();
-		void this.session.store.preference(`online:reply:${entryId}:${thread.id}`).then(saved => {
-			if (!this.disposed && isRecord(saved) && isRecord(saved.operation)) {
-				this.pendingReopen = saved.operation as unknown as OnlineOperation;
-				this.composer?.update();
-			}
-		}).catch(() => {});
 	}
 	async update(thread: AnchoredThread): Promise<void> {
 		this.thread = thread;
@@ -151,18 +144,17 @@ class ThreadCard {
 			this.composer = new CommentComposer(this.composerContainer, this.session, this.entryId, `reply:${this.entryId}:${thread.id}`,
 				body => ({ type: "reply.create", payload: { type: "reply.create", thread_id: thread.id, message_id: uuid(), body: protocolJson(body) } }), "Reply");
 			this.composer.addOnlineAction("Send and reopen", async (body, draft) => {
-				if (this.thread.state !== "resolved" && !this.pendingReopen) throw new Error("This discussion is already open.");
+				// Read the durable intent for every click. Recovery in this or
+				// another pane must not revive an old in-memory request identity.
+				const saved = await this.session.store.preference("online:" + draft.id);
+				const pending = isRecord(saved) && isRecord(saved.operation) ? saved.operation as unknown as OnlineOperation : undefined;
+				if (this.thread.state !== "resolved" && !pending) throw new Error("This discussion is already open.");
 				const serialized = JSON.stringify(body);
-				if (this.pendingReopen && isRecord(this.pendingReopen.payload) && JSON.stringify(this.pendingReopen.payload.body) !== serialized) throw new Error("Review the unconfirmed reply before changing it.");
-				this.pendingReopen ??= { operationId: uuid(), scopeId: this.entryId, payload: { type: "reply.create", thread_id: this.thread.id,
+				if (pending && isRecord(pending.payload) && JSON.stringify(pending.payload.body) !== serialized) throw new Error("Review the unconfirmed reply before changing it.");
+				const operation = pending ?? { operationId: uuid(), scopeId: this.entryId, payload: { type: "reply.create", thread_id: this.thread.id,
 					message_id: uuid(), body: protocolJson(body), reopen: true, expected_state_revision: this.thread.state_revision } };
-				try { await this.session.onlineDraft(draft, this.pendingReopen); this.pendingReopen = undefined; }
-				catch (error) {
-					// Picture preflight/upload failed before a reply could be submitted.
-					if (!await this.session.store.preference("online:" + draft.id)) this.pendingReopen = undefined;
-					throw error;
-				}
-			}, () => this.thread.state === "resolved" || !!this.pendingReopen);
+				await this.session.onlineDraft(draft, operation);
+			}, () => this.thread.state === "resolved" || !!this.composer?.hasUnconfirmedSend);
 		}
 		this.composerContainer.hidden = !this.expanded; this.composer?.update();
 		const result = await this.session.messages(this.entryId, thread.id, this.after, this.count);

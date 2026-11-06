@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionDelivery } from "./DiscussionDelivery";
 import { DiscussionPictures } from "./DiscussionPictures";
-import { parsePictureUpload } from "./PictureProtocol";
+import { parsePictureUpload, pictureIds } from "./PictureProtocol";
 import { commandPictures } from "./storage/PictureRecords";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
@@ -72,6 +72,7 @@ export class DiscussionSession {
 	get canAnchorBlocks(): boolean { return this.canAnchorText && this.blocksEnabled; }
 	get canAttachPictures(): boolean { return this.canQueue && this.picturesEnabled; }
 	get canRepairPictures(): boolean { return this.online && this.canAttachPictures && this.recoveryEnabled; }
+	get canRecoverOnlineDraft(): boolean { return this.online && this.recoveryEnabled; }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
 		const enabled = entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
@@ -358,6 +359,36 @@ export class DiscussionSession {
 		})().finally(() => {
 			if (!this.closed) { this.broadcast(); this.invalidate(); if (this.foreground) this.outbox.wake(); this.notify(); }
 		}));
+	}
+	async refreshDraftPictures(draft: Pick<Draft, "id" | "scopeId" | "revision">): Promise<Draft> {
+		if (!this.canAttachPictures || !this.permission(draft.scopeId)?.comment) throw new Error("Check picture and comment permission before refreshing pictures.");
+		return this.trackLocal((async () => {
+			const saved = await this.store.getDraft(draft.id);
+			if (!saved || saved.scopeId !== draft.scopeId || saved.revision !== draft.revision) throw new Error("Draft changed in another view");
+			const replacements = [];
+			for (const oldId of pictureIds(saved.body, true)) {
+				if (await this.store.pictureSource(oldId, draft.scopeId)) replacements.push({ oldId, newId: uuid() });
+			}
+			if (!replacements.length) throw new Error("No saved picture originals are available for this draft.");
+			if (this.closed) throw new Error("This discussion account is closed.");
+			return await this.store.refreshDraftPictures(draft.id, draft.revision, replacements);
+		})().finally(() => { if (!this.closed) { this.broadcast(); this.notify(); } }));
+	}
+	async recoverOnlineDraft(draft: Pick<Draft, "id" | "scopeId" | "revision">): Promise<{ status: "accepted" } | { status: "editable"; draft: Draft }> {
+		if (!this.canRecoverOnlineDraft || !this.permission(draft.scopeId)?.comment) throw new Error("Reconnect with comment permission before reviewing this send.");
+		return this.trackLocal((async () => {
+			const saved = await this.store.getDraft(draft.id), pending = await this.store.preference("online:" + draft.id);
+			if (!saved || saved.scopeId !== draft.scopeId || saved.revision !== draft.revision || !isRecord(pending) ||
+				pending.revision !== draft.revision || !isRecord(pending.operation) || pending.operation.scopeId !== draft.scopeId ||
+				!isId(pending.operation.operationId) || !isRecord(pending.operation.payload) || pending.operation.payload.type !== "reply.create") throw new Error("Online action changed in another view");
+			const operation = pending.operation as unknown as OnlineOperation;
+			if (!this.canRecoverOnlineDraft || !this.permission(draft.scopeId)?.comment) throw new Error("Reconnect before reviewing this send.");
+			const result = await this.transport.withdrawOnline(operation);
+			if (result.status === "accepted") {
+				await this.store.completeOnlineDraft(draft.id, draft.revision, operation.operationId); return { status: "accepted" as const };
+			}
+			return { status: "editable" as const, draft: await this.store.withdrawOnlineDraft(draft.id, draft.revision, operation) };
+		})().finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
 	}
 	async onlineDraft(draft: Pick<Draft, "id" | "revision">, operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");

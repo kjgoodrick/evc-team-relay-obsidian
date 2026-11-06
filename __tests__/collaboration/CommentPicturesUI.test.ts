@@ -126,6 +126,53 @@ test("online-pending drafts keep picture controls locked until the exact send is
 	} finally { composer.dispose(); store.close(); parent.remove(); }
 });
 
+test("draft picture refresh preserves the visible text, descriptions and target and needs no connection", async () => {
+	const { store, typed, parent, make } = await setup(), source = await prepareLocalPicture(id(8), entry, bytes());
+	await store.saveDraft({ id: "draft", scopeId: entry, revision: 0, target: { version: 1, type: "note" },
+		body: { text: "My draft", mentions: [], pictures: [{ type: "picture", picture_id: id(8), alt: "Diagram" }] } }, null, [source]);
+	const refresh = jest.fn(async (draft: { id: string; revision: number }) => store.refreshDraftPictures(draft.id, draft.revision, [{ oldId: id(8), newId: id(18) }]));
+	Object.assign(typed, { refreshDraftPictures: refresh });
+	const composer = make();
+	try {
+		await composer.flush();
+		const button = [...parent.querySelectorAll("button")].find(b => b.textContent === "Refresh picture uploads")!;
+		expect(button.disabled).toBe(false); button.click(); await until(() => parent.textContent!.includes("Pictures refreshed"));
+		expect(composer.textarea.value).toBe("My draft"); expect(composer.textarea.readOnly).toBe(false);
+		const alt = parent.querySelector<HTMLInputElement>('input[aria-label="Picture description"]')!;
+		expect(alt.value).toBe("Diagram"); alt.value = "Edited after refresh"; alt.dispatchEvent(new Event("input")); await composer.flush();
+		expect(await store.getDraft("draft")).toMatchObject({ target: { type: "note" }, body: { pictures: [{ picture_id: id(18), alt: "Edited after refresh" }] } });
+		expect(await store.pending(entry)).toEqual([]);
+	} finally { composer.dispose(); store.close(); parent.remove(); }
+});
+
+test.each(["editable", "accepted"])("checking a pending reply keeps it locked on failure and handles %s without a send", async outcome => {
+	const { store, typed, session, parent, make } = await setup(), source = await prepareLocalPicture(id(8), entry, bytes());
+	await store.saveDraft({ id: "draft", scopeId: entry, revision: 0, body: { text: "Retain me", mentions: [], pictures: [{ type: "picture", picture_id: id(8), alt: "Original" }] } }, null, [source]);
+	const operation = { operationId: id(9), scopeId: entry, payload: { type: "reply.create" } };
+	await store.prepareOnlineDraft("draft", 0, operation);
+	const recover = jest.fn().mockRejectedValueOnce(new Error("Unknown delivery")).mockImplementationOnce(async () => {
+		if (outcome === "accepted") { await store.completeOnlineDraft("draft", 0, operation.operationId); return { status: "accepted" }; }
+		return { status: "editable", draft: await store.withdrawOnlineDraft("draft", 0, operation) };
+	});
+	Object.assign(typed, { canRecoverOnlineDraft: false, recoverOnlineDraft: recover });
+	const composer = make();
+	try {
+		await composer.flush(); const button = [...parent.querySelectorAll("button")].find(b => b.textContent === "Check delivery and edit")!;
+		expect(button.disabled).toBe(true); expect(composer.textarea.readOnly).toBe(true);
+		Object.assign(typed, { canRecoverOnlineDraft: true }); composer.update(); button.click();
+		await until(() => parent.textContent!.includes("Recovery was not confirmed"));
+		expect(composer.textarea.readOnly).toBe(true); expect(composer.textarea.value).toBe("Retain me");
+		button.click(); await until(() => parent.textContent!.includes(outcome === "accepted" ? "already sent" : "ready to edit"));
+		expect(composer.textarea.readOnly).toBe(false); expect(composer.textarea.value).toBe(outcome === "accepted" ? "" : "Retain me");
+		expect(button.hidden).toBe(true); expect(session.queue).not.toHaveBeenCalled(); expect(await store.pending(entry)).toEqual([]);
+		if (outcome === "editable") {
+			const alt = parent.querySelector<HTMLInputElement>('input[aria-label="Picture description"]')!;
+			alt.value = "Edited recovered picture"; alt.dispatchEvent(new Event("input")); await composer.flush();
+			expect(await store.getDraft("draft")).toMatchObject({ revision: 2, body: { pictures: [{ alt: "Edited recovered picture" }] } });
+		}
+	} finally { composer.dispose(); store.close(); parent.remove(); }
+});
+
 test("renderer uses only blob URLs, loads full size on demand, and revokes pixels on permission loss", async () => {
 	const { store, typed, session, parent, listeners } = await setup();
 	const load = jest.fn().mockResolvedValue({ bytes: bytes(), mime: "image/png", width: 8, height: 6, local: false, offline: false });

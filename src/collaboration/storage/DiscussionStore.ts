@@ -288,6 +288,58 @@ export class DiscussionStore {
 		});
 	}
 
+	/** Only after authenticated withdrawal: invalidate every stale send/editor
+	 * before unlocking the unchanged draft. Never enqueue the online action.
+	 */
+	async withdrawOnlineDraft(draftId: string, revision: number, operation: { operationId: string; scopeId: string; payload: Json }): Promise<Draft> {
+		const expected = boundedJson(operation as unknown as Json);
+		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+			const preferences = tx.objectStore("preferences"), key = "online:" + draftId;
+			const existing = await request(preferences.get(key)) as { operation: typeof operation; revision: number } | undefined;
+			if (!existing || existing.revision !== revision || canonical(existing.operation as unknown as Json) !== expected) throw new Error("Online action changed in another view");
+			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(draftId));
+			if (!draft || draft.scopeId !== operation.scopeId || draft.revision !== revision || !Number.isSafeInteger(revision + 1)) throw new Error("Draft changed in another view");
+			draft.revision++;
+			await request(drafts.put(draft)); await request(preferences.delete(key)); return draft;
+		});
+	}
+
+	/** Unsent drafts may rotate local picture identities, including offline.
+	 * No bytes are uploaded here. Preserve shared originals and the entire draft.
+	 */
+	async refreshDraftPictures(draftId: string, revision: number, replacements: { oldId: string; newId: string }[]): Promise<Draft> {
+		replacements = replacements.map(item => ({ ...item }));
+		if (!replacements.length || replacements.length > 10 || !Number.isSafeInteger(revision + 1) ||
+			new Set(replacements.map(item => item.oldId)).size !== replacements.length ||
+			new Set(replacements.map(item => item.newId)).size !== replacements.length ||
+			replacements.some(item => !isId(item.newId))) throw new Error("Invalid picture recovery");
+		return this.transaction(["drafts", "outbox", ...PICTURE_STORES], "readwrite", async tx => {
+			if (await request(tx.objectStore("preferences").get("online:" + draftId))) throw new Error("Review the unconfirmed online action before editing this draft");
+			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(draftId));
+			if (!draft || draft.revision !== revision || !isRecord(draft.body) || !Array.isArray(draft.body.pictures)) throw new Error("Draft changed in another view");
+			const ids = pictureIds(draft.body, true), sources = tx.objectStore("pictureSources"), outbox = tx.objectStore("outbox");
+			for (const { oldId, newId } of replacements) {
+				if (!ids.includes(oldId) || ids.includes(newId) || await request(sources.getKey(newId)) || await request(outbox.getKey(newId))) throw new Error("Picture identity was already used");
+			}
+			const map = new Map(replacements.map(item => [item.oldId, item.newId]));
+			draft.body.pictures = draft.body.pictures.map(block => isRecord(block) && map.has(String(block.picture_id)) ? { ...block, picture_id: map.get(String(block.picture_id))! } : block);
+			draft.revision++;
+			const nextIds = pictureIds(draft.body, true);
+			let transferring = [...nextIds, ...map.keys()];
+			await setPictureReferences(tx, "draft", draft.id, draft.scopeId, transferring);
+			// At most one original is cloned at a time. Removing each obsolete
+			// reference first allows a full quota to rotate unshared bytes in place.
+			for (const { oldId, newId } of replacements) {
+				const source: LocalPicture | undefined = await request(sources.get(oldId));
+				if (!source || source.scopeId !== draft.scopeId || source.bytes.byteLength !== source.size) throw new Error("Saved picture changed during recovery");
+				transferring = transferring.filter(id => id !== oldId);
+				await setPictureReferences(tx, "draft", draft.id, draft.scopeId, transferring);
+				await putPictureSources(tx, [{ ...source, id: newId }], draft.scopeId, nextIds);
+			}
+			await request(drafts.put(draft)); return draft;
+		});
+	}
+
 	/** Only queueable user actions are accepted; moderation never enters the outbox. */
 	async enqueue(command: QueuedCommand, now = Date.now(), draft?: { id: string; revision: number }): Promise<OutboxOperation> {
 		requiredId(command.operationId); requiredId(command.scopeId);

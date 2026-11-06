@@ -147,6 +147,41 @@ integration("offline picture dependencies recover a lost upload ack against real
 			expect((await uiStore.getOperation(ackOperation))?.replacementId).toBeUndefined();
 			expect(puts).toBe(beforeRepairPuts);
 			expect((await transport.thread(fixture.entry, recoveryThread)).messages).toHaveLength(2);
+
+			// An expired unsent picture can be refreshed offline. A rejected
+			// Send and reopen must be withdrawn before its draft is edited, and
+			// a later lost success must resolve without another reply or upload.
+			const resolvedRecovery = await owner.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
+				type: "thread.state", thread_id: recoveryThread, expected_state_revision: 1, state: "resolved",
+			} });
+			const pendingDraft = { id: "expired-online", scopeId: fixture.entry, revision: 0 };
+			await uiStore.saveDraft({ ...pendingDraft, body: { text: "", mentions: [], pictures: repairBody.blocks } }, null, [expired]);
+			const onlineOperation = { operationId: randomUUID(), scopeId: fixture.entry, payload: { type: "reply.create", thread_id: recoveryThread,
+				message_id: randomUUID(), body: repairBody, reopen: true, expected_state_revision: 1 } };
+			await expect(session.onlineDraft(pendingDraft, onlineOperation)).rejects.toMatchObject({ code: "picture_expired" });
+			expect(await uiStore.preference("online:" + pendingDraft.id)).toBeUndefined();
+			session.setForeground(false);
+			const refreshed = await session.refreshDraftPictures(pendingDraft);
+			expect(refreshed.revision).toBe(1); expect(refreshed.body).toMatchObject({ text: "", pictures: [{ alt: "Recovered original" }] });
+			session.setForeground(true); await session.refresh();
+			const refreshedBody = { version: 1, blocks: (refreshed.body as { pictures: { type: string; picture_id: string; alt: string }[] }).pictures };
+			onlineOperation.payload.body = refreshedBody;
+			await expect(session.onlineDraft(refreshed, onlineOperation)).rejects.toMatchObject({ code: "stale_thread_revision" });
+			expect(await uiStore.preference("online:" + pendingDraft.id)).toBeDefined();
+			const recovered = await session.recoverOnlineDraft(refreshed);
+			expect(recovered.status).toBe("editable"); if (recovered.status !== "editable") throw new Error("Expected recovered draft");
+			expect(recovered.draft.body).toEqual(refreshed.body);
+			expect((await transport.thread(fixture.entry, recoveryThread)).thread.state).toBe("resolved");
+			await expect(transport.sendOnline(onlineOperation)).rejects.toMatchObject({ code: "operation_withdrawn", status: 410 });
+			const explicitRetry = { ...onlineOperation, operationId: randomUUID(), payload: { ...onlineOperation.payload,
+				message_id: randomUUID(), expected_state_revision: resolvedRecovery.state_revision } };
+			loseCommand = explicitRetry.operationId;
+			await expect(session.onlineDraft(recovered.draft, explicitRetry)).rejects.toMatchObject({ action: "retry" });
+			const beforeOnlineRecoveryPuts = puts;
+			expect(await session.recoverOnlineDraft(recovered.draft)).toEqual({ status: "accepted" });
+			expect(puts).toBe(beforeOnlineRecoveryPuts); expect(await uiStore.getDraft(pendingDraft.id)).toBeUndefined();
+			const recoveredThread = await transport.thread(fixture.entry, recoveryThread);
+			expect(recoveredThread.thread.state).toBe("open"); expect(recoveredThread.messages).toHaveLength(3);
 		} finally { await session.close(); }
 
 		const secondId = randomUUID(), second = await prepareLocalPicture(secondId, fixture.entry, original);
