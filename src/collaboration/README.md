@@ -309,6 +309,51 @@ two-native-client and mobile acceptance remain open. The server preview is
 disabled by default and currently requires one designated application process.
 Image/Bases presence and remote Reading selection rendering are not implemented.
 
+## Native Bases surface boundary
+
+`../bases/NativeBasesSurface.ts` implements the private built-in table/cards/list
+boundary for desktop Obsidian **1.13.7**. It is **not yet connected** to discussion
+capture, inline markers or sidebar navigation. The existing explicit target
+picker remains the available commenting interface. Unknown versions/layouts and
+an explicit `enabled: false` return no adapter; a user-facing toggle still needs
+to be wired with the host integration.
+
+The adapter returns mounted record/property handles from native model objects,
+not labels, row order or DOM text. Recycled rows, changed query results, unloaded
+views, unsaved configuration and unsupported formula cells cannot be silently
+reinterpreted. Loading is unavailable, distinct from a record filtered out by a
+completed query. Virtual navigation uses the matched record's current layout
+coordinates, verifies the mounted target, and never edits native selection or
+saved configuration. Failed navigation restores scrolling while its context is
+still current; background-frame waits have a bounded fallback.
+
+`bind` checks exact local bytes against a parsed server registry, normalizes the
+runtime configuration through the host's pure query parser, and verifies the
+saved-view slot. The caller must supply a live authority predicate covering the
+account, inventory/file identity, pending registry repairs, latest registry
+revision, permissions and lifecycle. A mapping proof is not an authorization
+grant. Check the returned binding and target handle again after every awaited
+capture, then use the existing server capture/outbox. Do not reuse a binding
+after a view switch. Callers own visible-pane subscriptions, cancellation on user
+navigation/backgrounding, and refresh after query/layout changes; the adapter
+itself installs no listeners, polling or persistent state.
+
+Native evidence covers an 80-record synthetic fixture in all three layouts,
+offscreen `note.rank` cells, hidden records/properties, stale layout rejection,
+and binding a previously verified cached registry offline. `.base`, image and
+CSV source hashes were unchanged. The disposable probe was unloaded/removed and
+the test vault closed. The last exception/animation-frame cleanup guards have
+automated evidence; they were added after the native run. Group collapse, broader
+configurations, mobile/popouts, RTL and the complete performance/accessibility
+matrix remain. See the parent workspace's Bases evidence page.
+
+Validation: **44 focused tests**, **1,960 plugin tests** across 188 passing suites
+(12 opt-in tests skipped), preview build/main TypeScript, changed-source/test lint
+with no findings, and the existing test-type gate passed. The build retains 15
+existing warnings; test types remain 206 errors/45 signatures within the frozen
+207/46 baseline. The first sandboxed regression attempt could not bind localhost
+fixtures and was stopped; the successful full run used the required socket access.
+
 ## Validation
 
 The direct managed-image-file protocol is available independently of text-anchor
