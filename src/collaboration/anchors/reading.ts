@@ -1,11 +1,11 @@
-import { commentMarkdownParser } from "./blocks";
+import { readingMarkdownParser } from "./readingSyntax";
 
-type Syntax = ReturnType<typeof commentMarkdownParser.parse>["topNode"];
+type Syntax = ReturnType<typeof readingMarkdownParser.parse>["topNode"];
 type Point = { node: Text; offset: number };
 type Atom<T> = { char: string; start: T; end: T; verbatim: boolean };
-type Projection = { kind: string; atoms: Atom<number>[] };
+type Projection = { kind: string; atoms: Atom<number>[]; generated?: boolean };
 type Mapped = { source: Atom<number>[]; dom: Atom<Point>[] };
-const LEAVES = "p,h1,h2,h3,h4,h5,h6,td,th,pre,li";
+const LEAVES = "p,h1,h2,h3,h4,h5,h6,td,th,pre,li,.callout-title-inner";
 const EXCLUDED = "button,input,svg,script,style,img,.copy-code-button,.relay-reading-comment-controls";
 
 /** HTML collapses ordinary whitespace, but code whitespace is meaningful. Keep
@@ -33,18 +33,25 @@ const label = (value: string) => value.replace(/^\[|\]$/g, "").trim().replace(/\
 /** Project only syntax with known source semantics. A final exact comparison
  * with the actual host render is still mandatory: this parser is not Obsidian's
  * renderer and reference links/third-party extensions can differ. */
-function project(source: string, node: Syntax, refs: Set<string>, document: Document): Atom<number>[] | undefined {
+function project(source: string, node: Syntax, refs: Set<string>, document: Document, clipFrom = node.from, clipTo = node.to): Atom<number>[] | undefined {
 	const atoms: Atom<number>[] = [];
 	const raw = (from: number, to: number, verbatim = false) => {
-		for (let index = from; index < to; index++) atoms.push({ char: source[index], start: index, end: index + 1, verbatim });
+		for (let index = Math.max(from, clipFrom); index < Math.min(to, clipTo); index++) atoms.push({ char: source[index], start: index, end: index + 1, verbatim });
 	};
 	const replacement = (value: string, from: number, to: number, verbatim = false) => {
 		for (let index = 0; index < value.length; index++) atoms.push({ char: value[index], start: from, end: to, verbatim });
 	};
 	const inline = (current: Syntax): boolean => {
+		if (current.to <= clipFrom || current.from >= clipTo) return true;
 		const parts = children(current), text = source.slice(current.from, current.to);
-		if (["EmphasisMark", "HeaderMark", "QuoteMark", "TaskMarker", "StrikethroughMark"].includes(current.name)) return true;
-		if (current.name === "Image") return true;
+		if (["Escape", "HardBreak", "Entity", "InlineCode", "Autolink", "Link", "ReadingWikiLink"].includes(current.name) &&
+			(current.from < clipFrom || current.to > clipTo)) return false;
+		if (["EmphasisMark", "HeaderMark", "QuoteMark", "TaskMarker", "StrikethroughMark", "ReadingHighlightMark"].includes(current.name)) return true;
+		if (["Image", "ReadingWikiEmbed", "ReadingHiddenComment"].includes(current.name)) return true;
+		if (current.name === "ReadingWikiLink") {
+			const separator = text.indexOf("|");
+			raw(current.from + (separator < 0 ? 2 : separator + 1), current.to - 2); return true;
+		}
 		if (current.name === "Escape") { replacement(text.slice(1), current.from, current.to); return true; }
 		if (current.name === "HardBreak") { replacement("\n", current.from, current.to); return true; }
 		if (current.name === "Entity") {
@@ -82,7 +89,7 @@ function project(source: string, node: Syntax, refs: Set<string>, document: Docu
 			}
 			raw(cursor, closing.from); return true;
 		}
-		if (!["Paragraph", "Task", "TableCell", "Emphasis", "StrongEmphasis", "Strikethrough"].includes(current.name) &&
+		if (!["Paragraph", "Task", "TableCell", "Emphasis", "StrongEmphasis", "Strikethrough", "ReadingHighlight"].includes(current.name) &&
 			!/^(ATX|Setext)Heading\d$/.test(current.name)) return false;
 		let cursor = current.from;
 		for (const part of parts) {
@@ -107,12 +114,12 @@ function project(source: string, node: Syntax, refs: Set<string>, document: Docu
 }
 
 export class ReadingSource {
-	readonly tree: ReturnType<typeof commentMarkdownParser.parse>;
+	readonly tree: ReturnType<typeof readingMarkdownParser.parse>;
 	readonly refs = new Set<string>();
 	private lines = [0];
 	constructor(readonly source: string) {
 		for (let index = 0; index < source.length; index++) if (source[index] === "\n") this.lines.push(index + 1);
-		this.tree = commentMarkdownParser.parse(source);
+		this.tree = readingMarkdownParser.parse(source);
 		this.tree.iterate({ enter: node => {
 			if (node.name === "LinkReference") { const key = node.node.getChild("LinkLabel"); if (key) this.refs.add(label(source.slice(key.from, key.to))); return false; }
 		} });
@@ -134,6 +141,23 @@ function sourceLeaves(parsed: ReadingSource, from: number, to: number, document:
 			["Paragraph", "Task"].includes(node.name) ? "text" : node.name === "TableCell" ? "cell" :
 			["CodeBlock", "FencedCode"].includes(node.name) ? "code" : undefined;
 		if (!kind) return;
+		if (node.name === "Paragraph" && node.node.parent?.name === "Blockquote" && node.node.parent.getChild("Paragraph")?.from === node.from) {
+			const lineEnd = source.indexOf("\n", node.from), titleEnd = lineEnd < 0 ? node.to : Math.min(lineEnd, node.to);
+			const header = /^\[![^\]\r\n]+\][+-]?[ \t]*/.exec(source.slice(node.from, titleEnd));
+			if (header) {
+				const titleFrom = node.from + header[0].length;
+				const title = project(source, node.node, refs, document, titleFrom, titleEnd);
+				const body = titleEnd < node.to ? project(source, node.node, refs, document, titleEnd + 1, node.to) : undefined;
+				if (!title || titleEnd < node.to && !body) invalid = true;
+				else {
+					// A default title is generated by Obsidian, so it has no exact text
+					// range. Keep it unmapped while allowing verified body selection.
+					leaves.push({ kind: "callout_title", atoms: title!, generated: !source.slice(titleFrom, titleEnd).trim() });
+					if (body?.length) leaves.push({ kind: "text", atoms: body });
+				}
+				return false;
+			}
+		}
 		const atoms = project(source, node.node, refs, document);
 		if (!atoms) invalid = true; else leaves.push({ kind, atoms });
 		return false;
@@ -253,15 +277,17 @@ export function mapReadingSection(root: HTMLElement, source: string, from: numbe
 	if (parsed.source !== source) return undefined;
 	const projections = sourceLeaves(parsed, from, to, root.ownerDocument); if (!projections) return undefined;
 	const candidates = [...(root.matches(LEAVES) ? [root] : []), ...Array.from(root.querySelectorAll(LEAVES))]
-		.filter(element => !(element.tagName === "LI" && Array.from(element.children).some(child => child.matches("p,blockquote,pre"))) &&
+		.filter(element => !(element.tagName === "LI" && Array.from(element.children).some(child => child.matches("p,blockquote,pre,.callout"))) &&
 			!element.closest(".internal-embed,.footnotes,.relay-reading-comment-controls"));
 	if (candidates.length !== projections.length) return undefined;
 	const leaves: Mapped[] = [];
 	for (let index = 0; index < projections.length; index++) {
 		const element = candidates[index], projection = projections[index];
-		const kind = element.tagName === "PRE" ? "code" : /^(TD|TH)$/.test(element.tagName) ? "cell" : /^(P|LI)$/.test(element.tagName) ? "text" : element.tagName.toLowerCase();
+		const kind = element.matches(".callout-title-inner") ? "callout_title" : element.tagName === "PRE" ? "code" : /^(TD|TH)$/.test(element.tagName) ? "cell" : /^(P|LI)$/.test(element.tagName) ? "text" : element.tagName.toLowerCase();
+		if (kind !== projection.kind) return undefined;
+		if (projection.generated) continue;
 		const dom = domAtoms(element);
-		if (kind !== projection.kind || dom.map(atom => atom.char).join("") !== projection.atoms.map(atom => atom.char).join("")) return undefined;
+		if (dom.map(atom => atom.char).join("") !== projection.atoms.map(atom => atom.char).join("")) return undefined;
 		leaves.push({ source: projection.atoms, dom });
 	}
 	return new ReadingSectionMap(root, source, leaves, from, to);

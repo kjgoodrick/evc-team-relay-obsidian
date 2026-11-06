@@ -85,3 +85,46 @@ test("cross-section selection refuses missing source sections or reversed DOM or
 	const hidden = "one\n\nhidden\n\ntwo";
 	expect(ReadingSectionMap.combine(root, [mapReadingSection(first, hidden, 0, 3)!, mapReadingSection(second, hidden, 13, 16)!])).toBeUndefined();
 });
+
+test("wiki aliases, highlights and hidden inline comments retain exact occurrence offsets", () => {
+	const source = "[[One|repeat]] and [[Two|repeat]] ==**marked**== %%hidden *repeat*%% after [[Note]]";
+	const { root, map } = fixture(source, '<p><a class="internal-link">repeat</a> and <a class="internal-link">repeat</a> <mark><strong>marked</strong></mark>  after <a class="internal-link">Note</a></p>');
+	const second = root.querySelectorAll("a")[1].firstChild!, marked = root.querySelector("strong")!.firstChild!;
+	expect(map.sourceRange(range(second))).toEqual({ from: source.indexOf("Two|repeat") + 4, to: source.indexOf("Two|repeat") + 10 });
+	expect(map.sourceRange(range(marked))).toEqual({ from: source.indexOf("marked"), to: source.indexOf("marked") + 6 });
+	const selected = range(marked); selected.setEnd(root.querySelectorAll("a")[2].firstChild!, 4);
+	expect(source.slice(map.sourceRange(selected)!.from, map.sourceRange(selected)!.to)).toBe("marked**== %%hidden *repeat*%% after [[Note");
+	const code = "`[[One|repeat]] ==marked== %%visible%%` \\%\\%literal\\%\\%";
+	const literal = fixture(code, '<p><code>[[One|repeat]] ==marked== %%visible%%</code> %%literal%%</p>');
+	expect(literal.map.sourceRange(range(literal.root.querySelector("code")!.firstChild!))).toEqual({ from: 1, to: code.indexOf("`", 1) });
+});
+
+const callout = (title: string, body = "") => `<div class="callout"><div class="callout-title"><div class="callout-icon"><svg></svg></div><div class="callout-title-inner">${title}</div></div><div class="callout-content">${body}</div></div>`;
+
+test("callout titles and bodies map separately, including nested, title-only and CRLF content", () => {
+	const source = "> [!note]+ **Same**\r\n> Same [[Note|label]]\r\n>\r\n> > [!tip]- Nested\r\n> > ==body==";
+	const { root, map } = fixture(source, callout("<strong>Same</strong>", '<p>Same <a>label</a></p>' + callout("Nested", "<p><mark>body</mark></p>")));
+	const title = root.querySelector("strong")!.firstChild!, body = root.querySelector("p")!.firstChild!;
+	expect(map.sourceRange(range(title))).toEqual({ from: source.indexOf("Same"), to: source.indexOf("Same") + 4 });
+	expect(map.sourceRange(range(body, 0, 4))).toEqual({ from: source.indexOf("Same [["), to: source.indexOf("Same [[") + 4 });
+	expect(map.sourceRange(range(root.querySelector("mark")!.firstChild!))).toEqual({ from: source.indexOf("body"), to: source.indexOf("body") + 4 });
+	const only = fixture("> [!tip] Title", callout("Title"));
+	expect(only.map.sourceRange(range(only.root.querySelector(".callout-title-inner")!.firstChild!))).toEqual({ from: 9, to: 14 });
+});
+
+test("generated callout titles cannot acquire invented text anchors but the body remains selectable", () => {
+	const source = "> [!note]\n> Body", { root, map } = fixture(source, callout("Note", "<p>Body</p>"));
+	const title = root.querySelector(".callout-title-inner")!.firstChild!, body = root.querySelector("p")!.firstChild!;
+	expect(map.sourceRange(range(title))).toBeUndefined();
+	expect(map.sourceRange(range(body))).toEqual({ from: source.indexOf("Body"), to: source.length });
+	const selected = range(title); selected.setEnd(body, 4); expect(map.sourceRange(selected)).toBeUndefined();
+	expect(map.domRanges(0, source.length).map(value => value.toString())).toEqual(["Body"]);
+});
+
+test("different wiki rendering and incomplete callout structure retain the explicit block fallback", () => {
+	const root = document.createElement("div"); root.innerHTML = '<p><a>different</a></p>';
+	expect(mapReadingSection(root, "[[Note|label]]", 0, 14)).toBeUndefined();
+	const source = "> [!note] Title\n> Body";
+	root.innerHTML = '<div class="callout"><div class="callout-title">Title</div><p>Body</p></div>';
+	expect(mapReadingSection(root, source, 0, source.length)).toBeUndefined();
+});

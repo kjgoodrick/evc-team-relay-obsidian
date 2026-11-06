@@ -17,9 +17,14 @@ capability changes preserve the queued target. Reading view now has a native
 preview using public section metadata, the existing view/CRDT binding, exact
 source-to-DOM maps, shared leaf subscriptions and cached source parses. Desktop
 testing proves repeated-word and table-cell capture, accepted comments, exact
-Reading navigation, reload, and explicit whole-callout block capture. Precise
-callout/wiki/highlight mapping, complete construct coverage, block lifecycle
-recovery, mobile and resource acceptance remain unfinished.
+Reading navigation, reload, and explicit whole-callout block capture. A separate
+Reading syntax parser now maps wiki aliases, highlights, hidden inline comments,
+written callout titles and callout bodies, including nested callouts. Native
+checks verified a repeated alias, highlighted text, written/generated titles,
+nested body selection and reload. Generated callout titles have no invented text
+range; they retain the block fallback. Multiline hidden comments, colored
+highlights, complete construct coverage, block lifecycle recovery, mobile and
+resource acceptance remain unfinished.
 Bases primitives still require identity, authorization and native adapters.
 
 ## Local commands and delivery
