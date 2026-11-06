@@ -1,4 +1,5 @@
 import { ManagedIndexTransport } from "./ManagedIndexTransport";
+import { AwarenessPublisher, type PresenceAvailability } from "./AwarenessPublisher";
 /**
  * WebSocket provider for a Yjs doc.
  *
@@ -112,23 +113,13 @@ messageHandlers[messageSync] = (encoder, decoder, provider, emitSynced) => {
 	}
 };
 
-messageHandlers[messageQueryAwareness] = (encoder, _decoder, provider) => {
-	encoding.writeVarUint(encoder, messageAwareness);
-	encoding.writeVarUint8Array(
-		encoder,
-		awarenessProtocol.encodeAwarenessUpdate(
-			provider.awareness,
-			[provider.doc.clientID],
-		),
-	);
+messageHandlers[messageQueryAwareness] = (_encoder, _decoder, provider) => {
+	// Use the same ownership/recovery gate as ordinary local changes.
+	provider.presence.publish(true);
 };
 
 messageHandlers[messageAwareness] = (_encoder, decoder, provider) => {
-	awarenessProtocol.applyAwarenessUpdate(
-		provider.awareness,
-		decoding.readVarUint8Array(decoder),
-		provider,
-	);
+	provider.presence.receive(decoding.readVarUint8Array(decoder));
 };
 
 messageHandlers[messageAuth] = (_encoder, decoder, provider) => {
@@ -328,7 +319,7 @@ const openWS = (provider: YSweetProvider, ticket: ConnectTicket): void => {
 			awarenessProtocol.removeAwarenessStates(
 				provider.awareness,
 				Array.from(provider.awareness.getStates().keys()).filter(
-					(client) => client !== provider.doc.clientID,
+					(client) => client !== provider.awareness.clientID,
 				),
 				provider,
 			);
@@ -340,6 +331,7 @@ const openWS = (provider: YSweetProvider, ticket: ConnectTicket): void => {
 			provider.connectTrace.failedSockets++;
 		}
 
+		provider.presence.disconnected(event.code);
 		if (!provider.canReconnect()) return;
 		window.setTimeout(setupWS, reconnectDelay(provider), provider);
 	};
@@ -360,13 +352,8 @@ const openWS = (provider: YSweetProvider, ticket: ConnectTicket): void => {
 
 		sendOverSocket(provider, encodeSyncStep1(provider.doc));
 
-		if (provider.awareness.getLocalState() === null) return;
-
-		const localClients = [provider.doc.clientID];
-		// Publish through the local update handler with a fresh clock. Otherwise
-		// a reconnect can remain hidden behind the relay's disconnect tombstone
-		// until the next heartbeat, despite the document already being synced.
-		provider.awareness.setLocalState(provider.awareness.getLocalState());
+		provider.presence.connected();
+		if (provider.awareness.getLocalState() === null || !provider.presence.allowed) return;
 
 		// the first send can land before the server has a room for this
 		// document, and is then simply lost — the user appears absent to
@@ -386,10 +373,7 @@ const openWS = (provider: YSweetProvider, ticket: ConnectTicket): void => {
 			awarenessResendTimer = window.setTimeout(() => {
 				awarenessResendTimer = null;
 				if (!provider.wsconnected || provider.ws !== websocket) return;
-				sendOverSocket(
-					provider,
-					encodeAwarenessOf(provider.awareness, localClients),
-				);
+				provider.presence.publish(true);
 				if (provider.synced) return;
 				scheduleResend(attempt + 1);
 			}, delay);
@@ -401,6 +385,7 @@ const openWS = (provider: YSweetProvider, ticket: ConnectTicket): void => {
 };
 
 export type YSweetProviderEvents = {
+	"presence-status": (state: PresenceAvailability) => void;
 	status: (state: ConnectionState) => void;
 	synced: (state: boolean) => void;
 	sync: (state: boolean) => void;
@@ -435,6 +420,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 	doc: Y.Doc;
 	_WS: typeof WebSocket;
 	awareness: awarenessProtocol.Awareness;
+	readonly presence: AwarenessPublisher;
 	wsconnected = false;
 	wsconnecting = false;
 	bcconnected = false;
@@ -463,10 +449,6 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 	private _checkInterval: number;
 	private _bcSubscriber: (data: ArrayBuffer, origin: unknown) => void;
 	private _updateHandler: (update: Uint8Array, origin: unknown) => void;
-	private _awarenessUpdateHandler: (
-		changed: { added: number[]; updated: number[]; removed: number[] },
-		origin: unknown,
-	) => void;
 	private _unloadHandler: () => void;
 
 	constructor(
@@ -524,25 +506,18 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 		};
 		this.doc.on("update", this._updateHandler);
 
-		this._awarenessUpdateHandler = (changed, origin) => {
-			if (origin === this) return;
-			const changedClients = changed.added.concat(
-				changed.updated,
-				changed.removed,
-			).filter(client => client === this.doc.clientID);
-			// Timeout cleanup is local knowledge, not authority to disconnect peers.
-			// Initial peer state comes from the relay, never from this client.
-			if (!changedClients.length) return;
-			broadcastMessage(this, encodeAwarenessOf(this.awareness, changedClients));
-		};
-		this.awareness.on("update", this._awarenessUpdateHandler);
+		this.presence = new AwarenessPublisher(this.awareness,
+			() => this.ws?.readyState === WebSocket.OPEN || this.bcconnected,
+			frame => broadcastMessage(this, frame),
+			state => this.emit("presence-status", [state]),
+		);
 
 		// Leaving without saying so leaves a ghost cursor behind for everyone
 		// else until their own timeout expires.
 		this._unloadHandler = () => {
 			awarenessProtocol.removeAwarenessStates(
 				this.awareness,
-				[doc.clientID],
+				[this.awareness.clientID],
 				"window unload",
 			);
 		};
@@ -640,6 +615,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 
 	disconnect(): void {
 		this.shouldConnect = false;
+		this.presence.disconnected();
 		this.managedIndex?.stop();
 		this.disconnectBc();
 		releaseConnectTicket(this);
@@ -671,11 +647,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 		encoding.writeVarUint(queryAwareness, messageQueryAwareness);
 		bc.publish(this.bcChannel, encoding.toUint8Array(queryAwareness), this);
 
-		bc.publish(
-			this.bcChannel,
-			encodeAwarenessOf(this.awareness, [this.doc.clientID]),
-			this,
-		);
+		this.presence.publish(true);
 	}
 
 	disconnectBc(): void {
@@ -683,7 +655,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 		// Announce our departure to local peers before unsubscribing.
 		bc.publish(
 			this.bcChannel,
-			encodeAwarenessOf(this.awareness, [this.doc.clientID]),
+			encodeAwarenessOf(this.awareness, [this.awareness.clientID]),
 			this,
 		);
 		bc.unsubscribe(this.bcChannel, this._bcSubscriber);
@@ -747,7 +719,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 		} else if (typeof process !== "undefined") {
 			process.off("exit", this._unloadHandler);
 		}
-		this.awareness.off("update", this._awarenessUpdateHandler);
+		this.presence.destroy();
 		this.doc.off("update", this._updateHandler);
 		this.awareness.destroy();
 		super.destroy();

@@ -26,9 +26,10 @@ run("managed awareness authenticates readers, rejects impersonation/collisions a
 		const response = await api("/v1/tokens/relay", token, { share_id: f.share, doc_id: f.note, mode });
 		expect(response.status).toBe(200); return response.json();
 	}
-	async function peer(token: string, mode = "read") {
+	async function peer(token: string, mode = "read", presenceId?: number) {
 		const auth = await grant(token, mode), doc = new Y.Doc(); docs.push(doc);
 		const provider = new YSweetProvider(auth.relay_url, f.note, doc, { connect: false, disableBc: true, params: { token: auth.token } });
+		if (presenceId !== undefined) { provider.awareness.setLocalState(null); provider.awareness.clientID = presenceId; }
 		provider.awareness.setLocalState({ user: { id: "forged-admin", name: "Not the member", avatarUrl: "https://attacker.test/photo" } });
 		providers.push(provider); provider.connect(); await until(() => provider.synced, "sync");
 		return { doc, provider, auth, text: doc.getText("contents") };
@@ -65,6 +66,15 @@ run("managed awareness authenticates readers, rejects impersonation/collisions a
 			id: f.ownerId, name: "Fixture Owner", avatarUrl: "https://identity.example.test/owner.png",
 		});
 		expect(owner.text.toString()).toBe("alpha beta");
+		const collision = await peer(f.bobToken, "read", owner.provider.awareness.clientID);
+		const documentId = collision.doc.clientID;
+		await until(() => collision.provider.presence.availability === "ready"
+			&& collision.provider.awareness.clientID !== owner.provider.awareness.clientID
+			&& owner.provider.awareness.getStates().get(collision.provider.awareness.clientID)?.user?.id === f.bobId, "automatic collision recovery");
+		expect(collision.doc.clientID).toBe(documentId);
+		expect(collision.text.toString()).toBe("alpha beta");
+		expect(collision.provider.awareness.getLocalState()?.user.id).toBe("forged-admin");
+		collision.provider.disconnect();
 		reader.provider.disconnect(); await until(() => !remote(), "immediate disconnect cleanup");
 		const resumed = Date.now(); reader.provider.connect();
 		await until(() => !!remote(), "immediate presence on reconnect");

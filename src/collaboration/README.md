@@ -32,8 +32,12 @@ and timeout cleanup, and advances the local clock on reconnect. The matching
 managed gateway replaces peer identity with authenticated account/profile data;
 the Rust room enforces socket ownership and rejects collisions. See the server's
 `docs/presence-boundary.md` and the opt-in `__tests__/presence/realPresenceStack.test.ts`.
-Foreground-only publication, coalescing, collision recovery, the shared presence
-model, jump/follow and native presence acceptance remain unfinished.
+The provider now coalesces cursor updates and distinguishes bounded collision
+recovery from delayed capacity retries while retaining normal note sync. Recovery
+rotates only the awareness ID; CodeMirror identifies self using that ID. The
+provider exposes availability and explicit retry; foreground-only publication,
+socket backpressure, the shared controller/status UI, jump/follow and native
+presence acceptance remain unfinished.
 
 ## Local commands and delivery
 

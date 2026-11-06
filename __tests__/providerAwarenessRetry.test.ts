@@ -204,4 +204,24 @@ describe("YSweetProvider initial awareness resend on room warm-up", () => {
 			expect(ws.sent).toHaveLength(before + 2);
 		} finally { provider.destroy(); peer.destroy(); peerDoc.destroy(); doc.destroy(); }
 	});
+
+	test("a full presence room reconnects for note sync while suppressing presence queries and warm-up retries", () => {
+		const { provider, doc, ws } = makeProvider();
+		ws.triggerOpen();
+		ws.readyState = FakeWebSocket.CLOSED;
+		ws.onclose?.({ code: 4429 });
+		jest.advanceTimersByTime(100);
+		const resumed = provider.ws as unknown as FakeWebSocket;
+		expect(resumed).not.toBe(ws); resumed.triggerOpen();
+		const query = encoding.createEncoder(); encoding.writeVarUint(query, messageQueryAwareness);
+		resumed.onmessage?.({ data: encoding.toUint8Array(query).buffer });
+		resumed.onmessage?.({ data: buildSyncStep2Response(doc).buffer });
+		const before = resumed.countMessagesOfType(messageSync);
+		doc.getText("contents").insert(0, "edits still sync");
+		expect(resumed.countMessagesOfType(messageSync)).toBe(before + 1);
+		expect(provider.synced).toBe(true);
+		jest.advanceTimersByTime(10000);
+		expect(resumed.countMessagesOfType(messageAwareness)).toBe(0);
+		expect(provider.presence.availability).toBe("capacity");
+	});
 });

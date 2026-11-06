@@ -223,7 +223,7 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 			const clients = added.concat(updated).concat(removed);
 			if (
 				!this.destroyed &&
-				clients.findIndex((id) => id !== this._awareness?.doc.clientID) >= 0
+				clients.findIndex((id) => id !== this._awareness?.clientID) >= 0
 			) {
 				this.renderDirty = true;
 				editor.dispatch({
@@ -356,7 +356,7 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 		awareness.getStates().forEach((rawState, clientid) => {
 			if (!rawState || typeof rawState !== "object") return;
 			const state = rawState as AwarenessState;
-			if (clientid === awareness.doc.clientID) {
+			if (clientid === awareness.clientID) {
 				return;
 			}
 			const cursor = state.cursor;
