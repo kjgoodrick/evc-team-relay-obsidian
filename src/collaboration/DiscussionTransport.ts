@@ -121,12 +121,15 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		if (value.features.discussion_text_anchors !== undefined && typeof value.features.discussion_text_anchors !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true };
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors"]) {
+			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
+		}
+		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
+			blockAnchors: value.features.discussion_block_anchors === true };
 	}
 	async anchorContext(entryId: string): Promise<{ entryId: string; generation: string }> {
 		const value = await this.request(this.scopePath(entryId) + "/anchor-context");

@@ -4,6 +4,7 @@ import { editorInfoField, Menu, type Editor, type TFile } from "obsidian";
 import * as Y from "yjs";
 import { commentEditorBinding } from "./EditorTextBinding";
 import { captureTextAnchor, resolveTextAnchor } from "./anchors/text";
+import { captureBlockAnchor } from "./anchors/blocks";
 import { localTextAnchor, wireTextAnchor, type DiscussionAnchor, type WireTextAnchor } from "./DiscussionProtocol";
 import type { DiscussionHost } from "./DiscussionHost";
 import type { AnchoredThread, DiscussionSession } from "./DiscussionSession";
@@ -13,7 +14,7 @@ export type CapturedCommentSelection = { file: TFile; session: DiscussionSession
 export interface CommentEditorSurface {
 	readonly editor: Editor | undefined;
 	readonly file: TFile | undefined;
-	capture(): CapturedCommentSelection;
+	capture(blocks?: boolean): CapturedCommentSelection;
 	reveal(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): boolean;
 }
 
@@ -118,14 +119,15 @@ export function commentEditorExtension(host: DiscussionHost) {
 				widget: new ThreadMarker(threads, session, threadId => { void host.openThread(file, session, id, threadId); }, id) }).range(position));
 			this.decorations = Decoration.set(decorations, true);
 		}
-		capture(): CapturedCommentSelection {
+		capture(blocks = false): CapturedCommentSelection {
 			this.checkContext();
 			const file = this.file, session = this.session, id = this.entryId, bound = commentEditorBinding(this.view);
 			const generation = id ? session?.documentGeneration(id) : undefined;
 			if (!file || !session || !id || !generation || !session.permission(id)?.comment || !bound || bound.documentId !== id ||
 				this.view.composing || bound.text.toString() !== this.view.state.doc.toString()) throw new Error("Wait for this shared editor to finish synchronizing, then select the text again.");
 			const { anchor, head } = this.view.state.selection.main;
-			return { file, session, entryId: id, anchor: wireTextAnchor(captureTextAnchor(bound.text, id, generation, anchor, head)) };
+			if (blocks && !session.canAnchorBlocks) throw new Error("Block comments are not enabled on this server.");
+			return { file, session, entryId: id, anchor: wireTextAnchor((blocks ? captureBlockAnchor : captureTextAnchor)(bound.text, id, generation, anchor, head)) };
 		}
 		reveal(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): boolean {
 			const bound = commentEditorBinding(this.view), generation = session.documentGeneration(entryId);

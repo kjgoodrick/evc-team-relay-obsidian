@@ -1,5 +1,6 @@
 import type { Json } from "./storage/DiscussionStore";
 import { decodeBoundedBase64, type TextAnchor } from "./anchors/text";
+import { BLOCK_KINDS, type BlockStructure } from "./anchors/blocks";
 
 export const isId = (value: unknown): value is string => typeof value === "string" &&
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -30,7 +31,7 @@ export type DiscussionMessage = {
 };
 export type NoteAnchor = { version: 1; type: "note" };
 export type WireTextAnchor = { version: 1; type: "text"; document_id: string; generation: string; start: string; end: string;
-	dependency: string; selected_length: number; context: TextAnchor["context"] };
+	dependency: string; selected_length: number; context: TextAnchor["context"]; structure?: BlockStructure };
 export type DiscussionAnchor = NoteAnchor | WireTextAnchor;
 export type ThreadPage = { thread: ThreadSummary; anchor: DiscussionAnchor; messages: DiscussionMessage[]; has_more: boolean; next_after: number };
 export type MessageRead = { thread: ThreadSummary; anchor: DiscussionAnchor; message: DiscussionMessage };
@@ -118,18 +119,30 @@ export function parseAnchor(value: unknown): DiscussionAnchor {
 	for (const [key, limit] of [["dependency", 65536], ["start", 256], ["end", 256]] as const) {
 		requireValue(typeof value[key] === "string" && decodeBoundedBase64(value[key], limit).length > 0);
 	}
+	let structure: BlockStructure | undefined;
+	if (value.structure !== undefined && value.structure !== null) {
+		const candidate = value.structure;
+		requireValue(isRecord(candidate) && candidate.kind === "blocks" && array(candidate.blocks, 32) && candidate.blocks.length > 0);
+		structure = { kind: "blocks", blocks: candidate.blocks.map(block => {
+			requireValue(isRecord(block) && BLOCK_KINDS.includes(block.kind as BlockStructure["blocks"][number]["kind"]) &&
+				(block.explicit_id === undefined || typeof block.explicit_id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(block.explicit_id)));
+			return { kind: block.kind as BlockStructure["blocks"][number]["kind"], ...(typeof block.explicit_id === "string" ? { explicit_id: block.explicit_id } : {}) };
+		}) };
+	}
 	return { version: 1, type: "text", document_id: value.document_id, generation: value.generation,
 		start: value.start as string, end: value.end as string, dependency: value.dependency as string,
 		selected_length: value.selected_length, context: { quote: context.quote as string, prefix: context.prefix as string,
-			suffix: context.suffix as string, truncated: context.truncated as boolean } };
+			suffix: context.suffix as string, truncated: context.truncated as boolean }, ...(structure ? { structure } : {}) };
 }
 export function wireTextAnchor(value: TextAnchor): WireTextAnchor {
 	return parseAnchor({ version: value.version, type: value.type, document_id: value.documentId, generation: value.generation,
-		start: value.start, end: value.end, dependency: value.dependency, selected_length: value.selectedLength, context: value.context }) as WireTextAnchor;
+		start: value.start, end: value.end, dependency: value.dependency, selected_length: value.selectedLength, context: value.context,
+		...(value.structure ? { structure: value.structure } : {}) }) as WireTextAnchor;
 }
 export function localTextAnchor(value: WireTextAnchor): TextAnchor {
 	return { version: value.version, type: value.type, documentId: value.document_id, generation: value.generation,
-		start: value.start, end: value.end, dependency: value.dependency, selectedLength: value.selected_length, context: { ...value.context } };
+		start: value.start, end: value.end, dependency: value.dependency, selectedLength: value.selected_length, context: { ...value.context },
+		...(value.structure ? { structure: value.structure } : {}) };
 }
 function pagination(value: Record<string, unknown>, positions: number[], after: number) {
 	requireValue(typeof value.has_more === "boolean" && isSequence(value.next_after));

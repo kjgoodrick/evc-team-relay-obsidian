@@ -9,7 +9,12 @@ support whole-note discussions in the native sidebar and selected text through
 the editor command/context menu behind a separate capability. Desktop Source
 mode and Live Preview capture, highlights, thread navigation, and draft restoration
 have been exercised against the real control plane/relay in a disposable vault.
-Reading mapping, block targeting and native mobile validation remain unfinished.
+Block capture now expands selections/carets to Markdown source blocks and uses
+the same durable relative ranges. It is capability gated, preserves existing
+block IDs without editing the note, supports 1–32 blocks, and round-trips through
+the actual control plane/relay with comment-only access. Offline restart and
+capability changes preserve the queued target. Block native acceptance, Reading
+mapping and native mobile validation remain unfinished.
 Bases primitives still require identity, authorization and native adapters.
 
 ## Local commands and delivery

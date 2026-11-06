@@ -205,3 +205,39 @@ test("verified text context can be used offline after restart, but disabled text
 		expect(session.permission(entry)?.comment).toBe(true); expect(session.canQueue).toBe(true);
 	} finally { await session.close(); }
 });
+
+test("block drafts require verified support, persist offline across restart, and keep their immutable target after disable", async () => {
+	const factory = new IDBFactory(), transport = remote();
+	let store = await DiscussionStore.open(identity, factory);
+	let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	const anchor = { version: 1, type: "text", document_id: entry, generation: id(30), start: "AA==", end: "AA==",
+		dependency: "AAA=", selected_length: 4, context: { quote: "Note", prefix: "", suffix: "", truncated: false },
+		structure: { kind: "blocks", blocks: [{ kind: "paragraph", explicit_id: "existing" }] } };
+	const operation = { ...command(), payload: { ...command().payload, anchor } };
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true });
+		await session.start(); session.watch(entry, () => {}); await session.refresh();
+		expect(session.canAnchorBlocks).toBe(false);
+		await expect(session.queue(operation)).rejects.toThrow("Block comments");
+		expect(await store.getOperation(operation.operationId)).toBeUndefined();
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true, blockAnchors: true });
+		await session.refresh(); expect(session.canAnchorBlocks).toBe(true);
+		await session.close();
+		store = await DiscussionStore.open(identity, factory);
+		transport.capabilities.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		transport.permissions.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		transport.changes.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		transport.send.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+		await session.start(); session.watch(entry, () => {}); await session.refresh();
+		expect(session.status).toBe("offline"); expect(session.canAnchorBlocks).toBe(true);
+		await session.queue(operation); await session.outbox.settled();
+		expect((await store.getOperation(operation.operationId))?.payload).toEqual(operation.payload);
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true, blockAnchors: false });
+		transport.permissions.mockResolvedValue({ read: true, comment: true, edit: false, moderate: false });
+		await session.refresh();
+		expect(session.canAnchorText).toBe(true); expect(session.canAnchorBlocks).toBe(false);
+		await expect(session.queue({ ...operation, operationId: id(41) })).rejects.toThrow("Block comments");
+		expect((await store.getOperation(operation.operationId))?.payload).toEqual(operation.payload);
+	} finally { await session.close(); }
+});

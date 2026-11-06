@@ -6,6 +6,7 @@ import { YSweetProvider } from "../../src/client/provider";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
 import { bodyFromText, localTextAnchor, protocolJson, wireTextAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { captureTextAnchor, resolveTextAnchor } from "../../src/collaboration/anchors/text";
+import { captureBlockAnchor } from "../../src/collaboration/anchors/blocks";
 import type { QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
@@ -36,7 +37,7 @@ run("real selected-text comments wait for delete-only edits, survive lost replie
 		type: "thread.create", dependsOn: [], payload: { type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(),
 			anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Review this selection")) } });
 	try {
-		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true });
+		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true });
 		expect(await transport.permissions(fixture.note)).toEqual({ read: true, comment: true, edit: false, moderate: false });
 		const owner = await peer(fixture.ownerToken, "write"); owner.text.insert(0, "alpha beta gamma");
 		const reviewer = await peer(fixture.bobToken, "read");
@@ -80,5 +81,14 @@ run("real selected-text comments wait for delete-only edits, survive lost replie
 		expect((await transport.send(command(afterDeletion))).message_revision).toBe(1);
 		await expect(transport.send(command({ ...afterDeletion, generation: randomUUID() })))
 			.rejects.toMatchObject({ action: "reject", code: "anchor_generation_mismatch" });
+		const block = wireTextAnchor(captureBlockAnchor(restored.text, fixture.note, context.generation, 2, 2));
+		const blockCommand = command(block), blockReceipt = await transport.send(blockCommand);
+		expect(await transport.send(blockCommand)).toEqual(blockReceipt);
+		const blockThread = await transport.thread(fixture.note, blockReceipt.thread_id);
+		expect(blockThread.anchor).toEqual(block);
+		if (blockThread.anchor.type !== "text") throw new Error("Expected block range");
+		expect(blockThread.anchor.structure).toEqual({ kind: "blocks", blocks: [{ kind: "paragraph" }] });
+		expect(resolveTextAnchor(restored.text, fixture.note, context.generation, localTextAnchor(blockThread.anchor)))
+			.toEqual({ status: "attached", from: 0, to: "beta gamma".length });
 	} finally { for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy(); }
 }, 60000);

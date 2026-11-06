@@ -78,9 +78,12 @@ export class DiscussionDrafts {
 		if (activeDraft && !drafts.some(d => d.id === activeDraft.id)) drafts.unshift(activeDraft);
 		const options: [string, string][] = [[this.wholeNoteId, "Whole-note draft"]];
 		for (const draft of drafts) {
-			let label = "Selection needs review";
-			try { const anchor = parseAnchor(draft.target); if (anchor.type === "text") label = anchor.context.quote ? anchor.context.quote.slice(0, 80) : "Selected position"; } catch { /* Keep damaged drafts discoverable. */ }
-			options.push([draft.id, "Selection: " + label]);
+			let label = "Selection needs review", prefix = "Selection";
+			try { const anchor = parseAnchor(draft.target); if (anchor.type === "text") {
+				label = anchor.context.quote ? anchor.context.quote.slice(0, 80) : "Selected position";
+				if (anchor.structure) prefix = "Blocks";
+			} } catch { /* Keep damaged drafts discoverable. */ }
+			options.push([draft.id, prefix + ": " + label]);
 		}
 		const signature = JSON.stringify(options);
 		if (this.select.dataset.options !== signature) {

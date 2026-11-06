@@ -31,6 +31,7 @@ export class DiscussionSession {
 	private statusValue: SessionStatus = "starting";
 	private enabled = false;
 	private textEnabled = false;
+	private blocksEnabled = false;
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -57,6 +58,7 @@ export class DiscussionSession {
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
 	get canAnchorText(): boolean { return this.canQueue && this.textEnabled; }
+	get canAnchorBlocks(): boolean { return this.canAnchorText && this.blocksEnabled; }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
 		return this.canAnchorText && entry?.permission?.read && !entry.unavailable ? entry.documentGeneration : undefined;
@@ -87,13 +89,16 @@ export class DiscussionSession {
 			if (this.closed) return;
 			this.enabled = cached === true;
 			this.textEnabled = await this.store.preference("textAnchorsEnabled") === true;
+			this.blocksEnabled = await this.store.preference("blockAnchorsEnabled") === true;
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
 			this.enabled = capability.discussions;
 			this.textEnabled = capability.textAnchors === true;
+			this.blocksEnabled = capability.blockAnchors === true;
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
+			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -265,6 +270,7 @@ export class DiscussionSession {
 		queuedEnvelope(this.identity.shareId, command);
 		if (command.type === "thread.create" && isRecord(command.payload) && isRecord(command.payload.anchor) && command.payload.anchor.type === "text") {
 			if (!this.canAnchorText) throw new Error("Selected-text comments are not enabled on this server.");
+			if (command.payload.anchor.structure && !this.canAnchorBlocks) throw new Error("Block comments are not enabled on this server.");
 			if (command.payload.anchor.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this selection after refreshing the note’s comment context.");
 		}
 		await this.store.enqueue(command, Date.now(), draft);

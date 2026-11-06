@@ -23,7 +23,7 @@ test("real CodeMirror captures its bound Y.Text, clips highlights, navigates and
 	const anchor = wireTextAnchor(captureTextAnchor(text, id(1), id(2), 9, 13));
 	const thread = { id: id(4), anchor, author_id: id(5), state: "open", state_revision: 1, anchor_revision: 1,
 		removed: false, created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z" };
-	const session = { canAnchorText: true, permission: () => ({ read: true, comment: true }), documentGeneration: () => id(2),
+	const session = { canAnchorText: true, canAnchorBlocks: true, permission: () => ({ read: true, comment: true }), documentGeneration: () => id(2),
 		anchorThreads: jest.fn().mockResolvedValue([thread]), watch: jest.fn(() => jest.fn()), displayName: () => "Reviewer" } as unknown as DiscussionSession;
 	const file = { path: "Team/Note.md", extension: "md" } as TFile, editor = {} as Editor;
 	let surface!: CommentEditorSurface, current: DiscussionSession | undefined = session;
@@ -38,6 +38,13 @@ test("real CodeMirror captures its bound Y.Text, clips highlights, navigates and
 	const unbind = bindCommentEditor(view, () => ({ text, documentId: boundDocumentId }));
 	try {
 		expect(surface.capture().anchor.context.quote).toBe("beta");
+		const block = surface.capture(true).anchor;
+		expect(block.context.quote).toBe("alpha 🙂 beta gamma");
+		expect(block.structure).toEqual({ kind: "blocks", blocks: [{ kind: "paragraph" }] });
+		Object.assign(session, { canAnchorBlocks: false });
+		expect(() => surface.capture(true)).toThrow("not enabled");
+		expect(surface.capture().anchor.context.quote).toBe("beta");
+		Object.assign(session, { canAnchorBlocks: true });
 		await until(() => !!parent.querySelector(".relay-comment-marker"));
 		expect(parent.querySelector(".relay-comment-highlight")?.textContent).toBe("beta");
 		parent.querySelector<HTMLButtonElement>(".relay-comment-marker")!.click();

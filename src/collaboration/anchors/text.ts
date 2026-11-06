@@ -1,5 +1,6 @@
 import * as Y from "yjs";
 import { fromBase64, toBase64 } from "lib0/buffer";
+import type { BlockStructure } from "./blocks";
 
 /** Wire v1 uses Yjs v1 encodings and UTF-16 offsets, including on the Rust side. */
 export interface TextAnchor {
@@ -12,6 +13,7 @@ export interface TextAnchor {
 	dependency: string;
 	selectedLength: number;
 	context: { quote: string; prefix: string; suffix: string; truncated: boolean };
+	structure?: BlockStructure;
 }
 
 export type TextAnchorResolution =

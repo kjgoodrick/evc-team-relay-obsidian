@@ -113,7 +113,8 @@ export class CommentComposer {
 			this.people.value = selected;
 		}
 		this.people.disabled = this.busy || this.onlinePending || this.textarea.disabled || !people.length;
-		const label = this.target?.type === "text" ? (this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
+		const label = this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
+			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
 		if (this.targetEl.dataset.target !== label) {
 			this.targetEl.dataset.target = label; this.targetEl.empty();
 			if (label) {

@@ -10,6 +10,7 @@ import { DiscussionStore } from "./storage/DiscussionStore";
 import { isId, protocolJson, type DiscussionAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
 import { commentEditorExtension, type CommentEditorSurface } from "./CommentEditor";
+import { BlockSelectionError } from "./anchors/blocks";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; entryId?: string; session?: DiscussionSession; message?: string };
@@ -39,9 +40,17 @@ export class DiscussionHost extends Component {
 			return available;
 		} });
 		this.registerEvent(this.plugin.app.workspace.on("editor-menu", (menu, editor, info) => {
-			if (info.file?.extension === "md" && this.shares.shareFor(info.file.path)) menu.addItem(item =>
-				item.setTitle("Comment on selected text").setIcon("message-square").onClick(() => { void this.commentSelection(editor); }));
+			if (info.file?.extension === "md" && this.shares.shareFor(info.file.path)) {
+				menu.addItem(item => item.setTitle("Comment on selected text").setIcon("message-square").onClick(() => { void this.commentSelection(editor); }));
+				if (this.targetFor(info.file).session?.canAnchorBlocks) menu.addItem(item =>
+					item.setTitle("Comment on block(s)").setIcon("message-square").onClick(() => { void this.commentSelection(editor, true); }));
+			}
 		}));
+		this.plugin.addCommand({ id: "comment-blocks", name: "Comment on block(s)", editorCheckCallback: (checking, editor, info) => {
+			const available = info.file?.extension === "md" && !!this.targetFor(info.file).session?.canAnchorBlocks;
+			if (available && !checking) void this.commentSelection(editor, true);
+			return available;
+		} });
 		this.register(this.auth.on(() => this.reconcile()));
 		this.register(this.auth.onTokenRefreshed(() => { this.reconcile(); for (const slot of this.slots.values()) void slot.session?.refresh(); }));
 		this.register(this.shares.on(() => this.reconcile()));
@@ -119,13 +128,13 @@ export class DiscussionHost extends Component {
 		return { path: file.path, entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
 	}
 	registerEditor(surface: CommentEditorSurface): () => void { this.editors.add(surface); return () => this.editors.delete(surface); }
-	async commentSelection(editor: Editor): Promise<void> {
+	async commentSelection(editor: Editor, blocks = false): Promise<void> {
 		try {
 			const surface = [...this.editors].find(item => item.editor === editor);
 			if (!surface) { new Notice("Open this shared note in editing view and wait for it to synchronize before commenting on a selection."); return; }
 			// Capture synchronously, before an asynchronous save or opening the sidebar
 			// can move focus, replace the file, or alter the user's selection.
-			const selected = surface.capture(), { session, entryId, file, anchor } = selected;
+			const selected = surface.capture(blocks), { session, entryId, file, anchor } = selected;
 			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session;
 			const draftId = "selection:" + entryId + ":" + uuid();
 			await session.trackLocal(session.store.saveDraft({ id: draftId, scopeId: entryId, revision: 0,
@@ -134,7 +143,7 @@ export class DiscussionHost extends Component {
 			await session.trackLocal(session.store.setPreference("activeNewDraft:" + entryId, draftId));
 			if (!current()) return;
 			this.lastFile = file; this.focus = undefined; await this.open();
-		} catch { new Notice("The selection could not be saved. Check comment access and wait for the shared editor to finish synchronizing, then try again."); }
+		} catch (error) { new Notice(error instanceof BlockSelectionError ? error.message : "The selection could not be saved. Check comment access and wait for the shared editor to finish synchronizing, then try again."); }
 	}
 	focusedThread(session: DiscussionSession, entryId: string) {
 		return this.focus?.session === session && this.focus.entryId === entryId ? this.focus : undefined;

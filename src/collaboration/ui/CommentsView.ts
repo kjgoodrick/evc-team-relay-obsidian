@@ -122,7 +122,7 @@ class ThreadCard {
 		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
 		this.controls.empty();
 		if (thread.anchor?.type === "text") {
-			const target = this.controls.createEl("button", { text: thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
+			const target = this.controls.createEl("button", { text: thread.anchor.structure ? "Show selected blocks" : thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
 			target.title = thread.anchor.context.quote;
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		}
