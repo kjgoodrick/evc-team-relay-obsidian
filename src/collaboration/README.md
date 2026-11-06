@@ -11,8 +11,9 @@ until their authorization, identity, and native rendering gates are complete.
 `DiscussionStore` persists drafts, operations, cached entities and checkpoints in
 IndexedDB, partitioned by canonical server URL, account UUID, local vault identity,
 and share UUID. Use the transport's normalized `identity.serverId` when opening
-the store. IndexedDB schema version 2 adds a remote-entity scope index; upgrading
-version 1 preserves pending text. Payloads are copied before asynchronous writes,
+the store. IndexedDB schema version 3 preserves previous drafts/outbox/cache,
+and adds per-scope invalidation generations to the version-2 scope index.
+Payloads are copied before asynchronous writes,
 so another pane cannot mutate a command during persistence.
 
 In the local queue, `scopeId` is the **managed entry UUID**, available offline.
@@ -61,7 +62,14 @@ is 20 seconds, below the worker's 30-second lease.
 - Acknowledgment persistence failures pause with `storage_error`, leaving the
   operation recoverable. UI status callbacks cannot alter command delivery.
 
-The host controller still needs capability negotiation, account/logout lifecycle,
+The transport now provides capability discovery, authorized thread/message/history
+reads, and a separate one-attempt `sendOnline` method for moderation and Send and
+reopen. Keep an ambiguous online operation's ID/payload for an explicit retry;
+never put it into the offline queue. Reads validate response IDs, revisions,
+pagination progress, supported structured bodies and event kinds. Read responses
+are capped at 512 KiB; command responses remain capped at 64 KiB.
+
+The host controller still needs capability negotiation wiring, account/logout lifecycle,
 cross-window enqueue notifications, explicit local-data removal UX, draft/rejection
 review, dependency repair and attachment staging. The store's `clearAll()` is an
 explicit local cleanup primitive, not an automatic logout policy. Stop every
@@ -70,12 +78,29 @@ of already downloaded content or user-authored local recovery text.
 
 ## Inbound data and targets
 
-`applyRemoteBatch` atomically updates entities/acks/checkpoint using a previous
-cursor precondition and monotonic entity revisions. The inbound event/read worker
-is not implemented yet. The server currently offers retained metadata replay
-and live paginated reads, not a frozen snapshot. Future integration must fetch
-current authorized data, handle epoch/cursor resets, hide revoked content, and
-avoid inferring deletion from missing paginated results.
+`DiscussionSync` implements incoming authorized replay for one visible entry.
+It reads 25 metadata events per page, collapses repeated message targets, and
+fetches current messages/reactions or thread state without downloading entire
+conversations. Cache revisions use the read's thread activity sequence because
+reactions do not increment message edit revisions. Thread removal purges cached
+message bodies atomically; a missing message triggers an authorized state read
+that distinguishes removal from entry revocation. Removed state never includes
+the anchor or comment body. A plain absence in a page never deletes cached data.
+
+`applyRemoteBatch` atomically updates entities/acks/checkpoint/purges with both
+cursor and invalidation-generation preconditions. Clearing a scope increments
+its generation, fencing in-flight reads even when its cursor was already empty.
+Expired/changed-epoch cursors clear remote state and restart retained replay;
+drafts/outgoing operations survive. Stop the worker and await `settled()` before
+closing its store. Authentication/protocol failures pause; network errors back
+off. Stop during a pending read ignores its late result.
+
+The worker yields after three pages and uses a five-second active-surface fallback
+after catching up. The host must stop it for hidden/background surfaces and wake
+it for relevant invalidations/local sends. WebSocket invalidation, snapshot/event
+retention and host lifecycle wiring remain open; this is not a mobile battery or
+native UI claim. The current server retains all metadata, so do not enable pruning
+until a snapshot bootstrap protocol replaces replay from zero.
 
 The text anchor module captures shared Yjs/Yrs encodings and dependency evidence;
 it does not itself prove server durability. The Bases module provides view-scoped

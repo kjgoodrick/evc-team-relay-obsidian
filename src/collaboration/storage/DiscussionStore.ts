@@ -19,6 +19,8 @@ export interface OutboxOperation extends QueuedCommand {
 	error?: string;
 }
 export interface CachedEntity { id: string; revision: number; value: Json }
+export interface ScopeCheckpoint { cursor?: string; generation: number }
+export interface CachePurge { prefix: string; throughRevision: number }
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
 	return new Promise((resolve, reject) => {
@@ -68,7 +70,7 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 2);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 3);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -79,7 +81,8 @@ export class DiscussionStore {
 				db.createObjectStore("entities", { keyPath: ["scopeId", "id"] });
 				db.createObjectStore("cursors");
 			}
-			open.transaction!.objectStore("entities").createIndex("scope", "scopeId");
+			if (event.oldVersion < 2) open.transaction!.objectStore("entities").createIndex("scope", "scopeId");
+			if (event.oldVersion < 3) db.createObjectStore("generations");
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -178,18 +181,24 @@ export class DiscussionStore {
 	}
 
 	/** Remote authorization loss clears cached content, never pending local text. */
-	async clearRemoteScope(scopeId: string): Promise<void> {
-		await this.transaction(["entities", "cursors"], "readwrite", async tx => {
+	async clearRemoteScope(scopeId: string, expected?: ScopeCheckpoint): Promise<boolean> {
+		return this.transaction(["entities", "cursors", "generations"], "readwrite", async tx => {
+			const generations = tx.objectStore("generations");
+			const generation: number = await request(generations.get(scopeId)) ?? 0;
+			if (expected && (generation !== expected.generation ||
+				await request(tx.objectStore("cursors").get(scopeId)) !== expected.cursor)) return false;
 			const store = tx.objectStore("entities");
 			for (const key of await request(store.index("scope").getAllKeys(scopeId))) await request(store.delete(key));
 			await request(tx.objectStore("cursors").delete(scopeId));
+			await request(generations.put(generation + 1, scopeId));
+			return true;
 		});
 	}
 
 	/** Explicit local account cleanup; callers must stop workers first. */
 	async clearAll(): Promise<void> {
-		await this.transaction(["drafts", "outbox", "entities", "cursors"], "readwrite", async tx => {
-			for (const name of ["drafts", "outbox", "entities", "cursors"]) await request(tx.objectStore(name).clear());
+		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations"], "readwrite", async tx => {
+			for (const name of ["drafts", "outbox", "entities", "cursors", "generations"]) await request(tx.objectStore(name).clear());
 		});
 	}
 
@@ -247,26 +256,60 @@ export class DiscussionStore {
 		return this.transaction(["cursors"], "readonly", tx => request(tx.objectStore("cursors").get(scopeId)));
 	}
 
+	/** A generation fences in-flight reads even when invalidation clears an empty cursor. */
+	async checkpoint(scopeId: string): Promise<ScopeCheckpoint> {
+		return this.transaction(["cursors", "generations"], "readonly", async tx => ({
+			cursor: await request(tx.objectStore("cursors").get(scopeId)),
+			generation: await request(tx.objectStore("generations").get(scopeId)) ?? 0,
+		}));
+	}
+
 	async entity(scopeId: string, id: string): Promise<CachedEntity | undefined> {
 		return this.transaction(["entities"], "readonly", tx => request(tx.objectStore("entities").get([scopeId, id])));
 	}
 
+	/** Bounded local browsing; a page's absence never implies a remote deletion. */
+	async entities(scopeId: string, prefix: string, after = "", limit = 100): Promise<CachedEntity[]> {
+		if (!Number.isInteger(limit) || limit < 1 || limit > 500 || (after && !after.startsWith(prefix))) throw new Error("Invalid cache page");
+		return this.transaction(["entities"], "readonly", async tx => {
+			const range = IDBKeyRange.bound([scopeId, after || prefix], [scopeId, prefix + "\uffff"], !!after, false);
+			return request(tx.objectStore("entities").getAll(range, limit));
+		});
+	}
+
 	/** Cache, acknowledgments and cursor advance together; stale streams cannot rewind it. */
 	async applyRemoteBatch(scopeId: string, expectedCursor: string | undefined, nextCursor: string,
-		entities: CachedEntity[], accepted: { operationId: string; result: Json }[] = []): Promise<boolean> {
-		requiredId(scopeId); requiredId(nextCursor);
+		entities: CachedEntity[], accepted: { operationId: string; result: Json }[] = [], expectedGeneration?: number,
+		purges: CachePurge[] = []): Promise<boolean> {
+		requiredId(scopeId);
+		if (typeof nextCursor !== "string" || nextCursor.length < 1 || nextCursor.length > 2048) throw new Error("Invalid checkpoint cursor");
 		if (entities.length > 500 || accepted.length > 500) throw new Error("Event batch exceeds limit");
 		for (const entity of entities) {
 			requiredId(entity.id); boundedJson(entity.value);
 			if (!Number.isSafeInteger(entity.revision) || entity.revision < 1) throw new Error("Invalid entity revision");
 		}
 		accepted.forEach(ack => boundedJson(ack.result));
-		return this.transaction(["entities", "cursors", "outbox"], "readwrite", async tx => {
+		if (purges.length > 100 || purges.some(p => !p.prefix || p.prefix.length > 512 || !Number.isSafeInteger(p.throughRevision) || p.throughRevision < 1)) throw new Error("Invalid cache purge");
+		return this.transaction(["entities", "cursors", "outbox", "generations"], "readwrite", async tx => {
 			const cursors = tx.objectStore("cursors"), store = tx.objectStore("entities");
 			if (await request(cursors.get(scopeId)) !== expectedCursor) return false;
+			if (expectedGeneration !== undefined && (await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== expectedGeneration) return false;
 			for (const entity of entities) {
 				const old: CachedEntity | undefined = await request(store.get([scopeId, entity.id]));
 				if (!old || old.revision < entity.revision) await request(store.put({ ...entity, scopeId }));
+			}
+			for (const purge of purges) {
+				const range = IDBKeyRange.bound([scopeId, purge.prefix], [scopeId, purge.prefix + "\uffff"]);
+				await new Promise<void>((resolve, reject) => {
+					const cursor = store.openCursor(range);
+					cursor.onerror = () => reject(cursor.error);
+					cursor.onsuccess = () => {
+						const row = cursor.result;
+						if (!row) { resolve(); return; }
+						if ((row.value as CachedEntity).revision <= purge.throughRevision) row.delete();
+						row.continue();
+					};
+				});
 			}
 			for (const ack of accepted) {
 				const op: OutboxOperation | undefined = await request(tx.objectStore("outbox").get(ack.operationId));
