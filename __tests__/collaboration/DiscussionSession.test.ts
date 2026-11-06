@@ -75,6 +75,23 @@ test("revoked access clears remote content and names while preserving local draf
 	} finally { await close(); }
 });
 
+test("manual recovery retries the same command after permission restoration and is disabled offline", async () => {
+	const { store, session, transport, close } = await fixture();
+	try {
+		transport.send.mockRejectedValueOnce(new DiscussionFailure("reject", "comment_forbidden", 403));
+		await session.queue(command()); await session.outbox.settled();
+		const rejected = (await store.getOperation(id(4)))!; expect(rejected.state).toBe("rejected");
+		session.setForeground(false);
+		await expect(session.retryRejected(rejected)).rejects.toThrow("Reconnect");
+		session.setForeground(true); await session.refresh();
+		expect(await session.retryRejected(rejected)).toBe(true); await session.outbox.settled();
+		expect(transport.send).toHaveBeenCalledTimes(2);
+		expect(transport.send.mock.calls[1][0]).toMatchObject(command());
+		expect((await store.getOperation(id(4)))?.state).toBe("accepted");
+		expect(await session.retryRejected(rejected)).toBe(false);
+	} finally { await close(); }
+});
+
 test("previously verified capabilities/permissions support offline drafts, but not an unknown server", async () => {
 	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
 	await store.setPreference("enabled", true); await store.setPreference("permission:" + entry, { read: true, comment: true, edit: false, moderate: false });
@@ -133,6 +150,9 @@ test("an unconfirmed online reply retains its exact operation across restart and
 	store.close(); store = await DiscussionStore.open(identity, factory);
 	try {
 		expect(await store.prepareOnlineDraft("reply", 0, { ...operation, operationId: id(99) })).toEqual(first);
+		await expect(store.saveDraft({ id: "reply", scopeId: entry, revision: 1, body: "Other window's edit" }, 0)).rejects.toThrow("unconfirmed");
+		await expect(store.removeDraft("reply", 0)).rejects.toThrow("unconfirmed");
+		expect((await store.getDraft("reply"))?.body).toBe("Reply and reopen");
 		await expect(store.prepareOnlineDraft("reply", 0, { ...operation, payload: { ...operation.payload, expected_state_revision: 3 } })).rejects.toThrow("unconfirmed");
 		await store.completeOnlineDraft("reply", 0, first.operationId);
 		expect(await store.getDraft("reply")).toBeUndefined(); expect(await store.preference("online:reply")).toBeUndefined();

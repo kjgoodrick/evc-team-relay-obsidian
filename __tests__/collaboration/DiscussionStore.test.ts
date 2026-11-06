@@ -62,6 +62,25 @@ test("permanent denial keeps draft/body and blocks dependent work without blocki
 	} finally { store.close(); }
 });
 
+test("manual retries retain immutable IDs and dependencies and cannot revive an accepted or newer attempt", async () => {
+	const db = new IDBFactory(), first = await DiscussionStore.open(identity, db), second = await DiscussionStore.open(identity, db);
+	try {
+		await first.enqueue(command("parent"), 1); await first.enqueue(command("child", ["parent"]), 2);
+		const denied = (await first.claimNext("worker", 3))!;
+		await first.fail("parent", denied.lease!, "comment_forbidden");
+		expect(await second.retryRejected("parent", "different-note", denied.attempt, 4)).toBe(false);
+		const retries = await Promise.all([first.retryRejected("parent", "note", denied.attempt, 4), second.retryRejected("parent", "note", denied.attempt, 4)]);
+		expect(retries.filter(Boolean)).toHaveLength(1);
+		const retried = (await first.claimNext("worker", 4))!;
+		expect(retried).toMatchObject({ ...command("parent"), attempt: 2 });
+		await first.fail("parent", retried.lease!, "comment_forbidden");
+		expect(await second.retryRejected("parent", "note", denied.attempt, 5)).toBe(false);
+		await first.accept("parent", { accepted: true });
+		expect(await second.retryRejected("parent", "note", retried.attempt, 6)).toBe(false);
+		expect((await first.claimNext("worker", 6))?.operationId).toBe("child");
+	} finally { first.close(); second.close(); }
+});
+
 test("events persist entities, receipt and checkpoint atomically, reject rewind and roll back invalid batches", async () => {
 	const store = await DiscussionStore.open(identity, new IDBFactory());
 	try {

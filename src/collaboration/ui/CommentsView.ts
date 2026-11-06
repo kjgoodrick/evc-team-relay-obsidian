@@ -2,10 +2,11 @@ import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { DiscussionHost } from "../DiscussionHost";
 import type { DiscussionSession } from "../DiscussionSession";
-import { isRecord, parseBody, protocolJson, REACTIONS, type DiscussionMessage, type MessageBody, type ThreadSummary } from "../DiscussionProtocol";
+import { isRecord, protocolJson, REACTIONS, type DiscussionMessage, type MessageBody, type ThreadSummary } from "../DiscussionProtocol";
 import type { OnlineOperation } from "../DiscussionTransport";
 import { CommentComposer } from "./CommentComposer";
 import { renderCommentBody } from "./CommentBody";
+import { PendingComments } from "./PendingComments";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 function plainText(body: MessageBody): string | undefined {
@@ -213,6 +214,7 @@ export class CommentsView extends ItemView {
 	private status?: HTMLElement;
 	private list?: HTMLElement;
 	private pending?: HTMLElement;
+	private pendingView?: PendingComments;
 	private closed = false;
 	constructor(leaf: WorkspaceLeaf, private host: DiscussionHost) { super(leaf); }
 	getViewType(): string { return COMMENTS_VIEW; }
@@ -238,6 +240,7 @@ export class CommentsView extends ItemView {
 		this.generation++; this.session = undefined; this.entryId = undefined;
 		const watch = this.watch; this.watch = undefined; watch?.(); this.composer?.dispose(); this.composer = undefined;
 		for (const card of this.cards.values()) card.dispose(); this.cards.clear();
+		this.pendingView?.dispose(); this.pendingView = undefined;
 		this.contentEl.empty(); this.status = undefined; this.list = undefined; this.pending = undefined; this.count = 20; this.after = 0; this.pages = [];
 	}
 	private async render(): Promise<void> {
@@ -255,6 +258,7 @@ export class CommentsView extends ItemView {
 			this.status = this.contentEl.createDiv({ cls: "relay-comment-status", attr: { role: "status", "aria-live": "polite" } });
 			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { void this.session?.refresh(); };
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
+			this.pendingView = new PendingComments(this.pending, this.session, this.entryId);
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
 			this.composer = new CommentComposer(this.contentEl, this.session, this.entryId, "new:" + this.entryId,
 				body => ({ type: "thread.create", payload: { type: "thread.create", thread_id: uuid(), message_id: uuid(),
@@ -269,11 +273,17 @@ export class CommentsView extends ItemView {
 		this.status!.setText(sync === "unavailable" ? "You no longer have access to this note’s comments." : sync === "syncing" ? "Updating comments…" :
 			statuses[session.status] + (permission?.read && !permission.comment ? " · You can read comments" : ""));
 		this.composer?.update();
-		if (!permission?.read || session.status === "authentication_required" || session.status === "unavailable") {
-			for (const card of this.cards.values()) card.dispose(); this.cards.clear(); this.pending!.empty(); return;
+		const canRead = !!permission?.read && session.status !== "authentication_required" && session.status !== "unavailable";
+		if (!canRead) {
+			for (const card of this.cards.values()) card.dispose(); this.cards.clear(); this.list!.empty();
 		}
-		const local = await session.local(entryId, this.after, this.count);
+		// Local authored work remains recoverable after read access is revoked;
+		// only remote entities require the current note permission.
+		const local = canRead ? await session.local(entryId, this.after, this.count) :
+			{ threads: [], pending: await session.store.pending(entryId), hasMore: false, nextAfter: this.after };
 		if (this.closed || generation !== this.generation || session.status === "closed") return;
+		this.pendingView!.update(local.pending);
+		if (!canRead) return;
 		const retained = new Set(local.threads.map(thread => thread.id));
 		for (const [id, card] of this.cards) if (!retained.has(id)) { card.dispose(); this.cards.delete(id); }
 		for (const thread of local.threads) {
@@ -289,13 +299,6 @@ export class CommentsView extends ItemView {
 		}
 		if (this.pages.length) { const previous = this.list!.createEl("button", { text: "Previous discussions", cls: "relay-comment-more" });
 			previous.onclick = () => { this.after = this.pages.pop() ?? 0; this.schedule(); }; }
-		this.pending!.empty();
-		for (const operation of local.pending) {
-			if (!isRecord(operation.payload) || operation.type === "reaction.set") continue;
-			const box = this.pending!.createDiv({ cls: "relay-comment-pending-item" });
-			box.createEl("p", { text: operation.state === "rejected" ? "Not sent — your text is kept on this device" : "Waiting to send…" });
-			try { renderCommentBody(box, parseBody(operation.payload.body), id => session.displayName(entryId, id)); } catch { box.createEl("p", { text: "Saved local operation" }); }
-		}
 		if (!local.threads.length && !local.pending.length && sync === "current") this.list!.createEl("p", { cls: "relay-comment-more", text: "No comments yet. Start a discussion below." });
 	}
 	async onClose(): Promise<void> {

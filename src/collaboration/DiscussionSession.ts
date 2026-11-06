@@ -224,6 +224,13 @@ export class DiscussionSession {
 			if (!this.closed) { this.invalidate(); this.broadcast(); this.notify(); }
 		}
 	}
+	async retryRejected(operation: OutboxOperation): Promise<boolean> {
+		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check comment permission before retrying.");
+		queuedEnvelope(this.identity.shareId, operation);
+		const retried = await this.trackLocal(this.store.retryRejected(operation.operationId, operation.scopeId, operation.attempt));
+		if (!this.closed) { this.broadcast(); this.outbox.wake(); this.notify(); }
+		return retried;
+	}
 	async onlineDraft(draft: Pick<Draft, "id" | "revision">, operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");
 		await this.trackLocal((async () => {

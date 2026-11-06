@@ -29,3 +29,13 @@ export function renderCommentBody(parent: HTMLElement, body: MessageBody | null,
 		}
 	}
 }
+
+/** Selectable recovery text includes link destinations and readable mention
+ * labels. The original structured command stays intact in local storage.
+ */
+export function commentBodyText(body: MessageBody, name: (id: string) => string): string {
+	const inlineText = (nodes: InlineNode[]): string => nodes.map(node => node.type === "text" ? node.text :
+		node.type === "mention" ? "@" + name(node.user_id) : node.children.map(child => child.text).join("") + " (" + node.url + ")").join("");
+	return body.blocks.map(block => block.type === "paragraph" ? inlineText(block.children) : block.type === "code" ? block.text :
+		block.items.map((item, i) => (block.ordered ? `${i + 1}. ` : "- ") + inlineText(item.children)).join("\n")).join("\n\n");
+}

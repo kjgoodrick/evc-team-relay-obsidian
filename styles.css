@@ -643,6 +643,7 @@
 .relay-comment-composer { margin-top: var(--size-4-3); display: grid; gap: var(--size-4-2); }
 .relay-comment-composer label { font-size: var(--font-ui-small); font-weight: var(--font-semibold); }
 .relay-comment-composer textarea { width: 100%; min-height: 84px; resize: vertical; }
+.relay-comment-recovery-text { width: 100%; margin-block: var(--size-4-2); resize: vertical; }
 .relay-comment-composer select { max-width: 100%; }
 .relay-comment-mention { color: var(--text-accent); background: var(--background-modifier-hover); border-radius: 3px; }
 .relay-comment-reaction[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--interactive-accent); }

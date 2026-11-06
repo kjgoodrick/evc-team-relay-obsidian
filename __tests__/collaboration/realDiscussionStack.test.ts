@@ -79,6 +79,13 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		expect((await transport.threads(fixture.entry)).threads).toHaveLength(1);
 		expect((await transport.state(fixture.entry, thread)).thread.state).toBe("open");
 		incoming.stop(); await incoming.settled();
+		// The server commits this reply, but the response is lost. Revocation then
+		// rejects its retry before receipt lookup; recovery must keep the same ID.
+		lostResponse = true;
+		const ambiguous = await enqueue("reply.create", { type: "reply.create", thread_id: thread, message_id: randomUUID(), body: body("Committed before access changed") });
+		worker.wake(); await worker.settled();
+		expect((await store.getOperation(ambiguous.operationId))?.state).toBe("queued");
+		time += 1001;
 		const rules = await api(`shares/${fixture.share}/comment-rules`, {}, true);
 		await api(`shares/${fixture.share}/comment-rules`, { method: "PUT", body: JSON.stringify({
 			expected_revision: rules.revision, rules: [{ user_id: fixture.reviewer, path: "", recursive: true, allowed: false }],
@@ -86,8 +93,19 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		const denied = await enqueue("reply.create", { type: "reply.create", thread_id: thread, message_id: randomUUID(), body: body("Keep my draft") });
 		worker.wake(); await worker.settled();
 		expect(await store.getOperation(denied.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden", payload: { body: body("Keep my draft") } });
+		const ambiguousRejected = (await store.getOperation(ambiguous.operationId))!;
+		expect(ambiguousRejected).toMatchObject({ state: "rejected", error: "comment_forbidden" });
 		expect(await store.entity(fixture.entry, messageKey(thread, message))).toBeUndefined();
-		expect((await api(`${scopePath}/threads/${thread}`)).messages).toHaveLength(3);
+		expect((await api(`${scopePath}/threads/${thread}`)).messages).toHaveLength(4);
+		const revokedRules = await api(`shares/${fixture.share}/comment-rules`, {}, true);
+		await api(`shares/${fixture.share}/comment-rules`, { method: "PUT", body: JSON.stringify({
+			expected_revision: revokedRules.revision, rules: [{ user_id: fixture.reviewer, path: "", recursive: true, allowed: true }],
+		}) }, true);
+		expect(await store.retryRejected(ambiguous.operationId, fixture.entry, ambiguousRejected.attempt, time)).toBe(true);
+		worker.wake(); await worker.settled();
+		expect((await store.getOperation(ambiguous.operationId))?.state).toBe("accepted");
+		expect((await api(`${scopePath}/threads/${thread}`)).messages).toHaveLength(4); // Manual retry recovered the original receipt.
+		expect(await store.retryRejected(ambiguous.operationId, fixture.entry, ambiguousRejected.attempt, time)).toBe(false);
 		await api("commands", { method: "POST", body: JSON.stringify({ protocol_version: 1, operation_id: randomUUID(),
 			share_id: fixture.share, entry_id: fixture.entry, command: { type: "thread.remove", thread_id: thread,
 				expected_state_revision: 3, reason: "Synthetic moderation" } }) }, true);

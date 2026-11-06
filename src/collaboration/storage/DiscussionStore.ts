@@ -130,7 +130,8 @@ export class DiscussionStore {
 		requiredId(draft.id); requiredId(draft.scopeId); boundedJson(draft.body);
 		if (!Number.isSafeInteger(draft.revision) || draft.revision < 0) throw new Error("Invalid draft revision");
 		draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
-		await this.transaction(["drafts"], "readwrite", async tx => {
+		await this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+			if (await request(tx.objectStore("preferences").get("online:" + draft.id))) throw new Error("Review the unconfirmed online action before editing this draft");
 			const store = tx.objectStore("drafts"), current: Draft | undefined = await request(store.get(draft.id));
 			if (expectedRevision !== undefined && (current?.revision ?? null) !== expectedRevision) throw new Error("Draft changed in another view");
 			if (current && (current.scopeId !== draft.scopeId || current.revision >= draft.revision)) {
@@ -153,7 +154,8 @@ export class DiscussionStore {
 		await this.transaction(["preferences"], "readwrite", async tx => { await request(tx.objectStore("preferences").put(value, key)); });
 	}
 	async removeDraft(id: string, revision: number): Promise<boolean> {
-		return this.transaction(["drafts"], "readwrite", async tx => {
+		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+			if (await request(tx.objectStore("preferences").get("online:" + id))) throw new Error("Review the unconfirmed online action before removing this draft");
 			const drafts = tx.objectStore("drafts"), current: Draft | undefined = await request(drafts.get(id));
 			if (!current || current.revision !== revision) return false;
 			await request(drafts.delete(id)); return true;
@@ -229,6 +231,20 @@ export class DiscussionStore {
 
 	async getOperation(id: string): Promise<OutboxOperation | undefined> {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
+	}
+
+	/** An explicit retry retains every immutable command field. A stale recovery
+	 * panel cannot requeue a newer attempt or an operation acknowledged elsewhere.
+	 */
+	async retryRejected(operationId: string, scopeId: string, attempt: number, now = Date.now()): Promise<boolean> {
+		requiredId(operationId); requiredId(scopeId);
+		if (!Number.isSafeInteger(attempt) || attempt < 1 || !Number.isFinite(now)) throw new Error("Invalid retry");
+		return this.transaction(["outbox"], "readwrite", async tx => {
+			const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
+			if (!op || op.scopeId !== scopeId || op.state !== "rejected" || op.attempt !== attempt) return false;
+			op.state = "queued"; op.nextAttemptAt = now; delete op.error; delete op.lease;
+			await request(store.put(op)); return true;
+		});
 	}
 
 	/** Pending/rejected local work only; accepted history does not grow this view. */

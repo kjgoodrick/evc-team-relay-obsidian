@@ -1,0 +1,87 @@
+import type { DiscussionSession } from "../DiscussionSession";
+import { isRecord, parseBody, REACTIONS } from "../DiscussionProtocol";
+import type { OutboxOperation } from "../storage/DiscussionStore";
+import { commentBodyText, renderCommentBody } from "./CommentBody";
+
+const failureHelp: Record<string, string> = {
+	comment_forbidden: "Comment permission was denied. Restore access before retrying.",
+	target_unavailable: "The note or discussion could not be reached. Sync the note or restore access before retrying.",
+	stale_message_revision: "This comment changed elsewhere. Review the current version before editing again.",
+	author_required: "Only the comment’s author can make this change.",
+	mention_unavailable: "A mentioned member no longer has access to this note.",
+	too_many_mentions: "This comment contains too many mentions.",
+	command_too_large: "This comment exceeds the server’s size limit.",
+	invalid_command: "The server could not accept this comment’s format.",
+	operation_id_conflict: "The server could not confirm this saved request. Keep your text and contact support.",
+	identifier_unavailable: "This comment’s target could not be used. Keep your text and review the discussion.",
+};
+
+/** Keyed cards preserve text selection while incoming polling refreshes the
+ * sidebar. Recovery never changes a submitted payload or creates a new ID.
+ */
+export class PendingComments {
+	private cards = new Map<string, { el: HTMLElement; signature: string }>();
+	private heading: HTMLElement;
+	private limit: HTMLElement;
+	private disposed = false;
+	constructor(private parent: HTMLElement, private session: DiscussionSession, private entryId: string) {
+		this.heading = parent.createEl("h3", { text: "Saved on this device" });
+		this.limit = parent.createEl("p", { cls: "relay-comment-muted" });
+	}
+	update(operations: OutboxOperation[]): void {
+		if (this.disposed) return;
+		this.heading.hidden = operations.length === 0;
+		this.limit.hidden = operations.length < 100;
+		this.limit.setText("Showing the first 100 pending changes. More appear as these are confirmed.");
+		const ids = new Set(operations.map(op => op.operationId));
+		for (const [id, card] of this.cards) if (!ids.has(id)) { card.el.remove(); this.cards.delete(id); }
+		for (const op of operations) {
+			const canRetry = this.session.online && !!this.session.permission(this.entryId)?.comment;
+			const signature = JSON.stringify([op, canRetry, this.session.participants(this.entryId)]);
+			let card = this.cards.get(op.operationId);
+			if (!card) {
+				card = { el: this.parent.createDiv({ cls: "relay-comment-pending-item" }), signature: "" };
+				this.cards.set(op.operationId, card);
+			}
+			if (signature === card.signature) continue;
+			card.signature = signature; card.el.empty();
+			this.render(card.el, op, canRetry);
+		}
+	}
+	private render(box: HTMLElement, op: OutboxOperation, canRetry: boolean): void {
+		// A rejected retry may follow an accepted request whose acknowledgment was
+		// lost. Do not promise "not sent" or offer a fresh-ID resubmission here.
+		box.createEl("p", { text: op.state === "rejected" ? "Delivery needs review — your text is kept on this device" :
+			op.dependsOn.length ? "Waiting for an earlier saved change to be confirmed…" : "Waiting for delivery confirmation…" });
+		const payload = op.payload;
+		if (isRecord(payload) && op.type === "reaction.set") {
+			const emoji = typeof payload.emoji === "string" ? REACTIONS[payload.emoji as keyof typeof REACTIONS] : undefined;
+			box.createEl("p", { text: `${payload.present ? "Add" : "Remove"} reaction${emoji ? ": " + emoji : ""}` });
+		} else if (isRecord(payload)) {
+			try {
+				const body = parseBody(payload.body), name = (id: string) => this.session.displayName(this.entryId, id);
+				renderCommentBody(box, body, name);
+				const select = box.createEl("button", { text: "Select text to copy", attr: { type: "button" } });
+				const text = box.createEl("textarea", { cls: "relay-comment-recovery-text", attr: { rows: "5", readonly: "", "aria-label": "Saved comment text" } });
+				text.hidden = true; text.value = commentBodyText(body, name);
+				select.onclick = () => { text.hidden = false; text.focus(); text.select(); };
+			} catch { box.createEl("p", { text: "Saved local change could not be displayed. Its original data is still kept on this device." }); }
+		}
+		if (op.state !== "rejected") return;
+		box.createEl("p", { text: failureHelp[op.error ?? ""] ?? "The server has not confirmed this change. Check your connection and access to this note." });
+		box.createEl("p", { cls: "relay-comment-muted", text: "Retry checks the original request without creating a second comment. If you copy it into a new comment, check the discussion first to avoid duplicates." });
+		const retry = box.createEl("button", { text: "Retry original request", attr: { type: "button" } });
+		retry.disabled = !canRetry;
+		if (!canRetry) box.createEl("p", { cls: "relay-comment-muted", text: "Reconnect with comment permission to retry. You can still select and copy your saved text." });
+		const status = box.createDiv({ attr: { role: "status" } });
+		retry.onclick = () => {
+			retry.disabled = true;
+			void this.session.retryRejected(op).then(retried => {
+				if (!this.disposed) status.setText(retried ? "Saved for retry" : "This saved change has already been updated. Refresh comments to see its status.");
+			}).catch(() => {
+				if (!this.disposed) { status.setText("Could not retry. Your saved text is unchanged. Reconnect or refresh permissions and try again."); retry.disabled = !this.session.online || !this.session.permission(this.entryId)?.comment; }
+			});
+		};
+	}
+	dispose(): void { this.disposed = true; this.cards.clear(); this.parent.empty(); }
+}
