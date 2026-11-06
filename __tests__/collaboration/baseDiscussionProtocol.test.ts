@@ -1,4 +1,4 @@
-import { BASE_TARGET_KINDS, parseAnchor, parseBaseTargetContext, parseChanges, parseThreadList, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, parseAnchor, parseBaseTargetContext, parseChanges, parseThreadList, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { DiscussionTransport, queuedEnvelope } from "../../src/collaboration/DiscussionTransport";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -76,6 +76,23 @@ test("transport negotiates supported targets, requests context and refuses cross
 	fetcher.mockImplementation(async () => reply({ threads: [], has_more: true, next_after: 5, scanned_through: 5, view_id: id(4) }));
 	expect((await transport.threads(id(8), 0, id(4))).next_after).toBe(5);
 	expect(fetcher.mock.calls.at(-1)![0]).toContain("&view_id=" + id(4));
+});
+
+test("record capabilities are explicit, bounded and conservative with older servers", async () => {
+	const base = { protocol_version: 1, features: { discussion_commands: true, discussion_bases: true }, discussion_base_targets: BASE_TARGET_KINDS };
+	const fetcher = jest.fn().mockImplementation(async () => reply(base));
+	const transport = new DiscussionTransport(identity, credential, fetcher);
+	expect((await transport.capabilities()).baseRecordTypes).toEqual(["markdown"]);
+	for (const kinds of [[...BASE_RECORD_TYPES, "future"], [], ["folder", "image"]]) {
+		fetcher.mockImplementation(async () => reply({ ...base, discussion_base_record_types: kinds }));
+		expect((await transport.capabilities()).baseRecordTypes).toEqual(BASE_RECORD_TYPES.filter(kind => kinds.includes(kind)));
+	}
+	for (const kinds of [null, "image", [1], ["image", "image"], ["x".repeat(65)], Array.from({ length: 33 }, (_, n) => String(n))]) {
+		fetcher.mockImplementation(async () => reply({ ...base, discussion_base_record_types: kinds }));
+		await expect(transport.capabilities()).rejects.toMatchObject({ code: "invalid_read_response" });
+	}
+	fetcher.mockImplementation(async () => reply({ ...base, features: { ...base.features, discussion_bases: false }, discussion_base_record_types: BASE_RECORD_TYPES }));
+	expect((await transport.capabilities()).baseRecordTypes).toEqual([]);
 });
 
 test.each([["base_discussions_disabled", "pause"], ["base_definition_not_synced", "retry"], ["base_view_unavailable", "reject"]])(

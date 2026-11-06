@@ -1,9 +1,9 @@
 import { Modal, type App } from "obsidian";
 import { v4 as uuid } from "uuid";
-import { isBaseProperty, type BaseTargetKind } from "../DiscussionProtocol";
+import { isBaseProperty, type BaseTargetKind, type BaseRecordType } from "../DiscussionProtocol";
 import type { BaseTargetSelection } from "../DiscussionSession";
 
-export type BaseRecordChoice = { id: string; path: string };
+export type BaseRecordChoice = { id: string; path: string; kind: BaseRecordType };
 export type BaseRecordPage = { records: BaseRecordChoice[]; hasMore: boolean };
 // Official file properties: https://obsidian.md/help/bases/syntax#File%20properties
 const FILE_PROPERTIES = ["backlinks", "ctime", "embeds", "ext", "file", "folder", "links", "mtime", "name", "path", "properties", "size", "tags"];
@@ -43,15 +43,15 @@ export class BaseTargetPicker extends Modal {
 		}
 		this.kind.value = Array.from(this.kind.options).find(option => !option.disabled)?.value ?? "";
 		this.recordFields = this.contentEl.createDiv();
-		this.recordFields.createEl("p", { text: "Choose the shared note represented by the row or card. This list includes notes outside the view’s current filters." });
-		this.query = this.field("Find shared note", this.recordFields.createEl("input", { attr: { type: "search" } }));
+		this.recordFields.createEl("p", { text: "Choose the shared file represented by the row or card. This list includes files outside the view’s current filters." });
+		this.query = this.field("Find shared file", this.recordFields.createEl("input", { attr: { type: "search" } }));
 		this.record = this.field("Record", this.recordFields.createEl("select"));
 		this.propertyFields = this.contentEl.createDiv();
 		this.propertySource = this.field("Property source", this.propertyFields.createEl("select"));
 		for (const value of ["note", "file"]) this.propertySource.createEl("option", { text: value === "note" ? "Note property" : "File property", attr: { value } });
 		const listId = "relay-base-properties-" + uuid();
 		this.propertyName = this.field("Property name", this.propertyFields.createEl("input", { attr: { type: "text", list: listId, maxlength: "512", placeholder: "status" } }));
-		this.propertyFields.createEl("p", { text: "Use the property’s original name, without the note. or file. prefix. A renamed column’s display label may differ." });
+		this.propertyFields.createEl("p", { text: "Use the property’s original name, without the note. or file. prefix. A renamed column’s display label may differ. Note properties are available only for Markdown records; choose a file property for other records." });
 		this.suggestions = this.propertyFields.createEl("datalist", { attr: { id: listId } });
 		this.status = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
 		this.accept = this.contentEl.createEl("button", { text: "Write comment", cls: "mod-cta" });
@@ -77,7 +77,7 @@ export class BaseTargetPicker extends Modal {
 		this.record.empty(); this.record.createEl("option", { text: "Choose a record…", attr: { value: "" } });
 		for (const record of page.records) this.record.createEl("option", { text: record.path, attr: { value: record.id } });
 		this.record.value = this.records.has(previous) ? previous : "";
-		this.status.setText(page.hasMore ? "Showing the first 50 matching notes. Narrow the search to find another record." : "");
+		this.status.setText(page.hasMore ? "Showing the first 50 matching files. Narrow the search to find another record." : "");
 		this.update();
 	}
 	private selectedTarget(): BaseTargetSelection | undefined {
@@ -88,14 +88,17 @@ export class BaseTargetPicker extends Modal {
 		if (type === "item") return recordId ? { type, recordId } : undefined;
 		const property = { source: this.propertySource.value, name: this.propertyName.value };
 		if (!isBaseProperty(property) || !property.name.trim()) return;
+		if (type === "cell" && property.source === "note" && this.records.get(this.record.value)?.kind !== "markdown") return;
 		return type === "property" ? { type, property } : recordId ? { type: "cell", recordId, property } : undefined;
 	}
 	private update(): void {
 		if (this.closed) return;
 		this.recordFields.hidden = !["item", "cell"].includes(this.kind.value);
 		this.propertyFields.hidden = !["cell", "property"].includes(this.kind.value);
+		const noteProperties = this.kind.value !== "cell" || this.records.get(this.record.value)?.kind === "markdown";
+		this.propertySource.options[0].disabled = !noteProperties;
 		this.suggestions.empty();
-		const names = this.propertySource.value === "file" ? FILE_PROPERTIES : this.records.has(this.record.value) ? this.properties(this.record.value) : [];
+		const names = this.propertySource.value === "file" ? FILE_PROPERTIES : noteProperties && this.records.has(this.record.value) ? this.properties(this.record.value) : [];
 		for (const value of names.slice(0, 100)) this.suggestions.createEl("option", { attr: { value } });
 		for (const field of [this.kind, this.query, this.record, this.propertySource, this.propertyName]) field.disabled = this.busy;
 		this.accept.disabled = this.busy || !this.current() || !this.selectedTarget();

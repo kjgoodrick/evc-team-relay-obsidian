@@ -106,11 +106,11 @@ test("non-JSON forbidden responses still invalidate access and do not expose raw
 test("negotiates text anchors and binds document context to the requested entry", async () => {
 	const fetcher = jest.fn().mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true } }));
 	const transport = new DiscussionTransport(identity, credentials, fetcher);
-	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: false, imageOccurrences: false, imageFiles: false, pictures: false, recovery: false, baseTargets: [] });
+	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: false, imageOccurrences: false, imageFiles: false, pictures: false, recovery: false, baseTargets: [], baseRecordTypes: [] });
 	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true, discussion_block_anchors: "true" } }));
 	await expect(transport.capabilities()).rejects.toMatchObject({ action: "pause", code: "invalid_read_response" });
 	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true, discussion_block_anchors: true } }));
-	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false, imageFiles: false, pictures: false, recovery: false, baseTargets: [] });
+	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false, imageFiles: false, pictures: false, recovery: false, baseTargets: [], baseRecordTypes: [] });
 	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, entry_id: id(4), generation: id(8) }));
 	expect(await transport.anchorContext(id(4))).toEqual({ entryId: id(4), generation: id(8) });
 	expect(fetcher.mock.calls[3][0]).toContain(`/entries/${id(4)}/anchor-context`);

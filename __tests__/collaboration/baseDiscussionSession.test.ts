@@ -11,7 +11,7 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 const identity = { serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "base-session" };
 const scope = baseDiscussionScope(id(3), id(4)), other = baseDiscussionScope(id(3), id(5));
 function remote() {
-	return { identity, capabilities: jest.fn().mockResolvedValue({ discussions: true, baseTargets: ["view", "item", "cell", "property"] }),
+	return { identity, capabilities: jest.fn().mockResolvedValue({ discussions: true, baseTargets: ["view", "item", "cell", "property"], baseRecordTypes: ["markdown", "image", "file"] }),
 		baseTargetContext: jest.fn().mockImplementation(async (key: string, view: string, record?: string) => ({ protocol_version: 1,
 			entry_id: parseDiscussionScope(key)!.entryId, view_id: view, definition_id: id(6), generation: id(7), registry_revision: 1,
 			...(record ? { record_id: record, record_generation: id(8) } : {}) })),
@@ -29,6 +29,7 @@ test("saved-view local scopes preserve independent drafts, contexts and pending 
 	const transport = remote(); let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
 	try {
 		await session.start(); session.watch(scope, () => {}, "base"); session.watch(other, () => {}, "base"); await session.refresh();
+		expect(session.canAnchorBaseRecord("image")).toBe(true); expect(session.canAnchorBaseRecord("folder")).toBe(false);
 		const first = await session.captureBaseTarget(scope, { type: "cell", recordId: id(9), property: { source: "note", name: "status" } });
 		const second = await session.captureBaseTarget(other, { type: "view" });
 		expect(first.view_id).toBe(id(4)); expect(second.view_id).toBe(id(5));
@@ -45,6 +46,7 @@ test("saved-view local scopes preserve independent drafts, contexts and pending 
 		transport.send.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
 		session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
 		await session.start(); session.watch(scope, () => {}, "base"); session.watch(other, () => {}, "base"); await session.refresh();
+		expect(session.canAnchorBaseRecord("image")).toBe(true); expect(session.canAnchorBaseRecord("audio")).toBe(false);
 		expect(await session.captureBaseTarget(scope, { type: "cell", recordId: id(9), property: { source: "note", name: "status" } })).toEqual(first);
 		await expect(session.captureBaseTarget(other, { type: "cell", recordId: id(9), property: { source: "note", name: "status" } })).rejects.toThrow("Connect once");
 		expect((await store.selectionDrafts(scope)).drafts).toHaveLength(1);
@@ -52,6 +54,20 @@ test("saved-view local scopes preserve independent drafts, contexts and pending 
 		expect(await store.pending(scope)).toHaveLength(0); expect(await store.pending(other)).toHaveLength(1);
 		const picture = await prepareLocalPicture(id(14), scope, new Uint8Array([1, 2, 3]).buffer);
 		expect(picture.scopeId).toBe(scope);
+	} finally { await session.close(); }
+});
+
+test("a server downgrade replaces cached record capabilities while keeping existing work", async () => {
+	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
+	const transport = remote(); let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); expect(session.canAnchorBaseRecord("image")).toBe(true);
+		await store.saveDraft({ id: "kept", scopeId: scope, revision: 1, body: "Keep this" }); await session.close();
+		store = await DiscussionStore.open(identity, factory); session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+		transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "item", "cell", "property"] });
+		await session.start();
+		expect(session.canAnchorBaseRecord("image")).toBe(false); expect(session.canAnchorBaseRecord("markdown")).toBe(true);
+		expect((await store.getDraft("kept"))?.body).toBe("Keep this");
 	} finally { await session.close(); }
 });
 

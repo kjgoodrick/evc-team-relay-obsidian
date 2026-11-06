@@ -7,7 +7,7 @@ import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession } from "./DiscussionSession";
 import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
-import { isId, protocolJson, type DiscussionAnchor } from "./DiscussionProtocol";
+import { isId, isBaseRecordType, protocolJson, type DiscussionAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
 import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection, type ImageCommentContext } from "./CommentEditor";
 import { BlockSelectionError } from "./anchors/blocks";
@@ -208,11 +208,11 @@ export class DiscussionHost extends Component {
 		const current = () => !this.stopped && session.status !== "closed" && this.lastFile === file &&
 			this.targetFor(file).session === session && this.targetFor(file).entryId === scopeId && !!session.permission(scopeId)?.comment;
 		const records = (): BaseRecordChoice[] => {
-			const found = new Map<string, BaseRecordChoice>(), duplicates = new Set<string>();
+			const found = new Map<string, BaseRecordChoice>(), duplicates = new Set<string>(), seen = new Set<string>();
 			folder.folderIndex.eachRecord((record, path) => {
-				if (record.type !== "markdown" || !isId(record.id) || !this.plugin.app.vault.getFileByPath(folder.absolutePath(path))) return;
-				if (found.has(record.id)) duplicates.add(record.id);
-				found.set(record.id, { id: record.id, path });
+				if (seen.has(record.id)) duplicates.add(record.id); seen.add(record.id);
+				if (!isBaseRecordType(record.type) || !session.canAnchorBaseRecord(record.type) || !isId(record.id) || !this.plugin.app.vault.getFileByPath(folder.absolutePath(path))) return;
+				found.set(record.id, { id: record.id, path, kind: record.type });
 			});
 			for (const id of duplicates) found.delete(id);
 			return [...found.values()].sort((a, b) => a.path.localeCompare(b.path));
@@ -220,16 +220,19 @@ export class DiscussionHost extends Component {
 		const catalog = records();
 		new BaseTargetPicker(this.plugin.app, target.baseViewName ?? "Saved view", query => {
 			if (!current()) return { records: [], hasMore: false };
-			const matches = catalog.filter(record => record.path.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+			const matches = catalog.filter(record => session.canAnchorBaseRecord(record.kind) && record.path.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
 			return { records: matches.slice(0, 50), hasMore: matches.length > 50 };
 		}, recordId => {
 			const record = current() ? catalog.find(record => record.id === recordId) : undefined;
-			if (!record || folder.folderIndex.recordFor(record.path)?.id !== recordId) return [];
+			if (!record || record.kind !== "markdown" || folder.folderIndex.recordFor(record.path)?.id !== recordId) return [];
 			const note = record ? this.plugin.app.vault.getFileByPath(folder.absolutePath(record.path)) : null;
 			return note ? Object.keys(this.plugin.app.metadataCache.getFileCache(note)?.frontmatter ?? {}).filter(name => name !== "position") : [];
 		}, async selection => {
 			if (!current()) return false;
-			if ((selection.type === "cell" || selection.type === "item") && !records().some(record => record.id === selection.recordId)) throw new Error("The shared record changed");
+			if (selection.type === "cell" || selection.type === "item") {
+				const record = records().find(record => record.id === selection.recordId);
+				if (!record || selection.type === "cell" && selection.property.source === "note" && record.kind !== "markdown") throw new Error("The shared record changed");
+			}
 			const anchor = await session.captureBaseTarget(scopeId, selection);
 			if (!current()) return false;
 			return this.saveCommentSelection({ file, session, entryId: scopeId, anchor });
@@ -315,7 +318,7 @@ export class DiscussionHost extends Component {
 		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
-		folder?.folderIndex.eachRecord((record, path) => { if (record.type === "markdown" && record.id === target.record_id) paths.push(path); });
+		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });
 		const record = paths.length === 1 ? paths[0] : "Unavailable record (" + target.record_id.slice(0, 8) + ")";
 		return target.type === "item" ? "Record: " + record : "Cell: " + record + " · " + target.property.source + "." + target.property.name;
 	}

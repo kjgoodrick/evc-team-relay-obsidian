@@ -2,7 +2,7 @@ import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
 import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictureHash, type PictureMetadata, type PictureRendition, type PictureUpload } from "./PictureProtocol";
-import { BASE_TARGET_KINDS, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type DiscussionAnchor } from "./DiscussionProtocol";
+import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type BaseRecordType, type DiscussionAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
@@ -165,7 +165,7 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; baseTargets: BaseTargetKind[] }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[] }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
@@ -173,15 +173,24 @@ export class DiscussionTransport implements DiscussionSender {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
+		let baseRecordTypes: BaseRecordType[] = [];
 		if (value.features.discussion_bases === true) {
 			if (!Array.isArray(value.discussion_base_targets) || value.discussion_base_targets.length > 32 ||
 				value.discussion_base_targets.some(kind => typeof kind !== "string" || kind.length > 64) ||
 				new Set(value.discussion_base_targets).size !== value.discussion_base_targets.length) throw new DiscussionFailure("pause", "invalid_read_response");
 			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind));
+			const records = value.discussion_base_record_types;
+			// The initial Bases protocol only accepted Markdown records.
+			if (records === undefined) baseRecordTypes = ["markdown"];
+			else {
+				if (!Array.isArray(records) || records.length > 32 || records.some(kind => typeof kind !== "string" || kind.length > 64) ||
+					new Set(records).size !== records.length) throw new DiscussionFailure("pause", "invalid_read_response");
+				baseRecordTypes = BASE_RECORD_TYPES.filter(kind => records.includes(kind));
+			}
 		}
 		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
-			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets };
+			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes };
 	}
 
 	async picture(entryId: string, pictureId: string): Promise<PictureMetadata> {

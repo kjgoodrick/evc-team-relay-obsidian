@@ -9,9 +9,11 @@ import { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import { BaseTargetPicker } from "../../src/collaboration/ui/BaseTargetPicker";
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
+jest.mock("../../src/collaboration/ui/BaseTargetPicker", () => ({ BaseTargetPicker: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
 jest.mock("../../src/AttachmentFile", () => ({ isAttachmentFile: (value: { isAttachment?: boolean }) => value?.isAttachment === true }));
 jest.mock("obsidian", () => ({
 	Component: class { register() {} registerEvent() {} registerDomEvent() {} addChild<T>(child: T): T { return child; } },
@@ -85,12 +87,12 @@ test("saved-view restoration is scoped to the current account and does not carry
 	} finally { s.close(); }
 });
 
-test("target labels follow managed record identity across renames and refuse ambiguous path associations", async () => {
+test.each(["markdown", "image", "audio", "video", "pdf", "canvas", "file"])("%s target labels follow managed record identity across renames and refuse ambiguous path associations", async kind => {
 	const s = fixture();
 	try {
 		let paths = ["Example.md"];
 		Object.assign(s.folder.folderIndex, { eachRecord: (visit: (record: { id: string; type: string }, path: string) => void) => {
-			for (const path of paths) visit({ id: id(8), type: "markdown" }, path);
+			for (const path of paths) visit({ id: id(8), type: kind }, path);
 		} });
 		const session = { identity: { shareId: id(2) } } as DiscussionSession;
 		const scope = baseDiscussionScope(id(3), id(4));
@@ -100,6 +102,44 @@ test("target labels follow managed record identity across renames and refuse amb
 		paths = ["Renamed.md"]; expect(s.host.targetLabel(session, scope, anchor)).toBe("Cell: Renamed.md · note.status");
 		paths.push("Duplicate.md"); expect(s.host.targetLabel(session, scope, anchor)).toContain("Unavailable record");
 		expect(s.host.targetLabel(session, baseDiscussionScope(id(3), id(5)), anchor)).toBeUndefined();
+	} finally { s.close(); }
+});
+
+test("native record selection respects negotiated types, excludes folders/local-only and duplicate IDs, and rechecks a changed record", async () => {
+	const s = fixture(), flush = async () => { for (let n = 0; n < 10; n++) await Promise.resolve(); };
+	try {
+		await s.start(); s.file.path = "Team/Planning.base"; s.file.extension = "base";
+		let records = [
+			{ id: id(10), type: "markdown", path: "Note.md" }, { id: id(11), type: "image", path: "Chart.png" },
+			{ id: id(12), type: "file", path: "Data.csv" }, { id: id(13), type: "folder", path: "Folder" },
+			{ id: id(14), type: "audio", path: "Sound.mp3" }, { id: id(15), type: "image", path: "Missing.png" },
+			{ id: id(16), type: "image", path: "Duplicate.png" }, { id: id(16), type: "folder", path: "Duplicate" },
+		];
+		Object.assign(s.folder, { absolutePath: (path: string) => "Team/" + path, toVirtualPath: (path: string) => path.slice(5) });
+		Object.assign(s.folder.folderIndex, {
+			recordFor: (path: string) => path === "Planning.base" ? { id: id(3), type: "file" } : records.find(record => record.path === path),
+			eachRecord: (visit: (record: { id: string; type: string }, path: string) => void) => records.forEach(record => visit(record, record.path)),
+		});
+		const session = Object.assign(mockSessions[0], { permission: () => ({ read: true, comment: true }),
+			canAnchorBase: () => true, canAnchorBaseRecord: (kind: string) => ["markdown", "image", "file"].includes(kind),
+			captureBaseTarget: jest.fn().mockResolvedValue({ type: "base" }) }) as unknown as DiscussionSession;
+		s.store.preference.mockResolvedValueOnce({ id: id(4), name: "Planning", type: "table", state: "active" });
+		s.host.current(); await flush();
+		// An inventory entry without a locally available file cannot be selected.
+		const plugin = (s.host as unknown as { plugin: Plugin }).plugin;
+		jest.spyOn(plugin.app.vault, "getFileByPath").mockImplementation(path => path === "Team/Missing.png" ? null : s.file);
+		const saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+		await s.host.commentCurrentBase(session, baseDiscussionScope(id(3), id(4)));
+		const [, , search, properties, choose] = jest.mocked(BaseTargetPicker).mock.calls.at(-1)!;
+		expect(search("").records.map(record => record.path)).toEqual(["Chart.png", "Data.csv", "Note.md"]);
+		expect(search("chart").records).toEqual([{ id: id(11), path: "Chart.png", kind: "image" }]);
+		expect(properties(id(11))).toEqual([]);
+		await expect(choose({ type: "cell", recordId: id(11), property: { source: "note", name: "name" } })).rejects.toThrow("changed");
+		expect(await choose({ type: "cell", recordId: id(11), property: { source: "file", name: "size" } })).toBe(true);
+		expect(saved).toHaveBeenCalledTimes(1);
+		records = records.filter(record => record.id !== id(11));
+		await expect(choose({ type: "item", recordId: id(11) })).rejects.toThrow("changed");
+		expect(session.captureBaseTarget).toHaveBeenCalledTimes(1);
 	} finally { s.close(); }
 });
 

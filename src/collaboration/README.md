@@ -31,11 +31,22 @@ request view-specific lists/changes and validate filtered pages. The existing
 durable draft/outbox preserves these anchors across restart and sends them through
 comment-only access; the actual HTTP fixture verifies rename, retry, revocation
 and regrant. The native sidebar now offers an explicit saved-view chooser and
-targets for the whole view, a managed Markdown record, a cell and a note/file
+targets for the whole view, a managed file record, a cell and a note/file
 property header. The discussion view is pinned separately from the native layout;
-the target picker searches authorized local shared notes and does not evaluate
+the target picker searches local shared files and does not evaluate
 the view's filters. It saves IDs and property names, never row offsets or display
 labels. Inline selection, markers and target navigation remain adapter work.
+
+`discussion_base_record_types` negotiates Markdown, image, audio, video, PDF,
+Canvas and generic file records. Older servers default to Markdown only; unknown
+kinds are ignored, malformed lists are refused and the negotiated list survives
+offline restart. These are Bases rows/cells, not PDF/Canvas content annotations.
+Folders, local-only files and ambiguous managed IDs cannot be selected. Only
+Markdown records have note properties; all supported records have file-property
+targets. The picker preserves an invalid note-property selection until the user
+explicitly chooses a file property, and capture rechecks the current inventory.
+Type conversions rotate server anchor lineage, including when converted back;
+renames and content changes retain it. Existing drafts remain recoverable.
 
 Local scope keys encode both entry and view as `base:<entry UUID>:<view UUID>`;
 HTTP still sends the ordinary managed-entry ID with the required view filter.
@@ -54,12 +65,16 @@ Snapshot resets clear cached authority as well as remote entities. The session
 finishes any older permission request and reauthorizes before replay so valid
 read grants and generations are restored for the next offline startup. The
 actual HTTP fixture reproduced the earlier cache-access loss and verifies the
-fix through revocation, regrant and an offline restart.
+fix through revocation, regrant and an offline restart. A subsequent native
+Obsidian 1.13.7 check observed two automatic snapshot resets, restored cached
+read grants and both threads after a fully offline reload. Native image-cell
+and CSV-record sends, draft reload and offline CSV queue/reload also passed.
+Native record tests use an owner; reviewer enforcement has actual HTTP evidence.
 
 Actual HTTP session tests cover separate views, offline restart/delivery, cache
 revocation/regrant and retained drafts. Desktop Obsidian tests capture/send all
 four target kinds, restore a cell draft, separate views and retain cached comments
-and queued offline work. Groups/lanes, formulas/summaries, non-Markdown records,
+and queued offline work. Groups/lanes, formulas/summaries,
 inline definitions, provisional identities, Time & Line, target-aware mention
 choices, native reviewer and mobile/resource acceptance remain unfinished. See
 the server's `docs/base-discussions-preview.md`, `realBaseDiscussionStack.test.ts`

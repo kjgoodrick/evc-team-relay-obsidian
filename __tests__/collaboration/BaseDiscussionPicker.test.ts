@@ -46,7 +46,7 @@ test("account or file changes close a view chooser and discard late results", as
 function targets() {
 	let current = true, allowed = true, changed!: () => void;
 	const choose = jest.fn().mockResolvedValue(true), unsubscribe = jest.fn();
-	const search = jest.fn((query: string): BaseRecordPage => ({ records: query === "absent" ? [] : [{ id: id(3), path: "Projects/Plan.md" }], hasMore: false }));
+	const search = jest.fn((query: string): BaseRecordPage => ({ records: query === "absent" ? [] : [{ id: id(3), path: "Projects/Plan.md", kind: "markdown" }], hasMore: false }));
 	const modal = new BaseTargetPicker({} as App, "Planning", search, () => ["Stage", "Owner"], choose, () => allowed,
 		() => current, listener => { changed = listener; return unsubscribe; });
 	modal.onOpen();
@@ -78,7 +78,7 @@ test("filtering out a selected record, unsupported capabilities or changed conte
 	const s = targets();
 	try {
 		change(s.field("Target"), "item"); change(s.field("Record"), id(3));
-		change(s.field("Find shared note"), "absent");
+		change(s.field("Find shared file"), "absent");
 		expect(s.field("Record").value).toBe(""); expect(button(s.modal.contentEl, "Write comment").disabled).toBe(true);
 		change(s.field("Target"), "view"); s.setAllowed(false); s.changed();
 		expect(button(s.modal.contentEl, "Write comment").disabled).toBe(true);
@@ -96,5 +96,22 @@ test("capture failure keeps the chosen target editable and prevents duplicate si
 		fail(new Error("Denied")); await flush();
 		expect(s.modal.contentEl.textContent).toContain("could not be verified"); expect(send.disabled).toBe(false);
 		expect(s.field("Target").value).toBe("view");
+	} finally { s.modal.onClose(); }
+});
+
+
+test("attachment cells require an explicit file property without changing a chosen note property", async () => {
+	const s = targets();
+	try {
+		s.search.mockReturnValue({ records: [{ id: id(4), path: "Assets/chart.png", kind: "image" }], hasMore: false });
+		change(s.field("Find shared file"), "chart"); change(s.field("Target"), "cell"); change(s.field("Record"), id(4));
+		change(s.field("Property name"), "name");
+		expect(s.field("Property source").value).toBe("note");
+		expect((s.field("Property source") as HTMLSelectElement).options[0].disabled).toBe(true);
+		expect(button(s.modal.contentEl, "Write comment").disabled).toBe(true);
+		change(s.field("Property source"), "file");
+		expect([...s.modal.contentEl.querySelectorAll("datalist option")].map(option => option.getAttribute("value"))).toContain("size");
+		button(s.modal.contentEl, "Write comment").click(); await flush();
+		expect(s.choose).toHaveBeenCalledWith({ type: "cell", recordId: id(4), property: { source: "file", name: "name" } });
 	} finally { s.modal.onClose(); }
 });

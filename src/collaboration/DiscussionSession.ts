@@ -8,6 +8,7 @@ import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./Dis
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
 import { BASE_TARGET_KINDS, isId, isRecord, parseAnchor, parseBaseTargetContext, sourceAnchor, parseMessage, parseThread, protocolJson, type BaseAnchor, type BaseProperty, type BaseTargetContext, type BaseTargetKind, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
+import { BASE_RECORD_TYPES, isBaseRecordType, type BaseRecordType } from "./DiscussionProtocol";
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
@@ -45,6 +46,7 @@ export class DiscussionSession {
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
 	private baseKinds: BaseTargetKind[] = [];
+	private baseRecordTypes: BaseRecordType[] = [];
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -78,6 +80,9 @@ export class DiscussionSession {
 	get canRepairPictures(): boolean { return this.online && this.canAttachPictures && this.recoveryEnabled; }
 	get canRecoverOnlineDraft(): boolean { return this.online && this.recoveryEnabled; }
 	canAnchorBase(kind: BaseTargetKind): boolean { return this.canQueue && this.baseKinds.includes(kind); }
+	canAnchorBaseRecord(kind: unknown): boolean {
+		return (this.canAnchorBase("item") || this.canAnchorBase("cell")) && isBaseRecordType(kind) && this.baseRecordTypes.includes(kind);
+	}
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
 		const enabled = entry?.kind === "base" ? this.canQueue && this.baseKinds.length > 0 : entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
@@ -119,6 +124,8 @@ export class DiscussionSession {
 			this.picturesEnabled = await this.store.preference("picturesEnabled") === true;
 			const baseKinds = await this.store.preference("baseTargetKinds");
 			this.baseKinds = Array.isArray(baseKinds) ? BASE_TARGET_KINDS.filter(kind => baseKinds.includes(kind)) : [];
+			const recordTypes = await this.store.preference("baseRecordTypes");
+			this.baseRecordTypes = Array.isArray(recordTypes) ? BASE_RECORD_TYPES.filter(kind => recordTypes.includes(kind)) : ["markdown"];
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
@@ -130,6 +137,7 @@ export class DiscussionSession {
 			this.picturesEnabled = capability.pictures === true;
 			this.recoveryEnabled = capability.recovery === true;
 			this.baseKinds = capability.baseTargets ?? [];
+			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
@@ -137,6 +145,7 @@ export class DiscussionSession {
 			await this.store.setPreference("imageFilesEnabled", this.imageFilesEnabled);
 			await this.store.setPreference("picturesEnabled", this.picturesEnabled);
 			await this.store.setPreference("baseTargetKinds", protocolJson(this.baseKinds));
+			await this.store.setPreference("baseRecordTypes", protocolJson(this.baseRecordTypes));
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {

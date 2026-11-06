@@ -120,7 +120,8 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 			anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Session review")) } });
 	try {
 		await session.start(); watch(); await session.refresh();
-		const cell = await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.record, property: { source: "note", name: "status" } });
+		expect(session.canAnchorBaseRecord("image")).toBe(true);
+		const cell = await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.imageRecord, property: { source: "file", name: "size" } });
 		const wholeView = await session.captureBaseTarget(cardsScope, { type: "view" });
 		session.setForeground(false); await session.outbox.settled();
 		for (const [scopeId, anchor] of [[tableScope, cell], [cardsScope, wholeView]] as const) {
@@ -131,7 +132,8 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		connected = false; store = await DiscussionStore.open(identity, factory); session = new DiscussionSession(store, transport);
 		await session.start(); watch(); await session.refresh();
 		expect(session.status).toBe("offline");
-		expect(await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.record, property: { source: "note", name: "status" } })).toEqual(cell);
+		expect(session.canAnchorBaseRecord("image")).toBe(true);
+		expect(await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.imageRecord, property: { source: "file", name: "size" } })).toEqual(cell);
 		expect((await store.selectionDrafts(tableScope)).drafts.map(d => d.target)).toEqual([cell]);
 		expect((await store.selectionDrafts(cardsScope)).drafts.map(d => d.target)).toEqual([wholeView]);
 		expect((await store.pending(tableScope)).map(op => op.operationId)).toEqual([first.operationId]);
@@ -145,12 +147,12 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		await expect(transport.thread(cardsScope, String(first.payload.thread_id))).rejects.toMatchObject({ code: "invalid_read_response" });
 		expect((await store.checkpoint(tableScope)).cursor).not.toBe((await store.checkpoint(cardsScope)).cursor);
 		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify([...original,
-			{ user_id: f.reviewer, path: "Record.md", recursive: false, permission: "none" }]) })).status).toBe(200);
+			{ user_id: f.reviewer, path: "Image.png", recursive: false, permission: "none" }]) })).status).toBe(200);
 		changedRules = true; await session.refresh();
 		await until(async () => session.syncStatus(tableScope) === "current" && session.syncStatus(cardsScope) === "current" &&
 			(await session.local(tableScope)).threads.length === 0 && (await session.local(cardsScope)).threads.length === 1);
 		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
-		await expect(session.captureBaseTarget(tableScope, { type: "item", recordId: f.record })).rejects.toMatchObject({ status: 404 });
+		await expect(session.captureBaseTarget(tableScope, { type: "item", recordId: f.imageRecord })).rejects.toMatchObject({ status: 404 });
 		expect((await store.selectionDrafts(tableScope)).drafts).toHaveLength(1);
 		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(original) })).status).toBe(200);
 		changedRules = false; await session.refresh();
@@ -166,6 +168,38 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		expect(session.documentGeneration(cardsScope)).toBe(wholeView.generation);
 		expect((await session.local(tableScope)).threads.map(t => t.id)).toEqual([first.payload.thread_id]);
 		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
+		// A binary content update and a rename preserve the file-property target.
+		// Type conversion must invalidate it even if the file later changes back.
+		connected = true; await session.refresh();
+		const indexUrl = f.base + "/v1/managed/index/" + f.share;
+		const grantResponse = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: auth,
+			body: JSON.stringify({ share_id: f.share, doc_id: f.share, mode: "write" }) });
+		expect(grantResponse.status).toBe(200);
+		const grant = await grantResponse.json();
+		const indexAuth = { ...auth, Authorization: "Bearer " + grant.token };
+		const indexResponse = await fetch(indexUrl, { headers: indexAuth }); expect(indexResponse.status).toBe(200);
+		const index = await indexResponse.json();
+		const previous = index.records["Image.png"];
+		const updated = { ...previous, hash: "b".repeat(64) };
+		const batch = async (changes: unknown[]) => {
+			const response = await fetch(indexUrl, { method: "POST", headers: indexAuth, body: JSON.stringify({ changes }) });
+			expect(response.status).toBe(200); return response.json();
+		};
+		await batch([{ path: "Image.png", previous, value: updated }]);
+		await batch([{ path: "Image.png", previous: updated, value: null }, { path: "Renamed.png", previous: null, value: updated }]);
+		expect((await transport.thread(tableScope, String(first.payload.thread_id))).anchor).toEqual(cell);
+		const converted = { ...updated, type: "file" };
+		const conversion = [{ path: "Renamed.png", previous: updated, value: null }, { path: "Converted.txt", previous: null, value: converted }];
+		await batch(conversion);
+		await expect(transport.send(first)).rejects.toMatchObject({ status: 404 });
+		await expect(transport.send(operation(tableScope, cell))).rejects.toMatchObject({ code: "anchor_generation_mismatch" });
+		const fresh = await transport.baseTargetContext(tableScope, view, f.imageRecord);
+		expect(fresh.record_generation).not.toBe(cell.target.type === "cell" ? cell.target.record_generation : undefined);
+		await batch(conversion);
+		expect((await transport.baseTargetContext(tableScope, view, f.imageRecord)).record_generation).toBe(fresh.record_generation);
+		await session.refresh();
+		await until(async () => session.syncStatus(tableScope) === "current" && (await session.local(tableScope)).threads.length === 0);
+		expect((await store.selectionDrafts(tableScope)).drafts).toHaveLength(1);
 	} finally {
 		await session.close();
 		if (changedRules) await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(original) });

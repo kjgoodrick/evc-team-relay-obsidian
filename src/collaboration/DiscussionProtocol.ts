@@ -39,6 +39,11 @@ export type ImageFileAnchor = { version: 1; type: "image_file"; generation: stri
 	basis: ImageBasis; geometry: ImageGeometry };
 export const BASE_TARGET_KINDS = ["view", "item", "cell", "property"] as const;
 export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
+export const BASE_RECORD_TYPES = ["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as const;
+export type BaseRecordType = typeof BASE_RECORD_TYPES[number];
+export function isBaseRecordType(value: unknown): value is BaseRecordType {
+	return typeof value === "string" && (BASE_RECORD_TYPES as readonly string[]).includes(value);
+}
 export type BaseProperty = { source: "note" | "file"; name: string };
 export function isBaseProperty(value: unknown): value is BaseProperty {
 	return isRecord(value) && Object.keys(value).every(key => ["source", "name"].includes(key)) &&
