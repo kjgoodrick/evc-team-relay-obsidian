@@ -45,7 +45,7 @@ export class BaseTargetPicker extends Modal {
 		this.contentEl.classList.add("relay-base-target-picker");
 		this.contentEl.createEl("p", { text: "Discussion view: " + this.viewName });
 		this.kind = this.field("Target", this.contentEl.createEl("select"));
-		for (const [value, label] of [["view", "Entire saved view"], ["item", "Row or card"], ["cell", "Cell or property on a record"], ["property", "Column or property header"], ["formula", "Formula definition"], ["summary", "Summary definition"]]) {
+		for (const [value, label] of [["view", "Entire saved view"], ["item", "Row or card"], ["cell", "Cell or property on a record"], ["formula_cell", "Formula cell on a record"], ["property", "Column or property header"], ["formula", "Formula definition"], ["summary", "Summary definition"]]) {
 			const option = this.kind.createEl("option", { text: label, attr: { value } });
 			option.disabled = !this.available(value as BaseTargetKind);
 		}
@@ -78,7 +78,7 @@ export class BaseTargetPicker extends Modal {
 		this.accept.onclick = () => { void this.submit(); };
 		this.unsubscribe = this.subscribe(() => { if (!this.current()) this.close(); else this.update(); });
 		this.loadRecords(); this.kind.focus();
-		if (this.loadDefinitions && (this.available("formula") || this.available("summary"))) void this.readDefinitions();
+		if (this.loadDefinitions && (this.available("formula") || this.available("summary") || this.available("formula_cell"))) void this.readDefinitions();
 	}
 	private async readDefinitions(): Promise<void> {
 		if (!this.loadDefinitions || this.closed || this.definitionLoading || !this.current()) return;
@@ -110,11 +110,15 @@ export class BaseTargetPicker extends Modal {
 	}
 	private selectedTarget(): BaseTargetSelection | undefined {
 		const type = this.kind.value;
-		if (!["view", "item", "cell", "property", "formula", "summary"].includes(type) || !this.available(type as BaseTargetKind)) return;
+		if (!["view", "item", "cell", "property", "formula", "summary", "formula_cell"].includes(type) || !this.available(type as BaseTargetKind)) return;
 		if (type === "view") return { type };
-		if (type === "formula" || type === "summary") {
+		if (type === "formula" || type === "summary" || type === "formula_cell") {
 			if (this.definitionLoading) return;
-			const definition = this.definitions.find(item => item.id === this.definitionChoice.value && item.kind === type);
+			const definition = this.definitions.find(item => item.id === this.definitionChoice.value && item.kind === (type === "formula_cell" ? "formula" : type));
+			if (type === "formula_cell") {
+				const recordId = this.records.get(this.record.value)?.id;
+				return definition && recordId ? { type, recordId, definitionId: definition.id, definitionRevision: definition.revision } : undefined;
+			}
 			return definition ? { type, definitionId: definition.id, definitionRevision: definition.revision } : undefined;
 		}
 		const recordId = this.records.get(this.record.value)?.id;
@@ -126,10 +130,10 @@ export class BaseTargetPicker extends Modal {
 	}
 	private update(): void {
 		if (this.closed) return;
-		this.recordFields.hidden = !["item", "cell"].includes(this.kind.value);
+		this.recordFields.hidden = !["item", "cell", "formula_cell"].includes(this.kind.value);
 		this.propertyFields.hidden = !["cell", "property"].includes(this.kind.value);
-		this.definitionFields.hidden = !["formula", "summary"].includes(this.kind.value);
-		const definitions = this.definitions.filter(item => item.kind === this.kind.value), signature = JSON.stringify(definitions);
+		this.definitionFields.hidden = !["formula", "summary", "formula_cell"].includes(this.kind.value);
+		const definitions = this.definitions.filter(item => item.kind === (this.kind.value === "formula_cell" ? "formula" : this.kind.value)), signature = JSON.stringify(definitions);
 		if (this.definitionChoice.dataset.options !== signature) {
 			const selected = this.definitionChoice.value; this.definitionChoice.dataset.options = signature; this.definitionChoice.empty();
 			this.definitionChoice.createEl("option", { text: "Choose a definition…", attr: { value: "" } });
@@ -154,7 +158,7 @@ export class BaseTargetPicker extends Modal {
 			if (await this.choose(target)) { this.close(); return; }
 			if (!this.closed) this.status.setText("The target could not be saved. Check comment access and synchronization, then try again.");
 		} catch {
-			if (!this.closed) this.status.setText(target.type === "formula" || target.type === "summary" ?
+			if (!this.closed) this.status.setText(target.type === "formula" || target.type === "summary" || target.type === "formula_cell" ?
 				"The definition changed or could not be verified. Refresh definitions before trying again. Existing drafts are retained." :
 				"The target could not be verified. Reconnect with comment access to this view and record, then try again.");
 		} finally { this.busy = false; this.update(); }

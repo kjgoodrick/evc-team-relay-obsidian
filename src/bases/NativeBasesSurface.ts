@@ -1,6 +1,6 @@
 import { parseYaml, TFile } from "obsidian";
 import { sha256Hex } from "../contentDigest";
-import { isBaseProperty, type BaseProperty } from "../collaboration/DiscussionProtocol";
+import { isBaseDefinitionProperty, type BaseDefinitionProperty } from "../collaboration/DiscussionProtocol";
 import { parseBaseRegistry, type BaseRegistrySnapshot } from "./BaseRegistryProtocol";
 
 /** Private built-in renderer contract, observed in desktop Obsidian 1.13.7.
@@ -41,21 +41,21 @@ export function baseConfigurationKey(value: unknown): string | undefined {
 	try { return JSON.stringify(visit(value, 0)); } catch { return undefined; }
 }
 
-export function nativeBaseProperty(value: unknown): BaseProperty | undefined {
+export function nativeBaseProperty(value: unknown): BaseDefinitionProperty | undefined {
 	if (typeof value !== "string") return;
 	const dot = value.indexOf("."), candidate = { source: value.slice(0, dot), name: value.slice(dot + 1) };
-	return dot > 0 && isBaseProperty(candidate) ? candidate : undefined;
+	return dot > 0 && isBaseDefinitionProperty(candidate) ? candidate : undefined;
 }
 
 export type NativeBaseTarget = { type: "view" } | { type: "item"; file: TFile } |
-	{ type: "cell"; file: TFile; property: BaseProperty } | { type: "property"; property: BaseProperty };
+	{ type: "cell"; file: TFile; property: BaseDefinitionProperty } | { type: "property"; property: BaseDefinitionProperty };
 export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement; current(): boolean }
 export type NativeBaseReveal = "revealed" | "hidden" | "property-hidden" | "unavailable";
 export interface NativeBaseBinding {
 	snapshot: BaseRegistrySnapshot; viewId: string; name: string; type: string; current(): boolean;
 }
 
-function propertyEqual(a: BaseProperty, b: BaseProperty): boolean { return a.source === b.source && a.name === b.name; }
+function propertyEqual(a: BaseDefinitionProperty, b: BaseDefinitionProperty): boolean { return a.source === b.source && a.name === b.name; }
 function sameTarget(a: NativeBaseTarget, b: NativeBaseTarget): boolean {
 	return a.type === b.type && (!("file" in a) || "file" in b && a.file === b.file) &&
 		(!("property" in a) || "property" in b && propertyEqual(a.property, b.property));
@@ -196,7 +196,7 @@ export class NativeBasesSurface {
 		return output.length <= MAX_HANDLES ? output : [];
 	}
 	hit(node: Node): NativeBaseHandle | undefined {
-		// Unsupported formula/third-party cells must not silently become row or view comments.
+		// Unsupported third-party cells must not silently become row or view comments.
 		for (const row of this.rows() ?? []) {
 			if (!element(row.el) || !row.el.contains(node)) continue;
 			for (const cell of list(this.type === "cards" ? row.props : row.cells, 256) ?? []) {
@@ -219,7 +219,7 @@ export class NativeBasesSurface {
 		}
 		return entries;
 	}
-	private propertyDisplayed(property: BaseProperty): boolean {
+	private propertyDisplayed(property: BaseDefinitionProperty): boolean {
 		const data = this.renderer.data, properties = this.type === "list" ? this.renderer.order : object(data) ? data.properties : undefined;
 		return list(properties, 256)?.includes(property.source + "." + property.name) === true;
 	}
@@ -229,7 +229,7 @@ export class NativeBasesSurface {
 	}
 	/** Geometry derives from the matched record's current query entry. Indexes here
 	 * are transient layout coordinates only. Never select/edit a native cell. */
-	private position(file: TFile, property?: BaseProperty): { top: number; left?: number } | undefined {
+	private position(file: TFile, property?: BaseDefinitionProperty): { top: number; left?: number } | undefined {
 		const data = this.renderer.data, groups = this.groups(), nativeGroups = list(this.renderer.groups, 256), scroll = this.scrollElement();
 		if (!object(data) || !groups || !nativeGroups || !scroll) return;
 		let count = 0;

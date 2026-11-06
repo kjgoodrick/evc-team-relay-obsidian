@@ -20,6 +20,7 @@ export type AnchoredThread = ThreadSummary & { anchor?: DiscussionAnchor };
 export type DiscussionLocalView = { threads: AnchoredThread[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
 export type BaseTargetSelection = { type: "view" } | { type: "property"; property: BaseProperty } |
 	{ type: "item"; recordId: string } | { type: "cell"; recordId: string; property: BaseProperty } |
+	{ type: "formula_cell"; recordId: string; definitionId: string; definitionRevision: number } |
 	{ type: "formula" | "summary"; definitionId: string; definitionRevision: number };
 function storedThread(value: unknown): AnchoredThread {
 	const thread = parseThread(value);
@@ -93,7 +94,7 @@ export class DiscussionSession {
 		}
 	}
 	canAnchorBaseRecord(kind: unknown): boolean {
-		return (this.canAnchorBase("item") || this.canAnchorBase("cell")) && isBaseRecordType(kind) && this.baseRecordTypes.includes(kind);
+		return (this.canAnchorBase("item") || this.canAnchorBase("cell") || this.canAnchorBase("formula_cell")) && isBaseRecordType(kind) && this.baseRecordTypes.includes(kind);
 	}
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
@@ -451,7 +452,7 @@ export class DiscussionSession {
 				target: { type: target.type, definition_id: definition.id, definition_revision: definition.revision,
 					property: definition.property, ...(definition.kind === "summary" ? { summary: definition.summary } : {}) } }) as BaseAnchor;
 		}
-		const recordId = target.type === "item" || target.type === "cell" ? target.recordId : undefined;
+		const recordId = "recordId" in target ? target.recordId : undefined;
 		if (recordId !== undefined && !isId(recordId)) throw new Error("The selected record has no synchronized identity.");
 		const permissionKey = "baseRecordComment:" + scopeId + ":" + recordId;
 		return this.trackLocal((async () => {
@@ -471,6 +472,18 @@ export class DiscussionSession {
 				}
 				context = await this.cachedBaseContext(scopeId, recordId);
 				if (!context || context.generation !== entry.documentGeneration || recordId && await this.store.preference(permissionKey) !== true) throw new Error("Connect once to verify this saved view and record before commenting offline.");
+			}
+			if (target.type === "formula_cell") {
+				const catalog = await this.readBaseDefinitions(scopeId);
+				const definition = catalog.targets.find(item => item.kind === "formula" && item.id === target.definitionId);
+				if (!definition || definition.revision !== target.definitionRevision) throw new Error("This definition changed. Choose its current definition before starting another comment. Existing drafts are retained.");
+				if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
+					this.documentGeneration(scopeId) !== catalog.generation || context.generation !== catalog.generation ||
+					context.definition_id !== catalog.definition_id || context.registry_revision > catalog.registry_revision) throw new Error("The saved view or record changed during capture.");
+				return parseAnchor({ version: 1, type: "base", definition_id: catalog.definition_id, view_id: catalog.view_id,
+					generation: catalog.generation, registry_revision: catalog.registry_revision,
+					target: { type: "formula_cell", definition_id: definition.id, definition_revision: definition.revision,
+						property: definition.property, record_id: recordId, record_generation: context.record_generation } }) as BaseAnchor;
 			}
 			if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
 				this.documentGeneration(scopeId) !== context.generation) throw new Error("Comment access or the saved view changed while capturing this target. Refresh before trying again.");
@@ -522,11 +535,11 @@ export class DiscussionSession {
 		this.baseDefinitionFlights.set(scopeId, flight); return flight;
 	}
 	async baseDefinitionStatus(scopeId: string, anchor: BaseAnchor): Promise<string> {
-		if (anchor.target.type !== "formula" && anchor.target.type !== "summary") return "";
+		if (anchor.target.type !== "formula" && anchor.target.type !== "summary" && anchor.target.type !== "formula_cell") return "";
 		try {
 			const catalog = await this.readBaseDefinitions(scopeId), target = anchor.target;
 			if (catalog.definition_id !== anchor.definition_id || catalog.generation !== anchor.generation || catalog.view_id !== anchor.view_id) return "This discussion belongs to an earlier saved-view identity. Its original target is retained.";
-			const found = catalog.targets.find(item => item.id === target.definition_id && item.kind === target.type);
+			const found = catalog.targets.find(item => item.id === target.definition_id && item.kind === (target.type === "formula_cell" ? "formula" : target.type));
 			if (!found) return this.statusValue === "ready" ? "This definition is no longer available in the saved view. The original discussion is retained." : "This definition is absent from the cached view. Reconnect to verify it.";
 			if (found.revision !== target.definition_revision) return "The definition has changed since this discussion was created. The original discussion is retained.";
 			return this.statusValue === "ready" ? "Matches the latest verified definition." : "Matches the last verified definition. Reconnect to check for changes.";

@@ -5,6 +5,7 @@ import { commentBodyText, renderCommentBody } from "./CommentBody";
 import { commandPictures } from "../storage/PictureRecords";
 
 const failureHelp: Record<string, string> = {
+	base_formula_cells_disabled: "Formula cell comments are disabled on this server. Your saved work is retained; retry after support is restored.",
 	base_target_definition_changed: "The formula or summary definition changed after capture. Your saved comment retains its original target. Review the current definition before choosing a new target.",
 	base_target_definition_unavailable: "The captured definition is unavailable in this saved view. Your comment and original target are retained for review.",
 	base_definition_targets_disabled: "Formula and summary comments are disabled on this server. Your saved work is retained; retry after support is restored.",

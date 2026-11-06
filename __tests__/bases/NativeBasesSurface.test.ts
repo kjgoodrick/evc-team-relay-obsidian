@@ -116,9 +116,10 @@ describe("native Bases identity boundary", () => {
 		expect(handle.current()).toBe(false);
 		expect(surface.handles().some(item => "file" in item.target && item.target.file === f.a)).toBe(false);
 	});
-	test("formula cells stay unavailable rather than becoming note-property cells", () => {
+	test("formula cells preserve their namespace and unknown properties remain unavailable", () => {
 		const f = fixture(); f.rows[0].cells[0].prop = "formula.total";
-		expect(f.inspect()!.handles().some(handle => handle.target.type === "cell" && handle.element === f.rows[0].cells[0].el)).toBe(false);
+		expect(f.inspect()!.hit(f.rows[0].cells[0].el)?.target).toMatchObject({ type: "cell", file: f.a, property: { source: "formula", name: "total" } });
+		f.rows[0].cells[0].prop = "unknown.total";
 		expect(f.inspect()!.hit(f.rows[0].cells[0].el)).toBeUndefined();
 		expect(nativeBaseProperty("note.with.dots")).toEqual({ source: "note", name: "with.dots" });
 		expect(nativeBaseProperty("status")).toBeUndefined();
@@ -175,6 +176,20 @@ describe("verified saved-view binding", () => {
 });
 
 describe("semantic target navigation", () => {
+	test.each(["table", "cards", "list"] as const)("%s formula-cell navigation uses the property namespace, including offscreen and hidden targets", async type => {
+		const f = fixture(type);
+		for (const row of f.rows) { row.cells[1].prop = "formula.total"; row.cells[1].propertyId = "formula.total"; }
+		f.renderer.header.cells[1].prop = "formula.total";
+		f.renderer.data.properties[1] = "formula.total"; f.renderer.order[1] = "formula.total";
+		const surface = f.inspect()!, target = { type: "cell" as const, file: f.b, property: { source: "formula" as const, name: "total" } };
+		f.rows[1].el.remove(); f.renderer.updateVirtualDisplay.mockImplementation(() => { f.container.appendChild(f.rows[1].el); });
+		expect(await surface.reveal(target, () => true, async () => {})).toBe("revealed");
+		expect(f.rows[1].cells[1].el.scrollIntoView).toHaveBeenCalled();
+		if (type === "table") expect(await surface.reveal({ type: "property", property: target.property }, () => true)).toBe("revealed");
+		f.renderer.data.properties[1] = "note.total"; f.renderer.order[1] = "note.total";
+		expect(await surface.reveal(target, () => true)).toBe("property-hidden");
+		expect(f.host.data).toBe(f.source);
+	});
 	test.each(["table", "cards", "list"] as const)("%s reveals the selected file/property without altering query, selection or files", async type => {
 		const f = fixture(type), surface = f.inspect()!, before = JSON.stringify(f.serial);
 		expect(await surface.reveal({ type: "cell", file: f.b, property: { source: "file", name: "name" } }, () => true)).toBe("revealed");

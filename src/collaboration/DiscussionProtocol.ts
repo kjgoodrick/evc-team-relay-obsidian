@@ -37,7 +37,7 @@ export type WireTextAnchor = { version: 1; type: "text"; document_id: string; ge
 export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
 export type ImageFileAnchor = { version: 1; type: "image_file"; generation: string; asset: Extract<ImageAsset, { kind: "managed" }>;
 	basis: ImageBasis; geometry: ImageGeometry };
-export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary"] as const;
+export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell"] as const;
 export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
 export const BASE_RECORD_TYPES = ["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as const;
 export type BaseRecordType = typeof BASE_RECORD_TYPES[number];
@@ -47,6 +47,7 @@ export function isBaseRecordType(value: unknown): value is BaseRecordType {
 export type BaseProperty = { source: "note" | "file"; name: string };
 export type BaseDefinitionProperty = { source: "note" | "file" | "formula"; name: string };
 export type BaseDefinedTarget = { type: "formula"; definition_id: string; definition_revision: number; property: { source: "formula"; name: string } } |
+	{ type: "formula_cell"; definition_id: string; definition_revision: number; property: { source: "formula"; name: string }; record_id: string; record_generation: string } |
 	{ type: "summary"; definition_id: string; definition_revision: number; property: BaseDefinitionProperty; summary: string };
 export function isBaseDefinitionProperty(value: unknown): value is BaseDefinitionProperty {
 	return isRecord(value) && typeof value.source === "string" && ["note", "file", "formula"].includes(value.source) && isBaseProperty({ ...value, source: "note" });
@@ -187,14 +188,19 @@ function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 	if (target.type === "view") {
 		requireValue(Object.keys(target).length === 1);
 		parsed = { type: "view" };
-	} else if (target.type === "formula" || target.type === "summary") {
+	} else if (target.type === "formula" || target.type === "summary" || target.type === "formula_cell") {
 		requireValue(isId(target.definition_id) && isRevision(target.definition_revision) && target.definition_revision <= value.registry_revision &&
 			isBaseDefinitionProperty(target.property) && Object.keys(target).every(key =>
-				["type", "definition_id", "definition_revision", "property", ...(target.type === "summary" ? ["summary"] : [])].includes(key)));
+				["type", "definition_id", "definition_revision", "property", ...(target.type === "summary" ? ["summary"] : []),
+					...(target.type === "formula_cell" ? ["record_id", "record_generation"] : [])].includes(key)));
 		const property = { source: target.property.source, name: target.property.name };
-		if (target.type === "formula") {
+		if (target.type === "formula" || target.type === "formula_cell") {
 			requireValue(property.source === "formula");
-			parsed = { type: "formula", definition_id: target.definition_id, definition_revision: target.definition_revision, property: { source: "formula", name: property.name } };
+			const common = { definition_id: target.definition_id, definition_revision: target.definition_revision, property: { source: "formula" as const, name: property.name } };
+			if (target.type === "formula_cell") {
+				requireValue(isId(target.record_id) && isId(target.record_generation));
+				parsed = { ...common, type: "formula_cell", record_id: target.record_id, record_generation: target.record_generation };
+			} else parsed = { ...common, type: "formula" };
 		} else {
 			requireValue(isBaseProperty({ source: "note", name: target.summary }));
 			parsed = { type: "summary", definition_id: target.definition_id, definition_revision: target.definition_revision, property, summary: target.summary as string };

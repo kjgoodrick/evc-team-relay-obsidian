@@ -32,7 +32,7 @@ run("real Bases discussions preserve offline targets, saved-view isolation, exac
 	};
 	const snapshot = await publish("Table"), [view, cards] = snapshot.views.map(v => v.id!);
 	const captured = await transport.baseTargetContext(f.discussionEntry, view, f.record);
-	expect((await transport.capabilities()).baseTargets).toEqual(["view", "item", "cell", "property", "formula", "summary"]);
+	expect((await transport.capabilities()).baseTargets).toEqual(["view", "item", "cell", "property", "formula", "summary", "formula_cell"]);
 	expect(await transport.permissions(f.discussionEntry)).toEqual({ read: true, comment: true, edit: false, moderate: false });
 	const anchor: BaseAnchor = { version: 1, type: "base", definition_id: captured.definition_id, view_id: view,
 		generation: captured.generation, registry_revision: captured.registry_revision,

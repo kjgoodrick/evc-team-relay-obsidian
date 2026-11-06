@@ -90,6 +90,9 @@ export class BaseCommentPane {
 	private closed = false;
 	private context?: BaseCommentContext;
 	private chosen?: NativeBaseHandle;
+	private toolsContext?: BaseCommentContext;
+	private toolsChosen?: NativeBaseHandle;
+	private toolsKey?: string;
 	private threads: AnchoredThread[] = [];
 	private markerTargets = new Set<HTMLElement>();
 	private dataDirty = true;
@@ -195,17 +198,22 @@ export class BaseCommentPane {
 	private renderTools(): void {
 		const context = this.context;
 		if (!context?.current()) { this.layer.hidden = true; this.toolbar.classList.add("is-unavailable"); return; }
-		const focused = this.toolbar.contains(this.toolbar.ownerDocument.activeElement) ? this.toolbar.ownerDocument.activeElement?.getAttribute("aria-label") : undefined;
-		this.toolbar.replaceChildren();
-		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
 		const selected = this.chosen?.current() ? this.chosen : undefined;
 		const view = context.surface.handles().find(handle => handle.target.type === "view");
 		const target = selected ?? view;
-		if (target && context.canComment(target.target) && context.selection(target.target)) this.button(this.toolbar, "Comment on " + label(target.target), () => { void this.host.commentBaseHandle(context, target); });
-		if (selected?.target.type === "cell") {
-			const item: NativeBaseTarget = { type: "item", file: selected.target.file };
-			if (context.canComment(item)) this.button(this.toolbar, "Comment on record", () => { void this.host.commentBaseHandle(context, selected, item); });
-		}
+		const selection = target && context.canComment(target.target) ? context.selection(target.target) : undefined;
+		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
+		const commentRecord = !!item && context.canComment(item);
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord]);
+		// Preserve live buttons through scroll, polling and unrelated thread updates.
+		// A new handle/context must still replace callbacks, even for the same label.
+		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
+		this.toolsContext = context; this.toolsChosen = selected; this.toolsKey = key;
+		const focused = this.toolbar.contains(this.toolbar.ownerDocument.activeElement) ? this.toolbar.ownerDocument.activeElement?.getAttribute("aria-label") : undefined;
+		this.toolbar.replaceChildren();
+		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
+		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => { void this.host.commentBaseHandle(context, target); });
+		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => { void this.host.commentBaseHandle(context, selected, item); });
 		if (focused) Array.from(this.toolbar.querySelectorAll("button")).find(button => button.getAttribute("aria-label") === focused)?.focus({ preventScroll: true });
 	}
 	comment(): void {
@@ -224,7 +232,7 @@ export class BaseCommentPane {
 			if (thread.anchor?.type !== "base") continue;
 			const target = context.native(thread.anchor), selection = target ? context.selection(target) : undefined; if (!target || !selection) continue;
 			let key = baseSelectionKey(selection), handle = byKey.get(key), hiddenProperty = false;
-			if (!handle && selection.type === "cell") { key = baseSelectionKey({ type: "item", recordId: selection.recordId }); handle = byKey.get(key); hiddenProperty = true; }
+			if (!handle && (selection.type === "cell" || selection.type === "formula_cell")) { key = baseSelectionKey({ type: "item", recordId: selection.recordId }); handle = byKey.get(key); hiddenProperty = true; }
 			if (!handle || handle.target.type === "view") continue;
 			const marker = markers.get(key) ?? { handle, threads: [], hiddenProperty }; marker.threads.push(thread); marker.hiddenProperty ||= hiddenProperty; markers.set(key, marker);
 		}

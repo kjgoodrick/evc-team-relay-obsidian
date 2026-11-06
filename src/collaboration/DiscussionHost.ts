@@ -4,7 +4,8 @@ import type { AuthSession } from "../AuthSession";
 import type { ShareRegistry } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
-import { DiscussionSession } from "./DiscussionSession";
+import { DiscussionSession, type BaseTargetSelection } from "./DiscussionSession";
+import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
 import { isId, isBaseRecordType, protocolJson, type DiscussionAnchor, type BaseAnchor } from "./DiscussionProtocol";
@@ -233,21 +234,44 @@ export class DiscussionHost extends Component {
 				let count = 0; folder.folderIndex.eachRecord(item => { if (item.id === record.id) count++; });
 				return count === 1 ? record : undefined;
 			};
+			let catalog: BaseDefinitionCatalog | undefined;
+			try { catalog = await session.readBaseDefinitions(entryId); } catch { /* Other targets remain usable on older/offline servers. */ }
+			if (!authorized()) return;
+			if (catalog?.definition_id !== binding.snapshot.definition_id || catalog?.generation !== binding.snapshot.generation || catalog?.registry_revision !== binding.snapshot.revision) catalog = undefined;
+			const formulas = new Map(catalog?.targets.filter(item => item.kind === "formula").map(item => [item.property.name, item]));
+			const selection = (target: NativeBaseTarget): BaseTargetSelection | undefined => {
+				if (!authorized()) return;
+				if (target.type === "view") return target;
+				if (target.type === "property" || target.type === "cell") {
+					const property = target.property;
+					if (property.source === "formula") {
+						const definition = formulas.get(property.name); if (!definition) return;
+						const identity = { definitionId: definition.id, definitionRevision: definition.revision };
+						if (target.type === "property") return { type: "formula", ...identity };
+						const record = recordFor(target.file);
+						return record ? { type: "formula_cell", recordId: record.id, ...identity } : undefined;
+					}
+					if (target.type === "property") return { type: "property", property: { source: property.source, name: property.name } };
+					const record = recordFor(target.file);
+					if (!record || property.source === "note" && record.type !== "markdown") return;
+					return { type: "cell", recordId: record.id, property: { source: property.source, name: property.name } };
+				}
+				const record = recordFor(target.file); return record ? { type: "item", recordId: record.id } : undefined;
+			};
 			transferred = true;
 			return { file, session, entryId, baseEntryId, surface, binding, current: authorized, release,
-				canComment: target => authorized() && session.permission(entryId)?.comment === true && session.canAnchorBase(target.type) &&
+				canComment: target => authorized() && session.permission(entryId)?.comment === true && !!selection(target) && session.canAnchorBase(selection(target)!.type) &&
 					(!("file" in target) || session.canAnchorBaseRecord(recordFor(target.file)?.type)),
-				selection: target => {
-					if (!authorized()) return;
-					if (target.type === "view" || target.type === "property") return target;
-					const record = recordFor(target.file);
-					if (!record || target.type === "cell" && target.property.source === "note" && record.type !== "markdown") return;
-					return target.type === "item" ? { type: "item", recordId: record.id } : { type: "cell", recordId: record.id, property: target.property };
-				},
+				selection,
 				native: anchor => {
 					if (!authorized() || anchor.definition_id !== binding.snapshot.definition_id || anchor.view_id !== binding.viewId || anchor.generation !== binding.snapshot.generation || anchor.registry_revision > binding.snapshot.revision) return;
 					const target = anchor.target; if (target.type === "view" || target.type === "property") return target;
-					if (target.type === "formula" || target.type === "summary") return;
+					if (target.type === "summary") return;
+					if (target.type === "formula" || target.type === "formula_cell") {
+						const definition = formulas.get(target.property.name);
+						if (!definition || definition.id !== target.definition_id || definition.revision !== target.definition_revision) return;
+						if (target.type === "formula") return { type: "property", property: target.property };
+					}
 					const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === target.record_id) paths.push(path); });
 					const recordFile = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
 					if (!recordFile || !recordFor(recordFile) || target.type === "cell" && target.property.source === "note" && recordFor(recordFile)?.type !== "markdown") return;
@@ -297,6 +321,12 @@ export class DiscussionHost extends Component {
 		if (!context.current()) return false;
 		const target = anchor?.target, recordId = target && "record_id" in target ? target.record_id : undefined;
 		const proof = await context.session.readBaseContext(context.entryId, recordId);
+		if (target && "definition_id" in target) {
+			const catalog = await context.session.readBaseDefinitions(context.entryId);
+			if (!context.current() || catalog.registry_revision !== context.binding.snapshot.revision || catalog.generation !== anchor!.generation ||
+				catalog.definition_id !== anchor!.definition_id || !catalog.targets.some(item => item.id === target.definition_id &&
+					item.revision === target.definition_revision && item.kind === (target.type === "formula_cell" ? "formula" : target.type))) return false;
+		}
 		return context.current() && proof.definition_id === context.binding.snapshot.definition_id && proof.view_id === context.binding.viewId &&
 			proof.registry_revision === context.binding.snapshot.revision && proof.generation === context.binding.snapshot.generation &&
 			(!target || !("record_generation" in target) || target.record_generation === proof.record_generation);
@@ -485,12 +515,12 @@ export class DiscussionHost extends Component {
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;
-				if (anchor.target.type === "formula" || anchor.target.type === "summary") {
+				if (anchor.target.type !== "summary" && await this.baseComments?.reveal(session, entryId, anchor)) return;
+				if ("definition_id" in anchor.target) {
 					const status = await session.baseDefinitionStatus(entryId, anchor);
-					if (available()) new Notice(this.targetLabel(session, entryId, anchor) + ". " + status + " Definition placement in the native view is not available yet.", 10000);
+					if (available()) new Notice(this.targetLabel(session, entryId, anchor) + ". " + status + " The original target is retained; its exact location cannot be shown in this view.", 10000);
 					return;
 				}
-				if (await this.baseComments?.reveal(session, entryId, anchor)) return;
 				new Notice("Discussion view: " + (this.baseSelection(session, scope.entryId)?.name ?? "saved view") + ". " +
 					this.targetLabel(session, entryId, anchor) + ". Inline navigation is unavailable here. The discussion and its target are retained.");
 				return;

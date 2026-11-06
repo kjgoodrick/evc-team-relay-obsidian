@@ -34,7 +34,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
-for (const code of ["base_definition_targets_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
+for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
 for (const code of ["pictures_disabled", "picture_identity_conflict", "picture_staging_quota", "picture_digest_mismatch", "picture_not_verified",
 	"picture_expired", "picture_too_large", "picture_output_too_large", "picture_too_many_pixels", "animated_picture_unsupported", "invalid_picture", "picture_changed"]) errorCodes.add(code);
 function validId(value: unknown): value is string { return typeof value === "string" && uuid.test(value); }
@@ -182,7 +182,7 @@ export class DiscussionTransport implements DiscussionSender {
 				value.discussion_base_targets.some(kind => typeof kind !== "string" || kind.length > 64) ||
 				new Set(value.discussion_base_targets).size !== value.discussion_base_targets.length) throw new DiscussionFailure("pause", "invalid_read_response");
 			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind) &&
-				(!["formula", "summary"].includes(kind) || definitionCatalog));
+				(!["formula", "summary", "formula_cell"].includes(kind) || definitionCatalog));
 			const records = value.discussion_base_record_types;
 			// The initial Bases protocol only accepted Markdown records.
 			if (records === undefined) baseRecordTypes = ["markdown"];
@@ -395,7 +395,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

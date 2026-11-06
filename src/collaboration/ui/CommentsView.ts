@@ -125,8 +125,8 @@ class ThreadCard {
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "base") {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
-			const defined = thread.anchor.target.type === "formula" || thread.anchor.target.type === "summary";
-			const target = this.controls.createEl("button", { text: defined ? "Definition details" : "Show Bases target" });
+			const defined = "definition_id" in thread.anchor.target;
+			const target = this.controls.createEl("button", { text: thread.anchor.target.type === "summary" ? "Definition details" : "Show Bases target" });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 			if (defined) {
 				const status = this.controls.createEl("p", { text: "Checking the saved definition…", attr: { role: "status" } });

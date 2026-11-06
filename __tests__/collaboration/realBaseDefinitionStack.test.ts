@@ -40,25 +40,39 @@ run("actual formula/summary discussions preserve offline targets, reject changed
 		const definitions = await session.readBaseDefinitions(scope), formula = definitions.targets.find(item => item.kind === "formula")!, summary = definitions.targets.find(item => item.kind === "summary")!;
 		const selection = { type: "formula" as const, definitionId: formula.id, definitionRevision: formula.revision };
 		const captured = await session.captureBaseTarget(scope, selection), summaryAnchor = await session.captureBaseTarget(scope, { type: "summary", definitionId: summary.id, definitionRevision: summary.revision });
+		const cellSelection = { ...selection, type: "formula_cell" as const, recordId: f.record };
+		const cellAnchor = await session.captureBaseTarget(scope, cellSelection);
+		expect(cellAnchor.target).toMatchObject({ type: "formula_cell", record_id: f.record, definition_id: formula.id });
 		await store.saveDraft({ id: "kept", scopeId: scope, revision: 1, body: "Review offline", target: protocolJson(captured) });
+		await store.saveDraft({ id: "cell", scopeId: scope, revision: 1, body: "Cell review offline", target: protocolJson(cellAnchor) });
 		await session.close(); connected = false;
 		store = await DiscussionStore.open(identity, factory); session = new DiscussionSession(store, transport); await start();
 		expect(await session.captureBaseTarget(scope, selection)).toEqual(captured);
+		expect(await session.captureBaseTarget(scope, cellSelection)).toEqual(cellAnchor);
+		expect((await store.getDraft("cell"))?.target).toEqual(cellAnchor);
 		expect((await store.getDraft("kept"))?.body).toBe("Review offline");
 		const queued = operation(captured); await session.queue(queued); expect(await store.pending(scope)).toHaveLength(1);
 		connected = true;
 		await publish("price * 2", "Renamed");
 		const accepted = await transport.send(queued); expect(await transport.send(queued)).toEqual(accepted);
 		const summaryAccepted = await transport.send(operation(summaryAnchor));
+		const cellOperation = operation(cellAnchor), cellAccepted = await transport.send(cellOperation);
+		expect(await transport.send(cellOperation)).toEqual(cellAccepted);
+		expect((await transport.thread(scope, cellAccepted.thread_id)).anchor).toEqual(cellAnchor);
 		expect((await transport.thread(scope, summaryAccepted.thread_id)).anchor).toEqual(summaryAnchor);
 		await publish("price * 3", "Renamed");
 		await expect(transport.send(operation(captured))).rejects.toMatchObject({ code: "base_target_definition_changed", status: 409 });
+		await expect(transport.send(operation(cellAnchor))).rejects.toMatchObject({ code: "base_target_definition_changed", status: 409 });
+		expect(await transport.send(cellOperation)).toEqual(cellAccepted);
+		await transport.send({ operationId: randomUUID(), scopeId: scope, type: "reply.create", dependsOn: [], payload: {
+			type: "reply.create", thread_id: cellAccepted.thread_id, message_id: randomUUID(), body: protocolJson(bodyFromText("Cell discussion after formula edit")) } });
 		expect(await transport.send(queued)).toEqual(accepted);
 		expect((await transport.thread(scope, accepted.thread_id)).anchor).toEqual(captured);
 		await transport.send({ operationId: randomUUID(), scopeId: scope, type: "reply.create", dependsOn: [], payload: {
 			type: "reply.create", thread_id: accepted.thread_id, message_id: randomUUID(), body: protocolJson(bodyFromText("The formula changed")) } });
 		await session.start(); expect(await session.baseDefinitionStatus(scope, captured)).toContain("has changed");
 		await expect(session.captureBaseTarget(scope, selection)).rejects.toThrow("definition changed");
+		await expect(session.captureBaseTarget(scope, cellSelection)).rejects.toThrow("definition changed");
 		expect((await store.getDraft("kept"))?.target).toEqual(captured);
 	} finally { await session.close(); }
 }, 25000);

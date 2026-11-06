@@ -12,6 +12,8 @@ import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { BaseTargetPicker } from "../../src/collaboration/ui/BaseTargetPicker";
 import type { BaseSyncHost } from "../../src/bases/BaseSyncHost";
 import type { NativeBasesSurface, NativeBaseHandle } from "../../src/bases/NativeBasesSurface";
+import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import type { BaseDefinitionCatalog } from "../../src/collaboration/BaseDefinitionProtocol";
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
@@ -74,7 +76,9 @@ async function nativeBaseFixture() {
 		knownDocumentGeneration: () => id(7), permission: () => ({ read, comment }), canAnchorBase: () => true, canAnchorBaseRecord: (kind: string) => kind === "markdown",
 		watch: jest.fn(() => { const stop = jest.fn(); stops.push(stop); return stop; }), refresh: jest.fn().mockResolvedValue(undefined), scopeReady: jest.fn().mockResolvedValue(undefined),
 		readBaseContext: jest.fn().mockResolvedValue({ definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1, record_generation: id(9) }),
-		captureBaseTarget: jest.fn().mockResolvedValue({ version: 1, type: "base", definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
+		readBaseDefinitions: jest.fn<Promise<BaseDefinitionCatalog>, []>().mockResolvedValue({ protocol_version: 1, entry_id: id(3), definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1, computed_values: false,
+			targets: [{ id: id(10), kind: "formula", revision: 1, fingerprint: "a".repeat(64), property: { source: "formula", name: "total" } }] }),
+		captureBaseTarget: jest.fn<Promise<BaseAnchor>, []>().mockResolvedValue({ version: 1, type: "base", definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
 			target: { type: "cell", record_id: id(8), record_generation: id(9), property: { source: "note", name: "status" } } }),
 	});
 	const savedPreference = jest.fn().mockResolvedValue(undefined); Object.assign(s.store, { setPreference: savedPreference });
@@ -97,6 +101,32 @@ test("native Bases discovery does not pin the sidebar; explicit capture pins and
 		expect(s.host.current().entryId).toBe(s.scope);
 		expect(saved).toHaveBeenCalledWith(expect.objectContaining({ entryId: s.scope, anchor: expect.objectContaining({ target: expect.objectContaining({ record_id: id(8) }) }) }));
 		context.release(); context.release(); expect(s.stops[0]).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("native formula cells and headers capture catalogue identities and refuse changed-definition placement", async () => {
+	const s = await nativeBaseFixture(), saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+	try {
+		if (s.handle.target.type !== "cell") throw new Error("fixture");
+		const property = { source: "formula" as const, name: "total" };
+		s.handle.target = { ...s.handle.target, property };
+		const anchor: BaseAnchor = { ...await s.session.captureBaseTarget(), target: { type: "formula_cell", record_id: id(8), record_generation: id(9), definition_id: id(10), definition_revision: 1, property } };
+		s.session.captureBaseTarget.mockResolvedValue(anchor);
+		const context = (await s.context())!;
+		expect(context.selection(s.handle.target)).toEqual({ type: "formula_cell", recordId: id(8), definitionId: id(10), definitionRevision: 1 });
+		expect(context.selection({ type: "property", property })).toEqual({ type: "formula", definitionId: id(10), definitionRevision: 1 });
+		expect(context.native(anchor)).toEqual(s.handle.target);
+		expect(await s.host.commentBaseHandle(context, s.handle)).toBe(true);
+		expect(saved).toHaveBeenCalledWith(expect.objectContaining({ anchor }));
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(true);
+		const catalog = await s.session.readBaseDefinitions();
+		s.session.readBaseDefinitions.mockResolvedValue({ ...catalog, registry_revision: 2, targets: catalog.targets.map(item => ({ ...item, revision: 2 })) });
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false);
+		context.release();
+		const stale = (await s.context())!;
+		expect(stale.selection(s.handle.target)).toBeUndefined();
+		expect(stale.native(anchor)).toBeUndefined();
+		expect(stale.selection({ type: "view" })).toEqual({ type: "view" }); stale.release();
 	} finally { s.close(); }
 });
 

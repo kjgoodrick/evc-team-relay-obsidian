@@ -15,6 +15,19 @@ const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve()
 const button = (el: HTMLElement, text: string) => [...el.querySelectorAll("button")].find(button => button.textContent === text)!;
 const change = (el: HTMLSelectElement | HTMLInputElement, value: string) => { el.value = value; el.dispatchEvent(new Event(el.tagName === "SELECT" ? "change" : "input")); };
 
+test("formula-cell picker requires both a shared record and a verified formula and never captures a calculated value", async () => {
+	const choose = jest.fn().mockResolvedValue(true);
+	const modal = new BaseTargetPicker({} as App, "Planning", () => ({ records: [{ id: id(8), path: "Item.md", kind: "markdown" }], hasMore: false }), () => [], choose,
+		() => true, () => true, () => () => {}, async () => ({ protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 8, computed_values: false,
+			targets: [{ id: id(5), revision: 7, fingerprint: "a".repeat(64), kind: "formula", property: { source: "formula", name: "total" } }] }));
+	modal.onOpen(); await flush();
+	const field = (name: string) => modal.contentEl.querySelector<HTMLSelectElement>(`[aria-label="${name}"]`)!;
+	change(field("Target"), "formula_cell"); change(field("Definition"), id(5));
+	expect(button(modal.contentEl, "Write comment").disabled).toBe(true);
+	change(field("Record"), id(8)); button(modal.contentEl, "Write comment").click(); await flush();
+	expect(choose).toHaveBeenCalledWith({ type: "formula_cell", recordId: id(8), definitionId: id(5), definitionRevision: 7 });
+});
+
 test("definition picker waits for verified choices and captures identity/revision without computed values", async () => {
 	let finish!: (page: BaseDefinitionCatalog) => void;
 	const choose = jest.fn().mockResolvedValue(true), load = () => new Promise<BaseDefinitionCatalog>(resolve => { finish = resolve; });

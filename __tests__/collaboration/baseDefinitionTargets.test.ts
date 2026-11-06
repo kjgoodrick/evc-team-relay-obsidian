@@ -17,7 +17,7 @@ const selection = { type: "formula" as const, definitionId: id(10), definitionRe
 function anchor(): BaseAnchor { return { version: 1, type: "base", definition_id: id(5), view_id: id(4), generation: id(6), registry_revision: 2,
 	target: { type: "formula", definition_id: id(10), definition_revision: 2, property: definition().property } }; }
 function remote() {
-	return { identity, capabilities: jest.fn().mockResolvedValue({ discussions: true, baseTargets: ["view", "formula", "summary"] }),
+	return { identity, capabilities: jest.fn().mockResolvedValue({ discussions: true, baseTargets: ["view", "formula", "summary", "formula_cell"], baseRecordTypes: ["markdown"] }),
 		permissions: jest.fn().mockResolvedValue({ read: true, comment: true, edit: false, moderate: false }),
 		participants: jest.fn().mockResolvedValue({ participants: [], hasMore: false }),
 		baseTargetContext: jest.fn().mockResolvedValue({ protocol_version: 1, entry_id: id(3), view_id: id(4), definition_id: id(5), generation: id(6), registry_revision: 2 }),
@@ -35,6 +35,11 @@ test("definition codecs retain typed lineage and reject evaluated data, malforme
 	expect(parseAnchor(anchor())).toEqual(anchor());
 	const summary = { ...anchor(), target: { ...anchor().target, type: "summary", summary: "Average" } };
 	expect(parseAnchor(summary)).toEqual(summary);
+	const cell = { ...anchor(), target: { ...anchor().target, type: "formula_cell", record_id: id(20), record_generation: id(21) } };
+	expect(parseAnchor(cell)).toEqual(cell);
+	for (const patch of [{ record_id: undefined }, { record_generation: "path.md" }, { dependency_ids: [] }, { property: { source: "note", name: "Total" } }]) {
+		expect(() => parseAnchor({ ...cell, target: { ...cell.target, ...patch } })).toThrow();
+	}
 	for (const target of [
 		{ ...anchor().target, definition_revision: 3 }, { ...anchor().target, computed_value: "private" },
 		{ ...anchor().target, property: { source: ["formula"], name: "Total" } },
@@ -48,6 +53,44 @@ test("definition codecs retain typed lineage and reject evaluated data, malforme
 	expect(() => parseBaseDefinitionCatalog({ ...catalog(), targets: [definition(), definition()] }, id(3), id(4))).toThrow();
 	expect(() => parseBaseDefinitionCatalog(catalog(), id(3), id(7))).toThrow();
 	expect(() => parseBaseDefinitionPage({ ...catalog(), has_more: true, next_after: id(100) }, id(3), id(4))).toThrow();
+});
+
+test("formula cells require both record permission and definition proof across offline restart", async () => {
+	const factory = new IDBFactory(), first = await open(factory);
+	const choice = { ...selection, type: "formula_cell" as const, recordId: id(20) };
+	let next: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		const context = { ...catalog(), record_id: id(20), record_generation: id(21) };
+		first.transport.baseTargetContext.mockResolvedValue(context);
+		const captured = await first.session.captureBaseTarget(scope, choice);
+		expect(captured.target).toMatchObject({ type: "formula_cell", record_id: id(20), record_generation: id(21), definition_id: id(10) });
+		expect(first.transport.permissions).toHaveBeenCalledWith(id(20));
+		await first.store.saveDraft({ id: "cell", scopeId: scope, revision: 1, body: "Cell review", target: protocolJson(captured) });
+		await first.session.close();
+		const remoteOffline = remote(); for (const call of [remoteOffline.capabilities, remoteOffline.permissions, remoteOffline.baseDefinitions, remoteOffline.baseTargetContext, remoteOffline.changes]) call.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		next = await open(factory, remoteOffline);
+		expect(await next.session.captureBaseTarget(scope, choice)).toEqual(captured);
+		expect((await next.store.getDraft("cell"))?.target).toEqual(captured);
+		await expect(next.session.captureBaseTarget(scope, { ...choice, recordId: id(99) })).rejects.toThrow("verify this saved view and record");
+		await next.store.setPreference("baseRecordComment:" + scope + ":" + id(20), false);
+		await expect(next.session.captureBaseTarget(scope, choice)).rejects.toThrow("verify this saved view and record");
+	} finally { await (next?.session ?? first.session).close(); }
+});
+
+test("a formula-cell capture rejects a changed definition after record verification without rewriting its draft", async () => {
+	const s = await open(new IDBFactory());
+	try {
+		s.transport.baseTargetContext.mockResolvedValue({ ...catalog(), record_id: id(20), record_generation: id(21) });
+		const choice = { ...selection, type: "formula_cell" as const, recordId: id(20) };
+		const captured = await s.session.captureBaseTarget(scope, choice);
+		await s.store.saveDraft({ id: "kept-cell", scopeId: scope, revision: 1, body: "Keep", target: protocolJson(captured) });
+		s.transport.baseDefinitions.mockResolvedValue(catalog(3));
+		await expect(s.session.captureBaseTarget(scope, choice)).rejects.toThrow("definition changed");
+		expect(await s.session.baseDefinitionStatus(scope, captured)).toContain("has changed");
+		expect((await s.store.getDraft("kept-cell"))?.target).toEqual(captured);
+		s.transport.permissions.mockResolvedValue({ read: true, comment: false, edit: false, moderate: false });
+		await expect(s.session.captureBaseTarget(scope, { ...choice, definitionRevision: 3 })).rejects.toMatchObject({ code: "comment_forbidden" });
+	} finally { await s.session.close(); }
 });
 
 test("catalogue transport completes bounded pages and refuses mixed revisions, duplicate progress and missing capability", async () => {

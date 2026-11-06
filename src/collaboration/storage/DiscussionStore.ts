@@ -83,9 +83,9 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 11 keeps the tables but fences workers that cannot decode
-		// formula/summary targets before they claim and reject that saved work.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 11);
+		// Version 12 keeps the tables but fences workers that cannot decode
+		// formula cells before they claim and reject that saved work.
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 12);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {

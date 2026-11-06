@@ -80,6 +80,21 @@ test("layout changes reuse cached data and preserve marker focus while readonly 
 	} finally { f.close(); }
 });
 
+test("unchanged refreshes retain toolbar buttons, while a replacement handle gets a fresh action", async () => {
+	const f = fixture();
+	try {
+		await settle(); f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		const button = f.buttons()[1]; button.focus();
+		f.pane.invalidate(); f.root.dispatchEvent(new Event("scroll")); await settle();
+		expect(f.buttons()[1]).toBe(button); expect(document.activeElement).toBe(button);
+		const next = { ...f.cellHandle };
+		f.surface.hit = () => next; f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		expect(f.buttons()[1]).not.toBe(button); f.buttons()[1].click();
+		expect(f.host.commentBaseHandle).toHaveBeenLastCalledWith(f.contexts[0], next);
+		f.readOnly(); await settle(); expect(f.buttons().map(item => item.textContent)).toEqual(["Comments · Work"]);
+	} finally { f.close(); }
+});
+
 test("focused author controls do not survive comment permission loss", async () => {
 	const f = fixture();
 	try {

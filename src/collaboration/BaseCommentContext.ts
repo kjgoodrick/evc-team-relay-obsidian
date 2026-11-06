@@ -13,6 +13,7 @@ export interface BaseCommentContext {
 }
 
 export function baseSelectionKey(target: BaseTargetSelection): string {
+	if (target.type === "formula_cell") return JSON.stringify([target.type, target.recordId, target.definitionId, target.definitionRevision]);
 	if (target.type === "formula" || target.type === "summary") return JSON.stringify([target.type, target.definitionId, target.definitionRevision]);
 	return JSON.stringify([target.type, "recordId" in target ? target.recordId : null,
 		"property" in target ? target.property.source : null, "property" in target ? target.property.name : null]);
