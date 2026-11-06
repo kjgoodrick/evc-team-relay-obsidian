@@ -8,6 +8,7 @@ import { captureTextAnchor } from "./anchors/text";
 import { imageAssetChanged, markdownImages, resolveImageOccurrence, type ImageOccurrence } from "./anchors/images";
 import { ImageAssets } from "./ImageAssets";
 import { ImageCommentModal } from "./ui/ImageCommentModal";
+import { RenderedImageComments } from "./RenderedImageComments";
 
 export class ImageComments extends Component {
 	private assets: ImageAssets;
@@ -15,6 +16,7 @@ export class ImageComments extends Component {
 	private unobserve?: () => void;
 	constructor(private host: DiscussionHost, private plugin: Plugin, shares: ShareRegistry) { super(); this.assets = new ImageAssets(plugin.app, shares); }
 	onload(): void {
+		this.addChild(new RenderedImageComments(this.host, this.plugin, this.assets, (context, image) => this.draft(context, image)));
 		this.plugin.addCommand({ id: "comment-image", name: "Comment on image", checkCallback: checking => {
 			const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
 			if (!view?.file || !this.host.targetFor(view.file).session?.canAnchorImages) return false;

@@ -84,9 +84,21 @@ The matching server documents the payload and rollout boundary in
 `docs/image-discussion-preview.md`. Upgrade all clients before enabling it:
 older parsers do not understand image anchors in a thread feed.
 
-This is a dialog-based preview, not complete inline image integration. Native
-image overlays, directly opened image files, comment picture uploads, image
-presence, all syntax/format/EXIF/crop cases, mobile and resource acceptance remain.
+`RenderedImageComments` now places saved pin/region overlays and per-image
+controls over native Live Preview and Reading images. The adapters use CM source
+positions or current Reading sections, independently verifying the displayed
+asset/version. A pane shares its source parse and dependency snapshot. Digest
+verification caches no bytes, coalesces duplicates and permits at most two
+distinct reads/hashes at once. Queued work for closed surfaces is abandoned.
+Permission loss or stale source clears controls; late verification cannot revive
+a removed overlay. Object-fit, ordinary scaling and clipped viewports preserve
+intrinsic geometry, and cropped-out marks do not retain keyboard focus.
+
+Desktop tests verified duplicate-image pins, external regions, thread navigation,
+scrolling/sidebar resizing, reload and an off-center cover crop. Creation still
+uses the placement dialog. Direct manipulation, directly opened image files,
+comment picture uploads, image presence, arbitrary transforms, all format/EXIF
+cases, mobile and resource acceptance remain unfinished.
 
 ## Local commands and delivery
 

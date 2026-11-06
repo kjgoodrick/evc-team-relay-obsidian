@@ -5,11 +5,15 @@ import { isId, safeImageUrl } from "./DiscussionProtocol";
 import type { ImageAsset } from "./anchors/imageGeometry";
 
 export type ImagePreview = { asset: ImageAsset; url: string; valid: () => boolean; release: () => void };
+export type RenderedImageEvidence = { asset: ImageAsset; valid: () => boolean };
 export class ImageUnavailable extends Error {}
 
 /** Resolves only the existing authorized inventory. Previewing a comment never
  * creates an attachment, mints an upload grant or asks the server to fetch a URL. */
 export class ImageAssets {
+	private verified = new WeakMap<TFile, { key: string; result: Promise<string>; needed: Set<() => boolean>; settled: boolean }>();
+	private active = 0;
+	private waiting: (() => void)[] = [];
 	constructor(private app: App, private shares: ShareRegistry) {}
 	private managed(note: TFile, destination: string) {
 		let path: string;
@@ -32,6 +36,47 @@ export class ImageAssets {
 		if (safeImageUrl(destination)) return { kind: "external", url: destination, version_evidence: "unknown" };
 		if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(destination)) throw new ImageUnavailable("This image URL is not supported.");
 		return this.managed(note, destination).asset;
+	}
+	/** Read/hash at most two distinct files concurrently. Cache only the digest,
+	 * never pixels or authorization; every caller rechecks its current context. */
+	private async digest(file: TFile, key: string, current: () => boolean): Promise<string> {
+		const cached = this.verified.get(file);
+		if (cached?.key === key) { if (!cached.settled) cached.needed.add(current); return cached.result; }
+		const needed = new Set([current]), required = () => Array.from(needed).some(check => check());
+		const result = (async () => {
+			if (this.active >= 2) await new Promise<void>(resolve => this.waiting.push(resolve));
+			else this.active++;
+			try {
+				if (!required() || file.stat.size > 64 * 1024 * 1024) throw new ImageUnavailable();
+				const bytes = await this.app.vault.readBinary(file);
+				if (!required() || bytes.byteLength > 64 * 1024 * 1024) throw new ImageUnavailable();
+				return await sha256Hex(bytes);
+			} finally { const next = this.waiting.shift(); if (next) next(); else this.active--; }
+		})();
+		const value = { key, result, needed, settled: false }; this.verified.set(file, value);
+		try { return await result; } catch (error) { if (this.verified.get(file) === value) this.verified.delete(file); throw error; }
+		finally { value.settled = true; needed.clear(); }
+	}
+	async verifyRendered(note: TFile, destination: string, image: HTMLImageElement, current: () => boolean): Promise<RenderedImageEvidence> {
+		const asset = this.describe(note, destination);
+		const source = image.currentSrc || image.src;
+		const loaded = () => current() && image.isConnected && image.complete && image.naturalWidth > 0 &&
+			(image.currentSrc || image.src) === source;
+		const sameUrl = (a: string, b: string) => { try { return new URL(a).href === new URL(b).href; } catch { return false; } };
+		if (asset.kind === "external") {
+			const valid = () => loaded() && sameUrl(source, asset.url);
+			if (!valid()) throw new ImageUnavailable(); return { asset, valid };
+		}
+		const managed = this.managed(note, destination), file = managed.file, { mtime, size } = file.stat;
+		const inventory = () => {
+			const value = managed.inspect();
+			return !!value && value.asset.entry_id === asset.entry_id && value.asset.sha256 === asset.sha256 && file.stat.mtime === mtime && file.stat.size === size;
+		};
+		const valid = () => loaded() && inventory() && sameUrl(source, this.app.vault.getResourcePath(file));
+		if (!valid()) throw new ImageUnavailable();
+		const hash = await this.digest(file, `${mtime}:${size}:${asset.sha256}`, () => inventory() && current());
+		if (hash !== asset.sha256 || !valid()) throw new ImageUnavailable();
+		return { asset, valid };
 	}
 	async load(note: TFile, destination: string, current: () => boolean): Promise<ImagePreview> {
 		if (!current()) throw new ImageUnavailable("This image's shared context is no longer available.");

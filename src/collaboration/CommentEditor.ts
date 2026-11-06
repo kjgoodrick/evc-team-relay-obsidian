@@ -8,12 +8,15 @@ import { captureBlockAnchor } from "./anchors/blocks";
 import { localTextAnchor, wireTextAnchor, sourceAnchor, type DiscussionAnchor, type WireTextAnchor } from "./DiscussionProtocol";
 import type { DiscussionHost } from "./DiscussionHost";
 import type { AnchoredThread, DiscussionSession } from "./DiscussionSession";
+import { editorImageTargets, type RenderedImageTarget } from "./anchors/renderedImages";
+import type { ImageOccurrence } from "./anchors/images";
 
 const refreshComments = StateEffect.define<null>();
 export type CapturedCommentSelection<A extends DiscussionAnchor = WireTextAnchor> = { file: TFile; session: DiscussionSession; entryId: string; anchor: A };
 export type ImageCommentContext = { file: TFile; session: DiscussionSession; entryId: string; text: Y.Text; generation: string; position?: number; current: () => boolean };
 export interface CommentEditorSurface {
 	imageContext?(writable?: boolean): ImageCommentContext;
+	renderedImages?(occurrences: ImageOccurrence[]): RenderedImageTarget[];
 	readonly editor: Editor | undefined;
 	readonly file: TFile | undefined;
 	capture(blocks?: boolean): CapturedCommentSelection;
@@ -129,6 +132,9 @@ export function commentEditorExtension(host: DiscussionHost) {
 				!!bound && !this.view.composing && bound.text.toString() === this.view.state.doc.toString();
 			if (!file || !session || !id || !bound || bound.documentId !== id || !generation || !current()) throw new Error("Wait for this shared image and note to synchronize.");
 			return { file, session, entryId: id, text: bound.text, generation, position: this.view.state.selection.main.head, current };
+		}
+		renderedImages(occurrences: ImageOccurrence[]): RenderedImageTarget[] {
+			return editorImageTargets(this.view.contentDOM, occurrences, node => this.view.posAtDOM(node));
 		}
 		capture(blocks = false): CapturedCommentSelection {
 			this.checkContext();

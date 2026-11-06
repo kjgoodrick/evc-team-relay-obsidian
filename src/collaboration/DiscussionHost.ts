@@ -14,6 +14,8 @@ import { BlockSelectionError } from "./anchors/blocks";
 import { ReadingComments } from "./CommentReading";
 import { readingCommentBinding } from "./ReadingTextBinding";
 import { ImageComments } from "./ImageComments";
+import type { ImageOccurrence } from "./anchors/images";
+import type { RenderedImageTarget } from "./anchors/renderedImages";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; entryId?: string; session?: DiscussionSession; message?: string };
@@ -138,6 +140,10 @@ export class DiscussionHost extends Component {
 		return { path: file.path, entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
 	}
 	registerEditor(surface: CommentEditorSurface): () => void { this.editors.add(surface); return () => this.editors.delete(surface); }
+	renderedImages(view: MarkdownView, occurrences: ImageOccurrence[]): RenderedImageTarget[] {
+		return view.getMode() === "preview" ? this.reading?.renderedImages(view, occurrences) ?? [] :
+			[...this.editors].find(surface => surface.editor === view.editor)?.renderedImages?.(occurrences) ?? [];
+	}
 	imageContext(view: MarkdownView, writable = true): ImageCommentContext {
 		if (view.getMode() !== "preview") {
 			const context = [...this.editors].find(surface => surface.editor === view.editor)?.imageContext?.(writable);

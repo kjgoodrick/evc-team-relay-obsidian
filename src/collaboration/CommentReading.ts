@@ -8,6 +8,8 @@ import { captureBlockAnchor, BlockSelectionError } from "./anchors/blocks";
 import { captureTextAnchor, resolveTextAnchor } from "./anchors/text";
 import { ReadingSectionMap, ReadingSource, mapReadingSection } from "./anchors/reading";
 import { onReadingBindingChange, readingCommentBinding } from "./ReadingTextBinding";
+import { readingImageTargets, type RenderedImageTarget } from "./anchors/renderedImages";
+import type { ImageOccurrence } from "./anchors/images";
 
 type Scope = { view: MarkdownView; session: DiscussionSession; entryId: string; stop: () => void; dirty: boolean;
 	threads: AnchoredThread[]; sections: Set<ReadingCommentSection>; source?: ReadingSource; text?: Y.Text; unobserve?: () => void; epoch: number };
@@ -249,6 +251,16 @@ export class ReadingComments extends Component {
 			section.containerEl.scrollIntoView({ block: "center", behavior: "auto" }); return true;
 		}
 		return false;
+	}
+	renderedImages(view: MarkdownView, occurrences: ImageOccurrence[]): RenderedImageTarget[] {
+		const result: RenderedImageTarget[] = [], seen = new Set<HTMLImageElement>();
+		for (const section of this.scopes.get(view)?.sections ?? []) {
+			const current = this.snapshot(section); if (!current) continue;
+			for (const target of readingImageTargets(section.containerEl, current.source.source, current.from, current.to, occurrences)) {
+				if (!seen.has(target.image)) { seen.add(target.image); result.push(target); }
+			}
+		}
+		return result;
 	}
 	onunload(): void {
 		this.closed = true; if (this.timer !== undefined) window.clearTimeout(this.timer);

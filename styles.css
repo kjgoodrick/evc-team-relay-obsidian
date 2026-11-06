@@ -700,3 +700,18 @@
 .is-mobile .relay-image-comment button, .is-mobile .relay-image-comment input { min-height: 44px; }
 
 .relay-image-comment-stage canvas.is-unavailable, .relay-image-comment-overlay.is-unavailable { display: none; }
+.relay-rendered-image-root { position: relative; }
+.relay-rendered-images { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+.relay-rendered-image, .relay-rendered-image-mark { position: absolute; }
+.relay-rendered-image[hidden] { display: none; }
+.relay-rendered-image button[hidden] { display: none; }
+.relay-rendered-image-clip { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.relay-rendered-image-controls { position: absolute; top: 2px; right: 2px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; max-width: 100%; pointer-events: none; }
+.relay-rendered-image-controls button, .relay-rendered-image-mark { pointer-events: auto; font-family: var(--font-interface); font-size: var(--font-ui-smaller); }
+.relay-rendered-image-controls button { min-height: 24px; height: auto; padding: 2px 5px; }
+.relay-rendered-image button.relay-rendered-image-mark { margin: 0; padding: 0; min-width: 0; min-height: 0; border: 2px solid var(--interactive-accent); border-radius: 2px; background: color-mix(in srgb, var(--interactive-accent) 12%, transparent); box-shadow: 0 0 0 1px var(--background-primary); }
+.relay-rendered-image button.relay-rendered-image-mark.pin { transform: translate(-50%, -50%); border-radius: 50%; background: var(--interactive-accent); }
+.relay-rendered-image-mark.is-resolved { border-style: dashed; opacity: 0.7; }
+.relay-rendered-image-mark:focus-visible, .relay-rendered-image-controls button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
+.relay-rendered-image-evidence { font-family: var(--font-interface); font-size: var(--font-ui-smaller); background: var(--background-primary); color: var(--text-muted); padding: 2px 5px; border-radius: 3px; }
+.is-mobile .relay-rendered-image-controls button { min-height: 44px; }

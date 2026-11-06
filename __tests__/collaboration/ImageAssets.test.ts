@@ -11,11 +11,11 @@ function fixture() {
 		folderIndex: { recordFor: () => record }, _liveProvider: { managedIndex: { registered: () => registered, isBlocked: () => blocked } },
 		crdtDoc: { getMap: () => ({ get: () => ({ owner: false, permissions: { "chart.png": permission, "renamed.png": permission } }) }) } };
 	const readBinary = jest.fn(async () => new ArrayBuffer(8));
-	const app = { metadataCache: { getFirstLinkpathDest: () => file }, vault: { getFileByPath: () => file, readBinary } };
+	const app = { metadataCache: { getFirstLinkpathDest: () => file }, vault: { getFileByPath: () => file, readBinary, getResourcePath: () => `app://local/${file.path}?${file.stat.mtime}` } };
 	const shares = { shareFor: () => folder };
 	const assets = new ImageAssets(app as unknown as App, shares as unknown as ShareRegistry);
 	jest.mocked(sha256Hex).mockResolvedValue(hash);
-	return { assets, note, file, folder, readBinary, shares, record, revoke: () => { permission = "none"; }, block: () => { blocked = true; }, unregister: () => { registered = false; } };
+	return { assets, note, file, folder, app, readBinary, shares, record, revoke: () => { permission = "none"; }, block: () => { blocked = true; }, unregister: () => { registered = false; } };
 }
 beforeEach(() => { jest.clearAllMocks(); jest.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview"); jest.spyOn(URL, "revokeObjectURL").mockImplementation(() => {}); });
 afterEach(() => jest.restoreAllMocks());
@@ -43,4 +43,48 @@ test("external URLs carry unknown version evidence and never use the vault or se
 	expect(preview.asset).toEqual({ kind: "external", url: "https://images.test/chart.png", version_evidence: "unknown" });
 	expect(f.readBinary).not.toHaveBeenCalled(); expect(sha256Hex).not.toHaveBeenCalled();
 	for (const path of ["file:///private", "data:image/png;base64,AA==", "https://user:password@images.test/a", "//images.test/a", "https:bad"]) expect(() => f.assets.describe(f.note, path)).toThrow();
+});
+
+function rendered(src: string): HTMLImageElement { return { src, currentSrc: src, isConnected: true, complete: true, naturalWidth: 800 } as HTMLImageElement; }
+test("verifies exact native resource versions once for repeated renders and rechecks authority without retaining image bytes", async () => {
+	const f = fixture(), first = rendered(f.app.vault.getResourcePath()), second = rendered(f.app.vault.getResourcePath());
+	const [a, b] = await Promise.all([f.assets.verifyRendered(f.note, "chart.png", first, () => true), f.assets.verifyRendered(f.note, "chart.png", second, () => true)]);
+	expect(a.valid()).toBe(true); expect(b.valid()).toBe(true); expect(f.readBinary).toHaveBeenCalledTimes(1); expect(URL.createObjectURL).not.toHaveBeenCalled();
+	await f.assets.verifyRendered(f.note, "chart.png", first, () => true); expect(f.readBinary).toHaveBeenCalledTimes(1);
+	f.revoke(); expect(a.valid()).toBe(false); expect(b.valid()).toBe(false);
+});
+
+test("never overlays a stale native image resource or a different external URL", async () => {
+	const f = fixture();
+	await expect(f.assets.verifyRendered(f.note, "chart.png", rendered('app://local/Team/chart.png?0'), () => true)).rejects.toThrow();
+	expect(f.readBinary).not.toHaveBeenCalled();
+	await expect(f.assets.verifyRendered(f.note, "https://images.test/a.png", rendered('https://images.test/b.png'), () => true)).rejects.toThrow();
+	const image = rendered('https://images.test/a.png'), evidence = await f.assets.verifyRendered(f.note, image.src, image, () => true);
+	expect(evidence.asset.kind).toBe('external'); expect(f.readBinary).not.toHaveBeenCalled();
+	Object.assign(image, { currentSrc: 'https://images.test/b.png' }); expect(evidence.valid()).toBe(false);
+});
+
+test("late digest completion cannot authorize a closed pane and a fresh pane can reuse only the digest", async () => {
+	const f = fixture(), image = rendered(f.app.vault.getResourcePath()); let current = true, finish!: (hash: string) => void;
+	jest.mocked(sha256Hex).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+	const pending = f.assets.verifyRendered(f.note, "chart.png", image, () => current);
+	await Promise.resolve(); current = false; finish(hash);
+	await expect(pending).rejects.toThrow();
+	const next = await f.assets.verifyRendered(f.note, "chart.png", image, () => true);
+	expect(next.valid()).toBe(true); expect(f.readBinary).toHaveBeenCalledTimes(1);
+});
+
+test("limits distinct image reads to two and drops queued verification when its last surface closes", async () => {
+	const f = fixture(), files = [0, 1, 2].map(n => ({ ...f.file, path: `Team/chart${n}.png` } as TFile));
+	const finish: ((value: ArrayBuffer) => void)[] = [];
+	const readBinary = jest.fn(() => new Promise<ArrayBuffer>(resolve => { finish.push(resolve); }));
+	const app = { metadataCache: { getFirstLinkpathDest: (destination: string) => files.find(file => file.path === 'Team/' + destination) },
+		vault: { getFileByPath: (path: string) => files.find(file => file.path === path), getResourcePath: (file: TFile) => `app://local/${file.path}?1`, readBinary } };
+	f.folder.crdtDoc.getMap = () => ({ get: () => ({ owner: true, permissions: { 'chart.png': 'read', 'renamed.png': 'read' } }) });
+	const assets = new ImageAssets(app as unknown as App, f.shares as unknown as ShareRegistry); let lastVisible = true;
+	const pending = files.map((file, i) => assets.verifyRendered(f.note, `chart${i}.png`, rendered(app.vault.getResourcePath(file)), () => i < 2 || lastVisible));
+	expect(readBinary).toHaveBeenCalledTimes(2); lastVisible = false;
+	finish.forEach(resolve => resolve(new ArrayBuffer(8)));
+	const results = await Promise.allSettled(pending);
+	expect(results.map(result => result.status)).toEqual(['fulfilled', 'fulfilled', 'rejected']); expect(readBinary).toHaveBeenCalledTimes(2);
 });
