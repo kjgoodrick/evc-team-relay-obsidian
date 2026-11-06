@@ -8,6 +8,7 @@ export interface BaseDownload { id: string; before: ArrayBuffer | null; remote: 
 export interface BaseSyncRecord {
 	entryId: string; revision: number; baseline?: BaseSnapshot; pending?: BasePending;
 	conflict?: BaseConflict; download?: BaseDownload;
+	reviewRequired?: "withdrawn";
 }
 export interface BaseRecovery { entryId: string; id: string; createdAt: number; record: BaseSyncRecord }
 
@@ -56,12 +57,13 @@ export class BaseSyncStore {
 	}
 	get(entryId: string): Promise<BaseSyncRecord> { return this.transaction("readonly", tx => this.current(tx, entryId)); }
 
-	private async write(tx: IDBTransaction, before: BaseSyncRecord, after: BaseSyncRecord, archive?: BaseRecovery): Promise<void> {
+	private async write(tx: IDBTransaction, before: BaseSyncRecord, after: BaseSyncRecord, archive?: BaseRecovery | BaseRecovery[]): Promise<void> {
 		const meta = tx.objectStore("meta"), used = await request(meta.get("bytes")) as number | undefined ?? 0;
 		let archivedBytes = 0;
-		if (archive && !await request(tx.objectStore("recoveries").getKey([archive.entryId, archive.id]))) {
-			archivedBytes = footprint(archive.record);
-			await request(tx.objectStore("recoveries").add(archive));
+		for (const item of archive ? Array.isArray(archive) ? archive : [archive] : []) {
+			if (await request(tx.objectStore("recoveries").getKey([item.entryId, item.id]))) continue;
+			archivedBytes += footprint(item.record);
+			await request(tx.objectStore("recoveries").add(item));
 		}
 		const next = used - footprint(before) + footprint(after) + archivedBytes;
 		if (next > this.quota) throw new Error("Bases local storage quota reached; retained work was not discarded");
@@ -75,12 +77,15 @@ export class BaseSyncStore {
 	private idle(record: BaseSyncRecord): void {
 		if (record.pending || record.download) throw new Error("Finish pending Bases work before replacing it");
 	}
+	private reviewed(record: BaseSyncRecord): void {
+		if (record.conflict || record.reviewRequired) throw new Error("Review the retained Bases conflict first");
+	}
 
 	async adopt(entryId: string, revision: number, snapshot: BaseSnapshot): Promise<void> {
 		snapshot = await validateBaseSnapshot(snapshot, entryId);
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
-			if (before.conflict) throw new Error("Review the retained Bases conflict first");
+			this.reviewed(before);
 			await this.write(tx, before, { ...before, baseline: snapshot });
 		});
 	}
@@ -89,7 +94,7 @@ export class BaseSyncStore {
 		const pending = copyBasePending({ operationId: uuidv4(), expected, bytes }, entryId);
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
-			if (before.conflict) throw new Error("Review the retained Bases conflict first");
+			this.reviewed(before);
 			await this.write(tx, before, { ...before, pending });
 		});
 		return copyBasePending(pending, entryId);
@@ -107,6 +112,7 @@ export class BaseSyncStore {
 			if (before.pending?.operationId !== operationId) return false;
 			const after = { ...before }; delete after.pending;
 			if (validated) after.baseline = { state: validated.state, bytes: before.pending.bytes };
+			else after.reviewRequired = "withdrawn";
 			await this.write(tx, before, after, validated ? undefined : { entryId, id: operationId, createdAt: Date.now(), record: before });
 			return true;
 		});
@@ -119,7 +125,8 @@ export class BaseSyncStore {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
 			// Repeated observations never discard the original conflict copies.
 			if (before.conflict) throw new Error("Review the retained Bases conflict first");
-			await this.write(tx, before, { ...before, conflict: copy });
+			const after = { ...before, conflict: copy }; delete after.reviewRequired;
+			await this.write(tx, before, after);
 		});
 	}
 
@@ -134,12 +141,34 @@ export class BaseSyncStore {
 		});
 	}
 
+	/** Archive reviewed conflicts and prepare their replacement in one commit.
+	 * A crash cannot leave a cleared conflict with an unrecorded overwrite. */
+	async resolveConflict(entryId: string, revision: number, choice: "local" | "server", localBytes: ArrayBuffer | null, remote: BaseSnapshot): Promise<void> {
+		const local = localBytes === null ? null : copyBaseBytes(localBytes);
+		remote = await validateBaseSnapshot(remote, entryId);
+		if (choice === "local" ? local === null : remote.bytes === null) throw new Error("The chosen Bases copy is unavailable");
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
+			if (!before.conflict && !before.reviewRequired) throw new Error("The Bases conflict was already reviewed");
+			const after = { ...before }; delete after.conflict; delete after.reviewRequired;
+			if (choice === "local") after.pending = { operationId: uuidv4(), expected: remote.state, bytes: local! };
+			else after.download = { id: uuidv4(), before: local, remote };
+			// The displayed copies may be newer than the initial conflict. Preserve
+			// those too before an explicit server choice can overwrite local edits.
+			await this.write(tx, before, after, [
+				{ entryId, id: uuidv4(), createdAt: Date.now(), record: before },
+				{ entryId, id: uuidv4(), createdAt: Date.now(), record: { entryId, revision: before.revision,
+					conflict: { reason: "reviewed-copies", local, remote } } },
+			]);
+		});
+	}
+
 	async prepareDownload(entryId: string, revision: number, beforeBytes: ArrayBuffer | null, remote: BaseSnapshot): Promise<BaseDownload> {
 		const download = { id: uuidv4(), before: beforeBytes === null ? null : copyBaseBytes(beforeBytes), remote: await validateBaseSnapshot(remote, entryId) };
 		if (download.remote.bytes === null) throw new Error("The Bases file has not been published");
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
-			if (before.conflict) throw new Error("Review the retained Bases conflict first");
+			this.reviewed(before);
 			await this.write(tx, before, { ...before, download });
 		});
 		return download;

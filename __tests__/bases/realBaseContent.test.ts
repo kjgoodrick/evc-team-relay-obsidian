@@ -3,6 +3,8 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { BaseContentTransport } from "../../src/bases/BaseContentTransport";
 import { BaseSyncStore } from "../../src/bases/BaseSyncStore";
 import { decideBaseSync, type BasePending } from "../../src/bases/BaseContentProtocol";
+import { BaseSyncRunner, sameBaseBytes, type BaseSyncAccess } from "../../src/bases/BaseSyncRunner";
+import { nativeBaseLock } from "../../src/bases/NativeBaseFile";
 Object.assign(globalThis, { IDBKeyRange });
 const fixturePath = process.env.EVC_BASE_CONTENT_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -49,5 +51,32 @@ integration("real Bases HTTP preserves offline writes and resolves unknown deliv
 		const reviewer = new BaseContentTransport({ ...identity, accountId: fixture.reviewer }, async () => ({ accountId: fixture.reviewer, accessToken: fixture.reviewerToken }), (url, init) => fetch(url, init));
 		expect(await reviewer.read(fixture.entry)).toEqual(remoteSnapshot);
 		await expect(reviewer.publish(fixture.entry, { ...remote, operationId: crypto.randomUUID(), expected: remoteSnapshot.state })).rejects.toMatchObject({ code: "base_editor_required" });
+
+		// Drive the actual worker through review, another lost response/restart,
+		// and a server-side race. The disk port here is intentionally in-memory;
+		// this fixture proves the HTTP/store orchestration, not Obsidian's API.
+		let disk = local.bytes; const fileIdentity = {}, lock = nativeBaseLock(identity, navigator.locks);
+		const access: BaseSyncAccess = { path: remoteSnapshot.state.path, current: () => true, writable: () => true, canInitialize: false,
+			read: async () => ({ bytes: disk, identity: fileIdentity }),
+			replace: async (before, next) => { if (!sameBaseBytes(before.bytes, disk)) return false; disk = next; return true; } };
+		let runner = new BaseSyncRunner(store, real, lock);
+		const review = (await runner.review(fixture.entry, access))!;
+		expect(await runner.resolve(fixture.entry, access, review, "local")).toBe("synced"); expect((await real.read(fixture.entry)).bytes).toEqual(disk);
+		disk = bytes("views: []\n# worker offline edit\n");
+		const losingRunner = new BaseSyncRunner(store, { read: real.read.bind(real), publish: losesResponse.publish.bind(losesResponse), withdraw: real.withdraw.bind(real) }, lock);
+		await expect(losingRunner.sync(fixture.entry, access)).rejects.toMatchObject({ action: "retry" });
+		const acceptedVersion = (await real.read(fixture.entry)).state.content_version;
+		store.close(); store = await BaseSyncStore.open(identity, factory); runner = new BaseSyncRunner(store, real, lock);
+		expect(await runner.sync(fixture.entry, access)).toBe("synced"); expect((await real.read(fixture.entry)).state.content_version).toBe(acceptedVersion);
+		disk = bytes("views: []\n# conflicting worker edit\n");
+		const racingRunner = new BaseSyncRunner(store, { read: real.read.bind(real), withdraw: real.withdraw.bind(real), publish: async (entry, pending) => {
+			await real.publish(entry, { ...pending, operationId: crypto.randomUUID(), bytes: bytes("views: []\n# racing editor\n") });
+			return real.publish(entry, pending);
+		} }, lock);
+		expect(await racingRunner.sync(fixture.entry, access)).toBe("conflict");
+		expect(new TextDecoder().decode(disk)).toContain("conflicting worker edit");
+		expect(await runner.resolve(fixture.entry, access, (await runner.review(fixture.entry, access))!, "server")).toBe("synced");
+		expect(new TextDecoder().decode(disk)).toContain("racing editor");
+		expect((await store.recoveries(fixture.entry)).some(copy => copy.record.conflict?.reason === "reviewed-copies")).toBe(true);
 	} finally { store.close(); }
 }, 30_000);
