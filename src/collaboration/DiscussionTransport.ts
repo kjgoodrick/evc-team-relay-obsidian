@@ -13,6 +13,8 @@ export class DiscussionFailure extends Error {
 
 export interface DiscussionIdentity { serverId: string; accountId: string; shareId: string }
 export interface DiscussionCredential { accountId: string; accessToken: string }
+export interface DiscussionPermissions { read: boolean; comment: boolean; edit: boolean; moderate: boolean }
+export interface DiscussionParticipant { id: string; name: string }
 export type CommandResult = {
 	operation_id: string; scope_id: string; thread_id: string; sequence: number;
 	state: "open" | "resolved"; state_revision: number; removed: boolean; changed: boolean;
@@ -52,7 +54,7 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 	return body;
 }
 
-type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
+export type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
 
 function accepted(value: unknown, op: OnlineOperation): CommandResult {
 	const command = op.payload as Record<string, Json>;
@@ -115,6 +117,27 @@ export class DiscussionTransport implements DiscussionSender {
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		return { discussions: value.features.discussion_commands };
+	}
+
+	async permissions(entryId: string): Promise<DiscussionPermissions> {
+		const value = await this.request(this.scopePath(entryId) + "/capabilities");
+		if (!object(value) || ["read", "comment", "edit", "moderate"].some(key => typeof value[key] !== "boolean")) {
+			throw new DiscussionFailure("pause", "invalid_read_response");
+		}
+		return { read: value.read as boolean, comment: value.comment as boolean, edit: value.edit as boolean, moderate: value.moderate as boolean };
+	}
+	async participants(entryId: string, after?: string): Promise<{ participants: DiscussionParticipant[]; hasMore: boolean; nextAfter?: string }> {
+		if (after !== undefined && !isId(after)) throw new DiscussionFailure("reject", "invalid_local_target");
+		const value = await this.request(this.scopePath(entryId) + "/participants?limit=50" + (after ? "&after=" + after : ""));
+		if (!object(value) || !Array.isArray(value.participants) || value.participants.length > 100 ||
+			typeof value.has_more !== "boolean" || !(value.next_after === null || isId(value.next_after))) throw new DiscussionFailure("pause", "invalid_read_response");
+		let previous = after ?? "";
+		const participants = value.participants.map(person => {
+			if (!object(person) || !isId(person.id) || person.id <= previous || typeof person.name !== "string" || !person.name || person.name.length > 320) throw new DiscussionFailure("pause", "invalid_read_response");
+			previous = person.id; return { id: person.id, name: person.name };
+		});
+		if (value.next_after !== (previous || null) || value.has_more && !participants.length) throw new DiscussionFailure("pause", "invalid_read_response");
+		return { participants, hasMore: value.has_more, nextAfter: previous || undefined };
 	}
 
 	private scopePath(entryId: string): string {

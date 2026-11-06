@@ -38,6 +38,8 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 	const scopePath = `shares/${fixture.share}/entries/${fixture.entry}`;
 	try {
 		expect(await transport.capabilities()).toEqual({ discussions: true });
+		expect(await transport.permissions(fixture.entry)).toEqual({ read: true, comment: true, edit: false, moderate: false });
+		expect((await transport.participants(fixture.entry)).participants.map(person => person.name)).toEqual(expect.arrayContaining(["reviewer", "owner"]));
 		await enqueue("thread.create", { type: "thread.create", thread_id: thread, message_id: message,
 			anchor: { version: 1, type: "note" }, body: body("First") }, [], root);
 		await enqueue("reply.create", { type: "reply.create", thread_id: thread, message_id: randomUUID(), body: body("Reply") }, [root]);
@@ -59,6 +61,15 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		expect(history.revisions.map((r: { revision: number }) => r.revision)).toEqual([1, 2]);
 		const changes = await api(`${scopePath}/changes`);
 		expect(changes.events).toHaveLength(4); // duplicate retry produced no extra event
+		expect(await transport.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
+			type: "thread.state", thread_id: thread, expected_state_revision: 1, state: "resolved",
+		} })).toMatchObject({ state: "resolved", state_revision: 2 });
+		const reopened = { operationId: randomUUID(), scopeId: fixture.entry, payload: {
+			type: "reply.create", thread_id: thread, message_id: randomUUID(), body: body("Send and reopen"), reopen: true, expected_state_revision: 2,
+		} };
+		const acknowledged = await transport.sendOnline(reopened);
+		expect(acknowledged).toMatchObject({ state: "open", state_revision: 3 });
+		expect(await transport.sendOnline(reopened)).toEqual(acknowledged);
 		incoming.resume(); await incoming.settled();
 		expect(incoming.status).toBe("current");
 		expect((await store.entity(fixture.entry, messageKey(thread, message)))?.value).toMatchObject({
@@ -76,10 +87,10 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		worker.wake(); await worker.settled();
 		expect(await store.getOperation(denied.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden", payload: { body: body("Keep my draft") } });
 		expect(await store.entity(fixture.entry, messageKey(thread, message))).toBeUndefined();
-		expect((await api(`${scopePath}/threads/${thread}`)).messages).toHaveLength(2);
+		expect((await api(`${scopePath}/threads/${thread}`)).messages).toHaveLength(3);
 		await api("commands", { method: "POST", body: JSON.stringify({ protocol_version: 1, operation_id: randomUUID(),
 			share_id: fixture.share, entry_id: fixture.entry, command: { type: "thread.remove", thread_id: thread,
-				expected_state_revision: 1, reason: "Synthetic moderation" } }) }, true);
+				expected_state_revision: 3, reason: "Synthetic moderation" } }) }, true);
 		incoming.resume(); await incoming.settled();
 		expect(incoming.status).toBe("current");
 		expect((await store.entity(fixture.entry, threadKey(thread)))?.value).toMatchObject({ removed: true });

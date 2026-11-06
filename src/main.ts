@@ -22,6 +22,7 @@ import {
 } from "obsidian";
 import { Platform } from "obsidian";
 import { PluginUpdater } from "./updates/PluginUpdater";
+import { DiscussionHost } from "./collaboration/DiscussionHost";
 import { UpdateFiles } from "./updates/UpdateFiles";
 
 /** Internal Obsidian App properties not exposed in the public API */
@@ -229,6 +230,7 @@ export default class TeamRelayPlugin extends Plugin {
 
 	// Auth + settings UI
 	authSession!: AuthSession;
+	private discussions?: DiscussionHost;
 	settingsPage!: RelaySettingsPage;
 	updater!: PluginUpdater;
 	private updaterBlockedStartup = false;
@@ -890,6 +892,8 @@ export default class TeamRelayPlugin extends Plugin {
 				new Notice("Please sign in to use relay");
 			}
 		}
+
+		this.discussions = this.addChild(new DiscussionHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
 
 		this.app.workspace.onLayoutReady(() => {
 			this.shareRegistry.restore();
@@ -2252,6 +2256,7 @@ export default class TeamRelayPlugin extends Plugin {
 	onunload() {
 		this.updater?.dispose();
 		if (this.updaterBlockedStartup) return;
+		this.discussions?.unload();
 		// Save settings before cleanup to persist any changes
 		// Must await to ensure settings are persisted before destroying namespaced settings
 		void this.pluginSettings?.persist();

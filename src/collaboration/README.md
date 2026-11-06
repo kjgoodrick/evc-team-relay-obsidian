@@ -1,7 +1,9 @@
 # Collaboration foundations
 
-These modules are implemented/tested primitives, not an enabled comments UI.
-No worker is constructed by plugin startup yet. The server protocol is documented
+These modules now include a whole-note native discussion preview. Plugin startup
+constructs `DiscussionHost`, which owns account-bound `DiscussionSession` instances
+and negotiates the server's disabled-by-default discussion capability. The complete
+text/image/Bases/presence feature is not enabled or finished. The server protocol is documented
 in the matching server checkout at `docs/discussion-preview.md`. Current commands
 support whole-note discussions only; text/Bases target primitives remain separate
 until their authorization, identity, and native rendering gates are complete.
@@ -11,8 +13,11 @@ until their authorization, identity, and native rendering gates are complete.
 `DiscussionStore` persists drafts, operations, cached entities and checkpoints in
 IndexedDB, partitioned by canonical server URL, account UUID, local vault identity,
 and share UUID. Use the transport's normalized `identity.serverId` when opening
-the store. IndexedDB schema version 3 preserves previous drafts/outbox/cache,
-and adds per-scope invalidation generations to the version-2 scope index.
+the store. IndexedDB schema version 4 preserves previous drafts/outbox/cache,
+invalidation generations and scope indexes, and adds ordered cache pages and
+local preferences. Draft preconditions and atomic enqueue/removal protect edits
+from another pane. Manual online-action intents are separate from the outbox;
+they preserve IDs through ambiguous responses and never auto-submit.
 Payloads are copied before asynchronous writes,
 so another pane cannot mutate a command during persistence.
 
@@ -69,9 +74,11 @@ never put it into the offline queue. Reads validate response IDs, revisions,
 pagination progress, supported structured bodies and event kinds. Read responses
 are capped at 512 KiB; command responses remain capped at 64 KiB.
 
-The host controller still needs capability negotiation wiring, account/logout lifecycle,
-cross-window enqueue notifications, explicit local-data removal UX, draft/rejection
-review, dependency repair and attachment staging. The store's `clearAll()` is an
+The native host now provides capability negotiation, account/logout lifecycle,
+foreground/hidden-surface handling and cross-window notifications. The sidebar
+has persistent drafts, replies, reactions, mentions, history and online state/removal
+actions. Full rich-text editing, explicit local-data removal UX, actionable draft/
+rejection review, dependency repair and attachment staging remain. The store's `clearAll()` is an
 explicit local cleanup primitive, not an automatic logout policy. Stop every
 worker sharing that store before using it. Revocation does not promise erasure
 of already downloaded content or user-authored local recovery text.
@@ -97,8 +104,8 @@ off. Stop during a pending read ignores its late result.
 
 The worker yields after three pages and uses a five-second active-surface fallback
 after catching up. The host must stop it for hidden/background surfaces and wake
-it for relevant invalidations/local sends. WebSocket invalidation, snapshot/event
-retention and host lifecycle wiring remain open; this is not a mobile battery or
+it for relevant invalidations/local sends. The host now does so. WebSocket
+invalidation and snapshot/event retention remain open; this is not a mobile battery or
 native UI claim. The current server retains all metadata, so do not enable pruning
 until a snapshot bootstrap protocol replaces replay from zero.
 

@@ -621,3 +621,31 @@
 	height: auto;
 	white-space: normal;
 }
+
+/* Native discussion sidebar: use host theme tokens and keep touch controls reachable. */
+.relay-comments-view { padding: var(--size-4-3); overflow: auto; }
+.relay-comments-view h2 { margin-top: 0; font-size: var(--font-ui-large); overflow-wrap: anywhere; }
+.relay-comment-status, .relay-comment-save-status, .relay-comment-muted, .relay-comment-author {
+	color: var(--text-muted); font-size: var(--font-ui-smaller); line-height: 1.5;
+}
+.relay-comment-status { margin-bottom: var(--size-4-2); }
+.relay-comment-thread, .relay-comment-pending-item {
+	border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m);
+	padding: var(--size-4-3); margin-block: var(--size-4-3); overflow-wrap: anywhere;
+}
+.relay-comment-thread-heading { font-size: var(--font-ui-small); margin-bottom: var(--size-4-2); }
+.relay-comment-thread-controls, .relay-comment-message-actions, .relay-comment-composer-actions {
+	display: flex; flex-wrap: wrap; align-items: center; gap: var(--size-4-1);
+}
+.relay-comment-message { border-top: 1px solid var(--background-modifier-border); padding-block: var(--size-4-2); }
+.relay-comment-message p, .relay-comment-history p, .relay-comment-pending-item p { white-space: pre-wrap; }
+.relay-comment-message pre, .relay-comment-history pre { overflow: auto; }
+.relay-comment-composer { margin-top: var(--size-4-3); display: grid; gap: var(--size-4-2); }
+.relay-comment-composer label { font-size: var(--font-ui-small); font-weight: var(--font-semibold); }
+.relay-comment-composer textarea { width: 100%; min-height: 84px; resize: vertical; }
+.relay-comment-composer select { max-width: 100%; }
+.relay-comment-mention { color: var(--text-accent); background: var(--background-modifier-hover); border-radius: 3px; }
+.relay-comment-reaction[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
+.relay-comment-history { border-bottom: 1px solid var(--background-modifier-border); padding-bottom: var(--size-4-3); }
+.is-mobile .relay-comments-view button, .is-mobile .relay-comment-composer button,
+.is-mobile .relay-comment-composer select { min-height: 44px; height: auto; }

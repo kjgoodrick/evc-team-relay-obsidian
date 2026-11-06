@@ -22,6 +22,14 @@ export interface CachedEntity { id: string; revision: number; value: Json }
 export interface ScopeCheckpoint { cursor?: string; generation: number }
 export interface CachePurge { prefix: string; throughRevision: number }
 
+function ordered(entity: CachedEntity): { collection: string; position: number } {
+	const value = entity.value;
+	const position = value && typeof value === "object" && !Array.isArray(value) ? value.created_sequence : undefined;
+	const removed = value && typeof value === "object" && !Array.isArray(value) && value.removed === true;
+	return { collection: entity.id.slice(0, entity.id.lastIndexOf(":") + 1),
+		position: removed ? 0 : typeof position === "number" && Number.isSafeInteger(position) && position > 0 ? position : entity.revision };
+}
+
 function request<T>(req: IDBRequest<T>): Promise<T> {
 	return new Promise((resolve, reject) => {
 		req.onsuccess = () => resolve(req.result);
@@ -70,7 +78,7 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 3);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 4);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -83,6 +91,17 @@ export class DiscussionStore {
 			}
 			if (event.oldVersion < 2) open.transaction!.objectStore("entities").createIndex("scope", "scopeId");
 			if (event.oldVersion < 3) db.createObjectStore("generations");
+			if (event.oldVersion < 4) {
+				db.createObjectStore("preferences");
+				open.transaction!.objectStore("outbox").createIndex("scopeState", ["scopeId", "state", "createdAt", "operationId"]);
+				const entities = open.transaction!.objectStore("entities");
+				entities.createIndex("ordered", ["scopeId", "collection", "position"]);
+				const cursor = entities.openCursor();
+				cursor.onsuccess = () => {
+					const row = cursor.result;
+					if (row) { row.update({ ...row.value, ...ordered(row.value as CachedEntity) }); row.continue(); }
+				};
+			}
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -107,12 +126,13 @@ export class DiscussionStore {
 		}
 	}
 
-	async saveDraft(draft: Draft): Promise<void> {
+	async saveDraft(draft: Draft, expectedRevision?: number | null): Promise<void> {
 		requiredId(draft.id); requiredId(draft.scopeId); boundedJson(draft.body);
 		if (!Number.isSafeInteger(draft.revision) || draft.revision < 0) throw new Error("Invalid draft revision");
 		draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
 		await this.transaction(["drafts"], "readwrite", async tx => {
 			const store = tx.objectStore("drafts"), current: Draft | undefined = await request(store.get(draft.id));
+			if (expectedRevision !== undefined && (current?.revision ?? null) !== expectedRevision) throw new Error("Draft changed in another view");
 			if (current && (current.scopeId !== draft.scopeId || current.revision >= draft.revision)) {
 				if (canonical(current as unknown as Json) === canonical(draft as unknown as Json)) return;
 				throw new Error("Draft changed in another view");
@@ -125,8 +145,53 @@ export class DiscussionStore {
 		return this.transaction(["drafts"], "readonly", tx => request(tx.objectStore("drafts").get(id)));
 	}
 
+	async preference(key: string): Promise<Json | undefined> {
+		return this.transaction(["preferences"], "readonly", tx => request(tx.objectStore("preferences").get(key)));
+	}
+	async setPreference(key: string, value: Json): Promise<void> {
+		requiredId(key); value = JSON.parse(boundedJson(value)) as Json;
+		await this.transaction(["preferences"], "readwrite", async tx => { await request(tx.objectStore("preferences").put(value, key)); });
+	}
+	async removeDraft(id: string, revision: number): Promise<boolean> {
+		return this.transaction(["drafts"], "readwrite", async tx => {
+			const drafts = tx.objectStore("drafts"), current: Draft | undefined = await request(drafts.get(id));
+			if (!current || current.revision !== revision) return false;
+			await request(drafts.delete(id)); return true;
+		});
+	}
+
+	/** A manual online action receipt is not an outbox item: no worker submits it.
+	 * Retain its exact identity until response acceptance and draft removal commit.
+	 */
+	async prepareOnlineDraft(draftId: string, revision: number, operation: { operationId: string; scopeId: string; payload: Json }): Promise<{ operationId: string; scopeId: string; payload: Json }> {
+		const saved = JSON.parse(boundedJson(operation as unknown as Json)) as typeof operation;
+		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+			const draft: Draft | undefined = await request(tx.objectStore("drafts").get(draftId));
+			if (!draft || draft.scopeId !== saved.scopeId || draft.revision !== revision) throw new Error("Draft changed in another view");
+			const preferences = tx.objectStore("preferences"), key = "online:" + draftId;
+			const existing = await request(preferences.get(key)) as { operation: typeof saved; revision: number } | undefined;
+			if (existing) {
+				if (existing.revision !== revision || existing.operation.scopeId !== saved.scopeId || canonical(existing.operation.payload) !== canonical(saved.payload)) {
+					throw new Error("Review the unconfirmed online action before changing this draft");
+				}
+				return existing.operation;
+			}
+			await request(preferences.put({ operation: saved, revision }, key)); return saved;
+		});
+	}
+	async completeOnlineDraft(draftId: string, revision: number, operationId: string): Promise<void> {
+		await this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+			const preferences = tx.objectStore("preferences"), key = "online:" + draftId;
+			const existing = await request(preferences.get(key)) as { operation: { operationId: string }; revision: number } | undefined;
+			if (existing?.operation.operationId !== operationId || existing.revision !== revision) throw new Error("Online action changed");
+			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(draftId));
+			if (draft?.revision !== revision) throw new Error("Draft changed in another view");
+			await request(drafts.delete(draftId)); await request(preferences.delete(key));
+		});
+	}
+
 	/** Only queueable user actions are accepted; moderation never enters the outbox. */
-	async enqueue(command: QueuedCommand, now = Date.now()): Promise<OutboxOperation> {
+	async enqueue(command: QueuedCommand, now = Date.now(), draft?: { id: string; revision: number }): Promise<OutboxOperation> {
 		requiredId(command.operationId); requiredId(command.scopeId);
 		if (!commandTypes.has(command.type) || !Number.isFinite(now) || command.dependsOn.length > 100 ||
 			new Set(command.dependsOn).size !== command.dependsOn.length || command.dependsOn.includes(command.operationId)) {
@@ -139,12 +204,18 @@ export class DiscussionStore {
 		}
 		const identity = boundedJson(command as unknown as Json);
 		command = JSON.parse(identity) as QueuedCommand;
-		return this.transaction(["outbox"], "readwrite", async tx => {
+		return this.transaction(["outbox", "drafts", "preferences"], "readwrite", async tx => {
 			const store = tx.objectStore("outbox"), previous: OutboxOperation | undefined = await request(store.get(command.operationId));
 			if (previous) {
 				const { operationId, scopeId, type, payload, dependsOn } = previous;
 				if (identity !== canonical({ operationId, scopeId, type, payload, dependsOn })) throw new Error("Operation ID was already used for another command");
 				return previous;
+			}
+			if (draft) {
+				if (await request(tx.objectStore("preferences").get("online:" + draft.id))) throw new Error("Review the unconfirmed online action before sending this draft");
+				const current: Draft | undefined = await request(tx.objectStore("drafts").get(draft.id));
+				if (!current || current.scopeId !== command.scopeId || current.revision !== draft.revision) throw new Error("Draft changed in another view");
+				await request(tx.objectStore("drafts").delete(draft.id));
 			}
 			for (const id of command.dependsOn) {
 				const dependency: OutboxOperation | undefined = await request(store.get(id));
@@ -158,6 +229,19 @@ export class DiscussionStore {
 
 	async getOperation(id: string): Promise<OutboxOperation | undefined> {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
+	}
+
+	/** Pending/rejected local work only; accepted history does not grow this view. */
+	async pending(scopeId: string, limit = 100): Promise<OutboxOperation[]> {
+		if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid pending page");
+		return this.transaction(["outbox"], "readonly", async tx => {
+			const index = tx.objectStore("outbox").index("scopeState"), result: OutboxOperation[] = [];
+			for (const state of ["queued", "sending", "rejected"]) {
+				const range = IDBKeyRange.bound([scopeId, state], [scopeId, state, []]);
+				result.push(...await request(index.getAll(range, limit)) as OutboxOperation[]);
+			}
+			return result.sort((a, b) => a.createdAt - b.createdAt || a.operationId.localeCompare(b.operationId)).slice(0, limit);
+		});
 	}
 
 	/** Earliest runnable retry/lease; rejected dependencies do not cause polling. */
@@ -182,7 +266,7 @@ export class DiscussionStore {
 
 	/** Remote authorization loss clears cached content, never pending local text. */
 	async clearRemoteScope(scopeId: string, expected?: ScopeCheckpoint): Promise<boolean> {
-		return this.transaction(["entities", "cursors", "generations"], "readwrite", async tx => {
+		return this.transaction(["entities", "cursors", "generations", "preferences"], "readwrite", async tx => {
 			const generations = tx.objectStore("generations");
 			const generation: number = await request(generations.get(scopeId)) ?? 0;
 			if (expected && (generation !== expected.generation ||
@@ -190,6 +274,8 @@ export class DiscussionStore {
 			const store = tx.objectStore("entities");
 			for (const key of await request(store.index("scope").getAllKeys(scopeId))) await request(store.delete(key));
 			await request(tx.objectStore("cursors").delete(scopeId));
+			await request(tx.objectStore("preferences").delete("permission:" + scopeId));
+			await request(tx.objectStore("preferences").delete("people:" + scopeId));
 			await request(generations.put(generation + 1, scopeId));
 			return true;
 		});
@@ -197,8 +283,8 @@ export class DiscussionStore {
 
 	/** Explicit local account cleanup; callers must stop workers first. */
 	async clearAll(): Promise<void> {
-		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations"], "readwrite", async tx => {
-			for (const name of ["drafts", "outbox", "entities", "cursors", "generations"]) await request(tx.objectStore(name).clear());
+		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", "preferences"], "readwrite", async tx => {
+			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", "preferences"]) await request(tx.objectStore(name).clear());
 		});
 	}
 
@@ -277,6 +363,12 @@ export class DiscussionStore {
 		});
 	}
 
+	async orderedEntities(scopeId: string, collection: string, after = 0, limit = 50): Promise<CachedEntity[]> {
+		if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(after) || after < 0) throw new Error("Invalid cache page");
+		return this.transaction(["entities"], "readonly", tx => request(tx.objectStore("entities").index("ordered").getAll(
+			IDBKeyRange.bound([scopeId, collection, after], [scopeId, collection, Number.MAX_SAFE_INTEGER], true), limit)));
+	}
+
 	/** Cache, acknowledgments and cursor advance together; stale streams cannot rewind it. */
 	async applyRemoteBatch(scopeId: string, expectedCursor: string | undefined, nextCursor: string,
 		entities: CachedEntity[], accepted: { operationId: string; result: Json }[] = [], expectedGeneration?: number,
@@ -296,7 +388,7 @@ export class DiscussionStore {
 			if (expectedGeneration !== undefined && (await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== expectedGeneration) return false;
 			for (const entity of entities) {
 				const old: CachedEntity | undefined = await request(store.get([scopeId, entity.id]));
-				if (!old || old.revision < entity.revision) await request(store.put({ ...entity, scopeId }));
+				if (!old || old.revision < entity.revision) await request(store.put({ ...entity, ...ordered(entity), scopeId }));
 			}
 			for (const purge of purges) {
 				const range = IDBKeyRange.bound([scopeId, purge.prefix], [scopeId, purge.prefix + "\uffff"]);
