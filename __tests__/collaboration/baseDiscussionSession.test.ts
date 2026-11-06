@@ -10,6 +10,7 @@ Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const identity = { serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "base-session" };
 const scope = baseDiscussionScope(id(3), id(4)), other = baseDiscussionScope(id(3), id(5));
+async function until(check: () => boolean) { for (let i = 0; i < 100 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 1)); expect(check()).toBe(true); }
 function remote() {
 	return { identity, capabilities: jest.fn().mockResolvedValue({ discussions: true, baseTargets: ["view", "item", "cell", "property"], baseRecordTypes: ["markdown", "image", "file"] }),
 		baseTargetContext: jest.fn().mockImplementation(async (key: string, view: string, record?: string) => ({ protocol_version: 1,
@@ -71,6 +72,121 @@ test("a server downgrade replaces cached record capabilities while keeping exist
 	} finally { await session.close(); }
 });
 
+test("read-only reviewers retain verified record navigation through an offline restart without gaining comment permission", async () => {
+	const factory = new IDBFactory(), transport = remote(); let store = await DiscussionStore.open(identity, factory);
+	transport.permissions.mockResolvedValue({ read: true, comment: false, edit: false, moderate: false });
+	let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const context = await session.readBaseContext(scope, id(9));
+		expect(context).toMatchObject({ view_id: id(4), record_id: id(9), record_generation: id(8) });
+		await expect(session.captureBaseTarget(scope, { type: "item", recordId: id(9) })).rejects.toThrow("comment permission");
+		await session.close(); store = await DiscussionStore.open(identity, factory);
+		for (const call of [transport.capabilities, transport.permissions, transport.baseTargetContext, transport.changes]) call.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		transport.baseTargetContext.mockClear();
+		expect(await session.readBaseContext(scope, id(9))).toEqual(context);
+		await expect(session.readBaseContext(scope, id(10))).rejects.toThrow("Connect to verify");
+		expect(transport.baseTargetContext).not.toHaveBeenCalled();
+		expect(await store.preference("baseRecordComment:" + scope + ":" + id(9))).toBeUndefined();
+	} finally { await session.close(); }
+});
+
+test("an offline pane restores cached authority without waiting for a pending network refresh", async () => {
+	const factory = new IDBFactory(), transport = remote(); let store = await DiscussionStore.open(identity, factory);
+	let session = new DiscussionSession(store, transport as unknown as DiscussionTransport), release: (() => void) | undefined;
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); await session.close();
+		store = await DiscussionStore.open(identity, factory);
+		transport.capabilities.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		transport.permissions.mockImplementation(() => new Promise((_, reject) => { release = () => reject(new DiscussionFailure("retry", "network_unavailable")); }));
+		transport.baseTargetContext.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		transport.changes.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session = new DiscussionSession(store, transport as unknown as DiscussionTransport); await session.start();
+		session.watch(scope, () => {}, "base"); await session.scopeReady(scope);
+		expect(session.permission(scope)?.read).toBe(true); expect(session.knownDocumentGeneration(scope)).toBe(id(7));
+		expect(release).toBeDefined();
+	} finally { release?.(); await session.close(); }
+});
+
+test("a read-side record denial invalidates cached navigation and cannot become offline authority", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		await session.readBaseContext(scope, id(9));
+		transport.baseTargetContext.mockRejectedValue(new DiscussionFailure("reject", "record_forbidden", 403));
+		await expect(session.readBaseContext(scope, id(9))).rejects.toMatchObject({ code: "record_forbidden" });
+		transport.baseTargetContext.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		await expect(session.readBaseContext(scope, id(9))).rejects.toThrow("Connect to verify");
+	} finally { await session.close(); }
+});
+
+test("read-side navigation refuses generation changes and a reply arriving after local revocation", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const context = await session.readBaseContext(scope, id(9));
+		transport.baseTargetContext.mockResolvedValue({ ...context, generation: id(90) });
+		await expect(session.readBaseContext(scope, id(9))).rejects.toThrow("Saved view changed");
+		let finish!: (value: typeof context) => void;
+		transport.baseTargetContext.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+		const pending = session.readBaseContext(scope, id(9));
+		const assertion = expect(pending).rejects.toThrow();
+		await until(() => !!finish);
+		transport.permissions.mockResolvedValue({ read: false, comment: false, edit: false, moderate: false });
+		await session.refresh(); finish(context); await assertion;
+		expect(session.knownDocumentGeneration(scope)).toBeUndefined();
+	} finally { await session.close(); }
+});
+
+test.each(["success", "denial"])("an older window's %s cannot overwrite a newer verified record context", async result => {
+	const factory = new IDBFactory(), remoteA = remote(), remoteB = remote();
+	const storeA = await DiscussionStore.open(identity, factory), storeB = await DiscussionStore.open(identity, factory);
+	const a = new DiscussionSession(storeA, remoteA as unknown as DiscussionTransport), b = new DiscussionSession(storeB, remoteB as unknown as DiscussionTransport);
+	try {
+		await a.start(); await b.start(); a.watch(scope, () => {}, "base"); b.watch(scope, () => {}, "base"); await a.refresh(); await b.refresh();
+		const original = await a.readBaseContext(scope, id(9)); let finish!: () => void;
+		remoteA.baseTargetContext.mockImplementation(() => new Promise((resolve, reject) => { finish = () => result === "success" ? resolve(original) : reject(new DiscussionFailure("reject", "record_forbidden", 403)); }));
+		const pending = a.readBaseContext(scope, id(9)), assertion = expect(pending).rejects.toThrow(); await until(() => !!finish);
+		remoteB.baseTargetContext.mockResolvedValue({ ...original, registry_revision: 2 });
+		const newer = await b.readBaseContext(scope, id(9)); finish(); await assertion;
+		expect(await storeA.preference("baseContext:" + scope + ":" + id(9))).toEqual(newer);
+		remoteA.baseTargetContext.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		expect(await a.readBaseContext(scope, id(9))).toEqual(newer);
+	} finally { await a.close(); await b.close(); }
+});
+
+test("coalesced readers cannot repopulate a record context after a remote snapshot reset", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const context = await session.readBaseContext(scope, id(9)); let finish!: () => void;
+		transport.baseTargetContext.mockClear().mockImplementation(() => new Promise(resolve => { finish = () => resolve(context); }));
+		const first = session.readBaseContext(scope, id(9)), second = session.readBaseContext(scope, id(9));
+		const assertions = [expect(first).rejects.toThrow("verification changed"), expect(second).rejects.toThrow("verification changed")];
+		await until(() => !!finish); expect(transport.baseTargetContext).toHaveBeenCalledTimes(1);
+		await store.clearRemoteScope(scope); finish(); await Promise.all(assertions);
+	} finally { await session.close(); }
+});
+
+test("an older registry response is refused without erasing the newer offline context", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const original = await session.readBaseContext(scope, id(9));
+		transport.baseTargetContext.mockResolvedValue({ ...original, registry_revision: 3 });
+		const newer = await session.readBaseContext(scope, id(9)); transport.baseTargetContext.mockResolvedValue(original);
+		await expect(session.readBaseContext(scope, id(9))).rejects.toThrow("association changed");
+		transport.baseTargetContext.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		expect(await session.readBaseContext(scope, id(9))).toEqual(newer);
+	} finally { await session.close(); }
+});
+
 test("known record-comment denial cannot be reused for offline capture or a new send", async () => {
 	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
 	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
@@ -80,7 +196,7 @@ test("known record-comment denial cannot be reused for offline capture or a new 
 		transport.permissions.mockResolvedValue({ read: true, comment: false, edit: false, moderate: false });
 		await expect(session.captureBaseTarget(scope, { type: "item", recordId: id(9) })).rejects.toMatchObject({ code: "comment_forbidden" });
 		session.setForeground(false); await session.outbox.settled();
-		await expect(session.queue(op(scope, anchor))).rejects.toThrow("Refresh");
+		await expect(session.queue(op(scope, anchor))).rejects.toThrow("Comment permission");
 		transport.baseTargetContext.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
 		await expect(session.captureBaseTarget(scope, { type: "item", recordId: id(9) })).rejects.toThrow("Connect once");
 		expect(await store.pending(scope)).toHaveLength(0);
@@ -101,10 +217,10 @@ test("scope encoding and HTTP routing never substitute a different view or a loc
 	await expect(transport.changes(scope, undefined, id(5))).rejects.toMatchObject({ code: "invalid_local_target" });
 });
 
-test("schema upgrade preserves earlier note work and prevents old workers from opening saved-view queues", async () => {
+test.each([8, 9])("schema upgrade from %i preserves earlier work and fences workers without verification tickets", async version => {
 	const factory = new IDBFactory(), name = "team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
 	await new Promise<void>((resolve, reject) => {
-		const open = factory.open(name, 8);
+		const open = factory.open(name, version);
 		open.onupgradeneeded = () => {
 			const db = open.result;
 			const drafts = db.createObjectStore("drafts", { keyPath: "id" }); drafts.createIndex("scopeId", ["scopeId", "id"]);
@@ -122,6 +238,6 @@ test("schema upgrade preserves earlier note work and prevents old workers from o
 	});
 	const store = await DiscussionStore.open(identity, factory);
 	expect((await store.getDraft("old-note"))?.body).toBe("Keep this"); store.close();
-	await expect(new Promise((resolve, reject) => { const open = factory.open(name, 8); open.onsuccess = () => { open.result.close(); resolve(undefined); }; open.onerror = () => reject(open.error); }))
+	await expect(new Promise((resolve, reject) => { const open = factory.open(name, 9); open.onsuccess = () => { open.result.close(); resolve(undefined); }; open.onerror = () => reject(open.error); }))
 		.rejects.toMatchObject({ name: "VersionError" });
 });

@@ -132,6 +132,27 @@ describe("native Bases identity boundary", () => {
 });
 
 describe("verified saved-view binding", () => {
+	test("view activation requires this surface's verified binding and leaves saved configuration unchanged", async () => {
+		const f = fixture(), surface = f.inspect()!, snapshot = await registry(f.source), selectView = jest.fn();
+		Object.assign(f.controller, { selectView });
+		const binding = (await surface.bind(snapshot, id(2), async () => f.source, () => true))!;
+		expect(surface.activateView(id(4), { ...binding })).toBe(false);
+		expect(surface.activateView(id(4), binding)).toBe(true);
+		expect(selectView).toHaveBeenCalledWith("Work");
+		expect(f.host.data).toBe(f.source); expect(f.host.lastSavedData).toBe(f.source); expect(f.host.dirty).toBe(false);
+		expect(surface.viewport()).toBe(f.scroll);
+	});
+	test.each(["unknown", "custom", "permission", "replaced"])("view activation refuses %s targets without invoking native controls", async change => {
+		const f = fixture(), surface = f.inspect()!, snapshot = await registry(f.source), selectView = jest.fn(); let allowed = true;
+		Object.assign(f.controller, { selectView });
+		const binding = (await surface.bind(snapshot, id(2), async () => f.source, () => allowed))!;
+		if (change === "custom") snapshot.views.push({ ...snapshot.views[0], id: id(5), type: "timeline", name: "Timeline", slot: 1 });
+		if (change === "permission") allowed = false;
+		if (change === "replaced") f.controller.view = { ...f.renderer };
+		expect(surface.activateView(change === "unknown" || change === "custom" ? id(5) : id(4), binding)).toBe(false);
+		expect(selectView).not.toHaveBeenCalled();
+		if (change === "replaced") expect(surface.viewport()).toBeUndefined();
+	});
 	test("binds a slot only after exact disk, runtime and server digest verification", async () => {
 		const f = fixture(), surface = f.inspect()!, snapshot = await registry(f.source);
 		const binding = await surface.bind(snapshot, id(2), async () => f.source, () => true);

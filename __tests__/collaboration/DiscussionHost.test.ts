@@ -10,6 +10,8 @@ import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { BaseTargetPicker } from "../../src/collaboration/ui/BaseTargetPicker";
+import type { BaseSyncHost } from "../../src/bases/BaseSyncHost";
+import type { NativeBasesSurface, NativeBaseHandle } from "../../src/bases/NativeBasesSurface";
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
@@ -35,7 +37,7 @@ jest.mock("../../src/collaboration/DiscussionSession", () => ({
 	},
 }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-function fixture() {
+function fixture(bases?: BaseSyncHost) {
 	mockSessions.length = 0; mockCredentials.length = 0;
 	let accountId: string | undefined = id(1), authChanged!: () => void, settingsChanged!: () => void;
 	const settings = { enabled: true, servers: [{ id: "server", controlPlaneUrl: "https://one.test", name: "One", isValidated: true }] };
@@ -50,11 +52,116 @@ function fixture() {
 	const store = { close: jest.fn(), preference: jest.fn().mockResolvedValue(undefined) };
 	const opening = jest.spyOn(DiscussionStore, "open").mockResolvedValue(store as unknown as DiscussionStore);
 	const host = new DiscussionHost(plugin as unknown as Plugin, auth as unknown as AuthSession, shares as unknown as ShareRegistry,
-		scope as unknown as SettingsScope<RelayOnPremSettings>, "vault");
-	return { host, opening, store, provider, settings, file, folder, start: async () => { host.onload(); await Promise.resolve(); await Promise.resolve(); },
+		 scope as unknown as SettingsScope<RelayOnPremSettings>, "vault", bases);
+	return { host, opening, store, provider, settings, file, folder, plugin, start: async () => { host.onload(); await Promise.resolve(); await Promise.resolve(); },
 		account: (value?: string) => { accountId = value; authChanged(); }, settingsChanged: () => settingsChanged(),
 		close: () => { host.onunload(); opening.mockRestore(); } };
 }
+
+async function nativeBaseFixture() {
+	const snapshot = { definition_id: id(6), entry_id: id(3), generation: id(7), revision: 1 };
+	const bases = { cachedViews: jest.fn().mockResolvedValue({ snapshot }), refreshViews: jest.fn().mockResolvedValue({ snapshot }) };
+	const s = fixture(bases as unknown as BaseSyncHost); await s.start();
+	s.file.path = "Team/Plan.base"; s.file.extension = "base";
+	const recordFile = Object.assign(new TFile(), { path: "Team/Note.md" }), record = { id: id(8), type: "markdown" };
+	Object.assign(s.folder, { absolutePath: (path: string) => "Team/" + path, toVirtualPath: (path: string) => path.slice(5),
+		trackedEntries: new Map([[id(3), { isAttachment: true }]]) });
+	Object.assign(s.folder.folderIndex, { recordFor: (path: string) => path === "Plan.base" ? { id: id(3), type: "file" } : record,
+		eachRecord: (fn: (record: { id: string; type: string }, path: string) => void) => { fn({ id: id(3), type: "file" }, "Plan.base"); fn(record, "Note.md"); } });
+	Object.assign(s.plugin.app.vault, { getFileByPath: (path: string) => path === s.file.path ? s.file : path === recordFile.path ? recordFile : null, read: jest.fn().mockResolvedValue("saved bytes") });
+	const stops: jest.Mock[] = [], scope = baseDiscussionScope(id(3), id(4)); let valid = true, read = true, comment = true;
+	const session = Object.assign(mockSessions[0], { identity: { shareId: id(2) }, online: true,
+		knownDocumentGeneration: () => id(7), permission: () => ({ read, comment }), canAnchorBase: () => true, canAnchorBaseRecord: (kind: string) => kind === "markdown",
+		watch: jest.fn(() => { const stop = jest.fn(); stops.push(stop); return stop; }), refresh: jest.fn().mockResolvedValue(undefined), scopeReady: jest.fn().mockResolvedValue(undefined),
+		readBaseContext: jest.fn().mockResolvedValue({ definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1, record_generation: id(9) }),
+		captureBaseTarget: jest.fn().mockResolvedValue({ version: 1, type: "base", definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
+			target: { type: "cell", record_id: id(8), record_generation: id(9), property: { source: "note", name: "status" } } }),
+	});
+	const savedPreference = jest.fn().mockResolvedValue(undefined); Object.assign(s.store, { setPreference: savedPreference });
+	const surface = { file: s.file, current: () => valid, activateView: jest.fn(() => true), bind: jest.fn(async (_snapshot, _entry, readFile: () => Promise<string>, current: () => boolean) => {
+		await readFile(); return { snapshot, viewId: id(4), name: "Work", type: "table", current: () => valid && current() };
+	}) };
+	const handle: NativeBaseHandle = { target: { type: "cell", file: recordFile, property: { source: "note", name: "status" } }, element: document.createElement("div"), current: () => valid };
+	return { ...s, bases, surface, session, stops, scope, record, handle, savedPreference,
+		context: () => s.host.baseCommentContext(surface as unknown as NativeBasesSurface, () => valid),
+		invalidate() { valid = false; }, revoke() { read = false; }, readOnly() { comment = false; } };
+}
+
+test("native Bases discovery does not pin the sidebar; explicit capture pins and saves the exact cell", async () => {
+	const s = await nativeBaseFixture(); const saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+	try {
+		const context = (await s.context())!; expect(context.current()).toBe(true);
+		expect(s.host.current().entryId).toBeUndefined(); expect(s.savedPreference).not.toHaveBeenCalled();
+		expect(context.selection(s.handle.target)).toEqual({ type: "cell", recordId: id(8), property: { source: "note", name: "status" } });
+		expect(await s.host.commentBaseHandle(context, s.handle)).toBe(true);
+		expect(s.host.current().entryId).toBe(s.scope);
+		expect(saved).toHaveBeenCalledWith(expect.objectContaining({ entryId: s.scope, anchor: expect.objectContaining({ target: expect.objectContaining({ record_id: id(8) }) }) }));
+		context.release(); context.release(); expect(s.stops[0]).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test.each(["record", "registry", "account", "access"])("a %s change during native target capture cannot pin or save a stale draft", async change => {
+	const s = await nativeBaseFixture(), saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+	try {
+		const context = (await s.context())!, anchor = await s.session.captureBaseTarget();
+		s.session.captureBaseTarget.mockImplementation(async () => {
+			if (change === "record") s.record.id = id(90);
+			if (change === "registry") return { ...anchor, registry_revision: 2 };
+			if (change === "account") s.account(id(90));
+			if (change === "access") s.revoke();
+			return anchor;
+		});
+		expect(await s.host.commentBaseHandle(context, s.handle)).toBe(false);
+		expect(saved).not.toHaveBeenCalled(); expect(s.savedPreference).not.toHaveBeenCalled(); context.release();
+	} finally { s.close(); }
+});
+
+test("readers can map native targets but cannot create, and changed record lineage refuses navigation", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		s.readOnly(); const context = (await s.context())!;
+		expect(context.selection(s.handle.target)).toBeDefined(); expect(context.canComment(s.handle.target)).toBe(false);
+		expect(await s.host.commentBaseHandle(context, s.handle)).toBe(false);
+		const anchor = await s.session.captureBaseTarget();
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(true);
+		s.session.readBaseContext.mockResolvedValue({ ...await s.session.readBaseContext(), record_generation: id(90) });
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false); context.release();
+	} finally { s.close(); }
+});
+
+test("native discovery releases its subscription when server registry proof is stale", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		s.session.readBaseContext.mockResolvedValue({ ...await s.session.readBaseContext(), registry_revision: 2 });
+		expect(await s.context()).toBeUndefined(); expect(s.stops[0]).toHaveBeenCalledTimes(1);
+		expect(s.savedPreference).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("a target override cannot substitute another record or property for a native handle", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		const context = (await s.context())!;
+		expect(await s.host.commentBaseHandle(context, s.handle, { type: "item", file: new TFile() })).toBe(false);
+		expect(await s.host.commentBaseHandle(context, s.handle, { type: "property", property: { source: "note", name: "status" } })).toBe(false);
+		expect(s.session.captureBaseTarget).not.toHaveBeenCalled(); context.release();
+	} finally { s.close(); }
+});
+
+test("target navigation can leave an unvisited native view using the requested scope's verified authority", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		const original = s.surface.bind.getMockImplementation()!;
+		s.surface.bind.mockImplementation(async (...args) => ({ ...await original(...args), viewId: id(5), name: "Unvisited cards" }));
+		const anchor = await s.session.captureBaseTarget();
+		expect(await s.host.activateBaseView(s.surface as unknown as NativeBasesSurface, s.session as unknown as DiscussionSession, s.scope, anchor, () => true)).toBe("changed");
+		expect(s.surface.activateView).toHaveBeenCalledWith(id(4), expect.objectContaining({ viewId: id(5) }));
+		expect(s.session.readBaseContext).toHaveBeenCalledWith(s.scope); expect(s.savedPreference).not.toHaveBeenCalled();
+		s.revoke(); s.surface.activateView.mockClear();
+		expect(await s.host.activateBaseView(s.surface as unknown as NativeBasesSurface, s.session as unknown as DiscussionSession, s.scope, anchor, () => true)).toBe("unavailable");
+		expect(s.surface.activateView).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
 
 test("direct-image read context stops on lost authentication while creation remains separately gated", async () => {
 	const test = fixture();

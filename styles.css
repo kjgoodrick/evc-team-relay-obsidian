@@ -735,3 +735,13 @@
 .evc-bases-sync textarea { width: 100%; font-family: var(--font-monospace); }
 .evc-bases-sync .setting-item-control { flex-wrap: wrap; }
 .is-mobile .evc-bases-sync button { min-height: 44px; }
+.relay-bases-comments-root { position: relative; isolation: isolate; }
+.relay-bases-comments { position: absolute; inset: 0; z-index: 30; pointer-events: none; overflow: hidden; }
+.relay-bases-comments[hidden], .relay-bases-comment-tools[hidden] { display: none; }
+.relay-bases-comment-tools { position: relative; flex: 0 0 auto; display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; min-height: 36px; overflow-x: auto; padding: 4px 8px; background: var(--background-primary); border-bottom: 1px solid var(--background-modifier-border); pointer-events: auto; }
+.relay-bases-comment-tools button { flex: 0 0 auto; min-height: 26px; height: auto; padding: 3px 6px; font-size: var(--font-ui-smaller); }
+.relay-bases-comments-root .relay-base-comment-target { padding-inline-end: 28px; }
+.relay-bases-comment-tools.is-unavailable { visibility: hidden; }
+button.relay-base-comment-marker { position: absolute; pointer-events: auto; min-width: 24px; min-height: 24px; height: auto; padding: 1px 4px; background: var(--interactive-accent); color: var(--text-on-accent); font-size: var(--font-ui-smaller); }
+.relay-base-comment-marker:focus-visible, .relay-bases-comment-tools button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
+.is-mobile .relay-bases-comment-tools button, .is-mobile .relay-base-comment-marker { min-height: 44px; min-width: 44px; }

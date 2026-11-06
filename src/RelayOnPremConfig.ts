@@ -130,6 +130,8 @@ export interface RelayOnPremSettings {
 	 * Default server ID for new shares
 	 */
 	defaultServerId?: string;
+	/** Disable private native Bases adapters while retaining the discussion sidebar. */
+	nativeBasesComments?: boolean;
 }
 
 /**

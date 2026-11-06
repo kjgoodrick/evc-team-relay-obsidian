@@ -70,6 +70,7 @@ export class NativeBasesSurface {
 	readonly source: string;
 	private readonly key: string;
 	private readonly data: unknown;
+	private bindings = new WeakSet<NativeBaseBinding>();
 	private constructor(private host: ObjectValue, private controller: ObjectValue, private renderer: ObjectValue, private query: ObjectValue,
 		private config: ObjectValue, file: TFile, slot: number, key: string) {
 		this.file = file; this.root = host.contentEl as HTMLElement; this.name = config.name as string;
@@ -127,9 +128,19 @@ export class NativeBasesSurface {
 			const source = await read();
 			if (source !== this.source || new TextEncoder().encode(source).byteLength > 262_144) return;
 			if (await sha256Hex(new TextEncoder().encode(source).buffer) !== verified.content_sha256 || !current() || !this.current() || !unchanged()) return;
-			return { snapshot: verified, viewId: view.id, name: view.name, type: view.type, current: () => current() && unchanged() && this.current() };
+			const binding = { snapshot: verified, viewId: view.id, name: view.name, type: view.type, current: () => current() && unchanged() && this.current() };
+			this.bindings.add(binding); return binding;
 		} catch { return; }
 	}
+	activateView(viewId: string, binding: NativeBaseBinding): boolean {
+		try {
+			if (!this.bindings.has(binding) || !binding.current() || !this.current() || !callable(this.controller.selectView)) return false;
+			const next = binding.snapshot.views.find(view => view.id === viewId);
+			if (!next || !["table", "cards", "list"].includes(next.type)) return false;
+			this.controller.selectView(next.name); return true;
+		} catch { return false; }
+	}
+	viewport(): HTMLElement | undefined { return this.current() ? this.scrollElement() : undefined; }
 	private rows(): ObjectValue[] | undefined {
 		if (this.type === "table" || this.type === "cards") {
 			const rows = list(this.type === "table" ? this.renderer.rows : this.renderer.items);

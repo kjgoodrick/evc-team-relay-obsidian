@@ -7,7 +7,7 @@ import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession } from "./DiscussionSession";
 import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
-import { isId, isBaseRecordType, protocolJson, type DiscussionAnchor } from "./DiscussionProtocol";
+import { isId, isBaseRecordType, protocolJson, type DiscussionAnchor, type BaseAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
 import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection, type ImageCommentContext } from "./CommentEditor";
 import { BlockSelectionError } from "./anchors/blocks";
@@ -23,6 +23,9 @@ import type { BaseSyncHost } from "../bases/BaseSyncHost";
 import type { BaseRegistrySnapshot } from "../bases/BaseRegistryProtocol";
 import { isAttachmentFile } from "../AttachmentFile";
 import { isRecord } from "./DiscussionProtocol";
+import type { NativeBasesSurface, NativeBaseHandle, NativeBaseTarget } from "../bases/NativeBasesSurface";
+import { baseSelectionKey, type BaseCommentContext } from "./BaseCommentContext";
+import { BaseComments } from "./BaseComments";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; kind?: "note" | "image" | "base"; entryId?: string; session?: DiscussionSession; message?: string;
@@ -43,13 +46,16 @@ export class DiscussionHost extends Component {
 	private focusSerial = 0;
 	private reading?: ReadingComments;
 	private images?: ImageComments;
+	private baseComments?: BaseComments;
 	private baseSelections = new WeakMap<DiscussionSession, Map<string, { choice?: BaseDiscussionChoice }>>();
+	private baseAction = 0;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
 		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string, private bases?: BaseSyncHost) { super(); }
 	onload(): void {
 		this.reading = this.addChild(new ReadingComments(this, this.plugin));
 		this.images = this.addChild(new ImageComments(this, this.plugin, this.shares));
+		this.baseComments = this.addChild(new BaseComments(this, this.plugin, this.bases));
 		this.plugin.registerView(COMMENTS_VIEW, leaf => new CommentsView(leaf, this));
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
 		this.plugin.registerEditorExtension(commentEditorExtension(this));
@@ -170,6 +176,151 @@ export class DiscussionHost extends Component {
 			})).catch(() => {});
 		}
 		return saved.choice;
+	}
+	get nativeBasesCommentsEnabled(): boolean { return this.settings.readValue().nativeBasesComments !== false; }
+	baseFile(session: DiscussionSession, entryId: string): TFile | undefined {
+		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId); if (!folder) return;
+		const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === entryId) paths.push(path); });
+		const file = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
+		return file?.extension === "base" && this.targetFor(file).session === session && this.targetFor(file).baseEntryId === entryId ? file : undefined;
+	}
+	async toggleNativeBasesComments(): Promise<void> {
+		await this.settings.mutateValue(value => ({ ...value, nativeBasesComments: !this.nativeBasesCommentsEnabled }));
+		this.notify(); new Notice(this.nativeBasesCommentsEnabled ? "Contextual Bases comments enabled on supported views." : "Contextual Bases comments disabled. The comment sidebar remains available.");
+	}
+	/** Retain one watched scope for a native pane. Registry proof never grants
+	 * access: native target capture and server lineage checks remain independent. */
+	async baseCommentContext(surface: NativeBasesSurface, alive: () => boolean): Promise<BaseCommentContext | undefined> {
+		const file = surface.file, target = this.targetFor(file), session = target.session, baseEntryId = target.baseEntryId;
+		const folder = this.shares.shareFor(file.path), tracked = baseEntryId ? folder?.trackedEntries.get(baseEntryId) : undefined;
+		if (!session || !baseEntryId || !folder || !tracked || !isAttachmentFile(tracked) || !this.bases) return;
+		let released = false, transferred = false; let bootstrap: (() => void) | undefined; const retained: (() => void)[] = [];
+		const current = () => !released && !this.stopped && alive() && this.nativeBasesCommentsEnabled && surface.current() &&
+			this.plugin.app.vault.getFileByPath(file.path) === file && this.targetFor(file).session === session && this.targetFor(file).baseEntryId === baseEntryId &&
+			(session.status === "ready" || session.status === "offline");
+		const release = () => { if (released) return; released = true; for (const stop of retained) stop(); retained.length = 0; };
+		try {
+			if (!current()) return;
+			if (session.status === "offline" && target.entryId && !session.permission(target.entryId)?.read) {
+				const stop = session.watch(target.entryId, () => this.notify(), "base"); let stopped = false;
+				bootstrap = () => { if (!stopped) { stopped = true; stop(); } };
+				retained.push(bootstrap); await session.scopeReady(target.entryId);
+			}
+			let cached = await this.bases.cachedViews(folder, tracked, { identity: session.identity, readable: () => {
+				const pinned = this.targetFor(file).entryId;
+				return current() && session.status === "offline" && !!pinned && session.permission(pinned)?.read === true;
+			} });
+			if (session.online) {
+				try { cached = await this.bases.refreshViews(folder, tracked); } catch { /* Exact byte proof below refuses unsynchronized edits. */ }
+			}
+			if (!current() || cached.pending || !cached.snapshot) return;
+			const binding = await surface.bind(cached.snapshot, baseEntryId, () => this.plugin.app.vault.read(file), current);
+			if (!binding || !current()) return;
+			const entryId = baseDiscussionScope(baseEntryId, binding.viewId);
+			retained.push(session.watch(entryId, () => this.notify(), "base"));
+			await session.scopeReady(entryId);
+			const authorized = () => current() && binding.current() && session.permission(entryId)?.read === true &&
+				session.knownDocumentGeneration(entryId) === binding.snapshot.generation;
+			if (!authorized()) { release(); return; }
+			bootstrap?.();
+			const proof = await session.readBaseContext(entryId);
+			if (!authorized() || proof.definition_id !== binding.snapshot.definition_id || proof.registry_revision !== binding.snapshot.revision) return;
+			const recordFor = (recordFile: TFile) => {
+				if (!authorized() || this.plugin.app.vault.getFileByPath(recordFile.path) !== recordFile || this.shares.shareFor(recordFile.path) !== folder) return;
+				const path = folder.toVirtualPath(recordFile.path), record = folder.folderIndex.recordFor(path), index = folder._liveProvider?.managedIndex;
+				if (!record || !isId(record.id) || !isBaseRecordType(record.type)) return;
+				if (index && (!index.registered(path, record.id) || !index.snapshot.owner && !["read", "write"].includes(index.snapshot.permissions[path]))) return;
+				let count = 0; folder.folderIndex.eachRecord(item => { if (item.id === record.id) count++; });
+				return count === 1 ? record : undefined;
+			};
+			transferred = true;
+			return { file, session, entryId, baseEntryId, surface, binding, current: authorized, release,
+				canComment: target => authorized() && session.permission(entryId)?.comment === true && session.canAnchorBase(target.type) &&
+					(!("file" in target) || session.canAnchorBaseRecord(recordFor(target.file)?.type)),
+				selection: target => {
+					if (!authorized()) return;
+					if (target.type === "view" || target.type === "property") return target;
+					const record = recordFor(target.file);
+					if (!record || target.type === "cell" && target.property.source === "note" && record.type !== "markdown") return;
+					return target.type === "item" ? { type: "item", recordId: record.id } : { type: "cell", recordId: record.id, property: target.property };
+				},
+				native: anchor => {
+					if (!authorized() || anchor.definition_id !== binding.snapshot.definition_id || anchor.view_id !== binding.viewId || anchor.generation !== binding.snapshot.generation || anchor.registry_revision > binding.snapshot.revision) return;
+					const target = anchor.target; if (target.type === "view" || target.type === "property") return target;
+					const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === target.record_id) paths.push(path); });
+					const recordFile = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
+					if (!recordFile || !recordFor(recordFile) || target.type === "cell" && target.property.source === "note" && recordFor(recordFile)?.type !== "markdown") return;
+					return target.type === "item" ? { type: "item", file: recordFile } : { type: "cell", file: recordFile, property: target.property };
+				} };
+		} catch { return; } finally { if (!transferred) release(); }
+	}
+	private async pinBaseContext(context: BaseCommentContext, current: () => boolean): Promise<boolean> {
+		if (!current()) return false;
+		const choice: BaseDiscussionChoice = { id: context.binding.viewId, name: context.binding.name, type: context.binding.type, state: "active" };
+		await context.session.trackLocal(context.session.store.setPreference("activeBaseView:" + context.baseEntryId, protocolJson(choice)));
+		if (!current()) return false;
+		this.baseSelection(context.session, context.baseEntryId);
+		this.baseSelections.get(context.session)!.get(context.baseEntryId)!.choice = choice;
+		this.lastFile = context.file; this.focus = undefined; this.notify(); return true;
+	}
+	async commentBaseHandle(context: BaseCommentContext, handle: NativeBaseHandle, target: NativeBaseTarget = handle.target): Promise<boolean> {
+		const action = ++this.baseAction;
+		const current = () => action === this.baseAction && context.current() && handle.current() && context.session.permission(context.entryId)?.comment === true;
+		try {
+			if (target !== handle.target && !(handle.target.type === "cell" && target.type === "item" && target.file === handle.target.file)) return false;
+			const selection = context.selection(target);
+			if (!selection || !current() || !context.canComment(target)) return false;
+			const anchor = await context.session.captureBaseTarget(context.entryId, selection);
+			const latest = context.selection(target);
+			if (!current() || !latest || baseSelectionKey(latest) !== baseSelectionKey(selection) || anchor.registry_revision !== context.binding.snapshot.revision || anchor.definition_id !== context.binding.snapshot.definition_id ||
+				anchor.view_id !== context.binding.viewId || anchor.generation !== context.binding.snapshot.generation) throw new Error("The saved view changed");
+			if (!await this.pinBaseContext(context, current)) return false;
+			return await this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
+		} catch { new Notice("This Bases target or its access changed. Refresh the view and select it again; existing drafts are retained."); return false; }
+	}
+	async openBaseThread(context: BaseCommentContext, threadId: string): Promise<void> {
+		const action = ++this.baseAction, current = () => action === this.baseAction && context.current();
+		try {
+			const thread = await context.session.cachedThread(context.entryId, threadId);
+			if (!current() || thread?.anchor?.type !== "base" || !context.native(thread.anchor)) return;
+			if (!await this.verifyBaseTarget(context, thread.anchor) || !current()) return;
+			if (await this.pinBaseContext(context, current)) await this.openThread(context.file, context.session, context.entryId, threadId);
+		} catch { new Notice("This discussion is no longer available in the current view."); }
+	}
+	async openBaseView(context: BaseCommentContext): Promise<void> {
+		const action = ++this.baseAction, current = () => action === this.baseAction && context.current();
+		try { if (await this.verifyBaseTarget(context) && await this.pinBaseContext(context, current)) await this.open(); }
+		catch { new Notice("Refresh this saved view before opening its discussions."); }
+	}
+	async verifyBaseTarget(context: BaseCommentContext, anchor?: BaseAnchor): Promise<boolean> {
+		if (!context.current()) return false;
+		const target = anchor?.target, recordId = target && "record_id" in target ? target.record_id : undefined;
+		const proof = await context.session.readBaseContext(context.entryId, recordId);
+		return context.current() && proof.definition_id === context.binding.snapshot.definition_id && proof.view_id === context.binding.viewId &&
+			proof.registry_revision === context.binding.snapshot.revision && proof.generation === context.binding.snapshot.generation &&
+			(!target || !("record_generation" in target) || target.record_generation === proof.record_generation);
+	}
+	/** A cached target can be revealed even when the currently displayed view has
+	 * never had its discussions opened. Authority comes from the requested scope. */
+	async activateBaseView(surface: NativeBasesSurface, session: DiscussionSession, scopeId: string, anchor: BaseAnchor, alive: () => boolean): Promise<"unchanged" | "changed" | "unavailable"> {
+		const scope = parseDiscussionScope(scopeId), file = surface.file, folder = this.shares.shareFor(file.path);
+		const tracked = scope ? folder?.trackedEntries.get(scope.entryId) : undefined;
+		const current = () => !this.stopped && this.nativeBasesCommentsEnabled && alive() && surface.current() &&
+			!!scope && scope.viewId === anchor.view_id && this.baseFile(session, scope.entryId) === file && session.permission(scopeId)?.read === true &&
+			(session.status === "ready" || session.status === "offline");
+		if (!scope || !folder || !tracked || !isAttachmentFile(tracked) || !this.bases || !current()) return "unavailable";
+		try {
+			let cached = await this.bases.cachedViews(folder, tracked, { identity: session.identity, readable: () => current() && session.status === "offline" });
+			if (session.online) cached = await this.bases.refreshViews(folder, tracked);
+			if (!current() || cached.pending || !cached.snapshot) return "unavailable";
+			const binding = await surface.bind(cached.snapshot, scope.entryId, () => this.plugin.app.vault.read(file), current);
+			if (!binding || !current()) return "unavailable";
+			const proof = await session.readBaseContext(scopeId);
+			if (!current() || !binding.current() || proof.definition_id !== anchor.definition_id || proof.generation !== anchor.generation ||
+				proof.definition_id !== binding.snapshot.definition_id || proof.generation !== binding.snapshot.generation || proof.registry_revision !== binding.snapshot.revision) return "unavailable";
+			if (binding.viewId === anchor.view_id) return "unchanged";
+			return surface.activateView(anchor.view_id, binding) ? "changed" : "unavailable";
+		} catch { return "unavailable"; }
 	}
 	chooseBaseView(): void {
 		const file = this.lastFile, target = this.current(), session = target.session, entryId = target.baseEntryId;
@@ -328,12 +479,11 @@ export class DiscussionHost extends Component {
 		const workspace = this.plugin.app.workspace;
 		try {
 			if (anchor.type === "base") {
-				// Full target navigation belongs to each surface adapter. Keep the
-				// saved discussion view explicit instead of opening an arbitrary note.
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;
+				if (await this.baseComments?.reveal(session, entryId, anchor)) return;
 				new Notice("Discussion view: " + (this.baseSelection(session, scope.entryId)?.name ?? "saved view") + ". " +
-					this.targetLabel(session, entryId, anchor) + ". Use the Bases view menu to open the matching layout.");
+					this.targetLabel(session, entryId, anchor) + ". Inline navigation is unavailable here. The discussion and its target are retained.");
 				return;
 			}
 			let file: TFile | undefined;

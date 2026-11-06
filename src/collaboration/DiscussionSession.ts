@@ -13,7 +13,7 @@ import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, 
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
 type Entry = { kind: "note" | "image" | "base"; listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
-	permissionFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
+	permissionFlight?: Promise<void>; permissionRestoreFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
 export type AnchoredThread = ThreadSummary & { anchor?: DiscussionAnchor };
 export type DiscussionLocalView = { threads: AnchoredThread[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
 export type BaseTargetSelection = { type: "view" } | { type: "property"; property: BaseProperty } |
@@ -46,6 +46,7 @@ export class DiscussionSession {
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
 	private baseKinds: BaseTargetKind[] = [];
+	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
 	private baseRecordTypes: BaseRecordType[] = [];
 	private lastPublish = 0;
 
@@ -178,6 +179,13 @@ export class DiscussionSession {
 			if (owned.listeners.size === 0) owned.sync.stop();
 		};
 	}
+	/** Opening an offline pane waits for local authority restoration only.
+	 * watch() continues its network refresh independently. */
+	async scopeReady(entryId: string): Promise<void> {
+		const entry = this.entries.get(entryId); if (!entry || this.closed) return;
+		await (this.statusValue === "offline" ? entry.permissionRestoreFlight : entry.permissionFlight);
+	}
+
 	permission(entryId: string): DiscussionPermissions | undefined { return this.entries.get(entryId)?.permission; }
 	participants(entryId: string): DiscussionParticipant[] { return this.entries.get(entryId)?.people ?? []; }
 	displayName(entryId: string, id: string | null): string {
@@ -207,26 +215,30 @@ export class DiscussionSession {
 		entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined; entry.permissionChecked = 0;
 		await this.refreshPermission(id, entry);
 	}
+	private async restorePermission(id: string, entry: Entry): Promise<void> {
+		const cached = await this.store.preference("permission:" + id);
+		if (this.closed) return;
+		if (isRecord(cached) && ["read", "comment", "edit", "moderate"].every(key => typeof cached[key] === "boolean")) {
+			entry.permission = cached as unknown as DiscussionPermissions;
+		}
+		const people = await this.store.preference("people:" + id);
+		if (this.closed) return;
+		if (Array.isArray(people) && people.every(p => isRecord(p) && typeof p.id === "string" && typeof p.name === "string")) {
+			entry.people = people as unknown as DiscussionParticipant[];
+		}
+		const generation = await this.store.preference("documentGeneration:" + id);
+		if (this.closed) return;
+		entry.documentGeneration = isId(generation) ? generation : undefined;
+		this.notify();
+	}
 	private refreshPermission(id: string, entry: Entry): Promise<void> {
 		if (this.closed || !this.foreground || entry.listeners.size === 0) return Promise.resolve();
 		if (entry.permissionFlight) return entry.permissionFlight;
 		entry.permissionFlight = (async () => {
 			try {
 				if (!entry.permission) {
-					const cached = await this.store.preference("permission:" + id);
-					if (this.closed) return;
-					if (isRecord(cached) && ["read", "comment", "edit", "moderate"].every(key => typeof cached[key] === "boolean")) {
-						entry.permission = cached as unknown as DiscussionPermissions;
-					}
-					const people = await this.store.preference("people:" + id);
-					if (this.closed) return;
-					if (Array.isArray(people) && people.every(p => isRecord(p) && typeof p.id === "string" && typeof p.name === "string")) {
-						entry.people = people as unknown as DiscussionParticipant[];
-					}
-					const generation = await this.store.preference("documentGeneration:" + id);
-					if (this.closed) return;
-					entry.documentGeneration = isId(generation) ? generation : undefined;
-					this.notify();
+					entry.permissionRestoreFlight = this.restorePermission(id, entry);
+					try { await entry.permissionRestoreFlight; } finally { entry.permissionRestoreFlight = undefined; }
 				}
 				if (!this.enabled) return;
 				const permission = await this.transport.permissions(id);
@@ -236,18 +248,16 @@ export class DiscussionSession {
 					await this.store.setPreference("permission:" + id, protocolJson(permission));
 					if (entry.kind === "base" ? this.baseKinds.length > 0 : entry.kind === "image" ? this.imageFilesEnabled : this.textEnabled) {
 						try {
-							const context = entry.kind === "base" ? await this.transport.baseTargetContext(id, parseDiscussionScope(id)!.viewId!) : await this.transport.anchorContext(id);
+							const context = entry.kind === "base" ? await this.fetchBaseContext(id) : await this.transport.anchorContext(id);
 							if (this.closed) return;
 							entry.documentGeneration = context.generation;
 							await this.store.setPreference("documentGeneration:" + id, context.generation);
-							if (entry.kind === "base") await this.store.setPreference("baseContext:" + id, protocolJson(context));
 						} catch (error) {
 							// A transient failure retains the last verified generation for offline
 							// capture. Existing drafts/queued anchors are never rewritten.
 							if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
 								entry.documentGeneration = undefined;
 								await this.store.setPreference("documentGeneration:" + id, null);
-								if (entry.kind === "base") await this.store.setPreference("baseContext:" + id, null);
 							}
 							if (error instanceof DiscussionFailure && (error.action === "authenticate" ||
 								error.action === "reject" && [403, 404].includes(error.status))) throw error;
@@ -368,26 +378,69 @@ export class DiscussionSession {
 		const value = await this.store.preference("baseContext:" + scopeId + (recordId ? ":" + recordId : ""));
 		try { return parseBaseTargetContext(value, scope.entryId, scope.viewId, recordId); } catch { return undefined; }
 	}
+	/** One request per target in this session. Store tickets also fence other
+	 * windows, late denials and resets; an old revision cannot replace a newer one. */
+	private fetchBaseContext(scopeId: string, recordId?: string): Promise<BaseTargetContext> {
+		const key = "baseContext:" + scopeId + (recordId ? ":" + recordId : "");
+		const existing = this.baseContextFlights.get(key); if (existing) return existing;
+		const flight = (async () => {
+			const scope = parseDiscussionScope(scopeId); if (!scope?.viewId || this.closed) throw new Error("Saved view access is unavailable.");
+			const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+			let context: BaseTargetContext;
+			try { context = await this.transport.baseTargetContext(scopeId, scope.viewId, recordId); }
+			catch (error) {
+				if (!this.closed && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+				throw error;
+			}
+			if (this.closed) throw new Error("This discussion account is closed.");
+			let previous: BaseTargetContext | undefined;
+			try { previous = parseBaseTargetContext(proof.previous, scope.entryId, scope.viewId, recordId); } catch { /* No prior verified target. */ }
+			if (previous?.generation === context.generation && previous.registry_revision > context.registry_revision) throw new Error("Saved view association changed.");
+			if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(context))) throw new Error("Saved target verification changed. Try again.");
+			return context;
+		})().finally(() => { if (this.baseContextFlights.get(key) === flight) this.baseContextFlights.delete(key); });
+		this.baseContextFlights.set(key, flight); return flight;
+	}
+
+	/** Read-side lineage for navigation. It does not require comment permission.
+	 * Offline navigation requires a context previously verified for this account. */
+	async readBaseContext(scopeId: string, recordId?: string): Promise<BaseTargetContext> {
+		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
+		const current = () => !this.closed && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		if (!scope?.viewId || !generation || !current()) throw new Error("Saved view access is unavailable.");
+		return this.trackLocal((async () => {
+			let context: BaseTargetContext | undefined;
+			try {
+				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				context = await this.fetchBaseContext(scopeId, recordId);
+				if (!current() || context.generation !== generation) throw new Error("Saved view changed.");
+			} catch (error) {
+				if (!current()) throw error;
+				if (!(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
+				context = await this.cachedBaseContext(scopeId, recordId);
+			}
+			if (!current() || !context || context.generation !== generation) throw new Error("Connect to verify this saved target before navigating offline.");
+			return context;
+		})());
+	}
 	async captureBaseTarget(scopeId: string, target: BaseTargetSelection): Promise<BaseAnchor> {
 		const scope = parseDiscussionScope(scopeId), entry = this.entries.get(scopeId);
 		if (!scope?.viewId || entry?.kind !== "base" || !entry.permission?.comment || !this.canAnchorBase(target.type)) throw new Error("Open this saved view with comment permission first.");
 		const recordId = target.type === "item" || target.type === "cell" ? target.recordId : undefined;
 		if (recordId !== undefined && !isId(recordId)) throw new Error("The selected record has no synchronized identity.");
-		const key = "baseContext:" + scopeId + (recordId ? ":" + recordId : "");
 		const permissionKey = "baseRecordComment:" + scopeId + ":" + recordId;
 		return this.trackLocal((async () => {
 			let context: BaseTargetContext | undefined;
 			try {
-				context = await this.transport.baseTargetContext(scopeId, scope.viewId!, recordId);
+				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				context = await this.fetchBaseContext(scopeId, recordId);
 				const permission = recordId ? await this.transport.permissions(recordId) : entry.permission;
 				if (this.closed) throw new Error("This discussion account is closed.");
 				if (recordId) await this.store.setPreference(permissionKey, permission?.read === true && permission.comment);
 				if (!permission?.read || !permission.comment) throw new DiscussionFailure("reject", "comment_forbidden", 403);
-				await this.store.setPreference(key, protocolJson(context));
 			} catch (error) {
 				if (this.closed) throw error;
 				if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
-					await this.store.setPreference(key, null);
 					if (recordId) await this.store.setPreference(permissionKey, false);
 					throw error;
 				}

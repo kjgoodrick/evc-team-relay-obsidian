@@ -24,6 +24,7 @@ export interface OutboxOperation extends QueuedCommand {
 }
 export interface CachedEntity { id: string; revision: number; value: Json }
 export interface ScopeCheckpoint { cursor?: string; generation: number }
+export interface PreferenceVerification { token: string; generation: number; previous?: Json }
 export interface CachePurge { prefix: string; throughRevision: number }
 
 function ordered(entity: CachedEntity): { collection: string; position: number } {
@@ -84,7 +85,7 @@ export class DiscussionStore {
 		parts.forEach(requiredId);
 		// Version 9 keeps the same tables but prevents older workers from marking
 		// saved-view scope keys as invalid managed-entry IDs during delivery.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 9);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 10);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -238,6 +239,26 @@ export class DiscussionStore {
 	async setPreference(key: string, value: Json): Promise<void> {
 		requiredId(key); value = JSON.parse(boundedJson(value)) as Json;
 		await this.transaction(["preferences"], "readwrite", async tx => { await request(tx.objectStore("preferences").put(value, key)); });
+	}
+	/** Fence delayed verification responses across windows and remote-cache resets. */
+	async beginPreferenceVerification(scopeId: string, key: string, token: string): Promise<PreferenceVerification> {
+		requiredId(scopeId); requiredId(key); requiredId(token);
+		return this.transaction(["preferences", "generations"], "readwrite", async tx => {
+			const preferences = tx.objectStore("preferences");
+			const previous: Json | undefined = await request(preferences.get(key));
+			const generation: number = await request(tx.objectStore("generations").get(scopeId)) ?? 0;
+			await request(preferences.put(token, "verification:" + key));
+			return { token, generation, previous };
+		});
+	}
+	async finishPreferenceVerification(scopeId: string, key: string, proof: PreferenceVerification, value: Json): Promise<boolean> {
+		requiredId(scopeId); requiredId(key); value = JSON.parse(boundedJson(value)) as Json;
+		return this.transaction(["preferences", "generations"], "readwrite", async tx => {
+			const preferences = tx.objectStore("preferences");
+			if (await request(preferences.get("verification:" + key)) !== proof.token ||
+				(await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== proof.generation) return false;
+			await request(preferences.put(value, key)); return true;
+		});
 	}
 	/** Retiring a sent draft must not replace a newer choice in another pane. */
 	async comparePreference(key: string, expected: Json | undefined, value: Json): Promise<boolean> {

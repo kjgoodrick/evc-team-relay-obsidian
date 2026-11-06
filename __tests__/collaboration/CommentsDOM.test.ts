@@ -259,7 +259,9 @@ test("selected drafts keep their exact targets and text across switching, restar
 	await store.setPreference("activeNewDraft:" + entry, first);
 	const reveal = jest.fn(); let drafts = new DiscussionDrafts(parent, typed, entry, reveal);
 	try {
-		await until(() => parent.querySelector("textarea")?.value === "First draft");
+		// Text is restored before the pending-send check finishes. A real user
+		// cannot type until the composer enables this field.
+		await until(() => parent.querySelector("textarea")?.value === "First draft" && !parent.querySelector("textarea")?.disabled);
 		const textarea = parent.querySelector("textarea")!; textarea.value = "Preserve my first draft"; textarea.dispatchEvent(new Event("input"));
 		const picker = parent.querySelector<HTMLSelectElement>('select[aria-label="Discussion draft"]')!;
 		picker.value = second; picker.dispatchEvent(new Event("change"));

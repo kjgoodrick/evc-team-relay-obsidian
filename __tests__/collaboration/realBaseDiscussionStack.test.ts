@@ -123,6 +123,7 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		expect(session.canAnchorBaseRecord("image")).toBe(true);
 		const cell = await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.imageRecord, property: { source: "file", name: "size" } });
 		const wholeView = await session.captureBaseTarget(cardsScope, { type: "view" });
+		const navigationProof = await session.readBaseContext(tableScope, f.imageRecord);
 		session.setForeground(false); await session.outbox.settled();
 		for (const [scopeId, anchor] of [[tableScope, cell], [cardsScope, wholeView]] as const) {
 			await store.saveDraft({ id: "selection:" + scopeId + ":saved", scopeId, revision: 1, body: "Keep this draft", target: protocolJson(anchor) });
@@ -132,6 +133,7 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		connected = false; store = await DiscussionStore.open(identity, factory); session = new DiscussionSession(store, transport);
 		await session.start(); watch(); await session.refresh();
 		expect(session.status).toBe("offline");
+		expect(await session.readBaseContext(tableScope, f.imageRecord)).toEqual(navigationProof);
 		expect(session.canAnchorBaseRecord("image")).toBe(true);
 		expect(await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.imageRecord, property: { source: "file", name: "size" } })).toEqual(cell);
 		expect((await store.selectionDrafts(tableScope)).drafts.map(d => d.target)).toEqual([cell]);
@@ -153,6 +155,7 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 			(await session.local(tableScope)).threads.length === 0 && (await session.local(cardsScope)).threads.length === 1);
 		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
 		await expect(session.captureBaseTarget(tableScope, { type: "item", recordId: f.imageRecord })).rejects.toMatchObject({ status: 404 });
+		await expect(session.readBaseContext(tableScope, f.imageRecord)).rejects.toMatchObject({ status: 404 });
 		expect((await store.selectionDrafts(tableScope)).drafts).toHaveLength(1);
 		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(original) })).status).toBe(200);
 		changedRules = false; await session.refresh();
