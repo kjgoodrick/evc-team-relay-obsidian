@@ -1,13 +1,15 @@
 # Collaboration foundations
 
-These modules now include a whole-note native discussion preview. Plugin startup
+These modules now include whole-note and selected-text native discussion previews. Plugin startup
 constructs `DiscussionHost`, which owns account-bound `DiscussionSession` instances
 and negotiates the server's disabled-by-default discussion capability. The complete
 text/image/Bases/presence feature is not enabled or finished. The server protocol is documented
 in the matching server checkout at `docs/discussion-preview.md`. Current commands
-support whole-note discussions in the native sidebar. The transport/session now
-also support selected-text commands behind a separate capability; native capture,
-highlights, persistent target-aware drafts and Reading mapping remain unfinished.
+support whole-note discussions in the native sidebar and selected text through
+the editor command/context menu behind a separate capability. Desktop Source
+mode and Live Preview capture, highlights, thread navigation, and draft restoration
+have been exercised against the real control plane/relay in a disposable vault.
+Reading mapping, block targeting and native mobile validation remain unfinished.
 Bases primitives still require identity, authorization and native adapters.
 
 ## Local commands and delivery
@@ -15,13 +17,24 @@ Bases primitives still require identity, authorization and native adapters.
 `DiscussionStore` persists drafts, operations, cached entities and checkpoints in
 IndexedDB, partitioned by canonical server URL, account UUID, local vault identity,
 and share UUID. Use the transport's normalized `identity.serverId` when opening
-the store. IndexedDB schema version 4 preserves previous drafts/outbox/cache,
-invalidation generations and scope indexes, and adds ordered cache pages and
-local preferences. Draft preconditions and atomic enqueue/removal protect edits
+the store. IndexedDB schema version 5 preserves previous drafts/outbox/cache,
+invalidation generations, ordered cache pages and local preferences, and adds
+indexed selection-draft paging. Draft preconditions and atomic enqueue/removal protect edits
 from another pane. Manual online-action intents are separate from the outbox;
 they preserve IDs through ambiguous responses and never auto-submit.
 Payloads are copied before asynchronous writes,
 so another pane cannot mutate a command during persistence.
+
+The editor captures from its actual live Y.Text binding only when document ID,
+generation, permission and editor content agree. It freezes that target before
+opening the sidebar. Each captured selection gets a separate durable draft ID;
+switching drafts does not change anchors or discard text. Sending retires only
+that draft, and a conditional preference update cannot replace a newer selection
+in another pane. Invalid stored anchors leave the authored text selectable but
+cannot silently turn into whole-note comments. Comment decorations use relative
+positions and viewport clipping; account/access changes hide old highlights
+synchronously. A target button reveals the exact range or explains that it is
+unavailable, without guessing another occurrence of the quoted text.
 
 In the local queue, `scopeId` is the **managed entry UUID**, available offline.
 `payload` is the server's command object (including its `type`), not an entire

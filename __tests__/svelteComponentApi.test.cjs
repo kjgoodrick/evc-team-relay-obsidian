@@ -2,6 +2,23 @@ const path = require("node:path");
 const { loadSvelteComponent } = require("../scripts/test/svelteDOM.cjs");
 const loadBadge = () => loadSvelteComponent(path.resolve(__dirname, "../src/components/TextBadge.svelte"));
 
+test("the editor tracking label updates while its mutable view binding keeps the same identity", async () => {
+	const { dom, default: Component, mountComponent, flushSync } = await loadSvelteComponent(path.resolve(__dirname, "../src/components/EditorStatusActions.svelte"));
+	const target = dom.window.document.body;
+	const liveView = { isTracking: false, hostView: { file: { name: "Note.md" } }, toggleConnectionIntent() {} };
+	const component = mountComponent(Component, { target, props: { liveView, isTracking: false, connectionState: { status: "connected" }, linked: undefined } });
+	try {
+		expect(target.querySelector("button").getAttribute("aria-label")).toMatch(/^Not tracking/);
+		liveView.isTracking = true;
+		component.update({ liveView, isTracking: liveView.isTracking }); flushSync();
+		expect(target.querySelector("button").getAttribute("aria-label")).toMatch(/^Tracking changes/);
+		expect(target.querySelector("button").classList.contains("evc-notebook-synced")).toBe(true);
+		liveView.isTracking = false;
+		component.update({ liveView, isTracking: liveView.isTracking }); flushSync();
+		expect(target.querySelector("button").getAttribute("aria-label")).toMatch(/^Not tracking/);
+	} finally { component.destroy(); dom.window.close(); }
+});
+
 test("production options no longer accept the Svelte 4 class constructor", async () => {
 	const { dom, default: Component } = await loadBadge();
 	try {

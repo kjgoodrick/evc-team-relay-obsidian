@@ -1,12 +1,13 @@
 import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { DiscussionHost } from "../DiscussionHost";
-import type { DiscussionSession } from "../DiscussionSession";
-import { isRecord, protocolJson, REACTIONS, type DiscussionMessage, type MessageBody, type ThreadSummary } from "../DiscussionProtocol";
+import type { AnchoredThread, DiscussionSession } from "../DiscussionSession";
+import { isRecord, protocolJson, REACTIONS, type DiscussionMessage, type MessageBody } from "../DiscussionProtocol";
 import type { OnlineOperation } from "../DiscussionTransport";
 import { CommentComposer } from "./CommentComposer";
 import { renderCommentBody } from "./CommentBody";
 import { PendingComments } from "./PendingComments";
+import { DiscussionDrafts } from "./DiscussionDrafts";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 function plainText(body: MessageBody): string | undefined {
@@ -96,7 +97,8 @@ class ThreadCard {
 	private error: HTMLElement;
 	private disposed = false;
 	private renderedKey = "";
-	constructor(parent: HTMLElement, private app: App, private session: DiscussionSession, private entryId: string, private thread: ThreadSummary) {
+	constructor(parent: HTMLElement, private app: App, private session: DiscussionSession, private entryId: string, private thread: AnchoredThread,
+		private host: DiscussionHost) {
 		this.el = parent.createEl("article", { cls: "relay-comment-thread" });
 		this.summary = this.el.createDiv({ cls: "relay-comment-thread-heading" });
 		this.controls = this.el.createDiv({ cls: "relay-comment-thread-controls" });
@@ -110,7 +112,7 @@ class ThreadCard {
 			}
 		}).catch(() => {});
 	}
-	async update(thread: ThreadSummary): Promise<void> {
+	async update(thread: AnchoredThread): Promise<void> {
 		this.thread = thread;
 		const key = JSON.stringify([thread.activity_sequence, this.count, this.after, this.expanded,
 			this.session.permission(this.entryId), this.session.online, this.session.canQueue, this.session.participants(this.entryId)]);
@@ -119,6 +121,11 @@ class ThreadCard {
 		const generation = ++this.generation;
 		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
 		this.controls.empty();
+		if (thread.anchor?.type === "text") {
+			const target = this.controls.createEl("button", { text: thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
+			target.title = thread.anchor.context.quote;
+			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
+		}
 		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
 		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
 		const permission = this.session.permission(this.entryId);
@@ -164,6 +171,7 @@ class ThreadCard {
 		}
 		this.renderedKey = key;
 	}
+	async focus(): Promise<void> { this.expanded = true; this.count = 20; await this.update(this.thread); this.el.scrollIntoView({ block: "nearest" }); }
 	private message(message: DiscussionMessage): void {
 		const article = this.content.createDiv({ cls: "relay-comment-message" });
 		article.createDiv({ cls: "relay-comment-author", text: `${message.author_id === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, message.author_id)} · ${new Date(message.created_at).toLocaleString()}${message.revision > 1 ? " · edited" : ""}` });
@@ -204,7 +212,8 @@ export class CommentsView extends ItemView {
 	private entryId?: string;
 	private watch?: () => void;
 	private unsubscribe?: () => void;
-	private composer?: CommentComposer;
+	private drafts?: DiscussionDrafts;
+	private focusedSerial = 0;
 	private cards = new Map<string, ThreadCard>();
 	private generation = 0;
 	private timer?: number;
@@ -238,7 +247,7 @@ export class CommentsView extends ItemView {
 	}
 	private reset(): void {
 		this.generation++; this.session = undefined; this.entryId = undefined;
-		const watch = this.watch; this.watch = undefined; watch?.(); this.composer?.dispose(); this.composer = undefined;
+		const watch = this.watch; this.watch = undefined; watch?.(); this.drafts?.dispose(); this.drafts = undefined; this.focusedSerial = 0;
 		for (const card of this.cards.values()) card.dispose(); this.cards.clear();
 		this.pendingView?.dispose(); this.pendingView = undefined;
 		this.contentEl.empty(); this.status = undefined; this.list = undefined; this.pending = undefined; this.count = 20; this.after = 0; this.pages = [];
@@ -260,9 +269,8 @@ export class CommentsView extends ItemView {
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
 			this.pendingView = new PendingComments(this.pending, this.session, this.entryId);
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
-			this.composer = new CommentComposer(this.contentEl, this.session, this.entryId, "new:" + this.entryId,
-				body => ({ type: "thread.create", payload: { type: "thread.create", thread_id: uuid(), message_id: uuid(),
-					anchor: { version: 1, type: "note" }, body: protocolJson(body) } }), "New discussion on this note");
+			const session = this.session, entryId = this.entryId;
+			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); });
 		}
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule());
 		this.contentEl.querySelector("h2")?.setText(target.path.split("/").pop() ?? "Comments");
@@ -272,7 +280,7 @@ export class CommentsView extends ItemView {
 			unavailable: "Comments are not enabled on this server.", authentication_required: "Sign in again to continue.", error: "Comments need attention. Refresh to retry." };
 		this.status!.setText(sync === "unavailable" ? "You no longer have access to this note’s comments." : sync === "syncing" ? "Updating comments…" :
 			statuses[session.status] + (permission?.read && !permission.comment ? " · You can read comments" : ""));
-		this.composer?.update();
+		this.drafts?.update();
 		const canRead = !!permission?.read && session.status !== "authentication_required" && session.status !== "unavailable";
 		if (!canRead) {
 			for (const card of this.cards.values()) card.dispose(); this.cards.clear(); this.list!.empty();
@@ -284,13 +292,20 @@ export class CommentsView extends ItemView {
 		if (this.closed || generation !== this.generation || session.status === "closed") return;
 		this.pendingView!.update(local.pending);
 		if (!canRead) return;
+		const focus = this.host.focusedThread(session, entryId);
+		if (focus && !local.threads.some(thread => thread.id === focus.threadId)) {
+			const thread = await session.cachedThread(entryId, focus.threadId);
+			if (this.closed || generation !== this.generation) return;
+			if (thread) local.threads.unshift(thread);
+		}
 		const retained = new Set(local.threads.map(thread => thread.id));
 		for (const [id, card] of this.cards) if (!retained.has(id)) { card.dispose(); this.cards.delete(id); }
 		for (const thread of local.threads) {
 			let card = this.cards.get(thread.id);
-			if (!card) { card = new ThreadCard(this.list!, this.app, session, entryId, thread); this.cards.set(thread.id, card); }
+			if (!card) { card = new ThreadCard(this.list!, this.app, session, entryId, thread, this.host); this.cards.set(thread.id, card); }
 			await card.update(thread);
 			if (this.closed || generation !== this.generation) return;
+			if (focus?.threadId === thread.id && focus.serial !== this.focusedSerial) { this.focusedSerial = focus.serial; await card.focus(); }
 		}
 		this.list!.querySelectorAll(".relay-comment-more").forEach(el => el.remove());
 		if (local.hasMore) {

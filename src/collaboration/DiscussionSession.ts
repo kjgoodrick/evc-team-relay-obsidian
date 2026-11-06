@@ -2,13 +2,18 @@ import { v4 as uuid } from "uuid";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
-import { isId, isRecord, parseMessage, parseThread, protocolJson, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
+import { isId, isRecord, parseAnchor, parseMessage, parseThread, protocolJson, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
 type Entry = { listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
 	permissionFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
-export type DiscussionLocalView = { threads: ThreadSummary[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
+export type AnchoredThread = ThreadSummary & { anchor?: DiscussionAnchor };
+export type DiscussionLocalView = { threads: AnchoredThread[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
+function storedThread(value: unknown): AnchoredThread {
+	const thread = parseThread(value);
+	return { ...thread, ...(isRecord(value) && value.anchor !== undefined ? { anchor: parseAnchor(value.anchor) } : {}) };
+}
 
 /** A single account/server/vault/share owns this session. The native host removes
  * it synchronously on account change, then awaits shutdown before closing IDB.
@@ -226,10 +231,27 @@ export class DiscussionSession {
 	async local(entryId: string, after = 0, limit = 20): Promise<DiscussionLocalView> {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		const rows = await this.store.orderedEntities(entryId, "thread:", after, limit + 1);
-		const page = rows.slice(0, limit), threads = page.filter(row => isRecord(row.value) && !row.value.removed).map(row => parseThread(row.value));
+		const page = rows.slice(0, limit), threads = page.filter(row => isRecord(row.value) && !row.value.removed).map(row => storedThread(row.value));
 		const last = page[page.length - 1];
 		return { threads, pending: await this.store.pending(entryId), hasMore: rows.length > limit,
 			nextAfter: last && isRecord(last.value) && typeof last.value.created_sequence === "number" ? last.value.created_sequence : last?.revision ?? after };
+	}
+	async cachedThread(entryId: string, threadId: string): Promise<AnchoredThread | undefined> {
+		if (this.closed || !this.permission(entryId)?.read) return undefined;
+		const row = await this.store.entity(entryId, threadKey(threadId));
+		return row && isRecord(row.value) && !row.value.removed ? storedThread(row.value) : undefined;
+	}
+	async anchorThreads(entryId: string): Promise<AnchoredThread[]> {
+		const threads: AnchoredThread[] = []; let after = 0;
+		while (!this.closed && this.permission(entryId)?.read) {
+			const rows = await this.store.orderedEntities(entryId, "thread:", after, 100);
+			for (const row of rows) if (isRecord(row.value) && !row.value.removed) threads.push(storedThread(row.value));
+			if (rows.length < 100) return threads;
+			const last = rows[rows.length - 1].value;
+			if (!isRecord(last) || typeof last.created_sequence !== "number" || last.created_sequence <= after) throw new Error("Invalid cached thread order");
+			after = last.created_sequence;
+		}
+		return [];
 	}
 	async messages(entryId: string, threadId: string, after = 0, limit = 20): Promise<{ messages: DiscussionMessage[]; hasMore: boolean }> {
 		if (this.closed) throw new Error("This discussion account is closed.");

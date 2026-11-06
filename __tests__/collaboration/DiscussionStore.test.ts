@@ -1,4 +1,5 @@
-import { IDBFactory } from "fake-indexeddb";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+Object.assign(globalThis, { IDBKeyRange });
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 
 const identity = { serverId: "server", accountId: "alice", vaultId: "vault", shareId: "share" };
@@ -132,4 +133,20 @@ test("version-1 upgrade preserves drafts/outbox and adds scope cleanup without t
 		expect(await store.getDraft("old")).toBeUndefined(); expect(await store.getOperation("pending")).toBeUndefined();
 		expect((await other.getDraft("other"))?.body).toBe("other text");
 	} finally { store.close(); other.close(); }
+});
+
+test("selection drafts page within a note, preserve targets, and survive reopening the store", async () => {
+	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
+	const target = { version: 1, type: "text", generation: "original" };
+	await store.saveDraft({ id: "selection:note:a", scopeId: "note", revision: 0, body: "Alpha", target });
+	await store.saveDraft({ id: "selection:note:b", scopeId: "note", revision: 0, body: "Beta", target });
+	await store.saveDraft({ id: "selection:other:a", scopeId: "other", revision: 0, body: "Other", target });
+	store.close(); store = await DiscussionStore.open(identity, factory);
+	try {
+		const page = await store.selectionDrafts("note", undefined, 1);
+		expect(page.drafts.map(d => d.body)).toEqual(["Alpha"]); expect(page.hasMore).toBe(true);
+		expect((await store.selectionDrafts("note", page.drafts[0].id, 1)).drafts.map(d => d.body)).toEqual(["Beta"]);
+		await expect(store.saveDraft({ ...page.drafts[0], revision: 1, target: { ...target, generation: "replacement" } }, 0)).rejects.toThrow("Draft target changed");
+		expect((await store.getDraft("selection:note:a"))?.target).toEqual(target);
+	} finally { store.close(); }
 });

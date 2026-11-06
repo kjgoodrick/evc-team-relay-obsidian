@@ -206,6 +206,7 @@ class ViewActionsMount {
 
 		const props = {
 			liveView: target,
+			isTracking: target.isTracking,
 			connectionState: doc.connectionState,
 			linked: doc.vaultShare.linked,
 		};
@@ -221,6 +222,7 @@ class ViewActionsMount {
 			this.unsubscribe = doc.subscribe(actionsEl, (state: ConnectionState) => {
 				this.component?.update({
 					liveView: target,
+					isTracking: target.isTracking,
 					connectionState: state,
 					linked: doc.vaultShare.linked,
 				});

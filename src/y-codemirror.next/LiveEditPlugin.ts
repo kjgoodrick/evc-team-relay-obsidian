@@ -20,6 +20,7 @@ import diff_match_patch from "diff-match-patch";
 import { currentToggles } from "src/featureToggleState";
 import { MarkdownView, editorInfoField } from "obsidian";
 import { Document } from "src/Document";
+import { bindCommentEditor } from "../collaboration/EditorTextBinding";
 import { EmbeddedNoticeBar } from "src/ui/EmbeddedNoticeBar";
 import { ViewSurfaceBridge } from "src/viewSync/ViewSurfaceBridge";
 import {
@@ -342,6 +343,13 @@ export class LiveCMPluginValue implements PluginValue {
 		};
 		this._ytext = this.document.crdtText;
 		this._ytext.observe(this.observer);
+		this.unsubscribes.push(bindCommentEditor(this.editor, () => {
+			// Canvas/embedded editors are outside this feature's scope. The tracked
+			// Markdown view must have finished applying its authoritative content.
+			if (this.destroyed || this.embed || !this.document || !this.view?.isTracking ||
+				this._ytext !== this.document.crdtText) return undefined;
+			return { documentId: this.document.entityGuid, text: this._ytext };
+		}));
 	}
 
 	public incrementalBufferChange(newBuffer: string): ChangeSpec[] {

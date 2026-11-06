@@ -5,6 +5,9 @@
 	import type { RemoteFolderRecord } from "src/RelayModel";
 
 	export let liveView: TrackedViewBinding;
+	// The binding object keeps its identity while this field changes. Pass the
+	// primitive separately so the Svelte 5 mount adapter can invalidate it.
+	export let isTracking: boolean;
 	export let connectionState: ConnectionState;
 	export let linked: RemoteFolderRecord | undefined;
 	export let signedOut = false;
@@ -15,8 +18,8 @@
 		unsynced: "Not tracking changes: local file and update log are not in sync",
 	};
 
-	$: trackingClass = liveView.isTracking ? "evc-notebook-synced" : "notebook";
-	$: trackingLabel = TRACKING_LABELS[liveView.isTracking ? "synced" : "unsynced"];
+	$: trackingClass = isTracking ? "evc-notebook-synced" : "notebook";
+	$: trackingLabel = TRACKING_LABELS[isTracking ? "synced" : "unsynced"];
 
 	function onRelayClick() {
 		if (signedOut) {

@@ -11,6 +11,8 @@ import { CommentsView } from "../../src/collaboration/ui/CommentsView";
 import { bodyFromText, type ThreadSummary } from "../../src/collaboration/DiscussionProtocol";
 import { renderCommentBody } from "../../src/collaboration/ui/CommentBody";
 import { PendingComments } from "../../src/collaboration/ui/PendingComments";
+import { DiscussionDrafts } from "../../src/collaboration/ui/DiscussionDrafts";
+import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 
 jest.mock("obsidian", () => ({
 	ItemView: class {
@@ -123,7 +125,7 @@ test("the sidebar retains local recovery when access is revoked and clears it sy
 	await store.enqueue({ operationId: id(20), scopeId: entry, type: "reply.create", dependsOn: [], payload: {
 		type: "reply.create", thread_id: id(4), message_id: id(5), body: bodyFromText("Retained local text") } });
 	let notify!: () => void, currentSession: DiscussionSession | undefined = typed;
-	const host = { onChange: (fn: () => void) => { notify = fn; return () => {}; },
+	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
 		current: () => ({ path: "Note.md", entryId: entry, session: currentSession }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
@@ -142,11 +144,11 @@ test("incoming sidebar refresh preserves the focused draft and closes the old no
 	session.messages.mockResolvedValue({ messages: [{ id: id(5), author_id: id(1), revision: 1, deleted: false, body: bodyFromText("Existing"),
 		created_sequence: 1, created_at: thread.created_at, edited_at: null, reactions: [] }], hasMore: false });
 	let notify!: () => void, currentEntry = entry, currentSession: DiscussionSession | undefined = typed;
-	const host = { onChange: (fn: () => void) => { notify = fn; return () => {}; },
+	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
 		current: () => ({ path: "Note.md", entryId: currentEntry, session: currentSession }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
-		await view.onOpen(); await until(() => !!view.contentEl.querySelector("textarea:not([disabled])"));
+		await view.onOpen(); await until(() => !!view.contentEl.querySelector("textarea:not([disabled])") && view.contentEl.textContent!.includes("Existing"));
 		const textarea = view.contentEl.querySelector("textarea")!;
 		textarea.value = "Unsent text"; textarea.dispatchEvent(new Event("input")); textarea.focus(); textarea.setSelectionRange(2, 5);
 		notify(); await new Promise(resolve => setTimeout(resolve, 100));
@@ -158,4 +160,97 @@ test("incoming sidebar refresh preserves the focused draft and closes the old no
 		currentSession = undefined; notify();
 		expect(view.contentEl.querySelector("textarea")).toBeNull(); // No debounce window exposing the old account.
 	} finally { await view.onClose(); store.close(); }
+});
+
+test("selected drafts keep their exact targets and text across switching, restart and send", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div"); document.body.append(parent);
+	const selection = (label: string) => ({ version: 1, type: "text", document_id: entry, generation: id(30),
+		start: "AA==", end: "AA==", dependency: "AAA=", selected_length: label.length,
+		context: { quote: label, prefix: "", suffix: "", truncated: false } });
+	const first = "selection:" + entry + ":" + id(40), second = "selection:" + entry + ":" + id(41);
+	await store.saveDraft({ id: first, scopeId: entry, revision: 0, body: { text: "First draft", mentions: [] }, target: protocolJson(selection("alpha")) });
+	await store.saveDraft({ id: second, scopeId: entry, revision: 0, body: { text: "Second draft", mentions: [] }, target: protocolJson(selection("beta")) });
+	await store.setPreference("activeNewDraft:" + entry, first);
+	const reveal = jest.fn(); let drafts = new DiscussionDrafts(parent, typed, entry, reveal);
+	try {
+		await until(() => parent.querySelector("textarea")?.value === "First draft");
+		const textarea = parent.querySelector("textarea")!; textarea.value = "Preserve my first draft"; textarea.dispatchEvent(new Event("input"));
+		const picker = parent.querySelector<HTMLSelectElement>('select[aria-label="Discussion draft"]')!;
+		picker.value = second; picker.dispatchEvent(new Event("change"));
+		await until(() => parent.querySelector("textarea")?.value === "Second draft");
+		expect((await store.getDraft(first))?.body).toMatchObject({ text: "Preserve my first draft" });
+		expect((await store.getDraft(first))?.target).toEqual(selection("alpha"));
+		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, entry, reveal);
+		await until(() => parent.querySelector("textarea")?.value === "Second draft");
+		[...parent.querySelectorAll("button")].find(button => button.textContent === "Show selection")!.click();
+		expect(reveal).toHaveBeenCalledWith(selection("beta"));
+		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await until(() => session.queue.mock.calls.length === 1 && parent.textContent!.includes("New discussion on this note"));
+		expect(session.queue.mock.calls[0][0].payload).toMatchObject({ anchor: selection("beta") });
+		expect(await store.getDraft(second)).toBeUndefined(); expect(await store.getDraft(first)).toBeDefined();
+	} finally { drafts.dispose(); store.close(); parent.remove(); }
+});
+
+test("finishing a send after switching drafts preserves the newly selected target", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div"); document.body.append(parent);
+	const target = { version: 1, type: "text", document_id: entry, generation: id(30), start: "AA==", end: "AA==", dependency: "AAA=",
+		selected_length: 4, context: { quote: "beta", prefix: "", suffix: "", truncated: false } };
+	const first = "selection:" + entry + ":" + id(40), second = "selection:" + entry + ":" + id(41);
+	for (const [draftId, text] of [[first, "Sending first"], [second, "Continue second"]]) {
+		await store.saveDraft({ id: draftId, scopeId: entry, revision: 0, body: { text, mentions: [] }, target: protocolJson(target) });
+	}
+	await store.setPreference("activeNewDraft:" + entry, first);
+	let finish!: () => void;
+	const pending = new Promise<void>(resolve => { finish = resolve; });
+	session.queue.mockImplementation(async (command, draft) => { await pending; await store.enqueue(command, Date.now(), draft); });
+	const drafts = new DiscussionDrafts(parent, typed, entry, () => {});
+	try {
+		await until(() => parent.querySelector("textarea")?.value === "Sending first");
+		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await until(() => session.queue.mock.calls.length === 1);
+		const picker = parent.querySelector<HTMLSelectElement>('select[aria-label="Discussion draft"]')!;
+		picker.value = second; picker.dispatchEvent(new Event("change"));
+		await until(() => parent.querySelector("textarea")?.value === "Continue second");
+		finish(); await pending;
+		await until(() => !parent.textContent!.includes("Sending first") && session.queue.mock.calls.length === 1);
+		// Wait for the durable retirement, including its late onSent callback.
+		await new Promise(resolve => setTimeout(resolve, 50));
+		expect(await store.getDraft(first)).toBeUndefined();
+		expect(await store.preference("activeNewDraft:" + entry)).toBe(second);
+		expect(parent.querySelector("textarea")?.value).toBe("Continue second");
+		expect(session.queue.mock.calls[0][0].payload).toMatchObject({ anchor: target });
+	} finally { finish(); drafts.dispose(); store.close(); parent.remove(); }
+});
+
+test("an older asynchronous draft refresh cannot undo a new picker choice", async () => {
+	const { store, typed } = await fixture(), parent = document.createElement("div"); document.body.append(parent);
+	const second = "selection:" + entry + ":" + id(41);
+	await store.saveDraft({ id: second, scopeId: entry, revision: 0, body: { text: "Selection draft", mentions: [] },
+		target: { version: 1, type: "text", document_id: entry, generation: id(30), start: "AA==", end: "AA==", dependency: "AAA=",
+			selected_length: 4, context: { quote: "beta", prefix: "", suffix: "", truncated: false } } });
+	const drafts = new DiscussionDrafts(parent, typed, entry, () => {});
+	let finish!: () => void;
+	const pending = new Promise<void>(resolve => { finish = resolve; });
+	try {
+		await until(() => !!parent.querySelector("textarea:not([disabled])"));
+		const page = store.selectionDrafts.bind(store);
+		const delayed = jest.spyOn(store, "selectionDrafts").mockImplementationOnce(async (...args) => { const result = await page(...args); await pending; return result; });
+		drafts.update(); await until(() => delayed.mock.calls.length > 0);
+		const picker = parent.querySelector<HTMLSelectElement>('select[aria-label="Discussion draft"]')!;
+		picker.value = second; picker.dispatchEvent(new Event("change"));
+		await until(() => !picker.disabled);
+		finish(); await until(() => parent.querySelector("textarea")?.value === "Selection draft");
+		expect(await store.preference("activeNewDraft:" + entry)).toBe(second);
+	} finally { finish(); drafts.dispose(); store.close(); parent.remove(); }
+});
+
+test("a corrupt saved target keeps draft text selectable and never submits as a whole-note comment", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div");
+	await store.saveDraft({ id: "corrupt", scopeId: entry, revision: 0, body: "Keep this text", target: { type: "unknown" } });
+	const composer = new CommentComposer(parent, typed, entry, "corrupt", () => { throw new Error("Must not send"); });
+	try {
+		await until(() => parent.textContent!.includes("Could not restore"));
+		expect(composer.textarea.value).toBe("Keep this text"); expect(composer.textarea.disabled).toBe(false);
+		await composer.submit(); expect(session.queue).not.toHaveBeenCalled();
+	} finally { composer.dispose(); store.close(); }
 });

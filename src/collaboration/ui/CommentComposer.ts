@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { protocolJson, type MessageBody } from "../DiscussionProtocol";
+import { parseAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { Json, QueuedCommand } from "../storage/DiscussionStore";
 import { commentDraftBody, readCommentDraft, updateMentionSpans, type MentionSpan } from "./CommentDraft";
@@ -30,12 +30,16 @@ export class CommentComposer {
 	private composing = false;
 	private extra?: HTMLButtonElement;
 	private extraAvailable: () => boolean = () => true;
+	private target?: DiscussionAnchor;
+	private targetEl: HTMLElement;
+	private reveal?: (anchor: DiscussionAnchor) => void;
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private draftId: string,
-		private command: (body: MessageBody) => ComposerCommand, label = "Comment", initialText = "",
+		private command: (body: MessageBody, anchor?: DiscussionAnchor) => ComposerCommand, label = "Comment", initialText = "",
 		private onSent: () => void = () => {}) {
 		this.el = parent.createEl("form", { cls: "relay-comment-composer" });
 		this.el.createEl("label", { text: label, attr: { for: draftId } });
+		this.targetEl = this.el.createDiv({ cls: "relay-comment-draft-target" });
 		this.textarea = this.el.createEl("textarea", { attr: { id: draftId, rows: "3", maxlength: "65536", "aria-label": label, placeholder: "Write a comment…" } });
 		this.textarea.disabled = true;
 		const actions = this.el.createDiv({ cls: "relay-comment-composer-actions" });
@@ -72,6 +76,10 @@ export class CommentComposer {
 			const restored = readCommentDraft(draft?.body);
 			this.savedValue = JSON.stringify(restored); this.mentions = restored.mentions;
 			this.textarea.value = draft ? restored.text : initialText; this.previousText = this.textarea.value;
+			if (draft?.target !== undefined) {
+				this.target = parseAnchor(draft.target);
+				if (this.target.type === "text" && this.target.document_id !== this.entryId) throw new Error("Draft target does not match this note");
+			}
 			this.onlinePending = !!await session.store.preference("online:" + draftId);
 			if (this.disposed) return;
 			this.textarea.disabled = false;
@@ -79,8 +87,13 @@ export class CommentComposer {
 			if (this.onlinePending) this.status.setText("A previous send is unconfirmed. Reconnect and retry the same send.");
 			if (!draft && initialText) this.persist();
 			this.update();
-		}).catch(() => { this.saveFailed = true; this.status.setText("Could not restore this draft. Reopen comments to retry."); }));
+		}).catch(() => {
+			this.saveFailed = true; this.textarea.disabled = false; this.textarea.readOnly = true;
+			this.status.setText("Could not restore this draft or its selection. Copy your text before reopening comments."); this.update();
+		}));
 	}
+	onRevealTarget(reveal: (anchor: DiscussionAnchor) => void): void { this.reveal = reveal; }
+	async flush(): Promise<boolean> { await this.ready; await this.chain; return !this.saveFailed; }
 	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>, available: () => boolean = () => true): void {
 		this.extraAvailable = available;
 		this.extra = this.send.parentElement!.createEl("button", { text: label, attr: { type: "button" } });
@@ -100,6 +113,15 @@ export class CommentComposer {
 			this.people.value = selected;
 		}
 		this.people.disabled = this.busy || this.onlinePending || this.textarea.disabled || !people.length;
+		const label = this.target?.type === "text" ? (this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
+		if (this.targetEl.dataset.target !== label) {
+			this.targetEl.dataset.target = label; this.targetEl.empty();
+			if (label) {
+				this.targetEl.createEl("p", { text: label });
+				const reveal = this.targetEl.createEl("button", { text: "Show selection", attr: { type: "button" } });
+				reveal.onclick = () => { if (this.target) this.reveal?.(this.target); };
+			}
+		}
 	}
 	private persist(): void {
 		if (this.disposed || this.textarea.disabled || this.busy || this.onlinePending) return;
@@ -109,7 +131,8 @@ export class CommentComposer {
 		this.chain = this.session.trackLocal(this.chain.then(async () => {
 			if (this.saveFailed) return;
 			if (value !== this.savedValue || this.revision < 0) {
-				await this.session.store.saveDraft({ id: this.draftId, scopeId: this.entryId, revision: this.revision + 1, body: protocolJson(draft) }, this.revision < 0 ? null : this.revision);
+				await this.session.store.saveDraft({ id: this.draftId, scopeId: this.entryId, revision: this.revision + 1, body: protocolJson(draft),
+					...(this.target ? { target: protocolJson(this.target) } : {}) }, this.revision < 0 ? null : this.revision);
 				this.revision++; this.savedValue = value;
 			}
 			if (!this.disposed && this.textarea.value === text) this.status.setText("Draft saved on this device");
@@ -132,7 +155,7 @@ export class CommentComposer {
 			if (onlineAction) {
 				await onlineAction(body, { id: this.draftId, revision: this.revision });
 			} else {
-				const command = this.command(body);
+				const command = this.command(body, this.target);
 				await this.session.queue({ operationId: uuid(), scopeId: this.entryId, type: command.type,
 					payload: protocolJson(command.payload), dependsOn: command.dependsOn ?? [] }, { id: this.draftId, revision: this.revision });
 			}

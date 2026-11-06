@@ -1,7 +1,7 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
-export interface Draft { id: string; scopeId: string; revision: number; body: Json }
+export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
 export interface QueuedCommand {
 	operationId: string;
 	scopeId: string;
@@ -78,7 +78,7 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 4);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 5);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -102,6 +102,7 @@ export class DiscussionStore {
 					if (row) { row.update({ ...row.value, ...ordered(row.value as CachedEntity) }); row.continue(); }
 				};
 			}
+			if (event.oldVersion < 5) open.transaction!.objectStore("drafts").createIndex("scopeId", ["scopeId", "id"]);
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -133,6 +134,7 @@ export class DiscussionStore {
 		await this.transaction(["drafts", "preferences"], "readwrite", async tx => {
 			if (await request(tx.objectStore("preferences").get("online:" + draft.id))) throw new Error("Review the unconfirmed online action before editing this draft");
 			const store = tx.objectStore("drafts"), current: Draft | undefined = await request(store.get(draft.id));
+			if (current && canonical(current.target ?? null) !== canonical(draft.target ?? null)) throw new Error("Draft target changed; preserve the original draft and start another selection");
 			if (expectedRevision !== undefined && (current?.revision ?? null) !== expectedRevision) throw new Error("Draft changed in another view");
 			if (current && (current.scopeId !== draft.scopeId || current.revision >= draft.revision)) {
 				if (canonical(current as unknown as Json) === canonical(draft as unknown as Json)) return;
@@ -145,6 +147,16 @@ export class DiscussionStore {
 	async getDraft(id: string): Promise<Draft | undefined> {
 		return this.transaction(["drafts"], "readonly", tx => request(tx.objectStore("drafts").get(id)));
 	}
+	async selectionDrafts(scopeId: string, after?: string, limit = 25): Promise<{ drafts: Draft[]; hasMore: boolean }> {
+		requiredId(scopeId);
+		if (!Number.isInteger(limit) || limit < 1 || limit > 100 || after !== undefined && !after.startsWith("selection:" + scopeId + ":")) throw new Error("Invalid draft page");
+		return this.transaction(["drafts"], "readonly", async tx => {
+			const prefix = "selection:" + scopeId + ":";
+			const range = IDBKeyRange.bound([scopeId, after ?? prefix], [scopeId, prefix + "\uffff"], after !== undefined, false);
+			const drafts: Draft[] = await request(tx.objectStore("drafts").index("scopeId").getAll(range, limit + 1));
+			return { drafts: drafts.slice(0, limit), hasMore: drafts.length > limit };
+		});
+	}
 
 	async preference(key: string): Promise<Json | undefined> {
 		return this.transaction(["preferences"], "readonly", tx => request(tx.objectStore("preferences").get(key)));
@@ -152,6 +164,16 @@ export class DiscussionStore {
 	async setPreference(key: string, value: Json): Promise<void> {
 		requiredId(key); value = JSON.parse(boundedJson(value)) as Json;
 		await this.transaction(["preferences"], "readwrite", async tx => { await request(tx.objectStore("preferences").put(value, key)); });
+	}
+	/** Retiring a sent draft must not replace a newer choice in another pane. */
+	async comparePreference(key: string, expected: Json | undefined, value: Json): Promise<boolean> {
+		requiredId(key); const previous = expected === undefined ? undefined : boundedJson(expected);
+		value = JSON.parse(boundedJson(value)) as Json;
+		return this.transaction(["preferences"], "readwrite", async tx => {
+			const store = tx.objectStore("preferences"), current: Json | undefined = await request(store.get(key));
+			if ((current === undefined ? undefined : canonical(current)) !== previous) return false;
+			await request(store.put(value, key)); return true;
+		});
 	}
 	async removeDraft(id: string, revision: number): Promise<boolean> {
 		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {

@@ -1,4 +1,5 @@
-import { Component, TFile, type Plugin } from "obsidian";
+import { Component, MarkdownView, Notice, TFile, type Editor, type Plugin } from "obsidian";
+import { v4 as uuid } from "uuid";
 import type { AuthSession } from "../AuthSession";
 import type { ShareRegistry } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
@@ -6,8 +7,9 @@ import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession } from "./DiscussionSession";
 import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
-import { isId } from "./DiscussionProtocol";
+import { isId, protocolJson, type DiscussionAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
+import { commentEditorExtension, type CommentEditorSurface } from "./CommentEditor";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; entryId?: string; session?: DiscussionSession; message?: string };
@@ -21,12 +23,25 @@ export class DiscussionHost extends Component {
 	private listeners = new Set<() => void>();
 	private stopped = false;
 	private lastFile?: TFile;
+	private editors = new Set<CommentEditorSurface>();
+	private focus?: { session: DiscussionSession; entryId: string; threadId: string; serial: number };
+	private focusSerial = 0;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
 		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string) { super(); }
 	onload(): void {
 		this.plugin.registerView(COMMENTS_VIEW, leaf => new CommentsView(leaf, this));
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
+		this.plugin.registerEditorExtension(commentEditorExtension(this));
+		this.plugin.addCommand({ id: "comment-selection", name: "Comment on selected text", editorCheckCallback: (checking, editor, info) => {
+			const available = info.file?.extension === "md" && !!this.shares.shareFor(info.file.path);
+			if (available && !checking) void this.commentSelection(editor);
+			return available;
+		} });
+		this.registerEvent(this.plugin.app.workspace.on("editor-menu", (menu, editor, info) => {
+			if (info.file?.extension === "md" && this.shares.shareFor(info.file.path)) menu.addItem(item =>
+				item.setTitle("Comment on selected text").setIcon("message-square").onClick(() => { void this.commentSelection(editor); }));
+		}));
 		this.register(this.auth.on(() => this.reconcile()));
 		this.register(this.auth.onTokenRefreshed(() => { this.reconcile(); for (const slot of this.slots.values()) void slot.session?.refresh(); }));
 		this.register(this.shares.on(() => this.reconcile()));
@@ -88,7 +103,9 @@ export class DiscussionHost extends Component {
 		this.notify();
 	}
 	current(): CommentTarget {
-		const file = this.lastFile;
+		return this.targetFor(this.lastFile);
+	}
+	targetFor(file?: TFile): CommentTarget {
 		if (!file || file.extension !== "md") return { path: "", message: "Open a shared Markdown note to see its comments." };
 		const folder = this.shares.shareFor(file.path);
 		if (!folder) return { path: file.path, message: "This note is not in a shared folder." };
@@ -100,6 +117,59 @@ export class DiscussionHost extends Component {
 		if (!record || record.type !== "markdown" || !isId(record.id)) return { path: file.path, message: "Waiting for this note’s shared identity…" };
 		const slot = this.slots.get(this.key(server.controlPlaneUrl, account.id, folder.entityGuid)), session = slot?.session;
 		return { path: file.path, entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
+	}
+	registerEditor(surface: CommentEditorSurface): () => void { this.editors.add(surface); return () => this.editors.delete(surface); }
+	async commentSelection(editor: Editor): Promise<void> {
+		try {
+			const surface = [...this.editors].find(item => item.editor === editor);
+			if (!surface) { new Notice("Open this shared note in editing view and wait for it to synchronize before commenting on a selection."); return; }
+			// Capture synchronously, before an asynchronous save or opening the sidebar
+			// can move focus, replace the file, or alter the user's selection.
+			const selected = surface.capture(), { session, entryId, file, anchor } = selected;
+			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session;
+			const draftId = "selection:" + entryId + ":" + uuid();
+			await session.trackLocal(session.store.saveDraft({ id: draftId, scopeId: entryId, revision: 0,
+				body: { text: "", mentions: [] }, target: protocolJson(anchor) }, null));
+			if (!current()) return;
+			await session.trackLocal(session.store.setPreference("activeNewDraft:" + entryId, draftId));
+			if (!current()) return;
+			this.lastFile = file; this.focus = undefined; await this.open();
+		} catch { new Notice("The selection could not be saved. Check comment access and wait for the shared editor to finish synchronizing, then try again."); }
+	}
+	focusedThread(session: DiscussionSession, entryId: string) {
+		return this.focus?.session === session && this.focus.entryId === entryId ? this.focus : undefined;
+	}
+	async openThread(file: TFile, session: DiscussionSession, entryId: string, threadId: string): Promise<void> {
+		if (this.stopped || session.status === "closed" || !session.permission(entryId)?.read ||
+			this.targetFor(file).session !== session || this.targetFor(file).entryId !== entryId) return;
+		this.lastFile = file; this.focus = { session, entryId, threadId, serial: ++this.focusSerial };
+		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
+	}
+	async revealTarget(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): Promise<void> {
+		const available = () => !this.stopped && session.status !== "closed" && session.permission(entryId)?.read;
+		if (!available()) return;
+		const workspace = this.plugin.app.workspace;
+		try {
+			let file: TFile | undefined;
+			for (const folder of this.shares.toArray()) if (folder.entityGuid === session.identity.shareId) {
+				const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === entryId) paths.push(path); });
+				if (paths.length !== 1) break;
+				file = this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) ?? undefined;
+			}
+			if (!file || this.targetFor(file).session !== session || this.targetFor(file).entryId !== entryId) return;
+			const existing = workspace.getLeavesOfType("markdown").find(leaf => leaf.view instanceof MarkdownView && leaf.view.file === file);
+			const leaf = existing ?? workspace.getLeaf("tab");
+			await leaf.setViewState({ type: "markdown", active: true, state: { file: file.path, mode: "source" } });
+			await workspace.revealLeaf(leaf);
+			if (anchor.type === "note") return;
+			for (let attempt = 0; attempt < 20; attempt++) {
+				if (!available()) return;
+				const surface = [...this.editors].find(item => item.file === file && leaf.view instanceof MarkdownView && item.editor === leaf.view.editor);
+				if (surface?.reveal(session, entryId, anchor)) return;
+				await new Promise(resolve => window.setTimeout(resolve, 50));
+			}
+			new Notice("This selection is unavailable or still syncing. Its original text remains with the discussion; it has not been moved to a similar passage.");
+		} catch { new Notice("This comment’s selection could not be opened."); }
 	}
 	retry(): void {
 		for (const [key, slot] of this.slots) if (slot.failed) { slot.cancelled = true; this.slots.delete(key); }
@@ -113,6 +183,7 @@ export class DiscussionHost extends Component {
 	}
 	onunload(): void {
 		this.stopped = true;
+		this.focus = undefined; this.editors.clear();
 		for (const slot of this.slots.values()) { slot.cancelled = true; void slot.session?.close(); }
 		for (const unsubscribe of this.folderListeners.values()) unsubscribe();
 		this.slots.clear(); this.folderListeners.clear(); this.notify(); this.listeners.clear();

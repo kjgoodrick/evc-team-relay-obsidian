@@ -12,7 +12,7 @@ const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
 jest.mock("obsidian", () => ({
 	Component: class { register() {} registerEvent() {} registerDomEvent() {} },
-	ItemView: class {}, Modal: class {}, TFile: class { path = "Team/Note.md"; extension = "md"; },
+	ItemView: class {}, Modal: class {}, Notice: class {}, TFile: class { path = "Team/Note.md"; extension = "md"; },
 }));
 jest.mock("../../src/collaboration/DiscussionTransport", () => ({
 	DiscussionTransport: class {
@@ -38,7 +38,7 @@ function fixture() {
 	const folder = { entityGuid: id(2), config: { onpremServerId: "server" }, folderIndex: { on: () => () => {}, recordFor: () => ({ id: id(3), type: "markdown" }) }, toVirtualPath: () => "Note.md" };
 	const shares = { on: () => () => {}, toArray: () => [folder], shareFor: () => folder };
 	const file = new TFile();
-	const plugin = { registerView: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn() } } };
+	const plugin = { registerView: jest.fn(), registerEditorExtension: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn() } } };
 	const scope = { readValue: () => settings, subscribe: (fn: () => void) => { settingsChanged = fn; return () => {}; } };
 	const store = { close: jest.fn() };
 	const opening = jest.spyOn(DiscussionStore, "open").mockResolvedValue(store as unknown as DiscussionStore);
