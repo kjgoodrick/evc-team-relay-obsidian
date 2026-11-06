@@ -122,6 +122,8 @@ class ThreadCard {
 			const target = this.controls.createEl("button", { text: thread.anchor.structure ? "Show selected blocks" : thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
 			target.title = thread.anchor.context.quote;
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
+		} else if (thread.anchor?.type === "base") {
+			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
 		}
 		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
 		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
@@ -257,6 +259,13 @@ export class CommentsView extends ItemView {
 	private async render(): Promise<void> {
 		if (!this.containerEl.getClientRects().length) { const watch = this.watch; this.watch = undefined; watch?.(); return; }
 		const target = this.host.current();
+		if (target.kind === "base" && target.session && !target.entryId) {
+			this.reset();
+			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Bases comments" });
+			this.contentEl.createEl("p", { text: "Discussions belong to a saved view. Choose one to see its comments and drafts." });
+			const choose = this.contentEl.createEl("button", { text: "Choose discussion view" }); choose.onclick = () => this.host.chooseBaseView();
+			return;
+		}
 		if (!target.session || !target.entryId || target.session.status === "closed") {
 			this.reset(); this.session = undefined; this.entryId = undefined;
 			this.contentEl.createEl("p", { text: target.message ?? "Sign in to use comments." });
@@ -266,6 +275,10 @@ export class CommentsView extends ItemView {
 		if (target.session !== this.session || target.entryId !== this.entryId) {
 			this.reset(); this.session = target.session; this.entryId = target.entryId;
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Comments" });
+			if (target.kind === "base") {
+				this.contentEl.createEl("p", { cls: "relay-comment-base-view", text: "Discussion view: " + target.baseViewName });
+				const choose = this.contentEl.createEl("button", { text: "Change discussion view" }); choose.onclick = () => this.host.chooseBaseView();
+			}
 			this.status = this.contentEl.createDiv({ cls: "relay-comment-status", attr: { role: "status", "aria-live": "polite" } });
 			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { void this.session?.refresh(); };
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
@@ -273,10 +286,13 @@ export class CommentsView extends ItemView {
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
 			const session = this.session, entryId = this.entryId;
 			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); },
-				target.kind === "image" ? () => this.host.commentCurrentImage(session, entryId) : undefined);
+				target.kind === "image" ? () => this.host.commentCurrentImage(session, entryId) : undefined,
+				target.kind === "base" ? () => this.host.commentCurrentBase(session, entryId) : undefined,
+				target.kind === "base" ? anchor => this.host.targetLabel(session, entryId, anchor) : undefined);
 		}
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");
 		this.contentEl.querySelector("h2")?.setText(target.path.split("/").pop() ?? "Comments");
+		this.contentEl.querySelector(".relay-comment-base-view")?.setText("Discussion view: " + target.baseViewName);
 		const session = this.session, entryId = this.entryId, generation = ++this.generation;
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);
 		const statuses: Record<string, string> = { starting: "Connecting…", ready: "Comments are up to date", offline: "Offline — comments are saved to send when connected",

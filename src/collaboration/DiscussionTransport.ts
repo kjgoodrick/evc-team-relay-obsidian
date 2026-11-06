@@ -3,6 +3,7 @@ import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
 import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictureHash, type PictureMetadata, type PictureRendition, type PictureUpload } from "./PictureProtocol";
 import { BASE_TARGET_KINDS, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type DiscussionAnchor } from "./DiscussionProtocol";
+import { parseDiscussionScope } from "./DiscussionScope";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -40,10 +41,11 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 function positive(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }
 
-/** Scope IDs in the local queue are managed entry UUIDs, available while offline. */
+/** Local scope keys retain managed file identity and, for Bases, saved-view identity. */
 export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 	const payload = op.payload;
-	if (!validId(shareId) || !validId(op.operationId) || !validId(op.scopeId) || !object(payload) ||
+	const scope = parseDiscussionScope(op.scopeId);
+	if (!validId(shareId) || !validId(op.operationId) || !scope || !object(payload) ||
 		payload.type !== op.type || !validId(payload.thread_id) || !validId(payload.message_id) ||
 		!["thread.create", "reply.create", "message.edit", "reaction.set"].includes(op.type)) {
 		throw new DiscussionFailure("reject", "invalid_local_command");
@@ -53,12 +55,15 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 	let body: string;
 	try {
 		body = JSON.stringify({ protocol_version: 1, operation_id: op.operationId, share_id: shareId,
-			entry_id: op.scopeId, command: payload });
+			entry_id: scope.entryId, command: payload });
 	} catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
 	let limit = 65536;
 	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "base") {
-		try { parseAnchor(payload.anchor); } catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
+		try { const anchor = parseAnchor(payload.anchor);
+			if (scope.viewId !== undefined && (anchor.type !== "base" || anchor.view_id !== scope.viewId)) throw new Error("Wrong saved view");
+		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
 	}
+	if (op.type === "thread.create" && scope.viewId !== undefined && (!object(payload.anchor) || payload.anchor.type !== "base")) throw new DiscussionFailure("reject", "invalid_local_anchor");
 	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "image_file") {
 		try {
 			const anchor = parseAnchor(payload.anchor);
@@ -81,13 +86,14 @@ export type WithdrawalResult = { status: "withdrawn" } | { status: "accepted"; r
 
 function onlineEnvelope(shareId: string, operation: OnlineOperation): string {
 	const command = operation.payload;
-	if (!isId(shareId) || !isId(operation.operationId) || !isId(operation.scopeId) || !object(command) || !isId(command.thread_id) ||
+	const scope = parseDiscussionScope(operation.scopeId);
+	if (!isId(shareId) || !isId(operation.operationId) || !scope || !object(command) || !isId(command.thread_id) ||
 		!["reply.create", "thread.state", "message.delete", "thread.remove"].includes(String(command.type)) ||
 		(["reply.create", "message.delete"].includes(String(command.type)) && !isId(command.message_id))) {
 		throw new DiscussionFailure("reject", "invalid_local_command");
 	}
 	const body = JSON.stringify({ protocol_version: 1, operation_id: operation.operationId, share_id: shareId,
-		entry_id: operation.scopeId, command });
+		entry_id: scope.entryId, command });
 	if (new TextEncoder().encode(body).byteLength > 65536) throw new DiscussionFailure("reject", "command_too_large");
 	return body;
 }
@@ -146,7 +152,7 @@ export class DiscussionTransport implements DiscussionSender {
 		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
 		const value = await this.request("/commands/withdraw", body);
 		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
-		if (!object(value) || value.status !== "withdrawn" || value.operation_id !== captured.operationId || value.entry_id !== captured.scopeId) {
+		if (!object(value) || value.status !== "withdrawn" || value.operation_id !== captured.operationId || value.entry_id !== parseDiscussionScope(captured.scopeId)?.entryId) {
 			throw new DiscussionFailure("pause", "invalid_withdrawal_response");
 		}
 		return { status: "withdrawn" };
@@ -204,14 +210,16 @@ export class DiscussionTransport implements DiscussionSender {
 		return await this.request(this.scopePath(entryId) + "/pictures/" + pictureId + "/" + variant, undefined, { binary: expected }) as ArrayBuffer;
 	}
 	async anchorContext(entryId: string): Promise<{ entryId: string; generation: string }> {
+		const actual = parseDiscussionScope(entryId)?.entryId;
 		const value = await this.request(this.scopePath(entryId) + "/anchor-context");
-		if (!object(value) || value.protocol_version !== 1 || value.entry_id !== entryId || !isId(value.generation)) throw new DiscussionFailure("pause", "invalid_read_response");
+		if (!object(value) || value.protocol_version !== 1 || value.entry_id !== actual || !isId(value.generation)) throw new DiscussionFailure("pause", "invalid_read_response");
 		return { entryId, generation: value.generation };
 	}
 	async baseTargetContext(entryId: string, viewId: string, recordId?: string) {
 		if (!isId(viewId) || recordId !== undefined && !isId(recordId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		this.scopeView(entryId, viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + "/bases/target-context", JSON.stringify({ view_id: viewId,
-			...(recordId !== undefined ? { record_id: recordId } : {}) })), value => parseBaseTargetContext(value, entryId, viewId, recordId));
+			...(recordId !== undefined ? { record_id: recordId } : {}) })), value => parseBaseTargetContext(value, parseDiscussionScope(entryId)!.entryId, viewId, recordId));
 	}
 
 	async permissions(entryId: string): Promise<DiscussionPermissions> {
@@ -236,8 +244,9 @@ export class DiscussionTransport implements DiscussionSender {
 	}
 
 	private scopePath(entryId: string): string {
-		if (!isId(entryId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return `/shares/${this.identity.shareId}/entries/${entryId}`;
+		const scope = parseDiscussionScope(entryId);
+		if (!scope) throw new DiscussionFailure("reject", "invalid_local_target");
+		return `/shares/${this.identity.shareId}/entries/${scope.entryId}`;
 	}
 	private page(after: number): string {
 		if (!isSequence(after)) throw new DiscussionFailure("reject", "invalid_local_target");
@@ -247,6 +256,8 @@ export class DiscussionTransport implements DiscussionSender {
 		try { return parser(value); } catch { throw new DiscussionFailure("pause", "invalid_read_response"); }
 	}
 	private scoped<T extends { anchor?: DiscussionAnchor }>(value: T, entryId: string, raw: unknown, viewId?: string): T {
+		viewId = this.scopeView(entryId, viewId);
+		entryId = parseDiscussionScope(entryId)!.entryId;
 		const source = sourceAnchor(value.anchor);
 		if (source && source.document_id !== entryId || value.anchor?.type === "image_file" && value.anchor.asset.entry_id !== entryId) throw new DiscussionFailure("pause", "invalid_read_response");
 		if (value.anchor?.type === "base" && (!object(raw) || !object(raw.anchor) || raw.anchor.entry_id !== entryId) ||
@@ -257,20 +268,29 @@ export class DiscussionTransport implements DiscussionSender {
 		if (viewId !== undefined && !isId(viewId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return viewId === undefined ? "" : "&view_id=" + viewId;
 	}
+	private scopeView(entryId: string, viewId?: string): string | undefined {
+		const scope = parseDiscussionScope(entryId);
+		if (!scope || scope.viewId !== undefined && viewId !== undefined && scope.viewId !== viewId) throw new DiscussionFailure("reject", "invalid_local_target");
+		return scope.viewId ?? viewId;
+	}
 	async threads(entryId: string, after = 0, viewId?: string) {
+		viewId = this.scopeView(entryId, viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + "/threads" + this.page(after) + this.viewQuery(viewId)), v => parseThreadList(v, after, viewId));
 	}
 	async thread(entryId: string, threadId: string, after = 0, viewId?: string) {
+		viewId = this.scopeView(entryId, viewId);
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		this.viewQuery(viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}` + this.page(after)), v => this.scoped(parseThreadPage(v, threadId, after), entryId, v, viewId));
 	}
 	async message(entryId: string, threadId: string, messageId: string, viewId?: string) {
+		viewId = this.scopeView(entryId, viewId);
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		this.viewQuery(viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}`), v => this.scoped(parseMessageRead(v, threadId, messageId), entryId, v, viewId));
 	}
 	async state(entryId: string, threadId: string, viewId?: string) {
+		viewId = this.scopeView(entryId, viewId);
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		this.viewQuery(viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => this.scoped(parseThreadState(v, threadId), entryId, v, viewId));
@@ -280,6 +300,7 @@ export class DiscussionTransport implements DiscussionSender {
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}/history` + this.page(after)), v => parseHistory(v, after));
 	}
 	async changes(entryId: string, cursor?: string, viewId?: string) {
+		viewId = this.scopeView(entryId, viewId);
 		if (cursor !== undefined && (typeof cursor !== "string" || !cursor.length || cursor.length > 2048)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(entryId) + "/changes?limit=25" +
 			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor)) + this.viewQuery(viewId)), v => parseChanges(v, viewId));

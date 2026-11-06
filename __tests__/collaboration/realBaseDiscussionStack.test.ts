@@ -5,6 +5,8 @@ import { BaseContentTransport } from "../../src/bases/BaseContentTransport";
 import { BaseRegistryTransport } from "../../src/bases/BaseRegistryTransport";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
 import { DiscussionOutbox } from "../../src/collaboration/DiscussionOutbox";
+import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
+import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 import { bodyFromText, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 
@@ -81,4 +83,91 @@ run("real Bases discussions preserve offline targets, saved-view isolation, exac
 		expect((await transport.threads(f.discussionEntry, 0, view)).threads).toHaveLength(27);
 		expect((await transport.thread(f.discussionEntry, accepted.thread_id)).anchor).toEqual(anchor);
 	} finally { outbox?.stop(); await outbox?.settled(); store.close(); }
+}, 45_000);
+
+run("real saved-view sessions retain separate offline work and refresh authorized caches after record access changes", async () => {
+	const f = JSON.parse(readFileSync(process.env.EVC_BASE_CONTENT_FIXTURE!, "utf8")) as Record<string, string>;
+	expect(new URL(f.base).hostname).toBe("127.0.0.1");
+	const identity = { serverId: f.base, accountId: f.reviewer, shareId: f.share, vaultId: randomUUID() };
+	const ownerIdentity = { ...identity, accountId: f.owner };
+	const ownerCredential = async () => ({ accountId: f.owner, accessToken: f.ownerToken });
+	const content = new BaseContentTransport(ownerIdentity, ownerCredential, fetch);
+	const registry = new BaseRegistryTransport(ownerIdentity, ownerCredential, fetch);
+	const initial = await content.read(f.sessionEntry);
+	await content.publish(f.sessionEntry, { operationId: randomUUID(), expected: initial.state,
+		bytes: new TextEncoder().encode(JSON.stringify({ views: [{ type: "table", name: "Session table" }, { type: "cards", name: "Session cards" }] })).buffer as ArrayBuffer });
+	const published = await content.read(f.sessionEntry);
+	const snapshot = await registry.inspect(f.sessionEntry, published.state.record.hash!, published.state.generation!);
+	const [view, cards] = snapshot.views.map(v => v.id!);
+	const tableScope = baseDiscussionScope(f.sessionEntry, view), cardsScope = baseDiscussionScope(f.sessionEntry, cards);
+	let connected = true;
+	const transport = new DiscussionTransport(identity, async () => ({ accountId: f.reviewer, accessToken: f.reviewerToken }),
+		async (...args: Parameters<typeof fetch>) => { if (!connected) throw new TypeError("Offline fixture"); return fetch(...args); });
+	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
+	let session = new DiscussionSession(store, transport);
+	const rulesUrl = f.base + "/v1/managed/shares/" + f.share + "/rules";
+	const auth = { Authorization: "Bearer " + f.ownerToken, "Content-Type": "application/json" };
+	const original = await (await fetch(rulesUrl, { headers: auth })).json();
+	let changedRules = false;
+	const until = async (check: () => Promise<boolean>) => {
+		const end = Date.now() + 8000;
+		while (Date.now() < end) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 25)); }
+		throw new Error("Saved-view session did not converge");
+	};
+	const watch = () => { session.watch(tableScope, () => {}, "base"); session.watch(cardsScope, () => {}, "base"); };
+	const operation = (scopeId: string, anchor: BaseAnchor) => ({ operationId: randomUUID(), scopeId,
+		type: "thread.create" as const, dependsOn: [], payload: { type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(),
+			anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Session review")) } });
+	try {
+		await session.start(); watch(); await session.refresh();
+		const cell = await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.record, property: { source: "note", name: "status" } });
+		const wholeView = await session.captureBaseTarget(cardsScope, { type: "view" });
+		session.setForeground(false); await session.outbox.settled();
+		for (const [scopeId, anchor] of [[tableScope, cell], [cardsScope, wholeView]] as const) {
+			await store.saveDraft({ id: "selection:" + scopeId + ":saved", scopeId, revision: 1, body: "Keep this draft", target: protocolJson(anchor) });
+		}
+		const first = operation(tableScope, cell), second = operation(cardsScope, wholeView);
+		await session.queue(first); await session.queue(second); await session.close();
+		connected = false; store = await DiscussionStore.open(identity, factory); session = new DiscussionSession(store, transport);
+		await session.start(); watch(); await session.refresh();
+		expect(session.status).toBe("offline");
+		expect(await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.record, property: { source: "note", name: "status" } })).toEqual(cell);
+		expect((await store.selectionDrafts(tableScope)).drafts.map(d => d.target)).toEqual([cell]);
+		expect((await store.selectionDrafts(cardsScope)).drafts.map(d => d.target)).toEqual([wholeView]);
+		expect((await store.pending(tableScope)).map(op => op.operationId)).toEqual([first.operationId]);
+		expect((await store.pending(cardsScope)).map(op => op.operationId)).toEqual([second.operationId]);
+		connected = true; await session.refresh();
+		await until(async () => (await store.getOperation(first.operationId))?.state === "accepted" && (await store.getOperation(second.operationId))?.state === "accepted");
+		await until(async () => (await session.local(tableScope)).threads.length === 1 && (await session.local(cardsScope)).threads.length === 1);
+		expect((await session.local(tableScope)).threads.map(t => t.id)).toEqual([first.payload.thread_id]);
+		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
+		expect((await transport.thread(tableScope, String(first.payload.thread_id))).anchor).toEqual(cell);
+		await expect(transport.thread(cardsScope, String(first.payload.thread_id))).rejects.toMatchObject({ code: "invalid_read_response" });
+		expect((await store.checkpoint(tableScope)).cursor).not.toBe((await store.checkpoint(cardsScope)).cursor);
+		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify([...original,
+			{ user_id: f.reviewer, path: "Record.md", recursive: false, permission: "none" }]) })).status).toBe(200);
+		changedRules = true; await session.refresh();
+		await until(async () => session.syncStatus(tableScope) === "current" && session.syncStatus(cardsScope) === "current" &&
+			(await session.local(tableScope)).threads.length === 0 && (await session.local(cardsScope)).threads.length === 1);
+		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
+		await expect(session.captureBaseTarget(tableScope, { type: "item", recordId: f.record })).rejects.toMatchObject({ status: 404 });
+		expect((await store.selectionDrafts(tableScope)).drafts).toHaveLength(1);
+		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(original) })).status).toBe(200);
+		changedRules = false; await session.refresh();
+		await until(async () => (await session.local(tableScope)).threads.length === 1);
+		await until(async () => (await store.preference("permission:" + tableScope) as { read?: boolean } | undefined)?.read === true &&
+			(await store.preference("permission:" + cardsScope) as { read?: boolean } | undefined)?.read === true);
+		await session.close(); connected = false;
+		store = await DiscussionStore.open(identity, factory); session = new DiscussionSession(store, transport);
+		await session.start(); watch(); await session.refresh();
+		expect(session.permission(tableScope)?.read).toBe(true);
+		expect(session.permission(cardsScope)?.read).toBe(true);
+		expect(session.documentGeneration(tableScope)).toBe(cell.generation);
+		expect(session.documentGeneration(cardsScope)).toBe(wholeView.generation);
+		expect((await session.local(tableScope)).threads.map(t => t.id)).toEqual([first.payload.thread_id]);
+		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
+	} finally {
+		await session.close();
+		if (changedRules) await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(original) });
+	}
 }, 45_000);

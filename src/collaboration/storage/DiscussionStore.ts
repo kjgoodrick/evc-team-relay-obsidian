@@ -82,7 +82,9 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 8);
+		// Version 9 keeps the same tables but prevents older workers from marking
+		// saved-view scope keys as invalid managed-entry IDs during delivery.
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 9);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {

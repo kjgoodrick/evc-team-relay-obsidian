@@ -16,9 +16,17 @@ import { readingCommentBinding } from "./ReadingTextBinding";
 import { ImageComments } from "./ImageComments";
 import type { ImageOccurrence } from "./anchors/images";
 import type { RenderedImageTarget } from "./anchors/renderedImages";
+import { baseDiscussionScope, parseDiscussionScope } from "./DiscussionScope";
+import { BaseDiscussionPicker, type BaseDiscussionChoice } from "./ui/BaseDiscussionPicker";
+import { BaseTargetPicker, type BaseRecordChoice } from "./ui/BaseTargetPicker";
+import type { BaseSyncHost } from "../bases/BaseSyncHost";
+import type { BaseRegistrySnapshot } from "../bases/BaseRegistryProtocol";
+import { isAttachmentFile } from "../AttachmentFile";
+import { isRecord } from "./DiscussionProtocol";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
-export type CommentTarget = { path: string; kind?: "note" | "image"; entryId?: string; session?: DiscussionSession; message?: string };
+export type CommentTarget = { path: string; kind?: "note" | "image" | "base"; entryId?: string; session?: DiscussionSession; message?: string;
+	baseEntryId?: string; baseViewName?: string };
 export type ImageFileCommentContext = { file: TFile; session: DiscussionSession; entryId: string; generation?: string; current: () => boolean };
 
 /** Native Obsidian adapter. Note IDs come from the managed inventory; never
@@ -35,9 +43,10 @@ export class DiscussionHost extends Component {
 	private focusSerial = 0;
 	private reading?: ReadingComments;
 	private images?: ImageComments;
+	private baseSelections = new WeakMap<DiscussionSession, Map<string, { choice?: BaseDiscussionChoice }>>();
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
-		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string) { super(); }
+		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string, private bases?: BaseSyncHost) { super(); }
 	onload(): void {
 		this.reading = this.addChild(new ReadingComments(this, this.plugin));
 		this.images = this.addChild(new ImageComments(this, this.plugin, this.shares));
@@ -72,7 +81,7 @@ export class DiscussionHost extends Component {
 		this.registerEvent(this.plugin.app.vault.on("rename", () => this.notify()));
 		this.registerEvent(this.plugin.app.vault.on("delete", file => { if (file === this.lastFile) this.lastFile = undefined; this.notify(); }));
 		this.registerEvent(this.plugin.app.workspace.on("file-menu", (menu, file) => {
-			if (file instanceof TFile && this.targetFor(file).entryId) menu.addItem(item =>
+			if (file instanceof TFile && (this.targetFor(file).entryId || this.targetFor(file).baseEntryId)) menu.addItem(item =>
 				item.setTitle("Comments").setIcon("message-square").onClick(() => { this.lastFile = file; void this.open(); }));
 		}));
 		this.registerDomEvent(document, "visibilitychange", () => {
@@ -136,9 +145,95 @@ export class DiscussionHost extends Component {
 		const account = provider?.isLoggedIn() ? provider.getCurrentUser() : undefined;
 		if (!server || !account) return { path: file.path, message: "Sign in to this shared folder’s server to use comments." };
 		const record = folder.folderIndex.recordFor(folder.toVirtualPath(file.path));
-		if (!record || !["markdown", "image"].includes(record.type) || !isId(record.id)) return { path: file.path, message: "Comments require a shared note or image with a synchronized identity." };
+		const base = record?.type === "file" && file.extension.toLowerCase() === "base";
+		if (!record || !["markdown", "image"].includes(record.type) && !base || !isId(record.id)) return { path: file.path, message: "Comments require a shared note, image or Bases file with a synchronized identity." };
 		const slot = this.slots.get(this.key(server.controlPlaneUrl, account.id, folder.entityGuid)), session = slot?.session;
+		if (base) {
+			const selection = session ? this.baseSelection(session, record.id) : undefined;
+			return { path: file.path, kind: "base", baseEntryId: record.id, session,
+				entryId: selection ? baseDiscussionScope(record.id, selection.id) : undefined, baseViewName: selection?.name,
+				message: session ? "Choose a saved view to open its discussions." : "Opening comments…" };
+		}
 		return { path: file.path, kind: record.type === "image" ? "image" : "note", entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
+	}
+	private baseSelection(session: DiscussionSession, entryId: string): BaseDiscussionChoice | undefined {
+		let selections = this.baseSelections.get(session);
+		if (!selections) { selections = new Map(); this.baseSelections.set(session, selections); }
+		let saved = selections.get(entryId);
+		if (!saved) {
+			saved = {}; selections.set(entryId, saved); const record = saved;
+			void session.trackLocal(session.store.preference("activeBaseView:" + entryId).then(value => {
+				if (session.status === "closed" || this.stopped || record.choice) return;
+				if (isRecord(value) && isId(value.id) && typeof value.name === "string" && value.name.length <= 512 && typeof value.type === "string" &&
+					["active", "unmatched", "archived"].includes(String(value.state))) record.choice = value as BaseDiscussionChoice;
+				this.notify();
+			})).catch(() => {});
+		}
+		return saved.choice;
+	}
+	chooseBaseView(): void {
+		const file = this.lastFile, target = this.current(), session = target.session, entryId = target.baseEntryId;
+		const folder = file ? this.shares.shareFor(file.path) : undefined, tracked = entryId ? folder?.trackedEntries.get(entryId) : undefined;
+		if (!file || !session || !entryId || !folder || !tracked || !isAttachmentFile(tracked) || !this.bases) { new Notice("Wait for this Bases file to finish synchronizing before choosing its discussion view."); return; }
+		const current = () => !this.stopped && session.status !== "closed" && this.lastFile === file && this.targetFor(file).session === session && this.targetFor(file).baseEntryId === entryId;
+		const bases = this.bases; let snapshot: BaseRegistrySnapshot | undefined;
+		new BaseDiscussionPicker(this.plugin.app, async (state, after) => {
+			if (!current()) throw new Error("Discussion context changed");
+			if (state) {
+				if (!snapshot) throw new Error("Load current views first");
+				const page = await bases.savedViewPage(folder, tracked, snapshot, state, after);
+				return { choices: page.views, next: page.has_more ? page.next_after ?? undefined : undefined };
+			}
+			let record = await bases.cachedViews(folder, tracked, { identity: session.identity, readable: () => {
+				const scopeId = this.targetFor(file).entryId;
+				return current() && session.status === "offline" && !!scopeId && session.permission(scopeId)?.read === true;
+			} }), message: string | undefined;
+			try { record = await bases.refreshViews(folder, tracked); }
+			catch { message = "Showing saved associations. New targets require a previously verified context while offline. Refresh synchronization to see later view changes."; }
+			if (!current() || !record.snapshot) throw new Error("Saved views unavailable");
+			snapshot = record.snapshot;
+			return { choices: [...snapshot.views.flatMap(view => view.id ? [{ id: view.id, name: view.name, type: view.type, state: "active" as const }] : []), ...snapshot.unmatched.views], message };
+		}, async choice => {
+			if (!current()) throw new Error("Discussion context changed");
+			await session.trackLocal(session.store.setPreference("activeBaseView:" + entryId, protocolJson(choice)));
+			if (!current()) return;
+			this.baseSelection(session, entryId); this.baseSelections.get(session)!.get(entryId)!.choice = choice;
+			this.focus = undefined; this.notify(); await this.open();
+		}, current, listener => this.onChange(listener)).open();
+	}
+	async commentCurrentBase(session: DiscussionSession, scopeId: string): Promise<void> {
+		const file = this.lastFile, target = this.current();
+		if (!file || target.session !== session || target.entryId !== scopeId || target.kind !== "base") return;
+		const folder = this.shares.shareFor(file.path); if (!folder) return;
+		const current = () => !this.stopped && session.status !== "closed" && this.lastFile === file &&
+			this.targetFor(file).session === session && this.targetFor(file).entryId === scopeId && !!session.permission(scopeId)?.comment;
+		const records = (): BaseRecordChoice[] => {
+			const found = new Map<string, BaseRecordChoice>(), duplicates = new Set<string>();
+			folder.folderIndex.eachRecord((record, path) => {
+				if (record.type !== "markdown" || !isId(record.id) || !this.plugin.app.vault.getFileByPath(folder.absolutePath(path))) return;
+				if (found.has(record.id)) duplicates.add(record.id);
+				found.set(record.id, { id: record.id, path });
+			});
+			for (const id of duplicates) found.delete(id);
+			return [...found.values()].sort((a, b) => a.path.localeCompare(b.path));
+		};
+		const catalog = records();
+		new BaseTargetPicker(this.plugin.app, target.baseViewName ?? "Saved view", query => {
+			if (!current()) return { records: [], hasMore: false };
+			const matches = catalog.filter(record => record.path.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+			return { records: matches.slice(0, 50), hasMore: matches.length > 50 };
+		}, recordId => {
+			const record = current() ? catalog.find(record => record.id === recordId) : undefined;
+			if (!record || folder.folderIndex.recordFor(record.path)?.id !== recordId) return [];
+			const note = record ? this.plugin.app.vault.getFileByPath(folder.absolutePath(record.path)) : null;
+			return note ? Object.keys(this.plugin.app.metadataCache.getFileCache(note)?.frontmatter ?? {}).filter(name => name !== "position") : [];
+		}, async selection => {
+			if (!current()) return false;
+			if ((selection.type === "cell" || selection.type === "item") && !records().some(record => record.id === selection.recordId)) throw new Error("The shared record changed");
+			const anchor = await session.captureBaseTarget(scopeId, selection);
+			if (!current()) return false;
+			return this.saveCommentSelection({ file, session, entryId: scopeId, anchor });
+		}, kind => current() && session.canAnchorBase(kind), current, listener => this.onChange(listener)).open();
 	}
 	imageFileContext(file: TFile, writable = true): ImageFileCommentContext {
 		const target = this.targetFor(file), session = target.session, entryId = target.entryId;
@@ -213,11 +308,31 @@ export class DiscussionHost extends Component {
 		this.lastFile = file; this.focus = { session, entryId, threadId, serial: ++this.focusSerial };
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
+	targetLabel(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): string | undefined {
+		if (anchor.type !== "base" || parseDiscussionScope(entryId)?.viewId !== anchor.view_id) return;
+		const target = anchor.target;
+		if (target.type === "view") return "Entire saved view";
+		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
+		const paths: string[] = [];
+		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
+		folder?.folderIndex.eachRecord((record, path) => { if (record.type === "markdown" && record.id === target.record_id) paths.push(path); });
+		const record = paths.length === 1 ? paths[0] : "Unavailable record (" + target.record_id.slice(0, 8) + ")";
+		return target.type === "item" ? "Record: " + record : "Cell: " + record + " · " + target.property.source + "." + target.property.name;
+	}
 	async revealTarget(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): Promise<void> {
 		const available = () => !this.stopped && session.status !== "closed" && session.permission(entryId)?.read;
 		if (!available()) return;
 		const workspace = this.plugin.app.workspace;
 		try {
+			if (anchor.type === "base") {
+				// Full target navigation belongs to each surface adapter. Keep the
+				// saved discussion view explicit instead of opening an arbitrary note.
+				const scope = parseDiscussionScope(entryId);
+				if (scope?.viewId !== anchor.view_id) return;
+				new Notice("Discussion view: " + (this.baseSelection(session, scope.entryId)?.name ?? "saved view") + ". " +
+					this.targetLabel(session, entryId, anchor) + ". Use the Bases view menu to open the matching layout.");
+				return;
+			}
 			let file: TFile | undefined;
 			for (const folder of this.shares.toArray()) if (folder.entityGuid === session.identity.shareId) {
 				const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === entryId) paths.push(path); });

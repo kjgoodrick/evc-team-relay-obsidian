@@ -1,6 +1,7 @@
 import { DiscussionFailure, type DiscussionIdentity } from "./DiscussionTransport";
-import { isId, protocolJson, type ChangesPage, type MessageRead, type ThreadStateRead } from "./DiscussionProtocol";
+import { protocolJson, type ChangesPage, type MessageRead, type ThreadStateRead } from "./DiscussionProtocol";
 import type { CachedEntity, CachePurge, DiscussionStore } from "./storage/DiscussionStore";
+import { parseDiscussionScope } from "./DiscussionScope";
 
 export interface DiscussionReader {
 	readonly identity: Readonly<DiscussionIdentity>;
@@ -31,8 +32,8 @@ export class DiscussionSync {
 
 	constructor(private store: DiscussionStore, private reader: DiscussionReader, readonly entryId: string,
 		private onChange: (status: SyncStatus) => void = () => {}, private now: () => number = Date.now,
-		private random: () => number = Math.random) {
-		if (!isId(entryId) || ["serverId", "accountId", "shareId"].some(key =>
+		private random: () => number = Math.random, private onReset: () => Promise<void> = async () => {}) {
+		if (!parseDiscussionScope(entryId) || ["serverId", "accountId", "shareId"].some(key =>
 			store.identity[key as keyof typeof reader.identity] !== reader.identity[key as keyof typeof reader.identity])) {
 			throw new Error("Discussion reader identity does not match its local store");
 		}
@@ -136,6 +137,10 @@ export class DiscussionSync {
 				if (!(error instanceof DiscussionFailure)) throw error;
 				if (error.code === "snapshot_required" && checkpoint.cursor !== undefined && resets++ === 0) {
 					await this.store.clearRemoteScope(this.entryId, checkpoint);
+					if (!this.valid(generation)) return;
+					// Reset also removes cached grants/generation. Reauthorize before
+					// replay so a subsequent offline restart can read the fresh cache.
+					await this.onReset();
 					if (!this.valid(generation)) return;
 					this.changed("syncing"); continue;
 				}

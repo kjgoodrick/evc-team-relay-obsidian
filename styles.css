@@ -670,6 +670,12 @@
 .relay-comment-highlights-hidden .relay-comment-marker { visibility: hidden; }
 .relay-comment-drafts { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-top: var(--size-4-3); }
 .relay-comment-drafts select { max-width: 100%; min-width: 0; }
+.relay-base-target-field { display: grid; gap: var(--size-4-1); margin-block: var(--size-4-3); }
+.relay-base-target-field label { font-size: var(--font-ui-small); font-weight: var(--font-semibold); }
+.relay-base-target-field input, .relay-base-target-field select { width: 100%; min-width: 0; }
+.relay-base-target-picker [hidden] { display: none; }
+.is-mobile .relay-base-target-picker input, .is-mobile .relay-base-target-picker select,
+.is-mobile .relay-base-target-picker button { min-height: 44px; height: auto; }
 .relay-comment-draft-target p { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8em; overflow: auto; border-inline-start: 2px solid var(--text-accent); padding-inline-start: var(--size-4-2); }
 .is-mobile .relay-comment-marker, .is-mobile .relay-comment-drafts select { min-height: 44px; min-width: 44px; }
 

@@ -5,6 +5,9 @@ import { commentBodyText, renderCommentBody } from "./CommentBody";
 import { commandPictures } from "../storage/PictureRecords";
 
 const failureHelp: Record<string, string> = {
+	base_view_unavailable: "This saved view is archived or needs an association review. The comment keeps its original view; restore that association before retrying.",
+	base_definition_not_synced: "Waiting for the Bases definition and saved-view associations to synchronize.",
+	base_discussions_disabled: "Bases comments are disabled on this server. Your saved work is kept here.",
 	anchor_generation_mismatch: "This note was rebuilt or restored. Review and reattach this comment before sending.",
 	invalid_anchor: "The saved selection could not be validated. Keep your text and select a new target.",
 	comment_forbidden: "Comment permission was denied. Restore access before retrying.",

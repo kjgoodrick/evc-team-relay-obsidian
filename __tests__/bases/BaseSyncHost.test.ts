@@ -128,6 +128,17 @@ test("synchronized Bases allow read-only view inspection and export without modi
 		});
 		expect((await s.host.refreshViews(s.folder, s.file)).snapshot).toEqual(snapshot);
 		expect((await s.host.cachedViews(s.folder, s.file)).snapshot).toEqual(snapshot);
+		const identity = { serverId: "https://relay.fixture", accountId: id(1), vaultId: "fixture-vault", shareId: id(2) };
+		const provider = s.folder._liveProvider;
+		Object.assign(s.folder, { _liveProvider: undefined }); fetchMock.mockClear();
+		await expect(s.host.cachedViews(s.folder, s.file)).rejects.toThrow("base_context_changed");
+		expect((await s.host.cachedViews(s.folder, s.file, { identity, readable: () => true })).snapshot).toEqual(snapshot);
+		await expect(s.host.cachedViews(s.folder, s.file, { identity: { ...identity, accountId: id(99) }, readable: () => true })).rejects.toThrow("base_context_changed");
+		await expect(s.host.cachedViews(s.folder, s.file, { identity, readable: () => false })).rejects.toThrow("base_context_changed");
+		expect(fetchMock).not.toHaveBeenCalled();
+		Object.assign(s.folder, { _liveProvider: provider }); s.manifest.permissions[path] = "none";
+		await expect(s.host.cachedViews(s.folder, s.file, { identity, readable: () => true })).rejects.toThrow("base_context_changed");
+		s.manifest.permissions[path] = "read";
 		await expect(s.host.repairViews(s.folder, s.file, snapshot, [{ slot: 0, view_id: null }], [])).rejects.toThrow("base_editor_required");
 		const destination = await s.host.export(s.folder, entryId);
 		expect([...s.exports].find(([name]) => name.startsWith(destination) && name.includes("saved-views"))?.[1]).toContain(snapshot.definition_id);

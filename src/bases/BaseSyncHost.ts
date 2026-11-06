@@ -8,7 +8,7 @@ import type { SettingsScope } from "../SettingsPersistence";
 import { RECOVERY_FOLDER, isConflictCopyPath } from "../conflictCopyPath";
 import { baseId, basePath, encodeBaseBytes, retiredBaseEntries } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
-import { BaseSyncStore, type BaseSyncRecord } from "./BaseSyncStore";
+import { BaseSyncStore, type BaseSyncRecord, type BaseStoreIdentity } from "./BaseSyncStore";
 import { BaseSyncRunner, sameBaseBytes, type BaseConflictReview, type BaseSyncAccess } from "./BaseSyncRunner";
 import { NativeBaseFile, nativeBaseLock } from "./NativeBaseFile";
 import { BaseSyncModal } from "./BaseSyncModal";
@@ -328,11 +328,17 @@ export class BaseSyncHost extends Component {
 			if (!current(source)) throw new BaseContentFailure("pause", "base_context_changed"); return source;
 		} };
 	}
-	async cachedViews(folder: VaultShare, file: AttachmentFile) {
+	async cachedViews(folder: VaultShare, file: AttachmentFile, offline?: { identity: Readonly<BaseStoreIdentity>; readable(): boolean }) {
 		const slot = await this.requireViews(folder);
 		const readable = () => {
 			const index = folder._liveProvider?.managedIndex;
-			return slot.current() && index?.registered(file.path, file.entityGuid) && (index.snapshot.owner || ["read", "write"].includes(index.snapshot.permissions[file.path]));
+			if (!slot.current()) return false;
+			// An existing inventory's denial always wins. Before an offline folder
+			// has a provider, a discussion session may supply its retained read
+			// grant, bound to this exact account/server/vault/share cache.
+			if (index) return index.registered(file.path, file.entityGuid) && (index.snapshot.owner || ["read", "write"].includes(index.snapshot.permissions[file.path]));
+			return !!offline && (["serverId", "accountId", "vaultId", "shareId"] as const).every(key => offline.identity[key] === slot.store!.identity[key]) &&
+				folder.folderIndex.guidFor(file.path) === file.entityGuid && offline.readable();
 		};
 		if (!readable()) throw new BaseContentFailure("pause", "base_context_changed");
 		const record = await slot.views.store.get(file.entityGuid);

@@ -1,5 +1,6 @@
 import { v4 as uuid } from "uuid";
 import { parseAnchor, sourceAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
+import { parseDiscussionScope } from "../DiscussionScope";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { Draft, Json, QueuedCommand } from "../storage/DiscussionStore";
 import { prepareLocalPicture, type PictureBlock } from "../PictureProtocol";
@@ -44,6 +45,7 @@ export class CommentComposer {
 	private target?: DiscussionAnchor;
 	private targetEl: HTMLElement;
 	private reveal?: (anchor: DiscussionAnchor) => void;
+	private targetLabel?: (anchor: DiscussionAnchor) => string | undefined;
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private draftId: string,
 		private command: (body: MessageBody, anchor?: DiscussionAnchor) => ComposerCommand, label = "Comment", initialText: string | CommentDraft = "",
@@ -115,6 +117,7 @@ export class CommentComposer {
 				this.target = parseAnchor(draft.target);
 				if (sourceAnchor(this.target) && sourceAnchor(this.target)!.document_id !== this.entryId) throw new Error("Draft target does not match this note");
 				if (this.target.type === "image_file" && this.target.asset.entry_id !== this.entryId) throw new Error("Draft target does not match this image");
+				if (this.target.type === "base" && this.target.view_id !== parseDiscussionScope(this.entryId)?.viewId) throw new Error("Draft target does not match this saved view");
 			}
 			this.onlinePending = !!await session.store.preference("online:" + draftId);
 			if (this.disposed) return;
@@ -128,7 +131,7 @@ export class CommentComposer {
 			this.status.setText("Could not restore this draft or its selection. Copy your text before reopening comments."); this.update();
 		}));
 	}
-	onRevealTarget(reveal: (anchor: DiscussionAnchor) => void): void { this.reveal = reveal; }
+	onRevealTarget(reveal: (anchor: DiscussionAnchor) => void, label?: (anchor: DiscussionAnchor) => string | undefined): void { this.reveal = reveal; this.targetLabel = label; }
 	get hasUnconfirmedSend(): boolean { return this.onlinePending; }
 	async flush(): Promise<boolean> { await this.ready; await this.attachmentFlight; await this.chain; return !this.saveFailed; }
 	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>, available: () => boolean = () => true): void {
@@ -157,13 +160,15 @@ export class CommentComposer {
 		this.recoverSend.hidden = !this.onlinePending;
 		this.recoverSend.disabled = blocked || !this.session.canRecoverOnlineDraft;
 		this.renderPictures();
-		const label = this.target?.type === "image_file" ? "Image file: " + (this.target.geometry.type === "whole" ? "whole image" : this.target.geometry.type) : this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
-			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
+		const label = (this.target && this.targetLabel?.(this.target)) ?? (this.target?.type === "image_file" ? "Image file: " + (this.target.geometry.type === "whole" ? "whole image" : this.target.geometry.type) : this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
+			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : this.target?.type === "base" ?
+			(this.target.target.type === "view" ? "Entire saved view" : this.target.target.type === "item" ? "Record in this view" :
+				(this.target.target.type === "cell" ? "Cell: " : "Property header: ") + this.target.target.property.name) : "");
 		if (this.targetEl.dataset.target !== label) {
 			this.targetEl.dataset.target = label; this.targetEl.empty();
 			if (label) {
 				this.targetEl.createEl("p", { text: label });
-				const reveal = this.targetEl.createEl("button", { text: "Show selection", attr: { type: "button" } });
+				const reveal = this.targetEl.createEl("button", { text: this.target?.type === "base" ? "Target details" : "Show selection", attr: { type: "button" } });
 				reveal.onclick = () => { if (this.target) this.reveal?.(this.target); };
 			}
 		}

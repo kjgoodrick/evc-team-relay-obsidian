@@ -14,6 +14,7 @@ import { PendingComments } from "../../src/collaboration/ui/PendingComments";
 import { DiscussionDrafts } from "../../src/collaboration/ui/DiscussionDrafts";
 import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import type { OnlineOperation } from "../../src/collaboration/DiscussionTransport";
+import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 
 jest.mock("obsidian", () => ({
 	ItemView: class {
@@ -50,6 +51,7 @@ async function fixture() {
 		watch: jest.fn(() => jest.fn()), refresh: jest.fn(), local: jest.fn(), messages: jest.fn(),
 		retryRejected: jest.fn().mockResolvedValue(true),
 		canRepairPictures: true, repairPictures: jest.fn().mockResolvedValue("requeued"),
+		canAnchorBase: () => true, documentGeneration: () => id(7),
 	};
 	return { store, session, typed: session as unknown as DiscussionSession };
 }
@@ -72,6 +74,40 @@ test("composer preserves explicit mention identities in durable drafts and atomi
 		] }] } });
 		expect(await store.getDraft("new")).toBeUndefined(); expect(composer.textarea.value).toBe("");
 	} finally { composer.dispose(); store.close(); parent.remove(); }
+});
+
+test("Bases drafts require an explicit target, survive sidebar recreation, and cannot send under another saved view", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div");
+	const scope = baseDiscussionScope(entry, id(4)), other = baseDiscussionScope(entry, id(5));
+	const target = { type: "base", version: 1, definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
+		target: { type: "cell", record_id: id(8), record_generation: id(9), property: { source: "note", name: "status" } } };
+	const begin = jest.fn().mockResolvedValue(undefined); let drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
+	try {
+		await until(() => !!parent.querySelector(".relay-base-view-new"));
+		expect(parent.querySelector("textarea")).toBeNull();
+		(parent.querySelector(".relay-base-view-new") as HTMLButtonElement).click(); await until(() => begin.mock.calls.length === 1);
+		expect(session.queue).not.toHaveBeenCalled();
+		const draftId = "selection:" + scope + ":captured";
+		await store.saveDraft({ id: draftId, scopeId: scope, revision: 0, body: "Review status", target });
+		await store.setPreference("activeNewDraft:" + scope, draftId); drafts.update();
+		await until(() => parent.querySelector("textarea")?.value === "Review status");
+		expect(parent.textContent).toContain("Cell: status");
+		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
+		await until(() => parent.querySelector("textarea")?.value === "Review status");
+		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await until(() => session.queue.mock.calls.length === 1);
+		expect(session.queue.mock.calls[0][0]).toMatchObject({ scopeId: scope, payload: { anchor: target } });
+		drafts.dispose();
+		const wrongId = "selection:" + other + ":wrong";
+		await store.saveDraft({ id: wrongId, scopeId: other, revision: 0, body: "Retain for recovery", target });
+		await store.setPreference("activeNewDraft:" + other, wrongId);
+		drafts = new DiscussionDrafts(parent, typed, other, () => {}, undefined, begin);
+		await until(() => parent.textContent!.includes("Could not restore"));
+		expect(parent.querySelector("textarea")?.readOnly).toBe(true);
+		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await new Promise(resolve => setTimeout(resolve, 10));
+		expect(session.queue).toHaveBeenCalledTimes(1); expect(await store.getDraft(wrongId)).toBeDefined();
+	} finally { drafts.dispose(); await new Promise(resolve => setTimeout(resolve, 10)); store.close(); }
 });
 
 test("concurrent draft changes preserve the editor's text and prevent sending a stale draft", async () => {

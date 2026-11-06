@@ -1,4 +1,5 @@
 import { isId, isRecord } from "./DiscussionProtocol";
+import { parseDiscussionScope } from "./DiscussionScope";
 
 export const PICTURE_MAX_BYTES = 10 * 1024 * 1024;
 export const PICTURE_MAX_PIXELS = 20_000_000;
@@ -56,7 +57,7 @@ export async function pictureHash(bytes: ArrayBuffer): Promise<string> {
 
 /** Clone before hashing; callers cannot change bytes while an IDB save awaits. */
 export async function prepareLocalPicture(id: string, scopeId: string, bytes: ArrayBuffer): Promise<LocalPicture> {
-	if (!isId(id) || !isId(scopeId) || Object.prototype.toString.call(bytes) !== "[object ArrayBuffer]" ||
+	if (!isId(id) || !parseDiscussionScope(scopeId) || Object.prototype.toString.call(bytes) !== "[object ArrayBuffer]" ||
 		!size(bytes.byteLength, PICTURE_MAX_BYTES)) throw new Error("Pictures must be between 1 byte and 10 MiB");
 	const copy = bytes.slice(0);
 	return { id, scopeId, sha256: await pictureHash(copy), size: copy.byteLength, bytes: copy };

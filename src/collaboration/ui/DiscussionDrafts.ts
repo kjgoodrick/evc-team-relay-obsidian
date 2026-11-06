@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { parseAnchor, protocolJson, type DiscussionAnchor } from "../DiscussionProtocol";
+import { BASE_TARGET_KINDS, parseAnchor, protocolJson, type DiscussionAnchor } from "../DiscussionProtocol";
 import type { DiscussionSession } from "../DiscussionSession";
 import { CommentComposer } from "./CommentComposer";
 
@@ -20,7 +20,8 @@ export class DiscussionDrafts {
 	private changing = false;
 	private navigation = 0;
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string,
-		private reveal: (anchor: DiscussionAnchor) => void, private imageFile?: () => void) {
+		private reveal: (anchor: DiscussionAnchor) => void, private imageFile?: () => void, private baseView?: () => Promise<void>,
+		private targetLabel?: (anchor: DiscussionAnchor) => string | undefined) {
 		this.controls = parent.createDiv({ cls: "relay-comment-drafts" });
 		this.select = this.controls.createEl("select", { attr: { "aria-label": "Discussion draft" } });
 		this.select.onchange = () => { void this.choose(this.select.value); };
@@ -46,6 +47,12 @@ export class DiscussionDrafts {
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		this.composer?.dispose(); this.currentId = id;
 		this.composer = undefined;
+		if (id === this.wholeNoteId && this.baseView) {
+			this.editor.empty();
+			const start = this.editor.createEl("button", { text: "New discussion on this view", cls: "relay-base-view-new" });
+			start.onclick = () => { start.disabled = true; void this.baseView?.().finally(() => this.updateImageButton()); };
+			this.updateImageButton(); return;
+		}
 		if (id === this.wholeNoteId && this.imageFile) {
 			this.editor.empty();
 			const start = this.editor.createEl("button", { text: "New image comment", cls: "relay-image-file-new" });
@@ -53,10 +60,12 @@ export class DiscussionDrafts {
 		}
 		let label = id === this.wholeNoteId ? "New discussion on this note" : "Comment on selected text";
 		try { if (target && ["image", "image_file"].includes(parseAnchor(target).type)) label = "Comment on image"; } catch { /* The composer reports malformed targets. */ }
+		if (this.baseView) label = "Comment on this saved view";
 		this.editor.empty();
 		this.composer = new CommentComposer(this.editor, this.session, this.entryId, id,
 			(body, anchor) => {
 				if (this.imageFile && anchor?.type !== "image_file") throw new Error("Choose this image's comment target again.");
+				if (this.baseView && anchor?.type !== "base") throw new Error("Choose this saved view’s comment target again.");
 				return { type: "thread.create", payload: { type: "thread.create", thread_id: uuid(), message_id: uuid(),
 					anchor: protocolJson(anchor ?? { version: 1, type: "note" }), body: protocolJson(body) } };
 			},
@@ -66,11 +75,13 @@ export class DiscussionDrafts {
 				void this.session.trackLocal(this.session.store.comparePreference(this.key, id, this.wholeNoteId))
 					.then(() => { this.update(); }).catch(() => {});
 			});
-		this.composer.onRevealTarget(this.reveal);
+		this.composer.onRevealTarget(this.reveal, this.targetLabel);
 	}
 	private updateImageButton(): void {
 		const button = this.editor.querySelector<HTMLButtonElement>(".relay-image-file-new");
 		if (button) button.disabled = !this.session.canAnchorImageFiles || !this.session.documentGeneration(this.entryId) || !this.session.permission(this.entryId)?.comment;
+		const base = this.editor.querySelector<HTMLButtonElement>(".relay-base-view-new");
+		if (base) base.disabled = !BASE_TARGET_KINDS.some(kind => this.session.canAnchorBase(kind)) || !this.session.documentGeneration(this.entryId) || !this.session.permission(this.entryId)?.comment;
 	}
 	update(): void {
 		if (this.closed) return;
@@ -93,7 +104,7 @@ export class DiscussionDrafts {
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		const drafts = [...page.drafts];
 		if (activeDraft && !drafts.some(d => d.id === activeDraft.id)) drafts.unshift(activeDraft);
-		const options: [string, string][] = [[this.wholeNoteId, this.imageFile ? "New image comment" : "Whole-note draft"]];
+		const options: [string, string][] = [[this.wholeNoteId, this.baseView ? "New discussion on this view" : this.imageFile ? "New image comment" : "Whole-note draft"]];
 		for (const draft of drafts) {
 			let label = "Selection needs review", prefix = "Selection";
 			try { const anchor = parseAnchor(draft.target); if (anchor.type === "text") {
@@ -101,6 +112,7 @@ export class DiscussionDrafts {
 				if (anchor.structure) prefix = "Blocks";
 			} else if (anchor.type === "image") { prefix = "Image " + (anchor.geometry.type === "whole" ? "discussion" : anchor.geometry.type); label = anchor.occurrence.context.quote.slice(0, 80); }
 			else if (anchor.type === "image_file") { prefix = "Image file"; label = anchor.geometry.type === "whole" ? "Whole image" : anchor.geometry.type === "pin" ? "Pin" : "Region"; }
+			else if (anchor.type === "base") { prefix = "Saved view"; label = this.targetLabel?.(anchor) ?? (anchor.target.type === "view" ? "Entire view" : anchor.target.type === "item" ? "Record" : anchor.target.property.name); }
 			} catch { /* Keep damaged drafts discoverable. */ }
 			options.push([draft.id, prefix + ": " + label]);
 		}

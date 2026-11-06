@@ -30,10 +30,40 @@ discussion protocol support. `DiscussionTransport` can capture record lineage,
 request view-specific lists/changes and validate filtered pages. The existing
 durable draft/outbox preserves these anchors across restart and sends them through
 comment-only access; the actual HTTP fixture verifies rename, retry, revocation
-and regrant. Native Bases session/cache/surface integration and all other agreed
-target kinds remain unfinished. The note/image session refuses Base creation
-until a Bases surface is connected. See the server's
-`docs/base-discussions-preview.md` and `realBaseDiscussionStack.test.ts`.
+and regrant. The native sidebar now offers an explicit saved-view chooser and
+targets for the whole view, a managed Markdown record, a cell and a note/file
+property header. The discussion view is pinned separately from the native layout;
+the target picker searches authorized local shared notes and does not evaluate
+the view's filters. It saves IDs and property names, never row offsets or display
+labels. Inline selection, markers and target navigation remain adapter work.
+
+Local scope keys encode both entry and view as `base:<entry UUID>:<view UUID>`;
+HTTP still sends the ordinary managed-entry ID with the required view filter.
+Drafts, pending operations, pictures, remote entities and update cursors use the
+composite key. IndexedDB version 9 preserves version-8 note/image work and fences
+older workers that cannot route these keys. Account-bound saved-view choices and
+verified capture contexts survive restart. Offline capture requires the cached
+generation and, for record targets, a prior record-comment grant. A known denial
+clears that grant; delivery always rechecks current server permissions. When an
+offline folder has no inventory provider, cached view names can be read using the
+same account/server/vault/share discussion session's retained read grant. An
+existing inventory denial still wins. No view-repair or file-write authority is
+added by that cache read.
+
+Snapshot resets clear cached authority as well as remote entities. The session
+finishes any older permission request and reauthorizes before replay so valid
+read grants and generations are restored for the next offline startup. The
+actual HTTP fixture reproduced the earlier cache-access loss and verifies the
+fix through revocation, regrant and an offline restart.
+
+Actual HTTP session tests cover separate views, offline restart/delivery, cache
+revocation/regrant and retained drafts. Desktop Obsidian tests capture/send all
+four target kinds, restore a cell draft, separate views and retain cached comments
+and queued offline work. Groups/lanes, formulas/summaries, non-Markdown records,
+inline definitions, provisional identities, Time & Line, target-aware mention
+choices, native reviewer and mobile/resource acceptance remain unfinished. See
+the server's `docs/base-discussions-preview.md`, `realBaseDiscussionStack.test.ts`
+and the parent workspace's `docs/Plans/obsidian-presence-comments-bases.md`.
 
 The provider now publishes only its own awareness ID, including query responses
 and timeout cleanup, and advances the local clock on reconnect. The matching

@@ -30,6 +30,8 @@ export class ExplorerDecorationCoordinator {
 	walkersByLeaf: Map<WorkspaceLeaf, ExplorerTreeWalker>;
 	layoutSettled: boolean = false;
 	unsubscribes: TeardownFn[];
+	private destroyed = false;
+	private watchedFolders = new Set<VaultShare>();
 
 	constructor(
 		public obsidianVault: Vault,
@@ -42,6 +44,7 @@ export class ExplorerDecorationCoordinator {
 		this.docsetTeardownByFolder = new Map();
 
 		this.obsidianWorkspace.onLayoutReady(() => {
+			if (this.destroyed) return;
 			this.layoutSettled = true;
 			this.refreshAllRows();
 		});
@@ -68,12 +71,15 @@ export class ExplorerDecorationCoordinator {
 	// here).
 	private subscribeToFolderChanges(): () => void {
 		return this.syncedFolders.subscribe(() => {
+			if (this.destroyed) return;
 			this.syncedFolders.each((folder) => this.watchFolder(folder));
 			this.refreshAllRows();
 		});
 	}
 
 	private watchFolder(folder: VaultShare): void {
+		if (this.destroyed || this.watchedFolders.has(folder)) return;
+		this.watchedFolders.add(folder);
 		withAnyToggle([featureKey.enableDocumentStatus], () => {
 			const docsetListener = this.docsetTeardownByFolder.get(folder);
 			if (!docsetListener) {
@@ -89,7 +95,7 @@ export class ExplorerDecorationCoordinator {
 		});
 		void folder.awaitReady().then(() => {
 			this.refreshAllRows();
-		});
+		}).catch(() => { /* A removed folder or plugin teardown may cancel readiness. */ });
 		this.unsubscribes.push(
 			folder.attachmentSettings.subscribe(() => {
 				this.refreshExistingRows();
@@ -119,6 +125,7 @@ export class ExplorerDecorationCoordinator {
 	// own folder-explorer replacement instead of Obsidian's built-in one.
 	findFileExplorerLeaves(): WorkspaceLeaf[] {
 		const fileExplorers: WorkspaceLeaf[] = [];
+		if (this.destroyed) return fileExplorers;
 		this.obsidianWorkspace.iterateAllLeaves((leaf) => this.collectFileExplorerLeaf(leaf, fileExplorers));
 		return fileExplorers;
 	}
@@ -148,7 +155,7 @@ export class ExplorerDecorationCoordinator {
 	// previous behavior of re-resolving each shared-folder path from the
 	// vault once per explorer.
 	private walkEachExplorer(roots: () => TFolder[]) {
-		if (!this.layoutSettled) return;
+		if (this.destroyed || !this.layoutSettled) return;
 		for (const fileExplorer of this.findFileExplorerLeaves()) {
 			const walker = this.getOrCreateWalker(fileExplorer);
 			for (const root of roots()) {
@@ -200,6 +207,8 @@ export class ExplorerDecorationCoordinator {
 	}
 
 	dismantle() {
+		if (this.destroyed) return;
+		this.destroyed = true; this.layoutSettled = false;
 		this.folderChangeTeardown?.();
 		this.docsetTeardownByFolder.forEach((off) => off());
 		this.docsetTeardownByFolder.clear();
@@ -209,6 +218,7 @@ export class ExplorerDecorationCoordinator {
 			walker.destroy();
 		});
 		this.walkersByLeaf.clear();
+		this.watchedFolders.clear();
 		this.layoutChangeTeardown();
 
 		this.obsidianVault = null as unknown as Vault;

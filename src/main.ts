@@ -902,8 +902,8 @@ export default class TeamRelayPlugin extends Plugin {
 			}
 		}
 
-		this.discussions = this.addChild(new DiscussionHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
 		this.basesSync = this.addChild(new BaseSyncHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
+		this.discussions = this.addChild(new DiscussionHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId, this.basesSync));
 
 		this.app.workspace.onLayoutReady(() => {
 			this.shareRegistry.restore();

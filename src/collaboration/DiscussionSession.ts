@@ -6,14 +6,17 @@ import { parsePictureUpload, pictureIds } from "./PictureProtocol";
 import { commandPictures } from "./storage/PictureRecords";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
-import { isId, isRecord, parseAnchor, sourceAnchor, parseMessage, parseThread, protocolJson, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
+import { BASE_TARGET_KINDS, isId, isRecord, parseAnchor, parseBaseTargetContext, sourceAnchor, parseMessage, parseThread, protocolJson, type BaseAnchor, type BaseProperty, type BaseTargetContext, type BaseTargetKind, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
+import { parseDiscussionScope } from "./DiscussionScope";
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
-type Entry = { kind: "note" | "image"; listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
+type Entry = { kind: "note" | "image" | "base"; listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
 	permissionFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
 export type AnchoredThread = ThreadSummary & { anchor?: DiscussionAnchor };
 export type DiscussionLocalView = { threads: AnchoredThread[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
+export type BaseTargetSelection = { type: "view" } | { type: "property"; property: BaseProperty } |
+	{ type: "item"; recordId: string } | { type: "cell"; recordId: string; property: BaseProperty };
 function storedThread(value: unknown): AnchoredThread {
 	const thread = parseThread(value);
 	return { ...thread, ...(isRecord(value) && value.anchor !== undefined ? { anchor: parseAnchor(value.anchor) } : {}) };
@@ -41,6 +44,7 @@ export class DiscussionSession {
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
+	private baseKinds: BaseTargetKind[] = [];
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -73,9 +77,10 @@ export class DiscussionSession {
 	get canAttachPictures(): boolean { return this.canQueue && this.picturesEnabled; }
 	get canRepairPictures(): boolean { return this.online && this.canAttachPictures && this.recoveryEnabled; }
 	get canRecoverOnlineDraft(): boolean { return this.online && this.recoveryEnabled; }
+	canAnchorBase(kind: BaseTargetKind): boolean { return this.canQueue && this.baseKinds.includes(kind); }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
-		const enabled = entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
+		const enabled = entry?.kind === "base" ? this.canQueue && this.baseKinds.length > 0 : entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
 		return enabled ? this.knownDocumentGeneration(entryId) : undefined;
 	}
 	knownDocumentGeneration(entryId: string): string | undefined {
@@ -112,6 +117,8 @@ export class DiscussionSession {
 			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
 			this.imageFilesEnabled = await this.store.preference("imageFilesEnabled") === true;
 			this.picturesEnabled = await this.store.preference("picturesEnabled") === true;
+			const baseKinds = await this.store.preference("baseTargetKinds");
+			this.baseKinds = Array.isArray(baseKinds) ? BASE_TARGET_KINDS.filter(kind => baseKinds.includes(kind)) : [];
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
@@ -122,12 +129,14 @@ export class DiscussionSession {
 			this.imageFilesEnabled = capability.imageFiles === true;
 			this.picturesEnabled = capability.pictures === true;
 			this.recoveryEnabled = capability.recovery === true;
+			this.baseKinds = capability.baseTargets ?? [];
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
 			await this.store.setPreference("imageOccurrencesEnabled", this.imagesEnabled);
 			await this.store.setPreference("imageFilesEnabled", this.imageFilesEnabled);
 			await this.store.setPreference("picturesEnabled", this.picturesEnabled);
+			await this.store.setPreference("baseTargetKinds", protocolJson(this.baseKinds));
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -141,12 +150,14 @@ export class DiscussionSession {
 		this.notify();
 	}
 
-	watch(entryId: string, listener: () => void, kind: "note" | "image" = "note"): () => void {
+	watch(entryId: string, listener: () => void, kind: "note" | "image" | "base" = "note"): () => void {
 		if (this.closed) return () => {};
+		if ((parseDiscussionScope(entryId)?.viewId !== undefined) !== (kind === "base")) throw new Error("A Bases discussion requires a saved view.");
 		let entry = this.entries.get(entryId);
 		if (entry && entry.kind !== kind) throw new Error("Reopen comments after the file type changes.");
 		if (!entry) {
-			const sync = new DiscussionSync(this.store, this.transport, entryId, status => this.syncChanged(entryId, status));
+			const sync = new DiscussionSync(this.store, this.transport, entryId, status => this.syncChanged(entryId, status), undefined, undefined,
+				() => this.reauthorizeAfterReset(entryId));
 			entry = { kind, listeners: new Set(), sync, permissionChecked: 0, unavailable: false, people: [] };
 			this.entries.set(entryId, entry);
 		}
@@ -178,6 +189,15 @@ export class DiscussionSession {
 		}
 		this.notify();
 	}
+	private async reauthorizeAfterReset(id: string): Promise<void> {
+		const entry = this.entries.get(id); if (!entry || this.closed) return;
+		// A refresh that began before the reset may have saved its grant just
+		// before it was cleared. Finish that request, then get fresh authority.
+		await entry.permissionFlight;
+		if (this.closed) return;
+		entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined; entry.permissionChecked = 0;
+		await this.refreshPermission(id, entry);
+	}
 	private refreshPermission(id: string, entry: Entry): Promise<void> {
 		if (this.closed || !this.foreground || entry.listeners.size === 0) return Promise.resolve();
 		if (entry.permissionFlight) return entry.permissionFlight;
@@ -205,18 +225,20 @@ export class DiscussionSession {
 				entry.permission = permission; entry.unavailable = !permission.read;
 				if (permission.read) {
 					await this.store.setPreference("permission:" + id, protocolJson(permission));
-					if (entry.kind === "image" ? this.imageFilesEnabled : this.textEnabled) {
+					if (entry.kind === "base" ? this.baseKinds.length > 0 : entry.kind === "image" ? this.imageFilesEnabled : this.textEnabled) {
 						try {
-							const context = await this.transport.anchorContext(id);
+							const context = entry.kind === "base" ? await this.transport.baseTargetContext(id, parseDiscussionScope(id)!.viewId!) : await this.transport.anchorContext(id);
 							if (this.closed) return;
 							entry.documentGeneration = context.generation;
 							await this.store.setPreference("documentGeneration:" + id, context.generation);
+							if (entry.kind === "base") await this.store.setPreference("baseContext:" + id, protocolJson(context));
 						} catch (error) {
 							// A transient failure retains the last verified generation for offline
 							// capture. Existing drafts/queued anchors are never rewritten.
 							if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
 								entry.documentGeneration = undefined;
 								await this.store.setPreference("documentGeneration:" + id, null);
+								if (entry.kind === "base") await this.store.setPreference("baseContext:" + id, null);
 							}
 							if (error instanceof DiscussionFailure && (error.action === "authenticate" ||
 								error.action === "reject" && [403, 404].includes(error.status))) throw error;
@@ -304,7 +326,17 @@ export class DiscussionSession {
 		}
 		if (command.type === "thread.create" && isRecord(command.payload)) {
 			const anchor = parseAnchor(command.payload.anchor), source = sourceAnchor(anchor);
-			if (anchor.type === "base") throw new Error("Open a Bases discussion surface before sending this target.");
+			if ((anchor.type === "base") !== (this.entries.get(command.scopeId)?.kind === "base")) throw new Error("The comment target does not match this saved view.");
+			if (anchor.type === "base") {
+				if (!this.canAnchorBase(anchor.target.type)) throw new Error("This Bases target is not enabled on the server.");
+				if (anchor.generation !== this.documentGeneration(command.scopeId)) throw new Error("Refresh this saved view and review the comment target before sending.");
+				const recordId = anchor.target.type === "item" || anchor.target.type === "cell" ? anchor.target.record_id : undefined;
+				const context = await this.cachedBaseContext(command.scopeId, recordId);
+				if (!context || context.definition_id !== anchor.definition_id || context.generation !== anchor.generation ||
+					context.view_id !== anchor.view_id || context.registry_revision < anchor.registry_revision ||
+					(recordId !== undefined && context.record_generation !== (anchor.target as { record_generation: string }).record_generation)) throw new Error("Refresh this saved view and review the comment target before sending.");
+				if (recordId && await this.store.preference("baseRecordComment:" + command.scopeId + ":" + recordId) !== true) throw new Error("Comment permission is required on the selected record.");
+			}
 			if ((anchor.type === "image_file") !== (this.entries.get(command.scopeId)?.kind === "image")) throw new Error("The comment target does not match this file.");
 			if (anchor.type === "image_file") {
 				if (!this.canAnchorImageFiles) throw new Error("Image-file comments are not enabled on this server.");
@@ -320,6 +352,47 @@ export class DiscussionSession {
 		await this.store.enqueue(command, Date.now(), draft);
 		if (this.closed) return;
 		this.broadcast(); if (this.foreground) this.outbox.wake(); this.notify();
+	}
+	private async cachedBaseContext(scopeId: string, recordId?: string): Promise<BaseTargetContext | undefined> {
+		const scope = parseDiscussionScope(scopeId);
+		if (!scope?.viewId) return undefined;
+		const value = await this.store.preference("baseContext:" + scopeId + (recordId ? ":" + recordId : ""));
+		try { return parseBaseTargetContext(value, scope.entryId, scope.viewId, recordId); } catch { return undefined; }
+	}
+	async captureBaseTarget(scopeId: string, target: BaseTargetSelection): Promise<BaseAnchor> {
+		const scope = parseDiscussionScope(scopeId), entry = this.entries.get(scopeId);
+		if (!scope?.viewId || entry?.kind !== "base" || !entry.permission?.comment || !this.canAnchorBase(target.type)) throw new Error("Open this saved view with comment permission first.");
+		const recordId = target.type === "item" || target.type === "cell" ? target.recordId : undefined;
+		if (recordId !== undefined && !isId(recordId)) throw new Error("The selected record has no synchronized identity.");
+		const key = "baseContext:" + scopeId + (recordId ? ":" + recordId : "");
+		const permissionKey = "baseRecordComment:" + scopeId + ":" + recordId;
+		return this.trackLocal((async () => {
+			let context: BaseTargetContext | undefined;
+			try {
+				context = await this.transport.baseTargetContext(scopeId, scope.viewId!, recordId);
+				const permission = recordId ? await this.transport.permissions(recordId) : entry.permission;
+				if (this.closed) throw new Error("This discussion account is closed.");
+				if (recordId) await this.store.setPreference(permissionKey, permission?.read === true && permission.comment);
+				if (!permission?.read || !permission.comment) throw new DiscussionFailure("reject", "comment_forbidden", 403);
+				await this.store.setPreference(key, protocolJson(context));
+			} catch (error) {
+				if (this.closed) throw error;
+				if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
+					await this.store.setPreference(key, null);
+					if (recordId) await this.store.setPreference(permissionKey, false);
+					throw error;
+				}
+				context = await this.cachedBaseContext(scopeId, recordId);
+				if (!context || context.generation !== entry.documentGeneration || recordId && await this.store.preference(permissionKey) !== true) throw new Error("Connect once to verify this saved view and record before commenting offline.");
+			}
+			if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
+				this.documentGeneration(scopeId) !== context.generation) throw new Error("Comment access or the saved view changed while capturing this target. Refresh before trying again.");
+			const parsed = parseAnchor({ version: 1, type: "base", definition_id: context.definition_id, view_id: context.view_id,
+				generation: context.generation, registry_revision: context.registry_revision, target: target.type === "view" ? { type: "view" } :
+				target.type === "property" ? { type: "property", property: target.property } : { type: target.type, record_id: recordId,
+					record_generation: context.record_generation, ...(target.type === "cell" ? { property: target.property } : {}) } });
+			return parsed as BaseAnchor;
+		})());
 	}
 	async onlineAction(operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");

@@ -40,6 +40,11 @@ export type ImageFileAnchor = { version: 1; type: "image_file"; generation: stri
 export const BASE_TARGET_KINDS = ["view", "item", "cell", "property"] as const;
 export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
 export type BaseProperty = { source: "note" | "file"; name: string };
+export function isBaseProperty(value: unknown): value is BaseProperty {
+	return isRecord(value) && Object.keys(value).every(key => ["source", "name"].includes(key)) &&
+		(value.source === "note" || value.source === "file") && typeof value.name === "string" && text(value.name, 256) &&
+		![...value.name].some(char => char.charCodeAt(0) < 32 || char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff);
+}
 export type BaseTarget = { type: "view" } | { type: "item"; record_id: string; record_generation: string } |
 	{ type: "cell"; record_id: string; record_generation: string; property: BaseProperty } | { type: "property"; property: BaseProperty };
 export type BaseAnchor = { version: 1; type: "base"; definition_id: string; view_id: string; generation: string;
@@ -176,9 +181,7 @@ function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 		let property: BaseProperty | undefined;
 		if (target.type !== "item") {
 			const p = target.property;
-			requireValue(isRecord(p) && Object.keys(p).every(key => ["source", "name"].includes(key)) &&
-				(p.source === "note" || p.source === "file") && typeof p.name === "string" && text(p.name, 256) &&
-				![...p.name].some(char => char.charCodeAt(0) < 32 || char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff));
+			requireValue(isBaseProperty(p));
 			property = { source: p.source, name: p.name };
 		}
 		if (target.type === "property") {
