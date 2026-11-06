@@ -40,6 +40,7 @@ interface AwarenessUser {
 }
 
 interface AwarenessState {
+	surface?: "editor" | "reading";
 	cursor?: AwarenessCursor | null;
 	user?: AwarenessUser;
 }
@@ -314,7 +315,7 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 		// set local awareness state (update cursors)
 		if (localAwarenessState != null) {
 			const hasFocus =
-				update.view.hasFocus && this.ownerDocument.hasFocus() && this.ownerDocument.visibilityState !== "hidden";
+				localAwarenessState.surface !== "reading" && update.view.hasFocus && this.ownerDocument.hasFocus() && this.ownerDocument.visibilityState !== "hidden";
 			const sel = hasFocus ? update.state.selection.main : null;
 			const currentAnchor =
 				localAwarenessState.cursor == null

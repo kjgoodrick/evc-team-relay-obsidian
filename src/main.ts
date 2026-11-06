@@ -63,6 +63,8 @@ import { VaultShare, ShareRegistry } from "./VaultShare";
 import { holdsOnlySyncedText, uploadsOnModify } from "./uploadOnModify";
 import type { VaultShareSettings } from "./VaultShare";
 import { ViewBindingRegistry } from "./ViewBindings";
+import { PresenceController } from "./collaboration/presence/PresenceController";
+import { DEFAULT_PRESENCE_SETTINGS, type PresenceSettings } from "./collaboration/presence/PresenceSettings";
 import { RelayRegistry } from "./RelayRegistry";
 import { SystemClock, type Clock } from "./Clock";
 import { auditNotifierTeardown } from "./notifiers/Notifier";
@@ -141,12 +143,14 @@ const DEFAULT_DEBUG_SETTINGS: LoggingSettings = {
 };
 
 interface StoredSettings extends FeatureToggles, LoggingSettings {
+	presence: PresenceSettings;
 	sharedFolders: VaultShareSettings[];
 	endpoints: TenantSettings;
 	relayOnPrem: RelayOnPremSettings;
 }
 
 const DEFAULT_SETTINGS: StoredSettings = {
+	presence: DEFAULT_PRESENCE_SETTINGS,
 	sharedFolders: [],
 	endpoints: {},
 	relayOnPrem: DEFAULT_RELAY_ONPREM_SETTINGS,
@@ -231,6 +235,8 @@ export default class TeamRelayPlugin extends Plugin {
 	// Auth + settings UI
 	authSession!: AuthSession;
 	private discussions?: DiscussionHost;
+	presence?: PresenceController;
+	presenceSettings!: SettingsScope<PresenceSettings>;
 	settingsPage!: RelaySettingsPage;
 	updater!: PluginUpdater;
 	private updaterBlockedStartup = false;
@@ -589,6 +595,7 @@ export default class TeamRelayPlugin extends Plugin {
 		this.authSettingsScope = new SettingsScope(settingsBase, "login");
 		this.tenantEndpointSettings = new SettingsScope(settingsBase, "endpoints");
 		this.relayOnPremSettings = new SettingsScope(settingsBase, "relayOnPrem");
+		this.presenceSettings = new SettingsScope(settingsBase, "presence");
 
 		const featureToggleState = FeatureToggleState.getShared();
 		featureToggleState.bindSettings(this.featureToggleSettings);
@@ -905,6 +912,7 @@ export default class TeamRelayPlugin extends Plugin {
 				this.serviceHealth,
 			);
 			this._viewRegistry = liveViews;
+			this.presence = this.addChild(new PresenceController(this, liveViews, this.authSession, this.presenceSettings));
 			// The editor extensions list is registered exactly once here; after
 			// that it's mutated in place and this.app.workspace.updateOptions()
 			// is what applies further changes — not another registerEditorExtension call.
@@ -2256,6 +2264,7 @@ export default class TeamRelayPlugin extends Plugin {
 	onunload() {
 		this.updater?.dispose();
 		if (this.updaterBlockedStartup) return;
+		this.presence?.unload();
 		this.discussions?.unload();
 		// Save settings before cleanup to persist any changes
 		// Must await to ensure settings are persisted before destroying namespaced settings
@@ -2343,6 +2352,7 @@ export default class TeamRelayPlugin extends Plugin {
 		FeatureToggleState.resetInstance();
 
 		this.featureToggleSettings.destroy();
+		this.presenceSettings?.destroy();
 		this.featureToggleSettings = null as unknown as SettingsScope<FeatureToggles, Record<string, unknown>>;
 		this.authSettingsScope.destroy();
 		this.authSettingsScope = null as unknown as SettingsScope<AuthSettings, Record<string, unknown>>;

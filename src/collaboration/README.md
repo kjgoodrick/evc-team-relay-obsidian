@@ -35,8 +35,16 @@ the Rust room enforces socket ownership and rejects collisions. See the server's
 The provider now coalesces cursor updates and distinguishes bounded collision
 recovery from delayed capacity retries while retaining normal note sync. Recovery
 rotates only the awareness ID; CodeMirror identifies self using that ID. The
-provider exposes availability and explicit retry; foreground-only publication,
-socket backpressure, the shared controller/status UI, jump/follow and native
+provider exposes availability and explicit retry. `PresenceController` now owns
+foreground-note publication across leaves/popouts, using the existing document
+binding and connections. Background providers start silent; hidden/background,
+private, deleted or moved-out-of-share notes withdraw presence. Reading announces
+its surface with no editor caret. Account/session grant changes cannot republish
+an old identity. Native settings, a note-header control and commands provide
+persistent privacy and status/retry controls. A disposable desktop Obsidian
+instance plus a protocol observer verified privacy/reload, active-note switching,
+Reading transitions and popout transfer. Semantic Reading location, grouped
+rosters, socket backpressure, jump/follow, two-native-client rendering and mobile
 presence acceptance remain unfinished.
 
 ## Local commands and delivery

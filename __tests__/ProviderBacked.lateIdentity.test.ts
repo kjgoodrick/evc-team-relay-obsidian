@@ -61,11 +61,44 @@ function makeClient(documentId = DOCUMENT_ID) {
 }
 
 describe("ProviderBacked identity restoration", () => {
+	test("background notes stay silent through login and profile updates", () => {
+		const { provider, restoreIdentity, refreshProfile } = makeClient();
+		restoreIdentity(new Account("local-user", "Local User", "user@example.com", "", ""));
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+		refreshProfile(new Account("local-user", "Updated Name", "user@example.com", "", ""));
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+		provider.setPresenceActive("reading");
+		expect(provider._liveProvider.awareness.getLocalState()).toMatchObject({ surface: "reading", cursor: null, user: { name: "Updated Name" } });
+		provider.setPresenceActive();
+		refreshProfile(new Account("local-user", "Another Name", "user@example.com", "", ""));
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+	});
+
+	test("a new account or login session cannot publish over the previous managed grant", () => {
+		const { provider, restoreIdentity, refreshProfile } = makeClient();
+		const jwt = (claims: object) => Buffer.from('{"alg":"HS256"}').toString("base64url") + "." + Buffer.from(JSON.stringify(claims)).toString("base64url") + ".synthetic";
+		const account = (sub: string, session_id: string) => new Account(sub, "Member", "member@example.com", "", jwt({ sub, session_id }));
+		const grant = (sub: string, session_id: string) => ({ url: "ws://localhost/v1/managed/ws", docId: DOCUMENT_ID, folder: SHARE_ID,
+			token: jwt({ sub, session_id, scope: "managed", doc_id: DOCUMENT_ID }), expiryTime: Date.now() + 300000 });
+		restoreIdentity(account("first", "one")); provider.applyRefreshedToken(grant("first", "one")); provider.setPresenceActive("editor");
+		provider._liveProvider.awareness.setLocalStateField("cursor", { private: "old selection" });
+		refreshProfile(account("first", "two"));
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+		provider.applyRefreshedToken(grant("first", "two"));
+		expect(provider._liveProvider.awareness.getLocalState()?.cursor).toBeNull();
+		restoreIdentity(account("second", "three"));
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+		provider.applyRefreshedToken(grant("first", "two")); // A late token response is still unusable for presence.
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+		provider.applyRefreshedToken(grant("second", "three"));
+		expect(provider._liveProvider.awareness.getLocalState()?.user.id).toBe("second");
+	});
 	test("independent notes advertise the same color after account restoration and profile refresh", () => {
 		const first = makeClient();
 		const second = makeClient("00000000-0000-4000-8000-000000000003");
 		first.restoreIdentity(new Account("local-user", "Local User", "user@example.com", "", ""));
 		second.restoreIdentity(new Account("local-user", "Local User", "user@example.com", "", ""));
+		first.provider.setPresenceActive("editor"); second.provider.setPresenceActive("editor");
 		const color = first.provider._liveProvider.awareness.getLocalState()?.user.color;
 		expect(second.provider._liveProvider.awareness.getLocalState()?.user.color).toBe(color);
 		const changed = jest.fn();
@@ -83,6 +116,8 @@ describe("ProviderBacked identity restoration", () => {
 
 		const account = new Account("local-user", "Local User", "user@example.com", "", "");
 		restoreIdentity(account);
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
+		provider.setPresenceActive("editor");
 
 		expect(provider._liveProvider.awareness.getLocalState()?.user).toEqual({
 			id: account.accountId,
@@ -98,6 +133,7 @@ describe("ProviderBacked identity restoration", () => {
 		const { provider, restoreIdentity, refreshProfile } = makeClient();
 		const account = new Account("local-user", "Local User", "user@example.com", "https://id.example/one.png", "");
 		restoreIdentity(account);
+		provider.setPresenceActive("editor");
 		expect(provider._liveProvider.awareness.getLocalState()?.user.avatarUrl).toBe(account.avatarUrl);
 		const changed = jest.fn();
 		provider.crdtDoc.on("update", changed);
@@ -107,7 +143,7 @@ describe("ProviderBacked identity restoration", () => {
 		refreshProfile(new Account(account.accountId, "Updated Name", account.emailAddress, "", ""));
 		expect(provider._liveProvider.awareness.getLocalState()?.user.avatarUrl).toBeUndefined();
 		restoreIdentity(undefined);
-		expect(provider._liveProvider.awareness.getLocalState()?.user).toBeNull();
+		expect(provider._liveProvider.awareness.getLocalState()).toBeNull();
 	});
 
 	test("disposing a provider removes its authentication listener", () => {

@@ -113,6 +113,15 @@ test("switching provider detaches the old listener and clears stale decorations"
 	} finally { f.close(); nextAwareness.destroy(); nextDoc.destroy(); }
 });
 
+test("a hidden editor cannot publish a caret while its note is active in Reading view", () => {
+	const f = cursorFixture(), hostFocus = jest.spyOn(document, "hasFocus").mockReturnValue(true);
+	try {
+		f.awareness.setLocalState({ surface: "reading", user: { id: "reader" }, cursor: null });
+		f.focus.mockReturnValue(true); f.editor.dispatch({ selection: { anchor: 2, head: 5 } });
+		expect(f.awareness.getLocalState()?.cursor).toBeNull();
+	} finally { f.close(); hostFocus.mockRestore(); }
+});
+
 test("long remote selections render only the visible range and malformed peers do not crash the view", () => {
 	const f = cursorFixture(Array.from({ length: 10000 }, () => "line").join("\n"));
 	try {

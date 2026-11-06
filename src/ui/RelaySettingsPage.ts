@@ -52,8 +52,8 @@ export class RelaySettingsPage extends PluginSettingTab {
 		return [
 			{
 				name: "Team Relay",
-				desc: "Manage plugin updates, synced folders, shares, and the on-prem connection.",
-				aliases: ["relay", "sync", "team relay", "shares", "synced folders", "on-prem", "updates", "GitHub"],
+				desc: "Manage presence, plugin updates, synced folders, shares, and the on-prem connection.",
+				aliases: ["relay", "sync", "team relay", "shares", "synced folders", "on-prem", "updates", "GitHub", "presence", "privacy", "cursors"],
 				// Confirmed against the same runtime (function `s6`) that the
 				// framework calls `setting.setName()`/`setting.setDesc()` from
 				// the definition's `name`/`desc` BEFORE invoking `render()` --

@@ -60,7 +60,7 @@ jest.mock("../src/client/provider", () => {
 				connectionState: { status: "disconnected" },
 				intent: "read",
 				synced: false,
-				awareness: { setLocalStateField: jest.fn() },
+				awareness: { setLocalStateField: jest.fn(), setLocalState: jest.fn(), getLocalState: () => null },
 				connect: jest.fn(() => {
 					(target.connectionState as { status: string }).status = "connected";
 				}),

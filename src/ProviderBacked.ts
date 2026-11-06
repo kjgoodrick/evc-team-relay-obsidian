@@ -18,6 +18,8 @@ import { computeReconnectDelay } from "./reconnectThrottle";
 import { RelayAccessDeniedError } from "./auth/RelayOnPremTokenProvider";
 import { createPermanentUserData } from "./permanentUserData";
 import { safeAvatarUrl } from "./presenceAvatar";
+import { decodeJwt } from "jose";
+import type { NotePresenceSurface } from "./collaboration/presence/PresenceSettings";
 
 const EMPTY_TOKEN: DocumentGrant = {
 	token: "",
@@ -29,23 +31,19 @@ const EMPTY_TOKEN: DocumentGrant = {
 /** Do not reuse a token for a reconnect handshake with less than this left. */
 const RECONNECT_TOKEN_MARGIN_MS = 15_000;
 
-function seedAwareness(provider: YSweetProvider, user?: Account): void {
-	if (!user) {
-		return;
-	}
-	provider.awareness.setLocalStateField("user", {
+function presenceProfile(user: Account) {
+	return {
 		name: user.fullName,
 		id: user.accountId,
 		color: user.presenceColor.color,
 		colorLight: user.presenceColor.light,
 		avatarUrl: safeAvatarUrl(user.avatarUrl),
-	});
+	};
 }
 
 function buildProvider(
 	clientToken: DocumentGrant,
 	ydoc: Y.Doc,
-	user?: Account,
 	beforeConnect?: () => boolean,
 ): YSweetProvider {
 	const provider = new YSweetProvider(clientToken.url, clientToken.docId, ydoc, {
@@ -55,7 +53,9 @@ function buildProvider(
 		disableBc: true,
 		// no cap — see YSweetProvider's maxConnectionErrors default.
 	});
-	seedAwareness(provider, user);
+	// Background sync never announces a viewing location. The foreground
+	// controller alone activates a note after resolving its actual view binding.
+	provider.awareness.setLocalState(null);
 	return provider;
 }
 
@@ -134,6 +134,7 @@ export class ProviderBacked extends Loggable {
 	// unrelated AuthSession notification.
 	private seededAccountId?: string;
 	private seededProfile?: string;
+	private presenceSurface?: NotePresenceSurface;
 
 	constructor(
 		public entityGuid: string,
@@ -171,7 +172,7 @@ export class ProviderBacked extends Loggable {
 			this.credentialCache.peekToken(ResourceAddress.serialize(this.resourceAddress)) || { ...EMPTY_TOKEN };
 
 		this._liveProvider = buildProvider(
-			this.issuedToken, this.crdtDoc, user, () => this.refreshStaleProviderToken(),
+			this.issuedToken, this.crdtDoc, () => this.refreshStaleProviderToken(),
 		);
 		this.seededAccountId = user?.accountId;
 		this.seededProfile = this.profileKey(user);
@@ -207,7 +208,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	/**
-	 * Re-run seedAwareness/seedDocIdentity if the resolved per-server user
+	 * Refresh active presence/doc identity if the resolved per-server user
 	 * changed since the last seed (most commonly: went from unresolved to
 	 * resolved, once this doc's own server finishes logging in/restoring
 	 * after this provider was already constructed). A no-op on every
@@ -216,7 +217,10 @@ export class ProviderBacked extends Loggable {
 	 * something narrower.
 	 */
 	private reseedIdentityIfChanged(): void {
-		const user = this.authSession?.getCurrentUserForServer(this.onpremServerId);
+		const user = this.authSession?.getCurrentUserForServer(this.getOnpremServerId());
+		// A new login session for the same account can invalidate an old grant
+		// even when its display profile has not changed.
+		this.refreshPresence(user);
 		const profile = this.profileKey(user);
 		if (profile === this.seededProfile) {
 			return;
@@ -224,8 +228,35 @@ export class ProviderBacked extends Loggable {
 		if (user?.accountId !== this.seededAccountId) seedDocIdentity(this.crdtDoc, user);
 		this.seededAccountId = user?.accountId;
 		this.seededProfile = profile;
-		if (user) seedAwareness(this._liveProvider, user);
-		else this._liveProvider.awareness.setLocalStateField("user", null);
+	}
+
+	/** Only the shared foreground controller activates this ephemeral state. */
+	setPresenceActive(surface?: NotePresenceSurface): void {
+		this.presenceSurface = surface;
+		this.refreshPresence(this.authSession?.getCurrentUserForServer(this.getOnpremServerId()));
+	}
+
+	private refreshPresence(user?: Account): void {
+		const awareness = this._liveProvider.awareness, current = awareness.getLocalState();
+		if (!this.presenceSurface || !user || !this.presenceGrantMatches(user)) {
+			if (current !== null) awareness.setLocalState(null);
+			return;
+		}
+		const profile = presenceProfile(user);
+		if (current?.surface === this.presenceSurface && JSON.stringify(current.user) === JSON.stringify(profile)) return;
+		awareness.setLocalState({ user: profile, surface: this.presenceSurface,
+			cursor: current?.surface === this.presenceSurface && current?.user?.id === user.accountId ? current.cursor ?? null : null });
+	}
+
+	/** Local stale-account/session guard, not signature verification. The gateway
+	 * remains authoritative. Never send a new account's location on an old grant. */
+	private presenceGrantMatches(user: Account): boolean {
+		if (!this.issuedToken.url.includes("/v1/managed/")) return true;
+		try {
+			const grant = decodeJwt(this.issuedToken.token), session = decodeJwt(user.authToken);
+			return grant.scope === "managed" && grant.sub === user.accountId && session.sub === user.accountId &&
+				grant.doc_id === this.entityGuid && grant.session_id === session.session_id;
+		} catch { return false; }
 	}
 
 	private profileKey(user?: Account): string | undefined {
@@ -376,6 +407,7 @@ export class ProviderBacked extends Loggable {
 			clientToken.docId,
 			clientToken.token,
 		);
+		this.refreshPresence(this.authSession?.getCurrentUserForServer(this.getOnpremServerId()));
 
 		if (result.urlChanged) {
 			const maskedUrl = result.newUrl.replace(/token=[^&]+/, "token=[REDACTED]");

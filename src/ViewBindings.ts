@@ -553,6 +553,7 @@ export class DocumentViewBinding<ViewType extends TextFileView>
 		this._isTracking = value;
 		if (this._isTracking !== old) {
 			void this.mountView();
+			this._registry.notifyViewsChanged();
 		}
 	}
 
@@ -782,6 +783,11 @@ export class DocumentViewBinding<ViewType extends TextFileView>
 // ---------------------------------------------------------------------------
 
 export class ViewBindingRegistry {
+	private viewListeners = new Set<() => void>();
+	onViewsChanged(listener: () => void): () => void { this.viewListeners.add(listener); return () => this.viewListeners.delete(listener); }
+	notifyViewsChanged(): void {
+		for (const listener of this.viewListeners) { try { listener(); } catch { /* Isolate observers from note binding. */ } }
+	}
 	// event-listener bookkeeping, unwound in shutdown()
 	private teardownCallbacks: (() => void)[] = [];
 	private folderUnsubscribers: Map<VaultShare, () => void> = new Map();
@@ -1196,6 +1202,7 @@ export class ViewBindingRegistry {
 			this.logViewSummary(ctx, "Releasing Views", this.trackedViews);
 			this.unmountViews(this.trackedViews);
 			this.trackedViews = [];
+			this.notifyViewsChanged();
 			return true; // no live views open
 		}
 
@@ -1227,6 +1234,7 @@ export class ViewBindingRegistry {
 
 		log("installing live-editing extensions");
 		this.installExtensions();
+		this.notifyViewsChanged();
 		const now = moment.utc();
 		log(`refresh pass finished, took ${now.diff(queuedAt)}ms`, ctx);
 		return true;
@@ -1316,6 +1324,8 @@ export class ViewBindingRegistry {
 
 	public shutdown() {
 		this.isShutDown = true;
+		this.notifyViewsChanged();
+		this.viewListeners.clear();
 		this.unmountViews(this.trackedViews);
 		this.teardownCallbacks.forEach((off) => off());
 		this.teardownCallbacks.length = 0;

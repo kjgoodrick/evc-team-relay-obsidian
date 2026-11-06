@@ -81,6 +81,13 @@ run("managed awareness authenticates readers, rejects impersonation/collisions a
 		expect(Date.now() - resumed).toBeLessThan(3000);
 		expect(remote()?.sessionId).toBe(session);
 		expect(remote()?.user.id).toBe(f.bobId);
+		reader.provider.awareness.setLocalState({ surface: "reading", cursor: null });
+		await until(() => remote()?.surface === "reading" && remote()?.cursor === null, "Reading presence without a caret");
+		reader.provider.awareness.setLocalState(null);
+		await until(() => !remote(), "privacy removes the whole presence state");
+		expect(reader.provider.wsconnected).toBe(true);
+		reader.provider.awareness.setLocalState({ surface: "editor", cursor });
+		await until(() => remote()?.surface === "editor" && remote()?.user?.id === f.bobId, "foreground activation returns authenticated presence");
 		const revoked = await api(`/v1/managed/shares/${f.share}/rules`, f.ownerToken, [{ user_id: f.bobId, path: "", recursive: true, permission: "none" }], "PUT");
 		expect(revoked.status).toBe(200);
 		await until(() => !remote() && !reader.provider.wsconnected, "revocation removes presence");

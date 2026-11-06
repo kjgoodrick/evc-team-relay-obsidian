@@ -13,7 +13,7 @@ jest.mock("obsidian", () => ({ ...jest.requireActual("obsidian"), moment: { utc:
 function fixture(active: boolean, loggedIn: string[]) {
 	const registry = Object.create(ViewBindingRegistry.prototype) as ViewBindingRegistry;
 	const auth = { isAuthenticated: active, isLoggedInToServer: jest.fn((id: string) => loggedIn.includes(id)), presentLoginPage: jest.fn() };
-	Object.assign(registry, { authSession: auth, logInfo: jest.fn(), logWarn: jest.fn() });
+	Object.assign(registry, { viewListeners: new Set(), authSession: auth, logInfo: jest.fn(), logWarn: jest.fn() });
 	return { registry, auth };
 }
 

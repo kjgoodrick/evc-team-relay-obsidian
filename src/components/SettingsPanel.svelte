@@ -1,5 +1,6 @@
 <script lang="ts">
 	import PluginUpdates from "./PluginUpdates.svelte";
+	import PresenceSettings from "./PresenceSettings.svelte";
 	import ModalBackBar from "./ModalBackBar.svelte";
 	import type TeamRelayPlugin from "src/main";
 	import type { VaultShare } from "src/VaultShare";
@@ -177,6 +178,7 @@
 			on:goBack={handleGoBack}
 		/>
 	{:else if live.authSession.isRelayOnPremMode()}
+		<PresenceSettings {live} />
 		{#if live.updater}<PluginUpdates updater={live.updater} />{/if}
 		<RelayOnPremSettings {live} />
 	{:else}

@@ -38,7 +38,7 @@ jest.mock("../src/client/provider", () => {
 		shouldConnect = false;
 		synced = false;
 		ws: object | null = null;
-		awareness = { setLocalStateField: jest.fn() };
+		awareness = { setLocalStateField: jest.fn(), setLocalState: jest.fn(), getLocalState: () => null };
 		private listeners = new Map<string, Set<(...args: unknown[]) => void>>();
 
 		constructor(
