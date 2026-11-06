@@ -2,7 +2,7 @@ import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
 import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictureHash, type PictureMetadata, type PictureRendition, type PictureUpload } from "./PictureProtocol";
-import { isId, isSequence, parseAnchor, sourceAnchor, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type DiscussionAnchor } from "./DiscussionProtocol";
+import { BASE_TARGET_KINDS, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type DiscussionAnchor } from "./DiscussionProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -31,6 +31,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
+for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
 for (const code of ["pictures_disabled", "picture_identity_conflict", "picture_staging_quota", "picture_digest_mismatch", "picture_not_verified",
 	"picture_expired", "picture_too_large", "picture_output_too_large", "picture_too_many_pixels", "animated_picture_unsupported", "invalid_picture", "picture_changed"]) errorCodes.add(code);
 function validId(value: unknown): value is string { return typeof value === "string" && uuid.test(value); }
@@ -55,6 +56,9 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 			entry_id: op.scopeId, command: payload });
 	} catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
 	let limit = 65536;
+	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "base") {
+		try { parseAnchor(payload.anchor); } catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
+	}
 	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "image_file") {
 		try {
 			const anchor = parseAnchor(payload.anchor);
@@ -155,16 +159,23 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; baseTargets: BaseTargetKind[] }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
+		}
+		let baseTargets: BaseTargetKind[] = [];
+		if (value.features.discussion_bases === true) {
+			if (!Array.isArray(value.discussion_base_targets) || value.discussion_base_targets.length > 32 ||
+				value.discussion_base_targets.some(kind => typeof kind !== "string" || kind.length > 64) ||
+				new Set(value.discussion_base_targets).size !== value.discussion_base_targets.length) throw new DiscussionFailure("pause", "invalid_read_response");
+			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind));
 		}
 		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
-			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true };
+			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets };
 	}
 
 	async picture(entryId: string, pictureId: string): Promise<PictureMetadata> {
@@ -196,6 +207,11 @@ export class DiscussionTransport implements DiscussionSender {
 		const value = await this.request(this.scopePath(entryId) + "/anchor-context");
 		if (!object(value) || value.protocol_version !== 1 || value.entry_id !== entryId || !isId(value.generation)) throw new DiscussionFailure("pause", "invalid_read_response");
 		return { entryId, generation: value.generation };
+	}
+	async baseTargetContext(entryId: string, viewId: string, recordId?: string) {
+		if (!isId(viewId) || recordId !== undefined && !isId(recordId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		return this.parse(await this.request(this.scopePath(entryId) + "/bases/target-context", JSON.stringify({ view_id: viewId,
+			...(recordId !== undefined ? { record_id: recordId } : {}) })), value => parseBaseTargetContext(value, entryId, viewId, recordId));
 	}
 
 	async permissions(entryId: string): Promise<DiscussionPermissions> {
@@ -230,34 +246,43 @@ export class DiscussionTransport implements DiscussionSender {
 	private parse<T>(value: unknown, parser: (value: unknown) => T): T {
 		try { return parser(value); } catch { throw new DiscussionFailure("pause", "invalid_read_response"); }
 	}
-	private scoped<T extends { anchor?: DiscussionAnchor }>(value: T, entryId: string): T {
+	private scoped<T extends { anchor?: DiscussionAnchor }>(value: T, entryId: string, raw: unknown, viewId?: string): T {
 		const source = sourceAnchor(value.anchor);
 		if (source && source.document_id !== entryId || value.anchor?.type === "image_file" && value.anchor.asset.entry_id !== entryId) throw new DiscussionFailure("pause", "invalid_read_response");
+		if (value.anchor?.type === "base" && (!object(raw) || !object(raw.anchor) || raw.anchor.entry_id !== entryId) ||
+			viewId !== undefined && value.anchor !== undefined && (value.anchor.type !== "base" || value.anchor.view_id !== viewId)) throw new DiscussionFailure("pause", "invalid_read_response");
 		return value;
 	}
-	async threads(entryId: string, after = 0) {
-		return this.parse(await this.request(this.scopePath(entryId) + "/threads" + this.page(after)), v => parseThreadList(v, after));
+	private viewQuery(viewId?: string): string {
+		if (viewId !== undefined && !isId(viewId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		return viewId === undefined ? "" : "&view_id=" + viewId;
 	}
-	async thread(entryId: string, threadId: string, after = 0) {
+	async threads(entryId: string, after = 0, viewId?: string) {
+		return this.parse(await this.request(this.scopePath(entryId) + "/threads" + this.page(after) + this.viewQuery(viewId)), v => parseThreadList(v, after, viewId));
+	}
+	async thread(entryId: string, threadId: string, after = 0, viewId?: string) {
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.scoped(this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}` + this.page(after)), v => parseThreadPage(v, threadId, after)), entryId);
+		this.viewQuery(viewId);
+		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}` + this.page(after)), v => this.scoped(parseThreadPage(v, threadId, after), entryId, v, viewId));
 	}
-	async message(entryId: string, threadId: string, messageId: string) {
+	async message(entryId: string, threadId: string, messageId: string, viewId?: string) {
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.scoped(this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}`), v => parseMessageRead(v, threadId, messageId)), entryId);
+		this.viewQuery(viewId);
+		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}`), v => this.scoped(parseMessageRead(v, threadId, messageId), entryId, v, viewId));
 	}
-	async state(entryId: string, threadId: string) {
+	async state(entryId: string, threadId: string, viewId?: string) {
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.scoped(this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => parseThreadState(v, threadId)), entryId);
+		this.viewQuery(viewId);
+		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => this.scoped(parseThreadState(v, threadId), entryId, v, viewId));
 	}
 	async history(entryId: string, threadId: string, messageId: string, after = 0) {
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}/history` + this.page(after)), v => parseHistory(v, after));
 	}
-	async changes(entryId: string, cursor?: string) {
+	async changes(entryId: string, cursor?: string, viewId?: string) {
 		if (cursor !== undefined && (typeof cursor !== "string" || !cursor.length || cursor.length > 2048)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(entryId) + "/changes?limit=25" +
-			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor))), parseChanges);
+			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor)) + this.viewQuery(viewId)), v => parseChanges(v, viewId));
 	}
 
 	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition } = {}): Promise<unknown> {
@@ -318,8 +343,8 @@ export class DiscussionTransport implements DiscussionSender {
 			if (!response.ok) {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
-				if (response.status === 409 && code === "anchor_dependency_not_ready") throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
+				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

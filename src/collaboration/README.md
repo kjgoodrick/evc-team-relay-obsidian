@@ -25,7 +25,15 @@ nested body selection and reload. Generated callout titles have no invented text
 range; they retain the block fallback. Multiline hidden comments, colored
 highlights, complete construct coverage, block lifecycle recovery, mobile and
 resource acceptance remain unfinished.
-Bases primitives still require identity, authorization and native adapters.
+Bases now have server-verified saved-view identities and view/item/cell/property
+discussion protocol support. `DiscussionTransport` can capture record lineage,
+request view-specific lists/changes and validate filtered pages. The existing
+durable draft/outbox preserves these anchors across restart and sends them through
+comment-only access; the actual HTTP fixture verifies rename, retry, revocation
+and regrant. Native Bases session/cache/surface integration and all other agreed
+target kinds remain unfinished. The note/image session refuses Base creation
+until a Bases surface is connected. See the server's
+`docs/base-discussions-preview.md` and `realBaseDiscussionStack.test.ts`.
 
 The provider now publishes only its own awareness ID, including query responses
 and timeout cleanup, and advances the local clock on reconnect. The matching

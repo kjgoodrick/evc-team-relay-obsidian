@@ -37,20 +37,30 @@ export type WireTextAnchor = { version: 1; type: "text"; document_id: string; ge
 export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
 export type ImageFileAnchor = { version: 1; type: "image_file"; generation: string; asset: Extract<ImageAsset, { kind: "managed" }>;
 	basis: ImageBasis; geometry: ImageGeometry };
-export type DiscussionAnchor = NoteAnchor | WireTextAnchor | ImageAnchor | ImageFileAnchor;
+export const BASE_TARGET_KINDS = ["view", "item", "cell", "property"] as const;
+export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
+export type BaseProperty = { source: "note" | "file"; name: string };
+export type BaseTarget = { type: "view" } | { type: "item"; record_id: string; record_generation: string } |
+	{ type: "cell"; record_id: string; record_generation: string; property: BaseProperty } | { type: "property"; property: BaseProperty };
+export type BaseAnchor = { version: 1; type: "base"; definition_id: string; view_id: string; generation: string;
+	registry_revision: number; target: BaseTarget };
+export type BaseTargetContext = { protocol_version: 1; entry_id: string; definition_id: string; view_id: string;
+	generation: string; registry_revision: number; record_id?: string; record_generation?: string };
+export type DiscussionAnchor = NoteAnchor | WireTextAnchor | ImageAnchor | ImageFileAnchor | BaseAnchor;
 export const sourceAnchor = (anchor?: DiscussionAnchor): WireTextAnchor | undefined => anchor?.type === "image" ? anchor.occurrence : anchor?.type === "text" ? anchor : undefined;
 export type ThreadPage = { thread: ThreadSummary; anchor: DiscussionAnchor; messages: DiscussionMessage[]; has_more: boolean; next_after: number };
 export type MessageRead = { thread: ThreadSummary; anchor: DiscussionAnchor; message: DiscussionMessage };
 export type ThreadStateRead = { thread: ThreadSummary; anchor?: DiscussionAnchor };
-export type ThreadList = { threads: ThreadSummary[]; has_more: boolean; next_after: number };
+export type ThreadList = { threads: ThreadSummary[]; has_more: boolean; next_after: number; view_id?: string; scanned_through?: number };
 export type HistoryPage = { revisions: { revision: number; body: MessageBody | null; actor_id: string | null; created_at: string; reason: string | null }[];
 	has_more: boolean; next_after: number };
 export type DiscussionEvent = { kind: string; sequence: number; data: {
 	operation_id: string; scope_id: string; thread_id: string; actor_id: string | null; sequence: number;
 	state: "open" | "resolved"; state_revision: number; removed: boolean; changed: boolean;
 	message_id?: string; message_revision?: number; message_deleted?: boolean;
+	view_id?: string;
 } };
-export type ChangesPage = { events: DiscussionEvent[]; cursor: string; has_more: boolean };
+export type ChangesPage = { events: DiscussionEvent[]; cursor: string; has_more: boolean; view_id?: string; filtered?: true };
 
 function requireValue(condition: unknown): asserts condition {
 	if (!condition) throw new Error("Invalid discussion response");
@@ -118,6 +128,7 @@ export function parseAnchor(value: unknown): DiscussionAnchor {
 	requireValue(isRecord(value) && value.version === 1);
 	if (value.type === "note") return { version: 1, type: "note" };
 	if (value.type === "image") return parseImageAnchor(value);
+	if (value.type === "base") return parseBaseAnchor(value);
 	if (value.type === "image_file") {
 		requireValue(isId(value.generation));
 		const fields = parseImageFields(value);
@@ -150,6 +161,46 @@ export function parseAnchor(value: unknown): DiscussionAnchor {
 		start: value.start as string, end: value.end as string, dependency: value.dependency as string,
 		selected_length: value.selected_length, context: { quote: context.quote as string, prefix: context.prefix as string,
 			suffix: context.suffix as string, truncated: context.truncated as boolean }, ...(structure ? { structure } : {}) };
+}
+function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
+	requireValue(isId(value.definition_id) && isId(value.view_id) && isId(value.generation) && isRevision(value.registry_revision));
+	requireValue(Object.keys(value).every(key => ["version", "type", "definition_id", "view_id", "generation", "registry_revision", "target", "entry_id"].includes(key)));
+	const target = value.target;
+	requireValue(isRecord(target));
+	let parsed: BaseTarget;
+	if (target.type === "view") {
+		requireValue(Object.keys(target).length === 1);
+		parsed = { type: "view" };
+	} else {
+		requireValue(target.type === "item" || target.type === "cell" || target.type === "property");
+		let property: BaseProperty | undefined;
+		if (target.type !== "item") {
+			const p = target.property;
+			requireValue(isRecord(p) && Object.keys(p).every(key => ["source", "name"].includes(key)) &&
+				(p.source === "note" || p.source === "file") && typeof p.name === "string" && text(p.name, 256) &&
+				![...p.name].some(char => char.charCodeAt(0) < 32 || char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff));
+			property = { source: p.source, name: p.name };
+		}
+		if (target.type === "property") {
+			requireValue(Object.keys(target).every(key => ["type", "property"].includes(key)));
+			parsed = { type: "property", property: property! };
+		} else {
+			requireValue(isId(target.record_id) && isId(target.record_generation) && Object.keys(target).every(key =>
+				["type", "record_id", "record_generation", ...(target.type === "cell" ? ["property"] : [])].includes(key)));
+			parsed = target.type === "cell" ? { type: "cell", record_id: target.record_id, record_generation: target.record_generation, property: property! } :
+				{ type: "item", record_id: target.record_id, record_generation: target.record_generation };
+		}
+	}
+	return { version: 1, type: "base", definition_id: value.definition_id, view_id: value.view_id, generation: value.generation,
+		registry_revision: value.registry_revision, target: parsed };
+}
+export function parseBaseTargetContext(value: unknown, entryId: string, viewId: string, recordId?: string): BaseTargetContext {
+	requireValue(isRecord(value) && value.protocol_version === 1 && value.entry_id === entryId && value.view_id === viewId &&
+		isId(value.definition_id) && isId(value.generation) && isRevision(value.registry_revision));
+	requireValue(recordId === undefined ? value.record_id === undefined && value.record_generation === undefined :
+		value.record_id === recordId && isId(value.record_generation));
+	return { protocol_version: 1, entry_id: entryId, definition_id: value.definition_id, view_id: viewId, generation: value.generation,
+		registry_revision: value.registry_revision, ...(recordId !== undefined ? { record_id: recordId, record_generation: value.record_generation as string } : {}) };
 }
 function parseImageAnchor(value: Record<string, unknown>): ImageAnchor {
 	// Check before recursing so malformed image nesting cannot consume the stack.
@@ -200,10 +251,18 @@ function pagination(value: Record<string, unknown>, positions: number[], after: 
 	requireValue(value.next_after === last && (!value.has_more || positions.length > 0));
 	return { has_more: value.has_more, next_after: value.next_after };
 }
-export function parseThreadList(value: unknown, after: number): ThreadList {
+export function parseThreadList(value: unknown, after: number, viewId?: string): ThreadList {
 	requireValue(isRecord(value) && array(value.threads, 100));
 	const threads = value.threads.map(parseThread);
 	requireValue(new Set(threads.map(t => t.id)).size === threads.length);
+	if (viewId !== undefined) {
+		requireValue(isId(viewId) && value.view_id === viewId && isSequence(value.scanned_through) && value.next_after === value.scanned_through &&
+			typeof value.has_more === "boolean" && value.scanned_through >= after && (!value.has_more || value.scanned_through > after));
+		let previous = after;
+		for (const thread of threads) { requireValue(thread.created_sequence > previous && thread.created_sequence <= value.scanned_through); previous = thread.created_sequence; }
+		return { threads, has_more: value.has_more, next_after: value.scanned_through, view_id: viewId, scanned_through: value.scanned_through };
+	}
+	requireValue(value.view_id === undefined && value.scanned_through === undefined);
 	return { threads, ...pagination(value, threads.map(t => t.created_sequence), after) };
 }
 export function parseThreadPage(value: unknown, threadId: string, after: number): ThreadPage {
@@ -235,15 +294,18 @@ export function parseHistory(value: unknown, after: number): HistoryPage {
 	return { revisions, ...pagination(value, revisions.map(r => r.revision), after) };
 }
 const eventKinds = new Set(["thread.create", "reply.create", "message.edit", "message.delete", "reaction.set", "thread.state", "thread.remove"]);
-export function parseChanges(value: unknown): ChangesPage {
+export function parseChanges(value: unknown, viewId?: string): ChangesPage {
 	requireValue(isRecord(value) && array(value.events, 100) && typeof value.cursor === "string" &&
-		value.cursor.length > 0 && value.cursor.length <= 2048 && typeof value.has_more === "boolean" && (!value.has_more || value.events.length > 0));
+		value.cursor.length > 0 && value.cursor.length <= 2048 && typeof value.has_more === "boolean");
+	requireValue(viewId === undefined ? value.view_id === undefined && value.filtered === undefined && (!value.has_more || value.events.length > 0) :
+		isId(viewId) && value.view_id === viewId && value.filtered === true);
 	let previous = 0;
 	const events = value.events.map(event => {
 		requireValue(isRecord(event) && typeof event.kind === "string" && eventKinds.has(event.kind) &&
 			isRevision(event.sequence) && event.sequence > previous && isRecord(event.data));
 		previous = event.sequence;
 		const d = event.data;
+		requireValue(viewId === undefined ? d.view_id === undefined : d.view_id === viewId);
 		requireValue(d.sequence === event.sequence && isId(d.operation_id) && isId(d.scope_id) && isId(d.thread_id) &&
 			nullableId(d.actor_id) && ["open", "resolved"].includes(String(d.state)) && isRevision(d.state_revision) &&
 			typeof d.removed === "boolean" && typeof d.changed === "boolean");
@@ -252,10 +314,10 @@ export function parseChanges(value: unknown): ChangesPage {
 			d.message_id === undefined && d.message_revision === undefined && d.message_deleted === undefined);
 		return { kind: event.kind, sequence: event.sequence, data: { operation_id: d.operation_id, scope_id: d.scope_id,
 			thread_id: d.thread_id, actor_id: d.actor_id as string | null, sequence: event.sequence,
-			state: d.state as "open" | "resolved", state_revision: d.state_revision, removed: d.removed, changed: d.changed,
+			state: d.state as "open" | "resolved", state_revision: d.state_revision, removed: d.removed, changed: d.changed, ...(viewId !== undefined ? { view_id: viewId } : {}),
 			...(messageEvent ? { message_id: d.message_id as string, message_revision: d.message_revision as number, message_deleted: d.message_deleted as boolean } : {}) } };
 	});
-	return { events, cursor: value.cursor, has_more: value.has_more };
+	return { events, cursor: value.cursor, has_more: value.has_more, ...(viewId !== undefined ? { view_id: viewId, filtered: true as const } : {}) };
 }
 
 export function bodyFromText(text: string): MessageBody {

@@ -304,6 +304,7 @@ export class DiscussionSession {
 		}
 		if (command.type === "thread.create" && isRecord(command.payload)) {
 			const anchor = parseAnchor(command.payload.anchor), source = sourceAnchor(anchor);
+			if (anchor.type === "base") throw new Error("Open a Bases discussion surface before sending this target.");
 			if ((anchor.type === "image_file") !== (this.entries.get(command.scopeId)?.kind === "image")) throw new Error("The comment target does not match this file.");
 			if (anchor.type === "image_file") {
 				if (!this.canAnchorImageFiles) throw new Error("Image-file comments are not enabled on this server.");
