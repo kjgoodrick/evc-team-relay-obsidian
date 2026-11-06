@@ -11,7 +11,8 @@ import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
 jest.mock("obsidian", () => ({
-	Component: class { register() {} registerEvent() {} registerDomEvent() {} },
+	Component: class { register() {} registerEvent() {} registerDomEvent() {} addChild<T>(child: T): T { return child; } },
+	MarkdownRenderChild: class {},
 	ItemView: class {}, Modal: class {}, Notice: class {}, TFile: class { path = "Team/Note.md"; extension = "md"; },
 }));
 jest.mock("../../src/collaboration/DiscussionTransport", () => ({

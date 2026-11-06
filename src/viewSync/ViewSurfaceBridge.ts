@@ -10,6 +10,7 @@ import { applyDiffToYText } from "../ytextDiff";
 import { PropertiesEditorSync } from "./PropertiesEditorSync";
 import { ReadingViewSync } from "./ReadingViewSync";
 import type { DocumentSurfaceSync } from "./DocumentSurfaceSync";
+import { bindReadingComments } from "../collaboration/ReadingTextBinding";
 
 // Internal Obsidian APIs not exposed in the public type definitions, but
 // needed to hook the preview/metadata editors' native edit pathways.
@@ -53,6 +54,7 @@ export class ViewSurfaceBridge extends Loggable {
 
 		this.surfaceRenderers = [new ReadingViewSync(view), new PropertiesEditorSync(view)];
 		this.ytext = this.boundDocument.crdtText;
+		this.patchRemovers.push(bindReadingComments(view, () => this.isDestroyed ? undefined : { documentId: this.boundDocument.entityGuid, text: this.ytext }));
 
 		this.installFrontmatterSaveHook();
 		this.installSaveCoordinationHook();

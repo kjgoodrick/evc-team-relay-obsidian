@@ -13,8 +13,13 @@ Block capture now expands selections/carets to Markdown source blocks and uses
 the same durable relative ranges. It is capability gated, preserves existing
 block IDs without editing the note, supports 1–32 blocks, and round-trips through
 the actual control plane/relay with comment-only access. Offline restart and
-capability changes preserve the queued target. Block native acceptance, Reading
-mapping and native mobile validation remain unfinished.
+capability changes preserve the queued target. Reading view now has a native
+preview using public section metadata, the existing view/CRDT binding, exact
+source-to-DOM maps, shared leaf subscriptions and cached source parses. Desktop
+testing proves repeated-word and table-cell capture, accepted comments, exact
+Reading navigation, reload, and explicit whole-callout block capture. Precise
+callout/wiki/highlight mapping, complete construct coverage, block lifecycle
+recovery, mobile and resource acceptance remain unfinished.
 Bases primitives still require identity, authorization and native adapters.
 
 ## Local commands and delivery

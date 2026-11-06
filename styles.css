@@ -661,3 +661,18 @@
 .relay-comment-drafts select { max-width: 100%; min-width: 0; }
 .relay-comment-draft-target p { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8em; overflow: auto; border-inline-start: 2px solid var(--text-accent); padding-inline-start: var(--size-4-2); }
 .is-mobile .relay-comment-marker, .is-mobile .relay-comment-drafts select { min-height: 44px; min-width: 44px; }
+
+::highlight(relay-comments-open) { background-color: var(--text-highlight-bg); text-decoration: underline dotted var(--text-accent); }
+::highlight(relay-comments-resolved) { background-color: var(--background-modifier-hover); text-decoration: underline dotted var(--text-muted); }
+.relay-reading-comment-section { position: relative; }
+.relay-reading-block-comment { outline: 1px dotted var(--text-accent); outline-offset: 3px; }
+.relay-reading-comment-controls { position: absolute; inset-inline-end: 0; top: 0; transform: translateY(-100%); z-index: 2; display: flex; gap: var(--size-4-1); padding: 2px; border-radius: 4px; background: var(--background-primary); font-family: var(--font-interface); font-size: var(--font-ui-smaller); user-select: none; opacity: 0; pointer-events: none; }
+.relay-reading-comment-section:hover > .relay-reading-comment-controls,
+.relay-reading-comment-section:focus-within > .relay-reading-comment-controls,
+.relay-reading-comment-active > .relay-reading-comment-controls,
+.relay-reading-has-comments > .relay-reading-comment-controls { opacity: 1; pointer-events: auto; }
+.relay-reading-comment-controls button { font-size: var(--font-ui-smaller); height: auto; padding: 2px 6px; }
+.relay-reading-comment-controls button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.relay-reading-comment-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.relay-reading-comment-overlay rect { fill: var(--text-highlight-bg); opacity: 0.45; }
+.is-mobile .relay-reading-comment-controls button { min-height: 44px; }
