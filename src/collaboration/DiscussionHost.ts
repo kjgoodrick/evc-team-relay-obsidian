@@ -1,4 +1,4 @@
-import { Component, MarkdownView, Notice, TFile, type Editor, type Plugin } from "obsidian";
+import { Component, FileView, MarkdownView, Notice, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { AuthSession } from "../AuthSession";
 import type { ShareRegistry } from "../VaultShare";
@@ -18,7 +18,8 @@ import type { ImageOccurrence } from "./anchors/images";
 import type { RenderedImageTarget } from "./anchors/renderedImages";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
-export type CommentTarget = { path: string; entryId?: string; session?: DiscussionSession; message?: string };
+export type CommentTarget = { path: string; kind?: "note" | "image"; entryId?: string; session?: DiscussionSession; message?: string };
+export type ImageFileCommentContext = { file: TFile; session: DiscussionSession; entryId: string; generation?: string; current: () => boolean };
 
 /** Native Obsidian adapter. Note IDs come from the managed inventory; never
  * create a document, alter Markdown, or mint a new target ID just to comment.
@@ -71,7 +72,7 @@ export class DiscussionHost extends Component {
 		this.registerEvent(this.plugin.app.vault.on("rename", () => this.notify()));
 		this.registerEvent(this.plugin.app.vault.on("delete", file => { if (file === this.lastFile) this.lastFile = undefined; this.notify(); }));
 		this.registerEvent(this.plugin.app.workspace.on("file-menu", (menu, file) => {
-			if (file instanceof TFile && file.extension === "md" && this.shares.shareFor(file.path)) menu.addItem(item =>
+			if (file instanceof TFile && this.targetFor(file).entryId) menu.addItem(item =>
 				item.setTitle("Comments").setIcon("message-square").onClick(() => { this.lastFile = file; void this.open(); }));
 		}));
 		this.registerDomEvent(document, "visibilitychange", () => {
@@ -127,17 +128,32 @@ export class DiscussionHost extends Component {
 		return this.targetFor(this.lastFile);
 	}
 	targetFor(file?: TFile): CommentTarget {
-		if (!file || file.extension !== "md") return { path: "", message: "Open a shared Markdown note to see its comments." };
+		if (!file) return { path: "", message: "Open a shared note or image to see its comments." };
 		const folder = this.shares.shareFor(file.path);
-		if (!folder) return { path: file.path, message: "This note is not in a shared folder." };
+		if (!folder) return { path: file.path, message: "This file is not in a shared folder." };
 		const server = this.settings.readValue().servers.find(s => s.id === folder.config.onpremServerId);
 		const provider = server ? this.auth.getAuthProviderForServer(server.id) : undefined;
 		const account = provider?.isLoggedIn() ? provider.getCurrentUser() : undefined;
 		if (!server || !account) return { path: file.path, message: "Sign in to this shared folder’s server to use comments." };
 		const record = folder.folderIndex.recordFor(folder.toVirtualPath(file.path));
-		if (!record || record.type !== "markdown" || !isId(record.id)) return { path: file.path, message: "Waiting for this note’s shared identity…" };
+		if (!record || !["markdown", "image"].includes(record.type) || !isId(record.id)) return { path: file.path, message: "Comments require a shared note or image with a synchronized identity." };
 		const slot = this.slots.get(this.key(server.controlPlaneUrl, account.id, folder.entityGuid)), session = slot?.session;
-		return { path: file.path, entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
+		return { path: file.path, kind: record.type === "image" ? "image" : "note", entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
+	}
+	imageFileContext(file: TFile, writable = true): ImageFileCommentContext {
+		const target = this.targetFor(file), session = target.session, entryId = target.entryId;
+		const generation = entryId ? session?.knownDocumentGeneration(entryId) : undefined;
+		const current = () => !this.stopped && !!session && !["closed", "authentication_required", "unavailable"].includes(session.status) && !!entryId &&
+			this.plugin.app.vault.getFileByPath(file.path) === file && this.targetFor(file).kind === "image" &&
+			this.targetFor(file).session === session && this.targetFor(file).entryId === entryId && !!session.permission(entryId)?.read &&
+			session.knownDocumentGeneration(entryId) === generation && (!writable || session.canAnchorImageFiles && !!generation && !!session.permission(entryId)?.comment);
+		if (target.kind !== "image" || !session || !entryId || !current()) throw new Error("Shared image context unavailable");
+		return { file, session, entryId, generation, current };
+	}
+	commentImageFile(file?: TFile): void { if (file) void this.images?.commentFile(file); }
+	commentCurrentImage(session: DiscussionSession, entryId: string): void {
+		const target = this.current();
+		if (target.session === session && target.entryId === entryId) this.commentImageFile(this.lastFile);
 	}
 	registerEditor(surface: CommentEditorSurface): () => void { this.editors.add(surface); return () => this.editors.delete(surface); }
 	renderedImages(view: MarkdownView, occurrences: ImageOccurrence[]): RenderedImageTarget[] {
@@ -209,6 +225,15 @@ export class DiscussionHost extends Component {
 				file = this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) ?? undefined;
 			}
 			if (!file || this.targetFor(file).session !== session || this.targetFor(file).entryId !== entryId) return;
+			if (anchor.type === "image_file") {
+				if (this.targetFor(file).kind !== "image" || anchor.asset.entry_id !== entryId) return;
+				let existing: WorkspaceLeaf | undefined;
+				workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof FileView && leaf.view.file === file) existing = leaf; });
+				const leaf = existing ?? workspace.getLeaf("tab");
+				await leaf.openFile(file); await workspace.revealLeaf(leaf);
+				if (available()) this.images?.revealFile(file, session, entryId, anchor);
+				return;
+			}
 			const existing = workspace.getLeavesOfType("markdown").find(leaf => leaf.view instanceof MarkdownView && leaf.view.file === file);
 			if (anchor.type === "image" && existing?.view instanceof MarkdownView) {
 				await workspace.revealLeaf(existing);

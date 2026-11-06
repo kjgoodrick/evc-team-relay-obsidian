@@ -20,7 +20,7 @@ export class DiscussionDrafts {
 	private changing = false;
 	private navigation = 0;
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string,
-		private reveal: (anchor: DiscussionAnchor) => void) {
+		private reveal: (anchor: DiscussionAnchor) => void, private imageFile?: () => void) {
 		this.controls = parent.createDiv({ cls: "relay-comment-drafts" });
 		this.select = this.controls.createEl("select", { attr: { "aria-label": "Discussion draft" } });
 		this.select.onchange = () => { void this.choose(this.select.value); };
@@ -45,11 +45,21 @@ export class DiscussionDrafts {
 		if (this.composer && !await this.composer.flush()) throw new Error("Draft needs review");
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		this.composer?.dispose(); this.currentId = id;
+		this.composer = undefined;
+		if (id === this.wholeNoteId && this.imageFile) {
+			this.editor.empty();
+			const start = this.editor.createEl("button", { text: "New image comment", cls: "relay-image-file-new" });
+			start.onclick = () => this.imageFile?.(); this.updateImageButton(); return;
+		}
 		let label = id === this.wholeNoteId ? "New discussion on this note" : "Comment on selected text";
-		try { if (target && parseAnchor(target).type === "image") label = "Comment on image"; } catch { /* The composer reports malformed targets. */ }
+		try { if (target && ["image", "image_file"].includes(parseAnchor(target).type)) label = "Comment on image"; } catch { /* The composer reports malformed targets. */ }
+		this.editor.empty();
 		this.composer = new CommentComposer(this.editor, this.session, this.entryId, id,
-			(body, anchor) => ({ type: "thread.create", payload: { type: "thread.create", thread_id: uuid(), message_id: uuid(),
-				anchor: protocolJson(anchor ?? { version: 1, type: "note" }), body: protocolJson(body) } }),
+			(body, anchor) => {
+				if (this.imageFile && anchor?.type !== "image_file") throw new Error("Choose this image's comment target again.");
+				return { type: "thread.create", payload: { type: "thread.create", thread_id: uuid(), message_id: uuid(),
+					anchor: protocolJson(anchor ?? { version: 1, type: "note" }), body: protocolJson(body) } };
+			},
 			label, "", () => {
 				// Sending retired this exact draft atomically. Return to the note
 				// draft, never keep a stale selection active for the next comment.
@@ -58,9 +68,14 @@ export class DiscussionDrafts {
 			});
 		this.composer.onRevealTarget(this.reveal);
 	}
+	private updateImageButton(): void {
+		const button = this.editor.querySelector<HTMLButtonElement>(".relay-image-file-new");
+		if (button) button.disabled = !this.session.canAnchorImageFiles || !this.session.documentGeneration(this.entryId) || !this.session.permission(this.entryId)?.comment;
+	}
 	update(): void {
 		if (this.closed) return;
 		this.composer?.update();
+		this.updateImageButton();
 		if (this.changing) { this.again = true; return; }
 		if (this.refreshing) { this.again = true; return; }
 		this.refreshing = this.refresh().catch(() => { if (!this.closed) this.status.setText("Drafts could not be loaded. Your saved drafts have been kept."); })
@@ -78,13 +93,14 @@ export class DiscussionDrafts {
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		const drafts = [...page.drafts];
 		if (activeDraft && !drafts.some(d => d.id === activeDraft.id)) drafts.unshift(activeDraft);
-		const options: [string, string][] = [[this.wholeNoteId, "Whole-note draft"]];
+		const options: [string, string][] = [[this.wholeNoteId, this.imageFile ? "New image comment" : "Whole-note draft"]];
 		for (const draft of drafts) {
 			let label = "Selection needs review", prefix = "Selection";
 			try { const anchor = parseAnchor(draft.target); if (anchor.type === "text") {
 				label = anchor.context.quote ? anchor.context.quote.slice(0, 80) : "Selected position";
 				if (anchor.structure) prefix = "Blocks";
 			} else if (anchor.type === "image") { prefix = "Image " + (anchor.geometry.type === "whole" ? "discussion" : anchor.geometry.type); label = anchor.occurrence.context.quote.slice(0, 80); }
+			else if (anchor.type === "image_file") { prefix = "Image file"; label = anchor.geometry.type === "whole" ? "Whole image" : anchor.geometry.type === "pin" ? "Pin" : "Region"; }
 			} catch { /* Keep damaged drafts discoverable. */ }
 			options.push([draft.id, prefix + ": " + label]);
 		}

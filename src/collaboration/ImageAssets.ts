@@ -20,8 +20,13 @@ export class ImageAssets {
 		try { path = decodeURIComponent(destination.split("#")[0]); } catch { throw new ImageUnavailable("The image link could not be read."); }
 		const file = this.app.metadataCache.getFirstLinkpathDest(path, note.path), folder = this.shares.shareFor(note.path);
 		if (!file || !folder || this.shares.shareFor(file.path) !== folder) throw new ImageUnavailable("This image must be in the same shared folder as the note.");
+		return this.managedFile(file);
+	}
+	private managedFile(file: TFile) {
+		const folder = this.shares.shareFor(file.path);
+		if (!folder) throw new ImageUnavailable("This image is not in a shared folder.");
 		const inspect = () => {
-			if (this.app.vault.getFileByPath(file.path) !== file || !folder.wantsConnection || folder.isRecoveringStructure) return;
+			if (this.app.vault.getFileByPath(file.path) !== file || this.shares.shareFor(file.path) !== folder || !folder.wantsConnection || folder.isRecoveringStructure) return;
 			const path = folder.toVirtualPath(file.path), record = folder.folderIndex.recordFor(path), index = folder._liveProvider.managedIndex;
 			const base = folder.crdtDoc.getMap<{ owner: boolean; permissions: Record<string, string> }>("managed_base_v1").get("snapshot");
 			if (!record || record.type !== "image" || !isId(record.id) || !record.hash || !/^[0-9a-f]{64}$/.test(record.hash) ||
@@ -32,6 +37,7 @@ export class ImageAssets {
 		if (!value) throw new ImageUnavailable("This shared image is unavailable or still synchronizing.");
 		return { file, inspect, ...value };
 	}
+	describeFile(file: TFile): Extract<ImageAsset, { kind: "managed" }> { return this.managedFile(file).asset; }
 	describe(note: TFile, destination: string): ImageAsset {
 		if (safeImageUrl(destination)) return { kind: "external", url: destination, version_evidence: "unknown" };
 		if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(destination)) throw new ImageUnavailable("This image URL is not supported.");
@@ -67,7 +73,15 @@ export class ImageAssets {
 			const valid = () => loaded() && sameUrl(source, asset.url);
 			if (!valid()) throw new ImageUnavailable(); return { asset, valid };
 		}
-		const managed = this.managed(note, destination), file = managed.file, { mtime, size } = file.stat;
+		return this.verifyManaged(this.managed(note, destination), image, current);
+	}
+	verifyRenderedFile(file: TFile, image: HTMLImageElement, current: () => boolean): Promise<RenderedImageEvidence> {
+		return this.verifyManaged(this.managedFile(file), image, current);
+	}
+	private async verifyManaged(managed: ReturnType<ImageAssets["managedFile"]>, image: HTMLImageElement, current: () => boolean): Promise<RenderedImageEvidence> {
+		const { file, asset } = managed, { mtime, size } = file.stat, source = image.currentSrc || image.src;
+		const loaded = () => current() && image.isConnected && image.complete && image.naturalWidth > 0 && (image.currentSrc || image.src) === source;
+		const sameUrl = (a: string, b: string) => { try { return new URL(a).href === new URL(b).href; } catch { return false; } };
 		const inventory = () => {
 			const value = managed.inspect();
 			return !!value && value.asset.entry_id === asset.entry_id && value.asset.sha256 === asset.sha256 && file.stat.mtime === mtime && file.stat.size === size;
@@ -82,7 +96,12 @@ export class ImageAssets {
 		if (!current()) throw new ImageUnavailable("This image's shared context is no longer available.");
 		const asset = this.describe(note, destination);
 		if (asset.kind === "external") return { asset, url: asset.url, valid: current, release: () => {} };
-		const managed = this.managed(note, destination), file = managed.file, { mtime, size } = file.stat;
+		return this.loadManaged(this.managed(note, destination), current);
+	}
+	loadFile(file: TFile, current: () => boolean): Promise<ImagePreview> { return this.loadManaged(this.managedFile(file), current); }
+	private async loadManaged(managed: ReturnType<ImageAssets["managedFile"]>, current: () => boolean): Promise<ImagePreview> {
+		if (!current()) throw new ImageUnavailable("This image's shared context is no longer available.");
+		const { file, asset } = managed, { mtime, size } = file.stat;
 		if (size > 64 * 1024 * 1024) throw new ImageUnavailable("This image is too large for the comment placement preview (64 MiB limit).");
 		const valid = () => current() && file.stat.mtime === mtime && file.stat.size === size &&
 			managed.inspect()?.asset.entry_id === asset.entry_id && managed.inspect()?.asset.sha256 === asset.sha256;

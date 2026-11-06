@@ -45,6 +45,25 @@ test("external URLs carry unknown version evidence and never use the vault or se
 	for (const path of ["file:///private", "data:image/png;base64,AA==", "https://user:password@images.test/a", "//images.test/a", "https:bad"]) expect(() => f.assets.describe(f.note, path)).toThrow();
 });
 
+test("direct-file previews use the actual file identity without resolving a Markdown link", async () => {
+	const f = fixture();
+	jest.spyOn(f.app.metadataCache, "getFirstLinkpathDest").mockImplementation(() => { throw new Error("No note link available"); });
+	expect(f.assets.describeFile(f.file)).toEqual({ kind: "managed", entry_id: id, sha256: hash });
+	const preview = await f.assets.loadFile(f.file, () => true);
+	expect(preview.valid()).toBe(true); expect(f.readBinary).toHaveBeenCalledWith(f.file);
+	f.revoke(); expect(preview.valid()).toBe(false); preview.release();
+});
+
+test("direct-file render verification rejects resource replacement and a file moved outside its share", async () => {
+	const f = fixture(), image = rendered(f.app.vault.getResourcePath());
+	const evidence = await f.assets.verifyRenderedFile(f.file, image, () => true);
+	expect(evidence.valid()).toBe(true);
+	Object.assign(image, { currentSrc: "app://local/other.png" }); expect(evidence.valid()).toBe(false);
+	Object.assign(image, { currentSrc: f.app.vault.getResourcePath() });
+	jest.spyOn(f.shares, "shareFor").mockReturnValue(undefined as unknown as typeof f.folder);
+	expect(evidence.valid()).toBe(false);
+});
+
 function rendered(src: string): HTMLImageElement { return { src, currentSrc: src, isConnected: true, complete: true, naturalWidth: 800 } as HTMLImageElement; }
 test("verifies exact native resource versions once for repeated renders and rechecks authority without retaining image bytes", async () => {
 	const f = fixture(), first = rendered(f.app.vault.getResourcePath()), second = rendered(f.app.vault.getResourcePath());

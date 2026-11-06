@@ -39,16 +39,32 @@ function fixture() {
 	const folder = { entityGuid: id(2), config: { onpremServerId: "server" }, folderIndex: { on: () => () => {}, recordFor: () => ({ id: id(3), type: "markdown" }) }, toVirtualPath: () => "Note.md" };
 	const shares = { on: () => () => {}, toArray: () => [folder], shareFor: () => folder };
 	const file = new TFile();
-	const plugin = { registerView: jest.fn(), registerEditorExtension: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn() } } };
+	const plugin = { registerView: jest.fn(), registerEditorExtension: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn(), getFileByPath: () => file } } };
 	const scope = { readValue: () => settings, subscribe: (fn: () => void) => { settingsChanged = fn; return () => {}; } };
 	const store = { close: jest.fn() };
 	const opening = jest.spyOn(DiscussionStore, "open").mockResolvedValue(store as unknown as DiscussionStore);
 	const host = new DiscussionHost(plugin as unknown as Plugin, auth as unknown as AuthSession, shares as unknown as ShareRegistry,
 		scope as unknown as SettingsScope<RelayOnPremSettings>, "vault");
-	return { host, opening, store, provider, settings, start: async () => { host.onload(); await Promise.resolve(); await Promise.resolve(); },
+	return { host, opening, store, provider, settings, file, folder, start: async () => { host.onload(); await Promise.resolve(); await Promise.resolve(); },
 		account: (value?: string) => { accountId = value; authChanged(); }, settingsChanged: () => settingsChanged(),
 		close: () => { host.onunload(); opening.mockRestore(); } };
 }
+
+test("direct-image read context stops on lost authentication while creation remains separately gated", async () => {
+	const test = fixture();
+	try {
+		await test.start(); test.file.path = "Team/chart.png"; test.file.extension = "png";
+		jest.spyOn(test.folder.folderIndex, "recordFor").mockReturnValue({ id: id(3), type: "image" });
+		const session = Object.assign(mockSessions[0], { knownDocumentGeneration: () => id(4), canAnchorImageFiles: false,
+			permission: () => ({ read: true, comment: true }) });
+		expect(test.host.targetFor(test.file).kind).toBe("image");
+		const read = test.host.imageFileContext(test.file, false); expect(read.current()).toBe(true);
+		expect(() => test.host.imageFileContext(test.file)).toThrow("unavailable");
+		session.canAnchorImageFiles = true; expect(test.host.imageFileContext(test.file).current()).toBe(true);
+		session.status = "authentication_required"; expect(read.current()).toBe(false);
+		expect(() => test.host.imageFileContext(test.file, false)).toThrow("unavailable");
+	} finally { test.close(); }
+});
 
 test("switching accounts closes the old session synchronously and uses a distinct cache identity", async () => {
 	const test = fixture();

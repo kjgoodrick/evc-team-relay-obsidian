@@ -265,10 +265,23 @@ Use `DiscussionSession.watch(entryId, listener, "image")` to obtain that file's
 context. The existing cache/outbox preserves offline drafts, exact retries and
 original version evidence; it never rewrites queued targets after lineage changes.
 Read responses and queued commands must match the requested file. The native
-host/composer/reveal/overlay wiring for directly opened files is not implemented
-yet. The real-service fixture is `--image-files --plugin <this checkout>` in
+host now opens image-file discussions from the command, file menu, sidebar or
+verified file-view overlay. Whole-image/pin/region placement uses the static
+dialog; target drafts persist independently of note drafts. Saved markers open
+their thread, and Show image opens the actual file and its target preview.
+`ImageFileOverlays` bootstraps image-scope permissions, binds only an unambiguous
+exact native resource, shares bounded digest verification with embedded images,
+and suppresses old coordinates after asset/lineage/basis changes. The real-service
+fixture is `--image-files --plugin <this checkout>` in
 the server's `tests/integration/managed_stack.py`; it verifies offline replay
 with comment-only access and text barriers disabled.
+
+Desktop Obsidian 1.13.7 evidence includes all three file geometries, a draft
+restored after reload, saved overlays and target/reply navigation. A synthetic
+reviewer with `{read:true, comment:true, edit:false, moderate:false}` created a
+native image-file discussion after switching from the owner account. Files were
+unchanged. Direct manipulation on the native image, full geometry/format and
+mobile acceptance remain unfinished; creation still uses the placement dialog.
 
 Unit tests use fake IndexedDB and controlled transports to exercise restart,
 leases, cross-window claims, immutable retries, account checks, backoff, failed

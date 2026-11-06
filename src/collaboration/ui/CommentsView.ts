@@ -121,7 +121,7 @@ class ThreadCard {
 		const generation = ++this.generation;
 		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
 		this.controls.empty();
-		if (thread.anchor?.type === "image") {
+		if (thread.anchor?.type === "image" || thread.anchor?.type === "image_file") {
 			const target = this.controls.createEl("button", { text: "Show image " + (thread.anchor.geometry.type === "whole" ? "discussion" : thread.anchor.geometry.type) });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "text") {
@@ -273,15 +273,16 @@ export class CommentsView extends ItemView {
 			this.pendingView = new PendingComments(this.pending, this.session, this.entryId);
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
 			const session = this.session, entryId = this.entryId;
-			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); });
+			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); },
+				target.kind === "image" ? () => this.host.commentCurrentImage(session, entryId) : undefined);
 		}
-		this.watch ??= this.session.watch(this.entryId, () => this.schedule());
+		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");
 		this.contentEl.querySelector("h2")?.setText(target.path.split("/").pop() ?? "Comments");
 		const session = this.session, entryId = this.entryId, generation = ++this.generation;
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);
 		const statuses: Record<string, string> = { starting: "Connecting…", ready: "Comments are up to date", offline: "Offline — comments are saved to send when connected",
 			unavailable: "Comments are not enabled on this server.", authentication_required: "Sign in again to continue.", error: "Comments need attention. Refresh to retry." };
-		this.status!.setText(sync === "unavailable" ? "You no longer have access to this note’s comments." : sync === "syncing" ? "Updating comments…" :
+		this.status!.setText(sync === "unavailable" ? "You no longer have access to this file’s comments." : sync === "syncing" ? "Updating comments…" :
 			statuses[session.status] + (permission?.read && !permission.comment ? " · You can read comments" : ""));
 		this.drafts?.update();
 		const canRead = !!permission?.read && session.status !== "authentication_required" && session.status !== "unavailable";

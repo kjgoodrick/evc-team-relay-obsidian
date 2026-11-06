@@ -66,7 +66,11 @@ export class DiscussionSession {
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
 		const enabled = entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
-		return enabled && entry?.permission?.read && !entry.unavailable ? entry.documentGeneration : undefined;
+		return enabled ? this.knownDocumentGeneration(entryId) : undefined;
+	}
+	knownDocumentGeneration(entryId: string): string | undefined {
+		const entry = this.entries.get(entryId);
+		return entry?.permission?.read && !entry.unavailable && !this.closed ? entry.documentGeneration : undefined;
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private notify(): void {
