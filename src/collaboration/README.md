@@ -27,6 +27,14 @@ highlights, complete construct coverage, block lifecycle recovery, mobile and
 resource acceptance remain unfinished.
 Bases primitives still require identity, authorization and native adapters.
 
+The provider now publishes only its own awareness ID, including query responses
+and timeout cleanup, and advances the local clock on reconnect. The matching
+managed gateway replaces peer identity with authenticated account/profile data;
+the Rust room enforces socket ownership and rejects collisions. See the server's
+`docs/presence-boundary.md` and the opt-in `__tests__/presence/realPresenceStack.test.ts`.
+Foreground-only publication, coalescing, collision recovery, the shared presence
+model, jump/follow and native presence acceptance remain unfinished.
+
 ## Local commands and delivery
 
 `DiscussionStore` persists drafts, operations, cached entities and checkpoints in

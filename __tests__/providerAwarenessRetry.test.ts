@@ -24,10 +24,12 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import * as syncProtocol from "y-protocols/sync";
+import { resetConnectGate } from "../src/client/connectGate";
 import {
 	YSweetProvider,
 	messageSync,
 	messageAwareness,
+	messageQueryAwareness,
 	MAX_AWARENESS_RESEND_ATTEMPTS,
 } from "../src/client/provider";
 
@@ -85,11 +87,14 @@ function buildSyncStep2Response(doc: Y.Doc): Uint8Array {
 }
 
 describe("YSweetProvider initial awareness resend on room warm-up", () => {
+	const active: { provider: YSweetProvider; doc: Y.Doc }[] = [];
 	beforeEach(() => {
 		jest.useFakeTimers();
+		resetConnectGate();
 	});
 
 	afterEach(() => {
+		for (const { provider, doc } of active.splice(0)) { provider.destroy(); doc.destroy(); }
 		jest.useRealTimers();
 	});
 
@@ -106,6 +111,7 @@ describe("YSweetProvider initial awareness resend on room warm-up", () => {
 		});
 
 		const ws = provider.ws as unknown as FakeWebSocket;
+		active.push({ provider, doc });
 		return { provider, doc, ws };
 	}
 
@@ -174,5 +180,28 @@ describe("YSweetProvider initial awareness resend on room warm-up", () => {
 		// at the top of each scheduled retry must see that and no-op rather
 		// than send on (or reference) a socket that's gone.
 		expect(ws.countMessagesOfType(messageAwareness)).toBe(1);
+	});
+
+	test("only publishes its owned awareness ID, including queries and remote timeout cleanup", () => {
+		const { provider, doc, ws } = makeProvider(), peerDoc = new Y.Doc();
+		const peer = new awarenessProtocol.Awareness(peerDoc);
+		try {
+			ws.triggerOpen();
+			peer.setLocalState({ user: { id: "peer", name: "Peer" } });
+			awarenessProtocol.applyAwarenessUpdate(provider.awareness, awarenessProtocol.encodeAwarenessUpdate(peer, [peerDoc.clientID]), provider);
+			const before = ws.sent.length;
+			const query = encoding.createEncoder(); encoding.writeVarUint(query, messageQueryAwareness);
+			ws.onmessage?.({ data: encoding.toUint8Array(query).buffer });
+			const outer = decoding.createDecoder(ws.sent[ws.sent.length - 1]);
+			expect(decoding.readVarUint(outer)).toBe(messageAwareness);
+			const payload = decoding.createDecoder(decoding.readVarUint8Array(outer));
+			expect(decoding.readVarUint(payload)).toBe(1);
+			expect(decoding.readVarUint(payload)).toBe(doc.clientID);
+			expect(ws.sent).toHaveLength(before + 1);
+			awarenessProtocol.removeAwarenessStates(provider.awareness, [peerDoc.clientID], "timeout");
+			expect(ws.sent).toHaveLength(before + 1);
+			provider.awareness.setLocalState(null);
+			expect(ws.sent).toHaveLength(before + 2);
+		} finally { provider.destroy(); peer.destroy(); peerDoc.destroy(); doc.destroy(); }
 	});
 });

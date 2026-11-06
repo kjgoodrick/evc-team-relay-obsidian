@@ -118,7 +118,7 @@ messageHandlers[messageQueryAwareness] = (encoder, _decoder, provider) => {
 		encoder,
 		awarenessProtocol.encodeAwarenessUpdate(
 			provider.awareness,
-			Array.from(provider.awareness.getStates().keys()),
+			[provider.doc.clientID],
 		),
 	);
 };
@@ -138,7 +138,7 @@ messageHandlers[messageAuth] = (_encoder, decoder, provider) => {
 };
 
 const permissionDeniedHandler = (provider: YSweetProvider, reason: string) =>
-	console.warn(`Permission denied to access ${provider.url}.\n${reason}`);
+	console.warn("Relay permission denied:", reason); // Never log the credential-bearing socket URL.
 
 /**
  * Decode one incoming frame and hand it to the handler for its type. The
@@ -363,10 +363,10 @@ const openWS = (provider: YSweetProvider, ticket: ConnectTicket): void => {
 		if (provider.awareness.getLocalState() === null) return;
 
 		const localClients = [provider.doc.clientID];
-		sendOverSocket(
-			provider,
-			encodeAwarenessOf(provider.awareness, localClients),
-		);
+		// Publish through the local update handler with a fresh clock. Otherwise
+		// a reconnect can remain hidden behind the relay's disconnect tombstone
+		// until the next heartbeat, despite the document already being synced.
+		provider.awareness.setLocalState(provider.awareness.getLocalState());
 
 		// the first send can land before the server has a room for this
 		// document, and is then simply lost — the user appears absent to
@@ -529,7 +529,10 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 			const changedClients = changed.added.concat(
 				changed.updated,
 				changed.removed,
-			);
+			).filter(client => client === this.doc.clientID);
+			// Timeout cleanup is local knowledge, not authority to disconnect peers.
+			// Initial peer state comes from the relay, never from this client.
+			if (!changedClients.length) return;
 			broadcastMessage(this, encodeAwarenessOf(this.awareness, changedClients));
 		};
 		this.awareness.on("update", this._awarenessUpdateHandler);
