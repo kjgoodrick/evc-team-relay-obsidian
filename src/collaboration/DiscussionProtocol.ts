@@ -34,7 +34,9 @@ export type NoteAnchor = { version: 1; type: "note" };
 export type WireTextAnchor = { version: 1; type: "text"; document_id: string; generation: string; start: string; end: string;
 	dependency: string; selected_length: number; context: TextAnchor["context"]; structure?: BlockStructure };
 export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
-export type DiscussionAnchor = NoteAnchor | WireTextAnchor | ImageAnchor;
+export type ImageFileAnchor = { version: 1; type: "image_file"; generation: string; asset: Extract<ImageAsset, { kind: "managed" }>;
+	basis: ImageBasis; geometry: ImageGeometry };
+export type DiscussionAnchor = NoteAnchor | WireTextAnchor | ImageAnchor | ImageFileAnchor;
 export const sourceAnchor = (anchor?: DiscussionAnchor): WireTextAnchor | undefined => anchor?.type === "image" ? anchor.occurrence : anchor?.type === "text" ? anchor : undefined;
 export type ThreadPage = { thread: ThreadSummary; anchor: DiscussionAnchor; messages: DiscussionMessage[]; has_more: boolean; next_after: number };
 export type MessageRead = { thread: ThreadSummary; anchor: DiscussionAnchor; message: DiscussionMessage };
@@ -113,6 +115,12 @@ export function parseAnchor(value: unknown): DiscussionAnchor {
 	requireValue(isRecord(value) && value.version === 1);
 	if (value.type === "note") return { version: 1, type: "note" };
 	if (value.type === "image") return parseImageAnchor(value);
+	if (value.type === "image_file") {
+		requireValue(isId(value.generation));
+		const fields = parseImageFields(value);
+		requireValue(fields.asset.kind === "managed");
+		return { version: 1, type: "image_file", generation: value.generation, ...fields, asset: fields.asset };
+	}
 	requireValue(value.type === "text" && isId(value.document_id) && isId(value.generation) &&
 		isSequence(value.selected_length) && value.selected_length <= 4294967295 && isRecord(value.context) &&
 		typeof value.context.truncated === "boolean");
@@ -145,6 +153,9 @@ function parseImageAnchor(value: Record<string, unknown>): ImageAnchor {
 	requireValue(isRecord(value.occurrence) && value.occurrence.type === "text");
 	const occurrence = parseAnchor(value.occurrence);
 	requireValue(occurrence.type === "text" && occurrence.selected_length > 0 && !occurrence.structure);
+	return { version: 1, type: "image", occurrence, ...parseImageFields(value) };
+}
+function parseImageFields(value: Record<string, unknown>): Pick<ImageAnchor, "asset" | "basis" | "geometry"> {
 	const a = value.asset, b = value.basis, g = value.geometry;
 	requireValue(isRecord(a) && isRecord(b) && isRecord(g));
 	let asset: ImageAsset;
@@ -167,7 +178,7 @@ function parseImageAnchor(value: Record<string, unknown>): ImageAnchor {
 			geometry = { type: "region", x: g.x, y: g.y, width: g.width, height: g.height };
 		}
 	}
-	return { version: 1, type: "image", occurrence, asset, basis: { width: b.width, height: b.height, orientation: "display" }, geometry };
+	return { asset, basis: { width: b.width, height: b.height, orientation: "display" }, geometry };
 }
 export function wireTextAnchor(value: TextAnchor): WireTextAnchor {
 	return parseAnchor({ version: value.version, type: value.type, document_id: value.documentId, generation: value.generation,

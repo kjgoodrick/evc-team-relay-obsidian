@@ -79,6 +79,7 @@ export class CommentComposer {
 			if (draft?.target !== undefined) {
 				this.target = parseAnchor(draft.target);
 				if (sourceAnchor(this.target) && sourceAnchor(this.target)!.document_id !== this.entryId) throw new Error("Draft target does not match this note");
+				if (this.target.type === "image_file" && this.target.asset.entry_id !== this.entryId) throw new Error("Draft target does not match this image");
 			}
 			this.onlinePending = !!await session.store.preference("online:" + draftId);
 			if (this.disposed) return;

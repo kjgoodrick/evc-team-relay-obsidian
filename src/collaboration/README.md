@@ -258,6 +258,18 @@ Image/Bases presence and remote Reading selection rendering are not implemented.
 
 ## Validation
 
+The direct managed-image-file protocol is available independently of text-anchor
+barriers through `discussion_image_files`. Its `image_file` target binds the
+managed asset ID, server generation, observed hash, intrinsic basis and geometry.
+Use `DiscussionSession.watch(entryId, listener, "image")` to obtain that file's
+context. The existing cache/outbox preserves offline drafts, exact retries and
+original version evidence; it never rewrites queued targets after lineage changes.
+Read responses and queued commands must match the requested file. The native
+host/composer/reveal/overlay wiring for directly opened files is not implemented
+yet. The real-service fixture is `--image-files --plugin <this checkout>` in
+the server's `tests/integration/managed_stack.py`; it verifies offline replay
+with comment-only access and text barriers disabled.
+
 Unit tests use fake IndexedDB and controlled transports to exercise restart,
 leases, cross-window claims, immutable retries, account checks, backoff, failed
 authorization, storage failure, cursor transactions, old-schema upgrade and

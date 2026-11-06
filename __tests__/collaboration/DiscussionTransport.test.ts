@@ -45,6 +45,7 @@ test.each([
 	[429, "server_unavailable", "retry"], [503, "server_unavailable", "retry"],
 	[409, "anchor_dependency_not_ready", "retry"], [409, "anchor_generation_mismatch", "reject"],
 	[409, "text_anchors_disabled", "pause"], [422, "invalid_anchor", "reject"],
+	[409, "image_files_disabled", "pause"], [422, "invalid_anchor_scope", "reject"],
 ])("classifies HTTP %s without exposing response content", async (status, code, action) => {
 	const fetcher = jest.fn().mockResolvedValue(reply(status as number, { error: { message: { code }, private_body: "secret-comment" } }, { "Retry-After": "60" }));
 	const failure = await new DiscussionTransport(identity, credentials, fetcher).send(op()).catch(e => e);
@@ -105,11 +106,11 @@ test("non-JSON forbidden responses still invalidate access and do not expose raw
 test("negotiates text anchors and binds document context to the requested entry", async () => {
 	const fetcher = jest.fn().mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true } }));
 	const transport = new DiscussionTransport(identity, credentials, fetcher);
-	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: false, imageOccurrences: false });
+	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: false, imageOccurrences: false, imageFiles: false });
 	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true, discussion_block_anchors: "true" } }));
 	await expect(transport.capabilities()).rejects.toMatchObject({ action: "pause", code: "invalid_read_response" });
 	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true, discussion_block_anchors: true } }));
-	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false });
+	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false, imageFiles: false });
 	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, entry_id: id(4), generation: id(8) }));
 	expect(await transport.anchorContext(id(4))).toEqual({ entryId: id(4), generation: id(8) });
 	expect(fetcher.mock.calls[3][0]).toContain(`/entries/${id(4)}/anchor-context`);

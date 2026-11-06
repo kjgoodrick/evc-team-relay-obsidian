@@ -6,7 +6,7 @@ import { isId, isRecord, parseAnchor, sourceAnchor, parseMessage, parseThread, p
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
-type Entry = { listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
+type Entry = { kind: "note" | "image"; listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
 	permissionFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
 export type AnchoredThread = ThreadSummary & { anchor?: DiscussionAnchor };
 export type DiscussionLocalView = { threads: AnchoredThread[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
@@ -33,6 +33,7 @@ export class DiscussionSession {
 	private textEnabled = false;
 	private blocksEnabled = false;
 	private imagesEnabled = false;
+	private imageFilesEnabled = false;
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -60,10 +61,12 @@ export class DiscussionSession {
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
 	get canAnchorText(): boolean { return this.canQueue && this.textEnabled; }
 	get canAnchorImages(): boolean { return this.canAnchorText && this.imagesEnabled; }
+	get canAnchorImageFiles(): boolean { return this.canQueue && this.imageFilesEnabled; }
 	get canAnchorBlocks(): boolean { return this.canAnchorText && this.blocksEnabled; }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
-		return this.canAnchorText && entry?.permission?.read && !entry.unavailable ? entry.documentGeneration : undefined;
+		const enabled = entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
+		return enabled && entry?.permission?.read && !entry.unavailable ? entry.documentGeneration : undefined;
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private notify(): void {
@@ -93,6 +96,7 @@ export class DiscussionSession {
 			this.textEnabled = await this.store.preference("textAnchorsEnabled") === true;
 			this.blocksEnabled = await this.store.preference("blockAnchorsEnabled") === true;
 			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
+			this.imageFilesEnabled = await this.store.preference("imageFilesEnabled") === true;
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
@@ -100,10 +104,12 @@ export class DiscussionSession {
 			this.textEnabled = capability.textAnchors === true;
 			this.blocksEnabled = capability.blockAnchors === true;
 			this.imagesEnabled = capability.imageOccurrences === true;
+			this.imageFilesEnabled = capability.imageFiles === true;
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
 			await this.store.setPreference("imageOccurrencesEnabled", this.imagesEnabled);
+			await this.store.setPreference("imageFilesEnabled", this.imageFilesEnabled);
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -117,12 +123,13 @@ export class DiscussionSession {
 		this.notify();
 	}
 
-	watch(entryId: string, listener: () => void): () => void {
+	watch(entryId: string, listener: () => void, kind: "note" | "image" = "note"): () => void {
 		if (this.closed) return () => {};
 		let entry = this.entries.get(entryId);
+		if (entry && entry.kind !== kind) throw new Error("Reopen comments after the file type changes.");
 		if (!entry) {
 			const sync = new DiscussionSync(this.store, this.transport, entryId, status => this.syncChanged(entryId, status));
-			entry = { listeners: new Set(), sync, permissionChecked: 0, unavailable: false, people: [] };
+			entry = { kind, listeners: new Set(), sync, permissionChecked: 0, unavailable: false, people: [] };
 			this.entries.set(entryId, entry);
 		}
 		entry.listeners.add(listener);
@@ -180,7 +187,7 @@ export class DiscussionSession {
 				entry.permission = permission; entry.unavailable = !permission.read;
 				if (permission.read) {
 					await this.store.setPreference("permission:" + id, protocolJson(permission));
-					if (this.textEnabled) {
+					if (entry.kind === "image" ? this.imageFilesEnabled : this.textEnabled) {
 						try {
 							const context = await this.transport.anchorContext(id);
 							if (this.closed) return;
@@ -275,6 +282,11 @@ export class DiscussionSession {
 		queuedEnvelope(this.identity.shareId, command);
 		if (command.type === "thread.create" && isRecord(command.payload)) {
 			const anchor = parseAnchor(command.payload.anchor), source = sourceAnchor(anchor);
+			if ((anchor.type === "image_file") !== (this.entries.get(command.scopeId)?.kind === "image")) throw new Error("The comment target does not match this file.");
+			if (anchor.type === "image_file") {
+				if (!this.canAnchorImageFiles) throw new Error("Image-file comments are not enabled on this server.");
+				if (anchor.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this image after refreshing its comment context.");
+			}
 			if (source) {
 				if (!this.canAnchorText) throw new Error("Selected-text comments are not enabled on this server.");
 				if (source.structure && !this.canAnchorBlocks) throw new Error("Block comments are not enabled on this server.");
