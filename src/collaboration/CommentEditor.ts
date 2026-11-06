@@ -5,13 +5,15 @@ import * as Y from "yjs";
 import { commentEditorBinding } from "./EditorTextBinding";
 import { captureTextAnchor, resolveTextAnchor } from "./anchors/text";
 import { captureBlockAnchor } from "./anchors/blocks";
-import { localTextAnchor, wireTextAnchor, type DiscussionAnchor, type WireTextAnchor } from "./DiscussionProtocol";
+import { localTextAnchor, wireTextAnchor, sourceAnchor, type DiscussionAnchor, type WireTextAnchor } from "./DiscussionProtocol";
 import type { DiscussionHost } from "./DiscussionHost";
 import type { AnchoredThread, DiscussionSession } from "./DiscussionSession";
 
 const refreshComments = StateEffect.define<null>();
-export type CapturedCommentSelection = { file: TFile; session: DiscussionSession; entryId: string; anchor: WireTextAnchor };
+export type CapturedCommentSelection<A extends DiscussionAnchor = WireTextAnchor> = { file: TFile; session: DiscussionSession; entryId: string; anchor: A };
+export type ImageCommentContext = { file: TFile; session: DiscussionSession; entryId: string; text: Y.Text; generation: string; position?: number; current: () => boolean };
 export interface CommentEditorSurface {
+	imageContext?(writable?: boolean): ImageCommentContext;
 	readonly editor: Editor | undefined;
 	readonly file: TFile | undefined;
 	capture(blocks?: boolean): CapturedCommentSelection;
@@ -81,7 +83,7 @@ export function commentEditorExtension(host: DiscussionHost) {
 			const session = this.session, id = this.entryId, epoch = ++this.epoch;
 			const threads = session && id && session.permission(id)?.read ? await session.anchorThreads(id) : [];
 			if (this.closed || epoch !== this.epoch || session !== this.session) return;
-			this.threads = threads.filter(thread => thread.anchor?.type === "text"); this.redraw();
+			this.threads = threads.filter(thread => sourceAnchor(thread.anchor)); this.redraw();
 		}
 		private redraw(): void {
 			if (this.closed || this.visual !== undefined) return;
@@ -101,8 +103,8 @@ export function commentEditorExtension(host: DiscussionHost) {
 			this.view.dom.classList.remove("relay-comment-highlights-hidden");
 			const snapshot = Y.snapshot(bound.text.doc!), decorations: Range<Decoration>[] = [], groups = new Map<number, AnchoredThread[]>();
 			for (const thread of this.threads) {
-				if (thread.anchor?.type !== "text") continue;
-				const position = resolveTextAnchor(bound.text, id, generation, localTextAnchor(thread.anchor), snapshot);
+				const anchor = sourceAnchor(thread.anchor); if (!anchor) continue;
+				const position = resolveTextAnchor(bound.text, id, generation, localTextAnchor(anchor), snapshot);
 				if (position.status !== "attached") continue;
 				let marker: number | undefined;
 				for (const visible of this.view.visibleRanges) {
@@ -119,6 +121,15 @@ export function commentEditorExtension(host: DiscussionHost) {
 				widget: new ThreadMarker(threads, session, threadId => { void host.openThread(file, session, id, threadId); }, id) }).range(position));
 			this.decorations = Decoration.set(decorations, true);
 		}
+		imageContext(writable = true): ImageCommentContext {
+			this.checkContext();
+			const file = this.file, session = this.session, id = this.entryId, bound = commentEditorBinding(this.view), generation = id ? session?.documentGeneration(id) : undefined;
+			const current = () => !this.closed && !!session && (writable ? session.canAnchorImages : session.canAnchorText) && !!id && !!session.permission(id)?.read && (!writable || !!session.permission(id)?.comment) && this.file === file && this.session === session &&
+				this.entryId === id && session.documentGeneration(id) === generation && commentEditorBinding(this.view)?.text === bound?.text &&
+				!!bound && !this.view.composing && bound.text.toString() === this.view.state.doc.toString();
+			if (!file || !session || !id || !bound || bound.documentId !== id || !generation || !current()) throw new Error("Wait for this shared image and note to synchronize.");
+			return { file, session, entryId: id, text: bound.text, generation, position: this.view.state.selection.main.head, current };
+		}
 		capture(blocks = false): CapturedCommentSelection {
 			this.checkContext();
 			const file = this.file, session = this.session, id = this.entryId, bound = commentEditorBinding(this.view);
@@ -130,10 +141,10 @@ export function commentEditorExtension(host: DiscussionHost) {
 			return { file, session, entryId: id, anchor: wireTextAnchor((blocks ? captureBlockAnchor : captureTextAnchor)(bound.text, id, generation, anchor, head)) };
 		}
 		reveal(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): boolean {
-			const bound = commentEditorBinding(this.view), generation = session.documentGeneration(entryId);
-			if (this.closed || session !== this.session || entryId !== this.entryId || anchor.type !== "text" || !bound || bound.documentId !== entryId || !generation ||
+			const bound = commentEditorBinding(this.view), generation = session.documentGeneration(entryId), source = sourceAnchor(anchor);
+			if (this.closed || session !== this.session || entryId !== this.entryId || !source || !bound || bound.documentId !== entryId || !generation ||
 				!session.permission(entryId)?.read || bound.text.toString() !== this.view.state.doc.toString()) return false;
-			const position = resolveTextAnchor(bound.text, entryId, generation, localTextAnchor(anchor));
+			const position = resolveTextAnchor(bound.text, entryId, generation, localTextAnchor(source));
 			if (position.status !== "attached") return false;
 			this.view.dispatch({ selection: { anchor: position.from, head: position.to }, effects: EditorView.scrollIntoView(position.from, { y: "center" }) });
 			this.view.focus(); return true;

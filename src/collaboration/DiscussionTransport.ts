@@ -1,7 +1,7 @@
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
-import { isId, isSequence, parseAnchor, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type DiscussionAnchor } from "./DiscussionProtocol";
+import { isId, isSequence, parseAnchor, sourceAnchor, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type DiscussionAnchor } from "./DiscussionProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -29,7 +29,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operation_id_conflict", "identifier_unavailable",
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
-for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "text_anchors_disabled"]) errorCodes.add(code);
+for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled"]) errorCodes.add(code);
 function validId(value: unknown): value is string { return typeof value === "string" && uuid.test(value); }
 function object(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -52,10 +52,10 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 			entry_id: op.scopeId, command: payload });
 	} catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
 	let limit = 65536;
-	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "text") {
+	if (op.type === "thread.create" && object(payload.anchor) && ["text", "image"].includes(String(payload.anchor.type))) {
 		try {
-			const anchor = parseAnchor(payload.anchor);
-			if (anchor.type !== "text" || anchor.document_id !== op.scopeId) throw new Error("Wrong document");
+			const anchor = sourceAnchor(parseAnchor(payload.anchor));
+			if (!anchor || anchor.document_id !== op.scopeId) throw new Error("Wrong document");
 		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
 		limit = 256 * 1024;
 	}
@@ -121,15 +121,15 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
-			blockAnchors: value.features.discussion_block_anchors === true };
+			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true };
 	}
 	async anchorContext(entryId: string): Promise<{ entryId: string; generation: string }> {
 		const value = await this.request(this.scopePath(entryId) + "/anchor-context");
@@ -237,8 +237,8 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && code === "anchor_dependency_not_ready") throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && code === "text_anchors_disabled") throw new DiscussionFailure("pause", code, 409);
-				if (response.status === 404 && code !== "target_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
+				if (response.status === 409 && (code === "text_anchors_disabled" || code === "image_anchors_disabled")) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 413, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}
 			return value;

@@ -3,7 +3,7 @@ import * as Y from "yjs";
 import type { DiscussionHost } from "./DiscussionHost";
 import type { CapturedCommentSelection } from "./CommentEditor";
 import type { AnchoredThread, DiscussionSession } from "./DiscussionSession";
-import { localTextAnchor, wireTextAnchor, type DiscussionAnchor } from "./DiscussionProtocol";
+import { localTextAnchor, wireTextAnchor, sourceAnchor, type DiscussionAnchor } from "./DiscussionProtocol";
 import { captureBlockAnchor, BlockSelectionError } from "./anchors/blocks";
 import { captureTextAnchor, resolveTextAnchor } from "./anchors/text";
 import { ReadingSectionMap, ReadingSource, mapReadingSection } from "./anchors/reading";
@@ -208,8 +208,8 @@ export class ReadingComments extends Component {
 			const binding = readingCommentBinding(scope.view), generation = scope.session.documentGeneration(scope.entryId);
 			if (!binding || binding.documentId !== scope.entryId || !generation || !scope.session.permission(scope.entryId)?.read) { for (const section of scope.sections) section.clear(); continue; }
 			const snapshot = Y.snapshot(binding.text.doc!), positions = scope.threads.flatMap(thread => {
-				if (thread.anchor?.type !== "text") return [];
-				const position = resolveTextAnchor(binding.text, scope.entryId, generation, localTextAnchor(thread.anchor), snapshot);
+				const anchor = sourceAnchor(thread.anchor); if (!anchor) return [];
+				const position = resolveTextAnchor(binding.text, scope.entryId, generation, localTextAnchor(anchor), snapshot);
 				return position.status === "attached" ? [{ thread, ...position }] : [];
 			});
 			for (const section of scope.sections) {
@@ -236,14 +236,14 @@ export class ReadingComments extends Component {
 		}
 	}
 	reveal(view: MarkdownView, session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): boolean {
-		const scope = this.scopes.get(view), binding = readingCommentBinding(view), generation = session.documentGeneration(entryId);
-		if (!scope || scope.session !== session || scope.entryId !== entryId || !binding || binding.documentId !== entryId || !generation || anchor.type !== "text" || !session.permission(entryId)?.read) return false;
-		const position = resolveTextAnchor(binding.text, entryId, generation, localTextAnchor(anchor));
+		const scope = this.scopes.get(view), binding = readingCommentBinding(view), generation = session.documentGeneration(entryId), source = sourceAnchor(anchor);
+		if (!scope || scope.session !== session || scope.entryId !== entryId || !binding || binding.documentId !== entryId || !generation || !source || !session.permission(entryId)?.read) return false;
+		const position = resolveTextAnchor(binding.text, entryId, generation, localTextAnchor(source));
 		if (position.status !== "attached") return false;
 		for (const section of scope.sections) {
 			const current = this.snapshot(section), ranges = current ? section.map(current)?.domRanges(position.from, position.to) : undefined;
 			if (!current || position.from < current.from || position.from >= current.to) continue;
-			if (anchor.structure && !ranges?.length) { section.containerEl.scrollIntoView({ block: "center", behavior: "auto" }); return true; }
+			if ((source.structure || anchor.type === "image") && !ranges?.length) { section.containerEl.scrollIntoView({ block: "center", behavior: "auto" }); return true; }
 			if (!ranges?.length) continue;
 			const selection = view.contentEl.ownerDocument.getSelection(); selection?.removeAllRanges(); selection?.addRange(ranges[0]);
 			section.containerEl.scrollIntoView({ block: "center", behavior: "auto" }); return true;

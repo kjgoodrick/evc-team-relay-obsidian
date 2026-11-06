@@ -54,7 +54,7 @@ API, then verifies the rendered section; cancellation fences late rendering.
 Desktop testing verified Live Preview and Reading jumps/follow, Reading selection,
 manual scroll interruption and reload. Reading postprocessor ownership now avoids
 duplicate controls when the same root is processed again. The authorized
-cross-note location channel, remote Reading highlights, image/Bases adapters,
+cross-note location channel described below is now connected. Remote Reading highlights, image/Bases adapters,
 socket backpressure, two-native-client rendering and mobile acceptance remain.
 
 Cross-note preparation now gives the foreground controller one random instance
@@ -62,8 +62,31 @@ UUID per plugin lifetime and publishes it across active-note transitions. Profil
 refresh preserves this identifier; background/privacy still removes the whole
 awareness state. Peer parsing accepts the optional validated UUID, retaining
 compatibility with previous states. The matching server has an opt-in location
-transport preview documented at `docs/presence-location-channel.md`; this plugin
-does not yet connect to it. Cross-note Follow is still unavailable.
+transport preview documented at `docs/presence-location-channel.md`; the plugin
+now connects to it as described in the cross-note presence section below.
+
+## Embedded-image discussion preview
+
+`ImageComments` adds whole-image, pin and region targets to Markdown image
+occurrences behind `discussion_image_occurrences`. Its static placement dialog
+works from Source, Live Preview and Reading; the existing draft/outbox stores
+the entire image target. The nested Y.Text anchor keeps repeated embeds distinct
+through edits. Managed assets require current same-share read access and verified
+local bytes, and retain their entry ID/hash. External HTTP(S) URLs are rendered
+only by the client with explicit unknown-version evidence. Changed assets or
+dimensions suppress old geometry on the replacement.
+
+Native desktop tests verified a second-occurrence pin, reload of the unsent draft,
+an external region in Reading, Source-mode whole-image capture, accepted threads,
+and reopened geometry without modifying note/image files. The actual
+Python/Rust/plugin fixture runs with `--image-anchors --plugin <this checkout>`.
+The matching server documents the payload and rollout boundary in
+`docs/image-discussion-preview.md`. Upgrade all clients before enabling it:
+older parsers do not understand image anchors in a thread feed.
+
+This is a dialog-based preview, not complete inline image integration. Native
+image overlays, directly opened image files, comment picture uploads, image
+presence, all syntax/format/EXIF/crop cases, mobile and resource acceptance remain.
 
 ## Local commands and delivery
 

@@ -40,15 +40,17 @@ export class DiscussionDrafts {
 		} catch { if (!this.closed) { this.status.setText("Could not switch drafts. Copy any unsaved text before reopening comments."); this.select.value = this.currentId; } }
 		finally { this.changing = false; this.select.disabled = false; this.update(); }
 	}
-	private async activate(id: string, navigation: number): Promise<void> {
+	private async activate(id: string, navigation: number, target?: unknown): Promise<void> {
 		if (this.closed || id === this.currentId) return;
 		if (this.composer && !await this.composer.flush()) throw new Error("Draft needs review");
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		this.composer?.dispose(); this.currentId = id;
+		let label = id === this.wholeNoteId ? "New discussion on this note" : "Comment on selected text";
+		try { if (target && parseAnchor(target).type === "image") label = "Comment on image"; } catch { /* The composer reports malformed targets. */ }
 		this.composer = new CommentComposer(this.editor, this.session, this.entryId, id,
 			(body, anchor) => ({ type: "thread.create", payload: { type: "thread.create", thread_id: uuid(), message_id: uuid(),
 				anchor: protocolJson(anchor ?? { version: 1, type: "note" }), body: protocolJson(body) } }),
-			id === this.wholeNoteId ? "New discussion on this note" : "Comment on selected text", "", () => {
+			label, "", () => {
 				// Sending retired this exact draft atomically. Return to the note
 				// draft, never keep a stale selection active for the next comment.
 				void this.session.trackLocal(this.session.store.comparePreference(this.key, id, this.wholeNoteId))
@@ -72,7 +74,7 @@ export class DiscussionDrafts {
 		if (active !== this.wholeNoteId && (!activeDraft || activeDraft.scopeId !== this.entryId)) active = this.wholeNoteId;
 		const page = await store.selectionDrafts(this.entryId, this.after);
 		if (this.closed || navigation !== this.navigation || this.changing) return;
-		await this.activate(active, navigation);
+		await this.activate(active, navigation, activeDraft?.target);
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		const drafts = [...page.drafts];
 		if (activeDraft && !drafts.some(d => d.id === activeDraft.id)) drafts.unshift(activeDraft);
@@ -82,7 +84,8 @@ export class DiscussionDrafts {
 			try { const anchor = parseAnchor(draft.target); if (anchor.type === "text") {
 				label = anchor.context.quote ? anchor.context.quote.slice(0, 80) : "Selected position";
 				if (anchor.structure) prefix = "Blocks";
-			} } catch { /* Keep damaged drafts discoverable. */ }
+			} else if (anchor.type === "image") { prefix = "Image " + (anchor.geometry.type === "whole" ? "discussion" : anchor.geometry.type); label = anchor.occurrence.context.quote.slice(0, 80); }
+			} catch { /* Keep damaged drafts discoverable. */ }
 			options.push([draft.id, prefix + ": " + label]);
 		}
 		const signature = JSON.stringify(options);

@@ -241,3 +241,27 @@ test("block drafts require verified support, persist offline across restart, and
 		expect((await store.getOperation(operation.operationId))?.payload).toEqual(operation.payload);
 	} finally { await session.close(); }
 });
+
+test("image targets persist with offline drafts and outbox dependencies without losing version or coordinates", async () => {
+	const factory = new IDBFactory(), transport = remote();
+	let store = await DiscussionStore.open(identity, factory), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	const anchor = { version: 1, type: "image", occurrence: { version: 1, type: "text", document_id: entry, generation: id(30), start: "AA==", end: "AA==",
+		dependency: "AAA=", selected_length: 14, context: { quote: "![[chart.png]]", prefix: "", suffix: "", truncated: false } },
+		asset: { kind: "managed", entry_id: id(40), sha256: "a".repeat(64) }, basis: { width: 1200, height: 800, orientation: "display" }, geometry: { type: "pin", x: 0.25, y: 0.75 } };
+	const operation = { ...command(), payload: { ...command().payload, anchor } };
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true });
+		await session.start(); session.watch(entry, () => {}); await session.refresh();
+		await expect(session.queue(operation)).rejects.toThrow("Image comments");
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true, imageOccurrences: true }); await session.refresh();
+		await store.saveDraft({ id: "image-draft", scopeId: entry, revision: 0, body: "Discuss this pin", target: anchor }, null);
+		await session.close(); store = await DiscussionStore.open(identity, factory);
+		for (const request of [transport.capabilities, transport.permissions, transport.changes, transport.send]) request.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session = new DiscussionSession(store, transport as unknown as DiscussionTransport); await session.start(); session.watch(entry, () => {}); await session.refresh();
+		expect(session.canAnchorImages).toBe(true); expect((await store.getDraft("image-draft"))?.target).toEqual(anchor);
+		await session.queue(operation, { id: "image-draft", revision: 0 }); await session.outbox.settled();
+		expect(await store.getDraft("image-draft")).toBeUndefined(); expect((await store.getOperation(operation.operationId))?.payload).toEqual(operation.payload);
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true, imageOccurrences: false }); await session.refresh();
+		expect(session.canAnchorImages).toBe(false); expect((await store.getOperation(operation.operationId))?.payload).toEqual(operation.payload);
+	} finally { await session.close(); }
+});

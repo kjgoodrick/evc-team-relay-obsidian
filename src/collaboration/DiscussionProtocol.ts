@@ -1,6 +1,7 @@
 import type { Json } from "./storage/DiscussionStore";
 import { decodeBoundedBase64, type TextAnchor } from "./anchors/text";
 import { BLOCK_KINDS, type BlockStructure } from "./anchors/blocks";
+import type { ImageAsset, ImageBasis, ImageGeometry } from "./anchors/imageGeometry";
 
 export const isId = (value: unknown): value is string => typeof value === "string" &&
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -32,7 +33,9 @@ export type DiscussionMessage = {
 export type NoteAnchor = { version: 1; type: "note" };
 export type WireTextAnchor = { version: 1; type: "text"; document_id: string; generation: string; start: string; end: string;
 	dependency: string; selected_length: number; context: TextAnchor["context"]; structure?: BlockStructure };
-export type DiscussionAnchor = NoteAnchor | WireTextAnchor;
+export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
+export type DiscussionAnchor = NoteAnchor | WireTextAnchor | ImageAnchor;
+export const sourceAnchor = (anchor?: DiscussionAnchor): WireTextAnchor | undefined => anchor?.type === "image" ? anchor.occurrence : anchor?.type === "text" ? anchor : undefined;
 export type ThreadPage = { thread: ThreadSummary; anchor: DiscussionAnchor; messages: DiscussionMessage[]; has_more: boolean; next_after: number };
 export type MessageRead = { thread: ThreadSummary; anchor: DiscussionAnchor; message: DiscussionMessage };
 export type ThreadStateRead = { thread: ThreadSummary; anchor?: DiscussionAnchor };
@@ -65,6 +68,8 @@ function validText(value: unknown): boolean {
 		(array(value.marks, 4) && new Set(value.marks).size === value.marks.length &&
 			value.marks.every(mark => ["bold", "italic", "code", "strike"].includes(String(mark)))));
 }
+export const safeImageUrl = (value: unknown): value is string => safeDiscussionUrl(value) && /^https?:\/\//i.test(value) && !value.includes("\\") &&
+	![...value].some(char => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff);
 function validParagraph(value: unknown): boolean {
 	return isRecord(value) && value.type === "paragraph" && array(value.children, 100) && value.children.length > 0 &&
 		value.children.every(node => validText(node) || (isRecord(node) && (
@@ -107,6 +112,7 @@ export function parseMessage(value: unknown): DiscussionMessage {
 export function parseAnchor(value: unknown): DiscussionAnchor {
 	requireValue(isRecord(value) && value.version === 1);
 	if (value.type === "note") return { version: 1, type: "note" };
+	if (value.type === "image") return parseImageAnchor(value);
 	requireValue(value.type === "text" && isId(value.document_id) && isId(value.generation) &&
 		isSequence(value.selected_length) && value.selected_length <= 4294967295 && isRecord(value.context) &&
 		typeof value.context.truncated === "boolean");
@@ -133,6 +139,35 @@ export function parseAnchor(value: unknown): DiscussionAnchor {
 		start: value.start as string, end: value.end as string, dependency: value.dependency as string,
 		selected_length: value.selected_length, context: { quote: context.quote as string, prefix: context.prefix as string,
 			suffix: context.suffix as string, truncated: context.truncated as boolean }, ...(structure ? { structure } : {}) };
+}
+function parseImageAnchor(value: Record<string, unknown>): ImageAnchor {
+	// Check before recursing so malformed image nesting cannot consume the stack.
+	requireValue(isRecord(value.occurrence) && value.occurrence.type === "text");
+	const occurrence = parseAnchor(value.occurrence);
+	requireValue(occurrence.type === "text" && occurrence.selected_length > 0 && !occurrence.structure);
+	const a = value.asset, b = value.basis, g = value.geometry;
+	requireValue(isRecord(a) && isRecord(b) && isRecord(g));
+	let asset: ImageAsset;
+	if (a.kind === "managed") {
+		requireValue(isId(a.entry_id) && typeof a.sha256 === "string" && /^[0-9a-f]{64}$/.test(a.sha256));
+		asset = { kind: "managed", entry_id: a.entry_id, sha256: a.sha256 };
+	} else {
+		requireValue(a.kind === "external" && a.version_evidence === "unknown" && safeImageUrl(a.url));
+		asset = { kind: "external", url: a.url, version_evidence: "unknown" };
+	}
+	requireValue(isRevision(b.width) && b.width <= 100000 && isRevision(b.height) && b.height <= 100000 && b.orientation === "display");
+	let geometry: ImageGeometry;
+	const coordinate = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+	if (g.type === "whole") geometry = { type: "whole" };
+	else {
+		requireValue(coordinate(g.x) && coordinate(g.y));
+		if (g.type === "pin") geometry = { type: "pin", x: g.x, y: g.y };
+		else {
+			requireValue(g.type === "region" && coordinate(g.width) && coordinate(g.height) && g.width > 0 && g.height > 0 && g.x + g.width <= 1 && g.y + g.height <= 1);
+			geometry = { type: "region", x: g.x, y: g.y, width: g.width, height: g.height };
+		}
+	}
+	return { version: 1, type: "image", occurrence, asset, basis: { width: b.width, height: b.height, orientation: "display" }, geometry };
 }
 export function wireTextAnchor(value: TextAnchor): WireTextAnchor {
 	return parseAnchor({ version: value.version, type: value.type, document_id: value.documentId, generation: value.generation,

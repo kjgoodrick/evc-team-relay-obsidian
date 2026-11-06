@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { parseAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
+import { parseAnchor, sourceAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { Json, QueuedCommand } from "../storage/DiscussionStore";
 import { commentDraftBody, readCommentDraft, updateMentionSpans, type MentionSpan } from "./CommentDraft";
@@ -78,7 +78,7 @@ export class CommentComposer {
 			this.textarea.value = draft ? restored.text : initialText; this.previousText = this.textarea.value;
 			if (draft?.target !== undefined) {
 				this.target = parseAnchor(draft.target);
-				if (this.target.type === "text" && this.target.document_id !== this.entryId) throw new Error("Draft target does not match this note");
+				if (sourceAnchor(this.target) && sourceAnchor(this.target)!.document_id !== this.entryId) throw new Error("Draft target does not match this note");
 			}
 			this.onlinePending = !!await session.store.preference("online:" + draftId);
 			if (this.disposed) return;
@@ -113,7 +113,7 @@ export class CommentComposer {
 			this.people.value = selected;
 		}
 		this.people.disabled = this.busy || this.onlinePending || this.textarea.disabled || !people.length;
-		const label = this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
+		const label = this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
 			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
 		if (this.targetEl.dataset.target !== label) {
 			this.targetEl.dataset.target = label; this.targetEl.empty();

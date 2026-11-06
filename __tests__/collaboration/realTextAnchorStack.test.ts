@@ -37,7 +37,7 @@ run("real selected-text comments wait for delete-only edits, survive lost replie
 		type: "thread.create", dependsOn: [], payload: { type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(),
 			anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Review this selection")) } });
 	try {
-		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true });
+		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false });
 		expect(await transport.permissions(fixture.note)).toEqual({ read: true, comment: true, edit: false, moderate: false });
 		const owner = await peer(fixture.ownerToken, "write"); owner.text.insert(0, "alpha beta gamma");
 		const reviewer = await peer(fixture.bobToken, "read");

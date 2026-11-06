@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
-import { isId, isRecord, parseAnchor, parseMessage, parseThread, protocolJson, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
+import { isId, isRecord, parseAnchor, sourceAnchor, parseMessage, parseThread, protocolJson, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
@@ -32,6 +32,7 @@ export class DiscussionSession {
 	private enabled = false;
 	private textEnabled = false;
 	private blocksEnabled = false;
+	private imagesEnabled = false;
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -58,6 +59,7 @@ export class DiscussionSession {
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
 	get canAnchorText(): boolean { return this.canQueue && this.textEnabled; }
+	get canAnchorImages(): boolean { return this.canAnchorText && this.imagesEnabled; }
 	get canAnchorBlocks(): boolean { return this.canAnchorText && this.blocksEnabled; }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
@@ -90,15 +92,18 @@ export class DiscussionSession {
 			this.enabled = cached === true;
 			this.textEnabled = await this.store.preference("textAnchorsEnabled") === true;
 			this.blocksEnabled = await this.store.preference("blockAnchorsEnabled") === true;
+			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
 			this.enabled = capability.discussions;
 			this.textEnabled = capability.textAnchors === true;
 			this.blocksEnabled = capability.blockAnchors === true;
+			this.imagesEnabled = capability.imageOccurrences === true;
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
+			await this.store.setPreference("imageOccurrencesEnabled", this.imagesEnabled);
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -268,10 +273,14 @@ export class DiscussionSession {
 	async queue(command: QueuedCommand, draft?: Pick<Draft, "id" | "revision">): Promise<void> {
 		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment permission is required.");
 		queuedEnvelope(this.identity.shareId, command);
-		if (command.type === "thread.create" && isRecord(command.payload) && isRecord(command.payload.anchor) && command.payload.anchor.type === "text") {
-			if (!this.canAnchorText) throw new Error("Selected-text comments are not enabled on this server.");
-			if (command.payload.anchor.structure && !this.canAnchorBlocks) throw new Error("Block comments are not enabled on this server.");
-			if (command.payload.anchor.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this selection after refreshing the note’s comment context.");
+		if (command.type === "thread.create" && isRecord(command.payload)) {
+			const anchor = parseAnchor(command.payload.anchor), source = sourceAnchor(anchor);
+			if (source) {
+				if (!this.canAnchorText) throw new Error("Selected-text comments are not enabled on this server.");
+				if (source.structure && !this.canAnchorBlocks) throw new Error("Block comments are not enabled on this server.");
+				if (anchor.type === "image" && !this.canAnchorImages) throw new Error("Image comments are not enabled on this server.");
+				if (source.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this selection after refreshing the note’s comment context.");
+			}
 		}
 		await this.store.enqueue(command, Date.now(), draft);
 		if (this.closed) return;

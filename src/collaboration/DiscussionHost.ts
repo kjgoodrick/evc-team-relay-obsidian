@@ -9,9 +9,11 @@ import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
 import { isId, protocolJson, type DiscussionAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
-import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection } from "./CommentEditor";
+import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection, type ImageCommentContext } from "./CommentEditor";
 import { BlockSelectionError } from "./anchors/blocks";
 import { ReadingComments } from "./CommentReading";
+import { readingCommentBinding } from "./ReadingTextBinding";
+import { ImageComments } from "./ImageComments";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; entryId?: string; session?: DiscussionSession; message?: string };
@@ -29,11 +31,13 @@ export class DiscussionHost extends Component {
 	private focus?: { session: DiscussionSession; entryId: string; threadId: string; serial: number };
 	private focusSerial = 0;
 	private reading?: ReadingComments;
+	private images?: ImageComments;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
 		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string) { super(); }
 	onload(): void {
 		this.reading = this.addChild(new ReadingComments(this, this.plugin));
+		this.images = this.addChild(new ImageComments(this, this.plugin, this.shares));
 		this.plugin.registerView(COMMENTS_VIEW, leaf => new CommentsView(leaf, this));
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
 		this.plugin.registerEditorExtension(commentEditorExtension(this));
@@ -47,6 +51,9 @@ export class DiscussionHost extends Component {
 				menu.addItem(item => item.setTitle("Comment on selected text").setIcon("message-square").onClick(() => { void this.commentSelection(editor); }));
 				if (this.targetFor(info.file).session?.canAnchorBlocks) menu.addItem(item =>
 					item.setTitle("Comment on block(s)").setIcon("message-square").onClick(() => { void this.commentSelection(editor, true); }));
+				if (this.targetFor(info.file).session?.canAnchorImages) menu.addItem(item => item.setTitle("Comment on image").setIcon("image").onClick(() => {
+					const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView); if (view) this.images?.comment(view);
+				}));
 			}
 		}));
 		this.plugin.addCommand({ id: "comment-blocks", name: "Comment on block(s)", editorCheckCallback: (checking, editor, info) => {
@@ -131,6 +138,19 @@ export class DiscussionHost extends Component {
 		return { path: file.path, entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
 	}
 	registerEditor(surface: CommentEditorSurface): () => void { this.editors.add(surface); return () => this.editors.delete(surface); }
+	imageContext(view: MarkdownView, writable = true): ImageCommentContext {
+		if (view.getMode() !== "preview") {
+			const context = [...this.editors].find(surface => surface.editor === view.editor)?.imageContext?.(writable);
+			if (!context) throw new Error("Shared image context unavailable"); return context;
+		}
+		const file = view.file, target = this.targetFor(file ?? undefined), session = target.session, id = target.entryId;
+		const binding = readingCommentBinding(view), generation = id ? session?.documentGeneration(id) : undefined;
+		const current = () => !this.stopped && !!file && view.file === file && this.plugin.app.vault.getFileByPath(file.path) === file &&
+			this.targetFor(file).session === session && !!session && (writable ? session.canAnchorImages : session.canAnchorText) && !!id && !!session.permission(id)?.read && (!writable || !!session.permission(id)?.comment) &&
+			session.documentGeneration(id) === generation && !!binding && readingCommentBinding(view)?.text === binding.text && view.getViewData() === binding.text.toString();
+		if (!file || !session || !id || !binding || binding.documentId !== id || !generation || !current()) throw new Error("Shared image context unavailable");
+		return { file, session, entryId: id, text: binding.text, generation, current };
+	}
 	readingViewFor(root: HTMLElement, sourcePath: string): MarkdownView | undefined {
 		if (!root.isConnected || root.closest(".internal-embed,.markdown-embed,.canvas-node")) return undefined;
 		return this.plugin.app.workspace.getLeavesOfType("markdown").map(leaf => leaf.view).find((view): view is MarkdownView =>
@@ -149,18 +169,18 @@ export class DiscussionHost extends Component {
 			await this.saveCommentSelection(surface.capture(blocks));
 		} catch (error) { new Notice(error instanceof BlockSelectionError ? error.message : "The selection could not be saved. Check comment access and wait for the shared editor to finish synchronizing, then try again."); }
 	}
-	async saveCommentSelection({ session, entryId, file, anchor }: CapturedCommentSelection): Promise<void> {
+	async saveCommentSelection({ session, entryId, file, anchor }: CapturedCommentSelection<DiscussionAnchor>): Promise<boolean> {
 		try {
 			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session && this.targetFor(file).entryId === entryId && session.permission(entryId)?.comment;
-			if (!current()) return;
+			if (!current()) return false;
 			const draftId = "selection:" + entryId + ":" + uuid();
 			await session.trackLocal(session.store.saveDraft({ id: draftId, scopeId: entryId, revision: 0,
 				body: { text: "", mentions: [] }, target: protocolJson(anchor) }, null));
-			if (!current()) return;
+			if (!current()) return false;
 			await session.trackLocal(session.store.setPreference("activeNewDraft:" + entryId, draftId));
-			if (!current()) return;
-			this.lastFile = file; this.focus = undefined; await this.open();
-		} catch { new Notice("The selection draft could not be saved. Check local storage and comment access, then try again."); }
+			if (!current()) return false;
+			this.lastFile = file; this.focus = undefined; await this.open(); return true;
+		} catch { new Notice("The selection draft could not be saved. Check local storage and comment access, then try again."); return false; }
 	}
 	focusedThread(session: DiscussionSession, entryId: string) {
 		return this.focus?.session === session && this.focus.entryId === entryId ? this.focus : undefined;
@@ -184,7 +204,11 @@ export class DiscussionHost extends Component {
 			}
 			if (!file || this.targetFor(file).session !== session || this.targetFor(file).entryId !== entryId) return;
 			const existing = workspace.getLeavesOfType("markdown").find(leaf => leaf.view instanceof MarkdownView && leaf.view.file === file);
-			if (existing?.view instanceof MarkdownView && existing.view.getMode() === "preview") {
+			if (anchor.type === "image" && existing?.view instanceof MarkdownView) {
+				await workspace.revealLeaf(existing);
+				if (this.images?.reveal(existing.view, session, entryId, anchor)) return;
+			}
+			if (anchor.type !== "image" && existing?.view instanceof MarkdownView && existing.view.getMode() === "preview") {
 				await workspace.revealLeaf(existing);
 				if (anchor.type === "note" || this.reading?.reveal(existing.view, session, entryId, anchor)) return;
 			}
@@ -194,8 +218,9 @@ export class DiscussionHost extends Component {
 			if (anchor.type === "note") return;
 			for (let attempt = 0; attempt < 20; attempt++) {
 				if (!available()) return;
+				if (anchor.type === "image" && leaf.view instanceof MarkdownView && this.images?.reveal(leaf.view, session, entryId, anchor)) return;
 				const surface = [...this.editors].find(item => item.file === file && leaf.view instanceof MarkdownView && item.editor === leaf.view.editor);
-				if (surface?.reveal(session, entryId, anchor)) return;
+				if (anchor.type !== "image" && surface?.reveal(session, entryId, anchor)) return;
 				await new Promise(resolve => window.setTimeout(resolve, 50));
 			}
 			new Notice("This selection is unavailable or still syncing. Its original text remains with the discussion; it has not been moved to a similar passage.");

@@ -121,7 +121,10 @@ class ThreadCard {
 		const generation = ++this.generation;
 		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
 		this.controls.empty();
-		if (thread.anchor?.type === "text") {
+		if (thread.anchor?.type === "image") {
+			const target = this.controls.createEl("button", { text: "Show image " + (thread.anchor.geometry.type === "whole" ? "discussion" : thread.anchor.geometry.type) });
+			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
+		} else if (thread.anchor?.type === "text") {
 			const target = this.controls.createEl("button", { text: thread.anchor.structure ? "Show selected blocks" : thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
 			target.title = thread.anchor.context.quote;
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
