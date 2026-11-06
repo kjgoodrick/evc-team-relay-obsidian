@@ -1,11 +1,13 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
+import { pictureIds, prepareLocalPicture, type LocalPicture, type PictureUpload } from "../PictureProtocol";
+import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
 export interface QueuedCommand {
 	operationId: string;
 	scopeId: string;
-	type: "thread.create" | "reply.create" | "message.edit" | "reaction.set";
+	type: "thread.create" | "reply.create" | "message.edit" | "reaction.set" | "picture.upload";
 	payload: Json;
 	dependsOn: string[];
 }
@@ -78,7 +80,7 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 5);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 6);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -103,6 +105,11 @@ export class DiscussionStore {
 				};
 			}
 			if (event.oldVersion < 5) open.transaction!.objectStore("drafts").createIndex("scopeId", ["scopeId", "id"]);
+			if (event.oldVersion < 6) {
+				db.createObjectStore("pictureSources", { keyPath: "id" }).createIndex("scope", "scopeId");
+				const refs = db.createObjectStore("pictureReferences", { keyPath: ["pictureId", "kind", "ownerId"] });
+				refs.createIndex("owner", ["kind", "ownerId"]); refs.createIndex("picture", "pictureId");
+			}
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -127,11 +134,18 @@ export class DiscussionStore {
 		}
 	}
 
-	async saveDraft(draft: Draft, expectedRevision?: number | null): Promise<void> {
+	async saveDraft(draft: Draft, expectedRevision?: number | null, pictures: LocalPicture[] = []): Promise<void> {
 		requiredId(draft.id); requiredId(draft.scopeId); boundedJson(draft.body);
 		if (!Number.isSafeInteger(draft.revision) || draft.revision < 0) throw new Error("Invalid draft revision");
 		draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
-		await this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+		const ids = pictureIds(draft.body, true);
+		if (pictures.length > 10) throw new Error("A comment can contain at most ten pictures");
+		const sources = await Promise.all(pictures.map(async source => {
+			const { sha256, size } = source, prepared = await prepareLocalPicture(source.id, source.scopeId, source.bytes);
+			if (prepared.sha256 !== sha256 || prepared.size !== size) throw new Error("Picture changed before it was saved");
+			return prepared;
+		}));
+		await this.transaction(["drafts", "outbox", ...PICTURE_STORES], "readwrite", async tx => {
 			if (await request(tx.objectStore("preferences").get("online:" + draft.id))) throw new Error("Review the unconfirmed online action before editing this draft");
 			const store = tx.objectStore("drafts"), current: Draft | undefined = await request(store.get(draft.id));
 			if (current && canonical(current.target ?? null) !== canonical(draft.target ?? null)) throw new Error("Draft target changed; preserve the original draft and start another selection");
@@ -141,6 +155,15 @@ export class DiscussionStore {
 				throw new Error("Draft changed in another view");
 			}
 			await request(store.put(draft));
+			await setPictureReferences(tx, "draft", draft.id, draft.scopeId, ids);
+			await putPictureSources(tx, sources, draft.scopeId, ids);
+		});
+	}
+
+	async pictureSource(id: string, scopeId: string): Promise<LocalPicture | undefined> {
+		return this.transaction(["pictureSources"], "readonly", async tx => {
+			const source: LocalPicture | undefined = await request(tx.objectStore("pictureSources").get(id));
+			return source?.scopeId === scopeId ? source : undefined;
 		});
 	}
 
@@ -176,11 +199,12 @@ export class DiscussionStore {
 		});
 	}
 	async removeDraft(id: string, revision: number): Promise<boolean> {
-		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+		return this.transaction(["drafts", ...PICTURE_STORES], "readwrite", async tx => {
 			if (await request(tx.objectStore("preferences").get("online:" + id))) throw new Error("Review the unconfirmed online action before removing this draft");
 			const drafts = tx.objectStore("drafts"), current: Draft | undefined = await request(drafts.get(id));
 			if (!current || current.revision !== revision) return false;
-			await request(drafts.delete(id)); return true;
+			await request(drafts.delete(id));
+			await setPictureReferences(tx, "draft", id, current.scopeId, []); return true;
 		});
 	}
 
@@ -204,13 +228,14 @@ export class DiscussionStore {
 		});
 	}
 	async completeOnlineDraft(draftId: string, revision: number, operationId: string): Promise<void> {
-		await this.transaction(["drafts", "preferences"], "readwrite", async tx => {
+		await this.transaction(["drafts", ...PICTURE_STORES], "readwrite", async tx => {
 			const preferences = tx.objectStore("preferences"), key = "online:" + draftId;
 			const existing = await request(preferences.get(key)) as { operation: { operationId: string }; revision: number } | undefined;
 			if (existing?.operation.operationId !== operationId || existing.revision !== revision) throw new Error("Online action changed");
 			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(draftId));
 			if (draft?.revision !== revision) throw new Error("Draft changed in another view");
 			await request(drafts.delete(draftId)); await request(preferences.delete(key));
+			await setPictureReferences(tx, "draft", draftId, draft!.scopeId, []);
 		});
 	}
 
@@ -226,20 +251,36 @@ export class DiscussionStore {
 			!Array.isArray(command.payload) && (command.payload.reopen === true || command.payload.expected_state_revision != null)) {
 			throw new Error("Send and reopen requires an online command");
 		}
-		const identity = boundedJson(command as unknown as Json);
-		command = JSON.parse(identity) as QueuedCommand;
-		return this.transaction(["outbox", "drafts", "preferences"], "readwrite", async tx => {
+		command = JSON.parse(boundedJson(command as unknown as Json)) as QueuedCommand;
+		return this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
+			const ids = commandPictures(command.payload), uploads = tx.objectStore("outbox");
+			for (const id of ids) {
+				const source: LocalPicture | undefined = await request(tx.objectStore("pictureSources").get(id));
+				const upload: OutboxOperation | undefined = await request(uploads.get(id));
+				if (source && source.scopeId !== command.scopeId || upload && (upload.type !== "picture.upload" || upload.scopeId !== command.scopeId)) throw new Error("Picture dependency changed scope or identity");
+				if (source && !upload) {
+					const payload: PictureUpload = { type: "picture.upload", picture_id: id, sha256: source.sha256, size: source.size };
+					await request(uploads.add({ operationId: id, scopeId: command.scopeId, type: "picture.upload", payload, dependsOn: [],
+						state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now } satisfies OutboxOperation));
+					await setPictureReferences(tx, "outbox", id, command.scopeId, [id]);
+				}
+				if (source || upload) command.dependsOn = [...new Set([...command.dependsOn, id])];
+			}
+			if (command.dependsOn.includes(command.operationId) || command.dependsOn.length > 100) throw new Error("Invalid picture dependency");
+			const identity = boundedJson(command as unknown as Json);
 			const store = tx.objectStore("outbox"), previous: OutboxOperation | undefined = await request(store.get(command.operationId));
 			if (previous) {
 				const { operationId, scopeId, type, payload, dependsOn } = previous;
 				if (identity !== canonical({ operationId, scopeId, type, payload, dependsOn })) throw new Error("Operation ID was already used for another command");
 				return previous;
 			}
+			await setPictureReferences(tx, "outbox", command.operationId, command.scopeId, ids);
 			if (draft) {
 				if (await request(tx.objectStore("preferences").get("online:" + draft.id))) throw new Error("Review the unconfirmed online action before sending this draft");
 				const current: Draft | undefined = await request(tx.objectStore("drafts").get(draft.id));
 				if (!current || current.scopeId !== command.scopeId || current.revision !== draft.revision) throw new Error("Draft changed in another view");
 				await request(tx.objectStore("drafts").delete(draft.id));
+				await setPictureReferences(tx, "draft", draft.id, command.scopeId, []);
 			}
 			for (const id of command.dependsOn) {
 				const dependency: OutboxOperation | undefined = await request(store.get(id));
@@ -283,7 +324,8 @@ export class DiscussionStore {
 	}
 
 	/** Earliest runnable retry/lease; rejected dependencies do not cause polling. */
-	async nextWakeAt(): Promise<number | undefined> {
+	async nextWakeAt(picturesNotBefore = 0): Promise<number | undefined> {
+		if (!Number.isFinite(picturesNotBefore) || picturesNotBefore < 0) throw new Error("Invalid picture retry time");
 		return this.transaction(["outbox"], "readonly", async tx => {
 			const store = tx.objectStore("outbox"), states = store.index("state");
 			const ops: OutboxOperation[] = [...await request(states.getAll("queued")), ...await request(states.getAll("sending"))];
@@ -295,7 +337,8 @@ export class DiscussionStore {
 					if (dependency?.state !== "accepted") { ready = false; break; }
 				}
 				if (!ready) continue;
-				const due = op.state === "sending" ? op.lease?.expiresAt : op.nextAttemptAt;
+				let due = op.state === "sending" ? op.lease?.expiresAt : op.nextAttemptAt;
+				if (due !== undefined && op.type === "picture.upload") due = Math.max(due, picturesNotBefore);
 				if (due !== undefined && (earliest === undefined || due < earliest)) earliest = due;
 			}
 			return earliest;
@@ -322,22 +365,23 @@ export class DiscussionStore {
 
 	/** Explicit local account cleanup; callers must stop workers first. */
 	async clearAll(): Promise<void> {
-		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", "preferences"], "readwrite", async tx => {
-			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", "preferences"]) await request(tx.objectStore(name).clear());
+		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", ...PICTURE_STORES], "readwrite", async tx => {
+			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", ...PICTURE_STORES]) await request(tx.objectStore(name).clear());
 		});
 	}
 
 	/** Read/write transactions serialize claims even across two plugin windows. */
-	async claimNext(owner: string, now = Date.now(), leaseMs = 30_000): Promise<OutboxOperation | undefined> {
+	async claimNext(owner: string, now = Date.now(), leaseMs = 30_000, picturesNotBefore = 0): Promise<OutboxOperation | undefined> {
 		requiredId(owner);
-		if (!Number.isFinite(now) || !Number.isFinite(leaseMs) || leaseMs < 1 || leaseMs > 300_000) throw new Error("Invalid lease");
+		if (!Number.isFinite(now) || !Number.isFinite(leaseMs) || leaseMs < 1 || leaseMs > 300_000 || !Number.isFinite(picturesNotBefore) || picturesNotBefore < 0) throw new Error("Invalid lease");
 		return this.transaction(["outbox"], "readwrite", async tx => {
 			const store = tx.objectStore("outbox"), states = store.index("state");
 			const queued: OutboxOperation[] = await request(states.getAll("queued"));
 			const sending: OutboxOperation[] = await request(states.getAll("sending"));
 			const eligible = [...queued.filter(op => op.nextAttemptAt <= now),
 				...sending.filter(op => op.lease && op.lease.expiresAt <= now)]
-				.sort((a, b) => a.createdAt - b.createdAt || a.operationId.localeCompare(b.operationId));
+				.filter(op => op.type !== "picture.upload" || now >= picturesNotBefore)
+				.sort((a, b) => Number(a.type === "picture.upload") - Number(b.type === "picture.upload") || a.createdAt - b.createdAt || a.operationId.localeCompare(b.operationId));
 			for (const op of eligible) {
 				let ready = true;
 				for (const id of op.dependsOn) {
@@ -346,7 +390,7 @@ export class DiscussionStore {
 				}
 				if (!ready) continue;
 				op.attempt++; op.state = "sending";
-				op.lease = { owner, attempt: op.attempt, expiresAt: now + leaseMs };
+				op.lease = { owner, attempt: op.attempt, expiresAt: now + (op.type === "picture.upload" ? Math.max(leaseMs, 120_000) : leaseMs) };
 				await request(store.put(op)); return op;
 			}
 			return undefined;
@@ -355,7 +399,7 @@ export class DiscussionStore {
 
 	async accept(operationId: string, result: Json): Promise<void> {
 		boundedJson(result);
-		await this.transaction(["outbox"], "readwrite", tx => this.acceptInTransaction(tx, operationId, result));
+		await this.transaction(["outbox", ...PICTURE_STORES], "readwrite", tx => this.acceptInTransaction(tx, operationId, result));
 	}
 
 	private async acceptInTransaction(tx: IDBTransaction, operationId: string, result: Json): Promise<void> {
@@ -363,6 +407,7 @@ export class DiscussionStore {
 		if (!op || op.state === "accepted") return;
 		op.state = "accepted"; op.result = result; delete op.lease; delete op.error;
 		await request(store.put(op));
+		await setPictureReferences(tx, "outbox", operationId, op.scopeId, []);
 	}
 
 	async fail(operationId: string, lease: { owner: string; attempt: number }, error: string,
@@ -421,7 +466,7 @@ export class DiscussionStore {
 		}
 		accepted.forEach(ack => boundedJson(ack.result));
 		if (purges.length > 100 || purges.some(p => !p.prefix || p.prefix.length > 512 || !Number.isSafeInteger(p.throughRevision) || p.throughRevision < 1)) throw new Error("Invalid cache purge");
-		return this.transaction(["entities", "cursors", "outbox", "generations"], "readwrite", async tx => {
+		return this.transaction(["entities", "cursors", "outbox", "generations", ...PICTURE_STORES], "readwrite", async tx => {
 			const cursors = tx.objectStore("cursors"), store = tx.objectStore("entities");
 			if (await request(cursors.get(scopeId)) !== expectedCursor) return false;
 			if (expectedGeneration !== undefined && (await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== expectedGeneration) return false;

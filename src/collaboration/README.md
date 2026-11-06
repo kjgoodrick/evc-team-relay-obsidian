@@ -96,8 +96,8 @@ intrinsic geometry, and cropped-out marks do not retain keyboard focus.
 
 Desktop tests verified duplicate-image pins, external regions, thread navigation,
 scrolling/sidebar resizing, reload and an off-center cover crop. Creation still
-uses the placement dialog. Direct manipulation, directly opened image files,
-comment picture uploads, image presence, arbitrary transforms, all format/EXIF
+uses the placement dialog. Direct manipulation, the native comment-picture UI,
+image presence, arbitrary transforms, all format/EXIF
 cases, mobile and resource acceptance remain unfinished.
 
 ## Local commands and delivery
@@ -302,3 +302,51 @@ policy change and preserved rejected text across the real boundary. The normal
 Jest run skips this opt-in test. PostgreSQL lock/migration tests live in the
 server's separate `discussions_postgres.py`; this client test does not substitute
 for them. No native vault or running service is touched.
+
+## Pictures in comments: durable client foundation
+
+The client now understands picture body blocks and the separately negotiated
+`discussion_pictures` capability. `PictureProtocol` bounds metadata and strips
+untrusted fields. `DiscussionTransport` stages immutable IDs, sends authenticated
+raw bytes and verifies returned MIME/size/digest. Existing verified uploads are
+reused after a lost acknowledgment. Content reads use authenticated requests;
+bearer tokens never enter image URLs or diagnostics.
+
+IndexedDB version 6 adds original picture bytes and explicit draft/outbox
+references. Saving a draft and its bytes is atomic. Enqueue transfers references
+and inserts immutable `picture.upload` dependencies before retiring the draft.
+The ordinary worker sends a message only after its pictures are verified. A
+rejection preserves the original bytes and blocks only dependent work; temporary
+upload failures back off uploads while ordinary comments remain runnable.
+Ready ordinary comments take priority over queued uploads. There is still one
+active request per worker: in-flight upload latency and native memory/battery
+behavior remain part of performance acceptance.
+
+Upload leases allow 120 seconds for staging plus upload. Other actions keep
+their existing lease duration. Sources have a separate 100 MiB local quota and
+are never evicted while referenced by drafts or pending/rejected actions.
+Acknowledgments, including event-based acknowledgments, release references in
+the same transaction; the final reference releases the bytes. Account/server/
+vault/share isolation, compare-and-swap drafts and version-change closure remain.
+An authorization cache purge removes remote data while preserving originals the
+user has not finished sending. Explicit account cleanup includes the new stores.
+
+The normal regression suite covers these invariants and old-schema upgrade.
+For the actual HTTP/MinIO boundary, start a disposable loopback MinIO with the
+synthetic credentials documented by the server harness, then run:
+
+```sh
+python tests/integration/discussions_client.py --plugin ../../../evc-team-relay-obsidian --pictures-endpoint 127.0.0.1:<test-port>
+```
+
+This runs `realPictureStack.test.ts`: offline restart, reviewer upload, lost
+upload acknowledgment, private staging, authenticated content/thumbnails,
+history, revocation and retained original bytes. Its bucket, database and HTTP
+process are temporary. The ordinary text-only fixture also remains supported.
+
+This is not a finished native picture feature. The picker/paste flow, authenticated
+image display and cache, picture editing, Send and reopen integration, expiry
+repair, server cleanup and desktop/mobile acceptance remain. Current body
+rendering preserves picture descriptions as placeholders instead of dropping a
+thread or inventing an unauthenticated image URL. Keep the server creation flag
+disabled outside controlled development fixtures until those parts are ready.

@@ -1,4 +1,5 @@
 import type { Json } from "./storage/DiscussionStore";
+import type { PictureBlock } from "./PictureProtocol";
 import { decodeBoundedBase64, type TextAnchor } from "./anchors/text";
 import { BLOCK_KINDS, type BlockStructure } from "./anchors/blocks";
 import type { ImageAsset, ImageBasis, ImageGeometry } from "./anchors/imageGeometry";
@@ -20,7 +21,7 @@ export type TextNode = { type: "text"; text: string; marks?: TextMark[] };
 export type InlineNode = TextNode | { type: "link"; url: string; children: TextNode[] } | { type: "mention"; user_id: string };
 export type Paragraph = { type: "paragraph"; children: InlineNode[] };
 export type MessageBody = { version: 1; blocks: (Paragraph | { type: "code"; text: string; language?: string } |
-	{ type: "list"; ordered?: boolean; items: Paragraph[] })[] };
+	{ type: "list"; ordered?: boolean; items: Paragraph[] } | PictureBlock)[] };
 export type ThreadSummary = {
 	id: string; author_id: string | null; state: "open" | "resolved"; state_revision: number;
 	anchor_revision: number; removed: boolean; created_sequence: number; activity_sequence: number; created_at: string;
@@ -83,8 +84,10 @@ export function parseBody(value: unknown): MessageBody {
 		new TextEncoder().encode(JSON.stringify(value)).length <= 32768 && value.blocks.every(block => validParagraph(block) ||
 			(isRecord(block) && (block.type === "code" && text(block.text, 8192) && (block.language === undefined ||
 				typeof block.language === "string" && /^[a-zA-Z0-9_+.-]{0,32}$/.test(block.language)) ||
+			block.type === "picture" && isId(block.picture_id) && (block.alt === undefined || typeof block.alt === "string" && [...block.alt].length <= 1024) ||
 			block.type === "list" && (block.ordered === undefined || typeof block.ordered === "boolean") &&
 				array(block.items, 100) && block.items.length > 0 && block.items.every(validParagraph)))));
+	requireValue(value.blocks.filter((block: unknown) => isRecord(block) && block.type === "picture").length <= 10);
 	return value as MessageBody;
 }
 

@@ -37,7 +37,7 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 	};
 	const scopePath = `shares/${fixture.share}/entries/${fixture.entry}`;
 	try {
-		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: false, blockAnchors: false });
+		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: false, blockAnchors: false, imageOccurrences: false, imageFiles: false, pictures: false });
 		expect(await transport.permissions(fixture.entry)).toEqual({ read: true, comment: true, edit: false, moderate: false });
 		expect((await transport.participants(fixture.entry)).participants.map(person => person.name)).toEqual(expect.arrayContaining(["reviewer", "owner"]));
 		await enqueue("thread.create", { type: "thread.create", thread_id: thread, message_id: message,

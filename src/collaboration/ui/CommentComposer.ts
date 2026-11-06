@@ -2,6 +2,7 @@ import { v4 as uuid } from "uuid";
 import { parseAnchor, sourceAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { Json, QueuedCommand } from "../storage/DiscussionStore";
+import type { PictureBlock } from "../PictureProtocol";
 import { commentDraftBody, readCommentDraft, updateMentionSpans, type MentionSpan } from "./CommentDraft";
 
 export type ComposerCommand = { type: QueuedCommand["type"]; payload: Json; dependsOn?: string[] };
@@ -19,6 +20,7 @@ export class CommentComposer {
 	private savedValue = "";
 	private previousText = "";
 	private mentions: MentionSpan[] = [];
+	private pictures: PictureBlock[] = [];
 	private people: HTMLSelectElement;
 	private peopleSignature = "";
 	private chain: Promise<void> = Promise.resolve();
@@ -75,6 +77,7 @@ export class CommentComposer {
 			this.revision = draft?.revision ?? -1;
 			const restored = readCommentDraft(draft?.body);
 			this.savedValue = JSON.stringify(restored); this.mentions = restored.mentions;
+			this.pictures = restored.pictures ?? [];
 			this.textarea.value = draft ? restored.text : initialText; this.previousText = this.textarea.value;
 			if (draft?.target !== undefined) {
 				this.target = parseAnchor(draft.target);
@@ -128,7 +131,7 @@ export class CommentComposer {
 	private persist(): void {
 		if (this.disposed || this.textarea.disabled || this.busy || this.onlinePending) return;
 		const text = this.textarea.value;
-		const draft = { text, mentions: this.mentions.map(m => ({ ...m })) }, value = JSON.stringify(draft);
+		const draft = { text, mentions: this.mentions.map(m => ({ ...m })), ...(this.pictures.length ? { pictures: this.pictures.map(p => ({ ...p })) } : {}) }, value = JSON.stringify(draft);
 		this.status.setText("Saving draft…");
 		this.chain = this.session.trackLocal(this.chain.then(async () => {
 			if (this.saveFailed) return;
@@ -149,7 +152,7 @@ export class CommentComposer {
 		if (this.busy || this.disposed || this.saveFailed || !this.session.canQueue || !this.session.permission(this.entryId)?.comment) return;
 		if (this.onlinePending && !onlineAction) return;
 		let body: MessageBody;
-		try { body = commentDraftBody({ text: this.textarea.value, mentions: this.mentions }); } catch { this.status.setText("The comment is empty or too long. Edit it before sending."); return; }
+		try { body = commentDraftBody({ text: this.textarea.value, mentions: this.mentions, pictures: this.pictures }); } catch { this.status.setText("The comment is empty or too long. Edit it before sending."); return; }
 		this.persist(); this.busy = true; this.textarea.readOnly = true; this.update();
 		try {
 			await this.chain;
@@ -162,6 +165,7 @@ export class CommentComposer {
 					payload: protocolJson(command.payload), dependsOn: command.dependsOn ?? [] }, { id: this.draftId, revision: this.revision });
 			}
 			this.revision = -1; this.savedValue = ""; this.textarea.value = ""; this.previousText = ""; this.mentions = []; this.onlinePending = false;
+			this.pictures = [];
 			this.status.setText(onlineAction ? "Sent" : "Saved to send"); this.onSent();
 		} catch {
 			this.status.setText("Not confirmed. Your draft is saved. Check the connection or permissions before retrying.");

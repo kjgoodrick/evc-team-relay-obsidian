@@ -23,6 +23,7 @@ export function renderCommentBody(parent: HTMLElement, body: MessageBody | null,
 	for (const block of body.blocks) {
 		if (block.type === "paragraph") inline(parent.createEl("p"), block.children, name);
 		else if (block.type === "code") parent.createEl("pre").createEl("code", { text: block.text });
+		else if (block.type === "picture") parent.createEl("p", { text: block.alt ? "Picture: " + block.alt : "Picture", cls: "relay-comment-picture-placeholder" });
 		else {
 			const list = parent.createEl(block.ordered ? "ol" : "ul");
 			for (const item of block.items) inline(list.createEl("li"), item.children, name);
@@ -37,5 +38,6 @@ export function commentBodyText(body: MessageBody, name: (id: string) => string)
 	const inlineText = (nodes: InlineNode[]): string => nodes.map(node => node.type === "text" ? node.text :
 		node.type === "mention" ? "@" + name(node.user_id) : node.children.map(child => child.text).join("") + " (" + node.url + ")").join("");
 	return body.blocks.map(block => block.type === "paragraph" ? inlineText(block.children) : block.type === "code" ? block.text :
+		block.type === "picture" ? `[Picture${block.alt ? ": " + block.alt : ""}]` :
 		block.items.map((item, i) => (block.ordered ? `${i + 1}. ` : "- ") + inlineText(item.children)).join("\n")).join("\n\n");
 }

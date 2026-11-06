@@ -14,6 +14,7 @@ export class DiscussionOutbox {
 	private timer?: number;
 	private requested = false;
 	private notBefore = 0;
+	private picturesNotBefore = 0;
 	private currentStatus: OutboxStatus = "stopped";
 
 	constructor(private store: DiscussionStore, private sender: DiscussionSender, private owner: string,
@@ -69,7 +70,7 @@ export class DiscussionOutbox {
 		this.requested = false;
 		this.statusChanged("running");
 		for (let count = 0; count < 25 && this.valid(generation) && this.now() >= this.notBefore; count++) {
-			const op = await this.store.claimNext(this.owner, this.now(), 30_000);
+			const op = await this.store.claimNext(this.owner, this.now(), 30_000, this.picturesNotBefore);
 			if (!this.valid(generation)) return;
 			if (!op) break;
 			try {
@@ -92,6 +93,11 @@ export class DiscussionOutbox {
 					this.pause(error.action === "authenticate" ? "authentication_required" : "protocol_error"); return;
 				}
 				if (error.action === "retry") {
+					if (op.type === "picture.upload") {
+						// Image processing/storage can be busy while ordinary
+						// comments remain healthy. Back off all uploads only.
+						this.picturesNotBefore = retryAt!; continue;
+					}
 					// Connectivity, rate limits and server health affect the whole
 					// worker. Do not flood it with the rest of an offline backlog.
 					this.notBefore = retryAt!; break;
@@ -99,7 +105,7 @@ export class DiscussionOutbox {
 			}
 		}
 		if (!this.valid(generation)) return;
-		const next = await this.store.nextWakeAt();
+		const next = await this.store.nextWakeAt(this.picturesNotBefore);
 		if (!this.valid(generation)) return;
 		this.statusChanged("idle");
 		if (next !== undefined) this.timer = window.setTimeout(() => {

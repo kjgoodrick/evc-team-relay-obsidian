@@ -16,6 +16,15 @@ const failureHelp: Record<string, string> = {
 	invalid_command: "The server could not accept this comment’s format.",
 	operation_id_conflict: "The server could not confirm this saved request. Keep your text and contact support.",
 	identifier_unavailable: "This comment’s target could not be used. Keep your text and review the discussion.",
+	pictures_disabled: "Pictures are disabled on this server. The picture and comment remain saved here.",
+	picture_expired: "The picture upload expired. Its original bytes remain saved here for recovery.",
+	picture_staging_quota: "The server’s pending-picture allowance is full. Your picture remains saved here.",
+	picture_too_many_pixels: "This picture exceeds 20 million pixels. Keep the original and choose a smaller copy.",
+	picture_output_too_large: "The processed picture is too large. Keep the original and choose a smaller copy.",
+	invalid_picture: "This file could not be decoded as a supported picture. Its original bytes remain saved here.",
+	animated_picture_unsupported: "Animated pictures are not supported by this server yet. The original remains saved here.",
+	picture_source_unavailable: "The saved picture bytes could not be found. The comment is kept for recovery.",
+	picture_digest_mismatch: "The picture does not match its saved identity. The original command is kept for recovery.",
 };
 
 /** Keyed cards preserve text selection while incoming polling refreshes the
@@ -53,10 +62,12 @@ export class PendingComments {
 	private render(box: HTMLElement, op: OutboxOperation, canRetry: boolean): void {
 		// A rejected retry may follow an accepted request whose acknowledgment was
 		// lost. Do not promise "not sent" or offer a fresh-ID resubmission here.
-		box.createEl("p", { text: op.state === "rejected" ? "Delivery needs review — your text is kept on this device" :
+		box.createEl("p", { text: op.state === "rejected" ? "Delivery needs review — your saved work is kept on this device" :
 			op.dependsOn.length ? "Waiting for an earlier saved change to be confirmed…" : "Waiting for delivery confirmation…" });
 		const payload = op.payload;
-		if (isRecord(payload) && op.type === "reaction.set") {
+		if (isRecord(payload) && op.type === "picture.upload") {
+			box.createEl("p", { text: "Picture upload" + (typeof payload.size === "number" ? ` · ${Math.ceil(payload.size / 1024)} KiB` : "") });
+		} else if (isRecord(payload) && op.type === "reaction.set") {
 			const emoji = typeof payload.emoji === "string" ? REACTIONS[payload.emoji as keyof typeof REACTIONS] : undefined;
 			box.createEl("p", { text: `${payload.present ? "Add" : "Remove"} reaction${emoji ? ": " + emoji : ""}` });
 		} else if (isRecord(payload)) {

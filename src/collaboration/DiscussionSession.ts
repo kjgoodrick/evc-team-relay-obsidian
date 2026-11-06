@@ -1,5 +1,8 @@
 import { v4 as uuid } from "uuid";
 import { DiscussionOutbox } from "./DiscussionOutbox";
+import { DiscussionDelivery } from "./DiscussionDelivery";
+import { parsePictureUpload } from "./PictureProtocol";
+import { commandPictures } from "./storage/PictureRecords";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
 import { isId, isRecord, parseAnchor, sourceAnchor, parseMessage, parseThread, protocolJson, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
@@ -34,10 +37,11 @@ export class DiscussionSession {
 	private blocksEnabled = false;
 	private imagesEnabled = false;
 	private imageFilesEnabled = false;
+	private picturesEnabled = false;
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
-		this.outbox = new DiscussionOutbox(store, transport, uuid(), status => {
+		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled), uuid(), status => {
 			if (this.closed) return;
 			if (status === "authentication_required") this.statusValue = "authentication_required";
 			if (status === "protocol_error" || status === "storage_error") this.statusValue = "error";
@@ -63,6 +67,7 @@ export class DiscussionSession {
 	get canAnchorImages(): boolean { return this.canAnchorText && this.imagesEnabled; }
 	get canAnchorImageFiles(): boolean { return this.canQueue && this.imageFilesEnabled; }
 	get canAnchorBlocks(): boolean { return this.canAnchorText && this.blocksEnabled; }
+	get canAttachPictures(): boolean { return this.canQueue && this.picturesEnabled; }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
 		const enabled = entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
@@ -101,6 +106,7 @@ export class DiscussionSession {
 			this.blocksEnabled = await this.store.preference("blockAnchorsEnabled") === true;
 			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
 			this.imageFilesEnabled = await this.store.preference("imageFilesEnabled") === true;
+			this.picturesEnabled = await this.store.preference("picturesEnabled") === true;
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
@@ -109,11 +115,13 @@ export class DiscussionSession {
 			this.blocksEnabled = capability.blockAnchors === true;
 			this.imagesEnabled = capability.imageOccurrences === true;
 			this.imageFilesEnabled = capability.imageFiles === true;
+			this.picturesEnabled = capability.pictures === true;
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
 			await this.store.setPreference("imageOccurrencesEnabled", this.imagesEnabled);
 			await this.store.setPreference("imageFilesEnabled", this.imageFilesEnabled);
+			await this.store.setPreference("picturesEnabled", this.picturesEnabled);
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -284,6 +292,10 @@ export class DiscussionSession {
 	async queue(command: QueuedCommand, draft?: Pick<Draft, "id" | "revision">): Promise<void> {
 		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment permission is required.");
 		queuedEnvelope(this.identity.shareId, command);
+		if (!this.canAttachPictures) {
+			for (const id of commandPictures(command.payload)) if (await this.store.pictureSource(id, command.scopeId) &&
+				(await this.store.getOperation(id))?.state !== "accepted") throw new Error("Pictures are not enabled on this server.");
+		}
 		if (command.type === "thread.create" && isRecord(command.payload)) {
 			const anchor = parseAnchor(command.payload.anchor), source = sourceAnchor(anchor);
 			if ((anchor.type === "image_file") !== (this.entries.get(command.scopeId)?.kind === "image")) throw new Error("The comment target does not match this file.");
@@ -313,7 +325,8 @@ export class DiscussionSession {
 	}
 	async retryRejected(operation: OutboxOperation): Promise<boolean> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check comment permission before retrying.");
-		queuedEnvelope(this.identity.shareId, operation);
+		if (operation.type === "picture.upload") parsePictureUpload(operation.payload);
+		else queuedEnvelope(this.identity.shareId, operation);
 		const retried = await this.trackLocal(this.store.retryRejected(operation.operationId, operation.scopeId, operation.attempt));
 		if (!this.closed) { this.broadcast(); this.outbox.wake(); this.notify(); }
 		return retried;
