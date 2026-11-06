@@ -3,6 +3,7 @@ import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionFailure, type DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
 import { bodyFromText } from "../../src/collaboration/DiscussionProtocol";
+import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -17,6 +18,7 @@ function remote() {
 		send: jest.fn().mockResolvedValue({ operation_id: id(4), scope_id: id(8), thread_id: id(5), message_id: id(6),
 			sequence: 1, state: "open", state_revision: 1, message_revision: 1, message_deleted: false, removed: false, changed: true }),
 		sendOnline: jest.fn().mockResolvedValue({ changed: true }),
+		uploadPicture: jest.fn().mockResolvedValue({ state: "verified" }),
 	};
 }
 const command = () => ({ operationId: id(4), scopeId: entry, type: "thread.create" as const, dependsOn: [], payload: {
@@ -158,6 +160,48 @@ test("an unconfirmed online reply retains its exact operation across restart and
 		await store.completeOnlineDraft("reply", 0, first.operationId);
 		expect(await store.getDraft("reply")).toBeUndefined(); expect(await store.preference("online:reply")).toBeUndefined();
 	} finally { store.close(); }
+});
+
+test("Send and reopen uploads pictures before submitting and retries an unconfirmed reply without re-uploading", async () => {
+	const { session, store, transport, close } = await fixture();
+	const source = await prepareLocalPicture(id(70), entry, new Uint8Array([1, 2, 3]).buffer);
+	const body = { version: 1, blocks: [{ type: "picture", picture_id: source.id }] };
+	const operation = { operationId: id(71), scopeId: entry, payload: { type: "reply.create", thread_id: id(5), message_id: id(72), body, reopen: true, expected_state_revision: 2 } };
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, ...{ pictures: true } }); await session.refresh();
+		await store.saveDraft({ id: "reply", scopeId: entry, revision: 0, body: { text: "", mentions: [], pictures: body.blocks } }, null, [source]);
+		transport.sendOnline.mockImplementationOnce(async () => {
+			expect(transport.uploadPicture).toHaveBeenCalledTimes(1); expect(await store.preference("online:reply")).toBeDefined();
+			throw new DiscussionFailure("retry", "network_unavailable");
+		});
+		await expect(session.onlineDraft({ id: "reply", revision: 0 }, operation)).rejects.toThrow();
+		expect(await store.pictureSource(source.id, entry)).toBeDefined(); expect(await store.pending(entry)).toEqual([]);
+		await session.onlineDraft({ id: "reply", revision: 0 }, { ...operation, operationId: id(99) });
+		expect(transport.uploadPicture).toHaveBeenCalledTimes(1);
+		expect(transport.sendOnline.mock.calls[1][0]).toEqual(operation);
+		expect(await store.getDraft("reply")).toBeUndefined(); expect(await store.pictureSource(source.id, entry)).toBeUndefined();
+	} finally { await close(); }
+});
+
+test("a rejected picture leaves the online draft editable and a concurrent draft change prevents publication", async () => {
+	const { session, store, transport, close } = await fixture();
+	const source = await prepareLocalPicture(id(70), entry, new Uint8Array([1, 2, 3]).buffer);
+	const body = { version: 1, blocks: [{ type: "picture", picture_id: source.id }] };
+	const operation = { operationId: id(71), scopeId: entry, payload: { type: "reply.create", thread_id: id(5), message_id: id(72), body, reopen: true, expected_state_revision: 2 } };
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, ...{ pictures: true } }); await session.refresh();
+		await store.saveDraft({ id: "reply", scopeId: entry, revision: 0, body: { text: "", mentions: [], pictures: body.blocks } }, null, [source]);
+		transport.uploadPicture.mockRejectedValueOnce(new DiscussionFailure("reject", "invalid_picture", 415));
+		await expect(session.onlineDraft({ id: "reply", revision: 0 }, operation)).rejects.toThrow();
+		expect(await store.preference("online:reply")).toBeUndefined(); expect(transport.sendOnline).not.toHaveBeenCalled();
+		transport.uploadPicture.mockImplementationOnce(async () => {
+			await store.saveDraft({ id: "reply", scopeId: entry, revision: 1, body: "Other window removed the picture" }, 0);
+			return { state: "verified" };
+		});
+		await expect(session.onlineDraft({ id: "reply", revision: 0 }, operation)).rejects.toThrow("another view");
+		expect(await store.preference("online:reply")).toBeUndefined(); expect(transport.sendOnline).not.toHaveBeenCalled();
+		expect((await store.getDraft("reply"))?.body).toBe("Other window removed the picture");
+	} finally { await close(); }
 });
 
 test("generation refresh never rewrites a queued selection, and revocation clears its cached context", async () => {

@@ -4,6 +4,27 @@ import { pictureIds, type PictureBlock } from "../PictureProtocol";
 export type MentionSpan = { start: number; end: number; userId: string };
 export type CommentDraft = { text: string; mentions: MentionSpan[]; pictures?: PictureBlock[] };
 
+/** Only offer this editor when its round trip preserves the supported content.
+ * Rich blocks/marks and interleaved pictures need the later rich editor.
+ */
+export function editableCommentDraft(body: MessageBody, name: (id: string) => string): CommentDraft | undefined {
+	const draft: CommentDraft = { text: "", mentions: [], pictures: [] };
+	let paragraphs = 0;
+	for (const block of body.blocks) {
+		if (block.type === "picture") { draft.pictures!.push({ ...block }); continue; }
+		if (block.type !== "paragraph" || draft.pictures!.length) return undefined;
+		if (paragraphs++) draft.text += "\n\n";
+		for (const node of block.children) {
+			if (node.type === "text" && !node.marks?.length) draft.text += node.text;
+			else if (node.type === "mention") {
+				const start = draft.text.length; draft.text += "@" + name(node.user_id);
+				draft.mentions.push({ start, end: draft.text.length, userId: node.user_id });
+			} else return undefined;
+		}
+	}
+	return draft;
+}
+
 export function readCommentDraft(value: unknown): CommentDraft {
 	if (typeof value === "string") return { text: value, mentions: [] };
 	if (!isRecord(value) || typeof value.text !== "string" || !Array.isArray(value.mentions)) {

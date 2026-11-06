@@ -5,6 +5,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
 import { DiscussionDelivery } from "../../src/collaboration/DiscussionDelivery";
 import { DiscussionOutbox } from "../../src/collaboration/DiscussionOutbox";
+import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
@@ -77,6 +78,33 @@ integration("offline picture dependencies recover a lost upload ack against real
 		worker.wake(); await worker.settled();
 		expect((await transport.history(fixture.entry, threadId, messageId)).revisions[0].body).toEqual(body);
 		await expect(owner.pictureContent(fixture.entry, pictureId, "content", picture.renditions.content!)).resolves.toBeInstanceOf(ArrayBuffer);
+
+		// Exercise the session path used by the native picture renderer and the
+		// online-only Send and reopen button against actual HTTP/object storage.
+		const uiStore = await DiscussionStore.open({ ...identity, vaultId: randomUUID() }, factory);
+		const session = new DiscussionSession(uiStore, transport);
+		try {
+			await session.start(); session.watch(fixture.entry, () => {}); await session.refresh();
+			const rendered = await session.pictures.load(fixture.entry, pictureId);
+			expect(rendered).toMatchObject({ mime: "image/png", local: false, offline: false });
+			session.setForeground(false);
+			expect(await session.pictures.load(fixture.entry, pictureId)).toMatchObject({ bytes: rendered.bytes, offline: true });
+			session.setForeground(true); await session.refresh();
+			const resolved = await owner.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
+				type: "thread.state", thread_id: threadId, expected_state_revision: 1, state: "resolved",
+			} });
+			const fresh = await prepareLocalPicture(randomUUID(), fixture.entry, original);
+			const replyBody = { version: 1, blocks: [{ type: "picture", picture_id: fresh.id, alt: "Reopen with a picture" }] };
+			await uiStore.saveDraft({ id: "reopen", scopeId: fixture.entry, revision: 0, body: { text: "", mentions: [], pictures: replyBody.blocks } }, null, [fresh]);
+			const replyId = randomUUID();
+			await session.onlineDraft({ id: "reopen", revision: 0 }, { operationId: randomUUID(), scopeId: fixture.entry, payload: {
+				type: "reply.create", thread_id: threadId, message_id: replyId, body: replyBody, reopen: true, expected_state_revision: resolved.state_revision,
+			} });
+			expect((await transport.message(fixture.entry, threadId, replyId)).message.body).toEqual(replyBody);
+			expect((await transport.thread(fixture.entry, threadId)).thread.state).toBe("open");
+			expect(await uiStore.getDraft("reopen")).toBeUndefined(); expect(await uiStore.pictureSource(fresh.id, fixture.entry)).toBeUndefined();
+			expect((await owner.picture(fixture.entry, fresh.id)).state).toBe("attached");
+		} finally { await session.close(); }
 
 		const secondId = randomUUID(), second = await prepareLocalPicture(secondId, fixture.entry, original);
 		await store.saveDraft({ id: "revoked-picture", scopeId: fixture.entry, revision: 0, body: { text: "Keep my picture", mentions: [], pictures: [{ type: "picture", picture_id: secondId }] } }, null, [second]);

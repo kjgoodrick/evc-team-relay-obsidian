@@ -645,6 +645,17 @@
 .relay-comment-composer textarea { width: 100%; min-height: 84px; resize: vertical; }
 .relay-comment-recovery-text { width: 100%; margin-block: var(--size-4-2); resize: vertical; }
 .relay-comment-composer select { max-width: 100%; }
+.relay-comment-draft-pictures { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: var(--size-4-2); }
+.relay-comment-draft-picture { min-width: 0; display: grid; gap: var(--size-4-2); align-content: start; padding: var(--size-4-2); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.relay-comment-draft-picture input { width: 100%; }
+.relay-comment-picture { margin: var(--size-4-2) 0; min-width: 0; }
+.relay-comment-picture-frame { width: 100%; }
+.relay-comment-picture img { display: block; max-width: 100%; height: auto; object-fit: contain; border-radius: var(--radius-s); }
+.relay-comment-picture img[hidden] { display: none; }
+.relay-comment-picture [hidden], .relay-comment-composer [hidden] { display: none; }
+.relay-comment-picture figcaption { color: var(--text-muted); font-size: var(--font-ui-small); margin-block: var(--size-2-1); }
+.relay-comment-draft-picture .relay-comment-picture img { max-height: 180px; width: auto; }
+.relay-comment-draft-picture .relay-comment-picture-frame { max-height: 180px; }
 .relay-comment-mention { color: var(--text-accent); background: var(--background-modifier-hover); border-radius: 3px; }
 .relay-comment-reaction[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
 .relay-comment-history { border-bottom: 1px solid var(--background-modifier-border); padding-bottom: var(--size-4-3); }

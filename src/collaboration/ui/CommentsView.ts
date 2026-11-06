@@ -2,18 +2,16 @@ import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { DiscussionHost } from "../DiscussionHost";
 import type { AnchoredThread, DiscussionSession } from "../DiscussionSession";
-import { isRecord, protocolJson, REACTIONS, type DiscussionMessage, type MessageBody } from "../DiscussionProtocol";
+import { isRecord, protocolJson, REACTIONS, type DiscussionMessage } from "../DiscussionProtocol";
 import type { OnlineOperation } from "../DiscussionTransport";
 import { CommentComposer } from "./CommentComposer";
 import { renderCommentBody } from "./CommentBody";
 import { PendingComments } from "./PendingComments";
 import { DiscussionDrafts } from "./DiscussionDrafts";
+import { CommentPicture } from "./CommentPicture";
+import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
 
 export const COMMENTS_VIEW = "team-relay-comments";
-function plainText(body: MessageBody): string | undefined {
-	if (body.blocks.some(block => block.type !== "paragraph" || block.children.some(node => node.type !== "text" || !!node.marks?.length))) return undefined;
-	return body.blocks.map(block => block.type === "paragraph" ? block.children.map(node => node.type === "text" ? node.text : "").join("") : "").join("\n\n");
-}
 
 class AccountModal extends Modal {
 	private stopWatching: () => void;
@@ -26,6 +24,7 @@ class AccountModal extends Modal {
 class HistoryModal extends AccountModal {
 	private closed = false;
 	private after = 0;
+	private pictures: CommentPicture[] = [];
 	constructor(app: App, private session: DiscussionSession, private entryId: string, private threadId: string, private messageId: string) { super(app, session); }
 	onOpen(): void { this.setTitle("Comment history"); void this.more(); }
 	private async more(): Promise<void> {
@@ -35,14 +34,15 @@ class HistoryModal extends AccountModal {
 			for (const revision of page.revisions) {
 				const article = this.contentEl.createEl("article", { cls: "relay-comment-history" });
 				article.createEl("h3", { text: `Revision ${revision.revision} · ${new Date(revision.created_at).toLocaleString()}` });
-				renderCommentBody(article, revision.body, id => this.session.displayName(this.entryId, id));
+				renderCommentBody(article, revision.body, id => this.session.displayName(this.entryId, id),
+					(parent, picture) => this.pictures.push(new CommentPicture(parent, this.session, this.entryId, picture)));
 				if (revision.reason) article.createEl("p", { text: revision.reason });
 			}
 			this.after = page.next_after;
 			if (page.has_more) { const more = this.contentEl.createEl("button", { text: "Load more history" }); more.onclick = () => { more.remove(); void this.more(); }; }
 		} catch { if (!this.closed) this.contentEl.createEl("p", { text: "History could not be loaded. Reconnect or check access to this note.", attr: { role: "alert" } }); }
 	}
-	onClose(): void { this.closed = true; super.onClose(); }
+	onClose(): void { this.closed = true; this.pictures.forEach(p => p.dispose()); this.pictures = []; super.onClose(); }
 }
 
 class DeleteCommentModal extends AccountModal {
@@ -70,12 +70,12 @@ class DeleteCommentModal extends AccountModal {
 
 class EditCommentModal extends AccountModal {
 	private composer?: CommentComposer;
-	constructor(app: App, private session: DiscussionSession, private entryId: string, private threadId: string, private message: DiscussionMessage, private text: string) { super(app, session); }
+	constructor(app: App, private session: DiscussionSession, private entryId: string, private threadId: string, private message: DiscussionMessage, private draft: CommentDraft) { super(app, session); }
 	onOpen(): void {
 		this.setTitle("Edit comment");
 		this.composer = new CommentComposer(this.contentEl, this.session, this.entryId, `edit:${this.entryId}:${this.message.id}`,
 			body => ({ type: "message.edit", payload: { type: "message.edit", thread_id: this.threadId, message_id: this.message.id,
-				expected_revision: this.message.revision, body: protocolJson(body) } }), "Comment", this.text, () => this.close());
+				expected_revision: this.message.revision, body: protocolJson(body) } }), "Comment", this.draft, () => this.close());
 	}
 	onClose(): void { this.composer?.dispose(); super.onClose(); }
 }
@@ -97,6 +97,7 @@ class ThreadCard {
 	private error: HTMLElement;
 	private disposed = false;
 	private renderedKey = "";
+	private pictures: CommentPicture[] = [];
 	constructor(parent: HTMLElement, private app: App, private session: DiscussionSession, private entryId: string, private thread: AnchoredThread,
 		private host: DiscussionHost) {
 		this.el = parent.createEl("article", { cls: "relay-comment-thread" });
@@ -155,13 +156,18 @@ class ThreadCard {
 				if (this.pendingReopen && isRecord(this.pendingReopen.payload) && JSON.stringify(this.pendingReopen.payload.body) !== serialized) throw new Error("Review the unconfirmed reply before changing it.");
 				this.pendingReopen ??= { operationId: uuid(), scopeId: this.entryId, payload: { type: "reply.create", thread_id: this.thread.id,
 					message_id: uuid(), body: protocolJson(body), reopen: true, expected_state_revision: this.thread.state_revision } };
-				await this.session.onlineDraft(draft, this.pendingReopen); this.pendingReopen = undefined;
+				try { await this.session.onlineDraft(draft, this.pendingReopen); this.pendingReopen = undefined; }
+				catch (error) {
+					// Picture preflight/upload failed before a reply could be submitted.
+					if (!await this.session.store.preference("online:" + draft.id)) this.pendingReopen = undefined;
+					throw error;
+				}
 			}, () => this.thread.state === "resolved" || !!this.pendingReopen);
 		}
 		this.composerContainer.hidden = !this.expanded; this.composer?.update();
 		const result = await this.session.messages(this.entryId, thread.id, this.after, this.count);
 		if (this.disposed || generation !== this.generation || this.session.status === "closed") return;
-		this.content.empty();
+		this.pictures.forEach(p => p.dispose()); this.pictures = []; this.content.empty();
 		for (const message of result.messages) this.message(message);
 		if (!result.messages.length) this.content.createEl("p", { text: "Loading discussion…", cls: "relay-comment-muted" });
 		if (this.expanded && result.hasMore) {
@@ -178,7 +184,8 @@ class ThreadCard {
 	private message(message: DiscussionMessage): void {
 		const article = this.content.createDiv({ cls: "relay-comment-message" });
 		article.createDiv({ cls: "relay-comment-author", text: `${message.author_id === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, message.author_id)} · ${new Date(message.created_at).toLocaleString()}${message.revision > 1 ? " · edited" : ""}` });
-		renderCommentBody(article, message.body, id => this.session.displayName(this.entryId, id));
+		renderCommentBody(article, message.body, id => this.session.displayName(this.entryId, id),
+			(parent, picture) => this.pictures.push(new CommentPicture(parent, this.session, this.entryId, picture)));
 		const permission = this.session.permission(this.entryId), actions = article.createDiv({ cls: "relay-comment-message-actions" });
 		if (!message.deleted) for (const [emoji, label] of Object.entries(REACTIONS)) {
 			const reaction = message.reactions.find(r => r.emoji === emoji);
@@ -197,9 +204,9 @@ class ThreadCard {
 			const history = actions.createEl("button", { text: "History" }); history.onclick = () => new HistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();
 		}
 		if (!message.deleted && permission?.comment) {
-			const text = message.body ? plainText(message.body) : undefined;
-			if (message.author_id === this.session.identity.accountId && text !== undefined) {
-				const edit = actions.createEl("button", { text: "Edit" }); edit.onclick = () => new EditCommentModal(this.app, this.session, this.entryId, this.thread.id, message, text).open();
+			const draft = message.body ? editableCommentDraft(message.body, id => this.session.displayName(this.entryId, id)) : undefined;
+			if (message.author_id === this.session.identity.accountId && draft !== undefined) {
+				const edit = actions.createEl("button", { text: "Edit" }); edit.onclick = () => new EditCommentModal(this.app, this.session, this.entryId, this.thread.id, message, draft).open();
 			}
 			if (message.author_id === this.session.identity.accountId || permission.moderate) {
 				const remove = actions.createEl("button", { text: "Remove" }); remove.disabled = !this.session.online;
@@ -207,7 +214,7 @@ class ThreadCard {
 			}
 		}
 	}
-	dispose(): void { this.disposed = true; this.generation++; this.composer?.dispose(); this.el.remove(); }
+	dispose(): void { this.disposed = true; this.generation++; this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
 }
 
 export class CommentsView extends ItemView {

@@ -1,5 +1,5 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
-import { pictureIds, prepareLocalPicture, type LocalPicture, type PictureUpload } from "../PictureProtocol";
+import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, PICTURE_CACHE_QUOTA, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
@@ -80,7 +80,7 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 6);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 7);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -109,6 +109,10 @@ export class DiscussionStore {
 				db.createObjectStore("pictureSources", { keyPath: "id" }).createIndex("scope", "scopeId");
 				const refs = db.createObjectStore("pictureReferences", { keyPath: ["pictureId", "kind", "ownerId"] });
 				refs.createIndex("owner", ["kind", "ownerId"]); refs.createIndex("picture", "pictureId");
+			}
+			if (event.oldVersion < 7) {
+				const cache = db.createObjectStore("pictureCache", { keyPath: ["scopeId", "id", "variant"] });
+				cache.createIndex("scope", "scopeId"); cache.createIndex("usedAt", "usedAt");
 			}
 		};
 		const db = await request(open);
@@ -164,6 +168,48 @@ export class DiscussionStore {
 		return this.transaction(["pictureSources"], "readonly", async tx => {
 			const source: LocalPicture | undefined = await request(tx.objectStore("pictureSources").get(id));
 			return source?.scopeId === scopeId ? source : undefined;
+		});
+	}
+
+	async cachedPicture(scopeId: string, id: string, variant: PictureVariant): Promise<CachedPicture | undefined> {
+		return this.transaction(["pictureCache"], "readwrite", async tx => {
+			const cache = tx.objectStore("pictureCache"), row: CachedPicture | undefined = await request(cache.get([scopeId, id, variant]));
+			if (row) { row.usedAt = Date.now(); await request(cache.put(row)); }
+			return row;
+		});
+	}
+	/** Downloaded renditions are disposable LRU data, never original draft bytes.
+	 * Generation fencing prevents an in-flight download repopulating a revoked scope.
+	 */
+	async cachePicture(scopeId: string, id: string, variant: PictureVariant, rendition: PictureRendition, bytes: ArrayBuffer, generation: number): Promise<boolean> {
+		const safe = parsePictureRendition(rendition, variant === "thumbnail"), copy = bytes.slice(0);
+		if (copy.byteLength !== safe.size || await pictureHash(copy) !== safe.sha256) throw new Error("Invalid cached picture");
+		return this.transaction(["pictureCache", "preferences", "generations"], "readwrite", async tx => {
+			if ((await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== generation) return false;
+			const cache = tx.objectStore("pictureCache"), preferences = tx.objectStore("preferences"), key = [scopeId, id, variant];
+			const previous: CachedPicture | undefined = await request(cache.get(key));
+			let total = (await request(preferences.get("pictureCacheBytes")) ?? 0) - (previous?.rendition.size ?? 0);
+			await request(cache.delete(key));
+			while (total + safe.size > PICTURE_CACHE_QUOTA) {
+				const oldest = await request(cache.index("usedAt").openCursor());
+				if (!oldest) throw new Error("Picture cache accounting is inconsistent");
+				total -= (oldest.value as CachedPicture).rendition.size; await request(oldest.delete());
+			}
+			await request(cache.put({ scopeId, id, variant, rendition: safe, bytes: copy, usedAt: Date.now() }));
+			await request(preferences.put(total + safe.size, "pictureCacheBytes")); return true;
+		});
+	}
+	async forgetPicture(scopeId: string, id: string): Promise<void> {
+		await this.transaction(["pictureCache", "preferences", "generations"], "readwrite", async tx => {
+			const cache = tx.objectStore("pictureCache"), preferences = tx.objectStore("preferences");
+			let total: number = await request(preferences.get("pictureCacheBytes")) ?? 0;
+			for (const variant of ["content", "thumbnail"]) {
+				const key = [scopeId, id, variant], previous: CachedPicture | undefined = await request(cache.get(key));
+				if (previous) { total -= previous.rendition.size; await request(cache.delete(key)); }
+			}
+			await request(preferences.put(total, "pictureCacheBytes"));
+			const generations = tx.objectStore("generations");
+			await request(generations.put((await request(generations.get(scopeId)) ?? 0) + 1, scopeId));
 		});
 	}
 
@@ -347,7 +393,7 @@ export class DiscussionStore {
 
 	/** Remote authorization loss clears cached content, never pending local text. */
 	async clearRemoteScope(scopeId: string, expected?: ScopeCheckpoint): Promise<boolean> {
-		return this.transaction(["entities", "cursors", "generations", "preferences"], "readwrite", async tx => {
+		return this.transaction(["entities", "cursors", "generations", "preferences", "pictureCache"], "readwrite", async tx => {
 			const generations = tx.objectStore("generations");
 			const generation: number = await request(generations.get(scopeId)) ?? 0;
 			if (expected && (generation !== expected.generation ||
@@ -358,6 +404,12 @@ export class DiscussionStore {
 			await request(tx.objectStore("preferences").delete("permission:" + scopeId));
 			await request(tx.objectStore("preferences").delete("people:" + scopeId));
 			await request(tx.objectStore("preferences").delete("documentGeneration:" + scopeId));
+			const cache = tx.objectStore("pictureCache");
+			let cachedBytes: number = await request(tx.objectStore("preferences").get("pictureCacheBytes")) ?? 0;
+			for (const key of await request(cache.index("scope").getAllKeys(scopeId))) {
+				cachedBytes -= (await request(cache.get(key)) as CachedPicture).rendition.size; await request(cache.delete(key));
+			}
+			await request(tx.objectStore("preferences").put(cachedBytes, "pictureCacheBytes"));
 			await request(generations.put(generation + 1, scopeId));
 			return true;
 		});
@@ -365,8 +417,8 @@ export class DiscussionStore {
 
 	/** Explicit local account cleanup; callers must stop workers first. */
 	async clearAll(): Promise<void> {
-		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", ...PICTURE_STORES], "readwrite", async tx => {
-			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", ...PICTURE_STORES]) await request(tx.objectStore(name).clear());
+		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", ...PICTURE_STORES], "readwrite", async tx => {
+			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", ...PICTURE_STORES]) await request(tx.objectStore(name).clear());
 		});
 	}
 

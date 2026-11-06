@@ -4,6 +4,10 @@ export const PICTURE_MAX_BYTES = 10 * 1024 * 1024;
 export const PICTURE_MAX_PIXELS = 20_000_000;
 export const PICTURE_THUMBNAIL_BYTES = 2 * 1024 * 1024;
 export const PICTURE_SOURCE_QUOTA = 100 * 1024 * 1024;
+export const PICTURE_CACHE_QUOTA = 50 * 1024 * 1024;
+export class PictureOfflineError extends Error {}
+export type PictureVariant = "content" | "thumbnail";
+export type CachedPicture = { scopeId: string; id: string; variant: PictureVariant; rendition: PictureRendition; bytes: ArrayBuffer; usedAt: number };
 export type PictureBlock = { type: "picture"; picture_id: string; alt?: string };
 export type PictureRendition = { sha256: string; size: number; mime: "image/png" | "image/jpeg"; width: number; height: number };
 export type PictureMetadata = { picture_id: string; state: "staged" | "verified" | "attached";

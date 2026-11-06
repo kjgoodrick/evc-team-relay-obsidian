@@ -1,6 +1,7 @@
 import { v4 as uuid } from "uuid";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionDelivery } from "./DiscussionDelivery";
+import { DiscussionPictures } from "./DiscussionPictures";
 import { parsePictureUpload } from "./PictureProtocol";
 import { commandPictures } from "./storage/PictureRecords";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
@@ -24,6 +25,7 @@ function storedThread(value: unknown): AnchoredThread {
  */
 export class DiscussionSession {
 	readonly outbox: DiscussionOutbox;
+	readonly pictures = new DiscussionPictures(this);
 	private entries = new Map<string, Entry>();
 	private listeners = new Set<() => void>();
 	private foreground = true;
@@ -334,6 +336,18 @@ export class DiscussionSession {
 	async onlineDraft(draft: Pick<Draft, "id" | "revision">, operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");
 		await this.trackLocal((async () => {
+			const saved = await this.store.getDraft(draft.id);
+			if (!saved || saved.scopeId !== operation.scopeId || saved.revision !== draft.revision) throw new Error("Draft changed in another view");
+			// Upload before locking the online receipt. A rejected picture leaves the
+			// draft editable; a lost reply acknowledgment retries the exact command.
+			if (!await this.store.preference("online:" + draft.id)) {
+				for (const pictureId of commandPictures(operation.payload)) {
+					const source = await this.store.pictureSource(pictureId, operation.scopeId);
+					if (!source) continue; // Existing published picture; the server checks scope/access.
+					if (!this.online || !this.canAttachPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check picture permission before sending.");
+					await this.transport.uploadPicture(operation.scopeId, { type: "picture.upload", picture_id: pictureId, sha256: source.sha256, size: source.size }, source.bytes);
+				}
+			}
 			const exact = await this.store.prepareOnlineDraft(draft.id, draft.revision, operation);
 			if (this.closed) throw new Error("This discussion account is closed.");
 			await this.onlineAction(exact);

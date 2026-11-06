@@ -1,4 +1,5 @@
 import { safeDiscussionUrl, type InlineNode, type MessageBody, type TextNode } from "../DiscussionProtocol";
+import type { PictureBlock } from "../PictureProtocol";
 
 function textNode(parent: HTMLElement, node: TextNode): void {
 	let target = parent;
@@ -18,12 +19,15 @@ function inline(parent: HTMLElement, nodes: InlineNode[], name: (id: string) => 
 }
 
 /** Render only supported nodes with textContent; server/comment text never becomes HTML. */
-export function renderCommentBody(parent: HTMLElement, body: MessageBody | null, name: (id: string) => string): void {
+export function renderCommentBody(parent: HTMLElement, body: MessageBody | null, name: (id: string) => string, picture?: (parent: HTMLElement, block: PictureBlock) => void): void {
 	if (!body) { parent.createEl("p", { text: "Comment removed", cls: "relay-comment-muted" }); return; }
 	for (const block of body.blocks) {
 		if (block.type === "paragraph") inline(parent.createEl("p"), block.children, name);
 		else if (block.type === "code") parent.createEl("pre").createEl("code", { text: block.text });
-		else if (block.type === "picture") parent.createEl("p", { text: block.alt ? "Picture: " + block.alt : "Picture", cls: "relay-comment-picture-placeholder" });
+		else if (block.type === "picture") {
+			if (picture) picture(parent, block);
+			else parent.createEl("p", { text: block.alt ? "Picture: " + block.alt : "Picture", cls: "relay-comment-picture-placeholder" });
+		}
 		else {
 			const list = parent.createEl(block.ordered ? "ol" : "ul");
 			for (const item of block.items) inline(list.createEl("li"), item.children, name);

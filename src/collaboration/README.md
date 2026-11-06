@@ -96,7 +96,7 @@ intrinsic geometry, and cropped-out marks do not retain keyboard focus.
 
 Desktop tests verified duplicate-image pins, external regions, thread navigation,
 scrolling/sidebar resizing, reload and an off-center cover crop. Creation still
-uses the placement dialog. Direct manipulation, the native comment-picture UI,
+uses the placement dialog. Direct manipulation, comment-picture recovery/cleanup,
 image presence, arbitrary transforms, all format/EXIF
 cases, mobile and resource acceptance remain unfinished.
 
@@ -303,7 +303,7 @@ Jest run skips this opt-in test. PostgreSQL lock/migration tests live in the
 server's separate `discussions_postgres.py`; this client test does not substitute
 for them. No native vault or running service is touched.
 
-## Pictures in comments: durable client foundation
+## Pictures in comments: desktop preview
 
 The client now understands picture body blocks and the separately negotiated
 `discussion_pictures` capability. `PictureProtocol` bounds metadata and strips
@@ -312,7 +312,7 @@ raw bytes and verifies returned MIME/size/digest. Existing verified uploads are
 reused after a lost acknowledgment. Content reads use authenticated requests;
 bearer tokens never enter image URLs or diagnostics.
 
-IndexedDB version 6 adds original picture bytes and explicit draft/outbox
+IndexedDB version 6 added original picture bytes and explicit draft/outbox
 references. Saving a draft and its bytes is atomic. Enqueue transfers references
 and inserts immutable `picture.upload` dependencies before retiring the draft.
 The ordinary worker sends a message only after its pictures are verified. A
@@ -341,12 +341,35 @@ python tests/integration/discussions_client.py --plugin ../../../evc-team-relay-
 
 This runs `realPictureStack.test.ts`: offline restart, reviewer upload, lost
 upload acknowledgment, private staging, authenticated content/thumbnails,
-history, revocation and retained original bytes. Its bucket, database and HTTP
+history, revocation and retained original bytes. It also exercises the session
+image loader, offline cache, and picture Send and reopen against the actual API.
+Its bucket, database and HTTP
 process are temporary. The ordinary text-only fixture also remains supported.
 
-This is not a finished native picture feature. The picker/paste flow, authenticated
-image display and cache, picture editing, Send and reopen integration, expiry
-repair, server cleanup and desktop/mobile acceptance remain. Current body
-rendering preserves picture descriptions as placeholders instead of dropping a
-thread or inventing an unauthenticated image URL. Keep the server creation flag
-disabled outside controlled development fixtures until those parts are ready.
+The composer supports a native file picker and clipboard image files, descriptions,
+removal and picture-only messages. It saves each source atomically before showing
+the attachment. Format/header preflight rejects unsupported/animated/oversized
+sources before local preview decoding; the server remains the full verifier.
+Simple paragraph/mention messages with trailing pictures can be edited without
+dropping references. Other rich or interleaved content waits for the rich editor.
+Send and reopen uploads first, then locks its exact online command. A failed
+upload leaves the draft editable; a lost reply acknowledgment preserves the
+receipt and retries without uploading again. It never queues moderation offline.
+
+IndexedDB version 7 adds a separate 50 MiB LRU rendition cache. It cannot evict
+original draft/outbox sources. Downloads always reauthorize online, validate
+MIME/size/digest, and use account-local blob URLs. Only retryable network failures
+allow a cached offline rendition; authorization failures purge its variants.
+Scope-generation checks prevent late downloads from repopulating revoked data.
+The account-owned loader deduplicates requests and permits at most two reads,
+with a bounded waiting list. The renderer loads visible pictures, frees blob
+URLs/offscreen decoded pixels while reserving layout, and releases everything
+on disposal/account loss. Full-size loading is explicit; an offline miss retains
+the thumbnail. Cache quota failures do not prevent displaying authorized bytes.
+
+Desktop Obsidian 1.13.7 has native evidence for picker, draft reload, picture-only
+send, edit/history, Send and reopen, scrolling and offline cache reload. Clipboard
+paste has automated DOM coverage; native clipboard/mobile/large-format and
+resource acceptance remain. Expiry repair, rejected dependency editing, server
+cleanup/storage accounting and backup/restore also remain. Keep the server
+creation flag disabled outside controlled fixtures until those parts are ready.

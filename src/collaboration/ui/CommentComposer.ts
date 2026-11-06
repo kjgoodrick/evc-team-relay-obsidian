@@ -2,8 +2,10 @@ import { v4 as uuid } from "uuid";
 import { parseAnchor, sourceAnchor, protocolJson, type DiscussionAnchor, type MessageBody } from "../DiscussionProtocol";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { Json, QueuedCommand } from "../storage/DiscussionStore";
-import type { PictureBlock } from "../PictureProtocol";
-import { commentDraftBody, readCommentDraft, updateMentionSpans, type MentionSpan } from "./CommentDraft";
+import { prepareLocalPicture, type PictureBlock } from "../PictureProtocol";
+import { inspectPicture, PictureInputError, readPictureFile } from "../PictureInput";
+import { CommentPicture } from "./CommentPicture";
+import { commentDraftBody, readCommentDraft, updateMentionSpans, type CommentDraft, type MentionSpan } from "./CommentDraft";
 
 export type ComposerCommand = { type: QueuedCommand["type"]; payload: Json; dependsOn?: string[] };
 
@@ -21,10 +23,15 @@ export class CommentComposer {
 	private previousText = "";
 	private mentions: MentionSpan[] = [];
 	private pictures: PictureBlock[] = [];
+	private pictureList: HTMLElement;
+	private attach: HTMLButtonElement;
+	private fileInput: HTMLInputElement;
+	private pictureViews = new Map<string, { el: HTMLElement; view: CommentPicture; alt: HTMLInputElement; remove: HTMLButtonElement }>();
 	private people: HTMLSelectElement;
 	private peopleSignature = "";
 	private chain: Promise<void> = Promise.resolve();
 	private ready: Promise<void>;
+	private attachmentFlight?: Promise<void>;
 	private saveFailed = false;
 	private busy = false;
 	private onlinePending = false;
@@ -37,14 +44,20 @@ export class CommentComposer {
 	private reveal?: (anchor: DiscussionAnchor) => void;
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private draftId: string,
-		private command: (body: MessageBody, anchor?: DiscussionAnchor) => ComposerCommand, label = "Comment", initialText = "",
+		private command: (body: MessageBody, anchor?: DiscussionAnchor) => ComposerCommand, label = "Comment", initialText: string | CommentDraft = "",
 		private onSent: () => void = () => {}) {
 		this.el = parent.createEl("form", { cls: "relay-comment-composer" });
 		this.el.createEl("label", { text: label, attr: { for: draftId } });
 		this.targetEl = this.el.createDiv({ cls: "relay-comment-draft-target" });
 		this.textarea = this.el.createEl("textarea", { attr: { id: draftId, rows: "3", maxlength: "65536", "aria-label": label, placeholder: "Write a comment…" } });
 		this.textarea.disabled = true;
+		this.pictureList = this.el.createDiv({ cls: "relay-comment-draft-pictures" });
 		const actions = this.el.createDiv({ cls: "relay-comment-composer-actions" });
+		this.attach = actions.createEl("button", { text: "Add pictures", attr: { type: "button" } });
+		this.fileInput = actions.createEl("input", { attr: { type: "file", accept: "image/png,image/jpeg,image/webp,image/gif", multiple: "", "aria-label": "Choose comment pictures" } });
+		this.fileInput.hidden = true;
+		this.attach.onclick = () => this.fileInput.click();
+		this.fileInput.onchange = () => { const files = Array.from(this.fileInput.files ?? []); this.fileInput.value = ""; void this.addPictures(files); };
 		this.people = actions.createEl("select", { attr: { "aria-label": "Mention a member" } });
 		this.people.addEventListener("change", () => {
 			const person = this.session.participants(this.entryId).find(p => p.id === this.people.value);
@@ -67,6 +80,18 @@ export class CommentComposer {
 			this.mentions = updateMentionSpans(this.previousText, this.textarea.value, this.mentions);
 			this.previousText = this.textarea.value; this.persist();
 		});
+		this.textarea.addEventListener("paste", event => {
+			const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith("image/"));
+			if (!files.length || !this.session.canAttachPictures || this.busy || this.onlinePending || this.textarea.disabled || this.saveFailed) return;
+			event.preventDefault();
+			const text = event.clipboardData?.getData("text/plain");
+			if (text) {
+				this.textarea.setRangeText(text, this.textarea.selectionStart, this.textarea.selectionEnd, "end");
+				this.mentions = updateMentionSpans(this.previousText, this.textarea.value, this.mentions);
+				this.previousText = this.textarea.value; this.persist();
+			}
+			void this.addPictures(files);
+		});
 		this.textarea.addEventListener("keydown", event => {
 			if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.isComposing && !this.composing) {
 				event.preventDefault(); void this.submit();
@@ -75,10 +100,10 @@ export class CommentComposer {
 		this.ready = session.trackLocal(session.store.getDraft(draftId).then(async draft => {
 			if (this.disposed) return;
 			this.revision = draft?.revision ?? -1;
-			const restored = readCommentDraft(draft?.body);
+			const restored = readCommentDraft(draft?.body ?? initialText);
 			this.savedValue = JSON.stringify(restored); this.mentions = restored.mentions;
 			this.pictures = restored.pictures ?? [];
-			this.textarea.value = draft ? restored.text : initialText; this.previousText = this.textarea.value;
+			this.textarea.value = restored.text; this.previousText = this.textarea.value;
 			if (draft?.target !== undefined) {
 				this.target = parseAnchor(draft.target);
 				if (sourceAnchor(this.target) && sourceAnchor(this.target)!.document_id !== this.entryId) throw new Error("Draft target does not match this note");
@@ -89,7 +114,7 @@ export class CommentComposer {
 			this.textarea.disabled = false;
 			this.textarea.readOnly = this.onlinePending;
 			if (this.onlinePending) this.status.setText("A previous send is unconfirmed. Reconnect and retry the same send.");
-			if (!draft && initialText) this.persist();
+			if (!draft && (restored.text || restored.pictures?.length)) this.persist();
 			this.update();
 		}).catch(() => {
 			this.saveFailed = true; this.textarea.disabled = false; this.textarea.readOnly = true;
@@ -97,7 +122,7 @@ export class CommentComposer {
 		}));
 	}
 	onRevealTarget(reveal: (anchor: DiscussionAnchor) => void): void { this.reveal = reveal; }
-	async flush(): Promise<boolean> { await this.ready; await this.chain; return !this.saveFailed; }
+	async flush(): Promise<boolean> { await this.ready; await this.attachmentFlight; await this.chain; return !this.saveFailed; }
 	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>, available: () => boolean = () => true): void {
 		this.extraAvailable = available;
 		this.extra = this.send.parentElement!.createEl("button", { text: label, attr: { type: "button" } });
@@ -117,6 +142,9 @@ export class CommentComposer {
 			this.people.value = selected;
 		}
 		this.people.disabled = this.busy || this.onlinePending || this.textarea.disabled || !people.length;
+		this.attach.hidden = !this.session.canAttachPictures;
+		this.attach.disabled = blocked || this.onlinePending || this.textarea.disabled || this.pictures.length >= 10;
+		this.renderPictures();
 		const label = this.target?.type === "image_file" ? "Image file: " + (this.target.geometry.type === "whole" ? "whole image" : this.target.geometry.type) : this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
 			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : "";
 		if (this.targetEl.dataset.target !== label) {
@@ -127,6 +155,64 @@ export class CommentComposer {
 				reveal.onclick = () => { if (this.target) this.reveal?.(this.target); };
 			}
 		}
+	}
+	private renderPictures(): void {
+		for (const [id, card] of this.pictureViews) if (!this.pictures.some(p => p.picture_id === id)) {
+			card.view.dispose(); card.el.remove(); this.pictureViews.delete(id);
+		}
+		for (const picture of this.pictures) {
+			let card = this.pictureViews.get(picture.picture_id);
+			if (!card) {
+				const el = this.pictureList.createDiv({ cls: "relay-comment-draft-picture" });
+				const view = new CommentPicture(el, this.session, this.entryId, picture, true);
+				const alt = el.createEl("input", { attr: { type: "text", maxlength: "1024", placeholder: "Picture description", "aria-label": "Picture description" } });
+				alt.value = picture.alt ?? "";
+				alt.oninput = () => { picture.alt = alt.value; view.setAlt(alt.value); this.persist(); };
+				const remove = el.createEl("button", { text: "Remove picture", attr: { type: "button" } });
+				remove.onclick = () => {
+					if (this.busy || this.onlinePending || this.saveFailed) return;
+					this.pictures = this.pictures.filter(p => p !== picture); this.persist(); this.update();
+				};
+				card = { el, view, alt, remove }; this.pictureViews.set(picture.picture_id, card);
+			}
+			card.alt.disabled = card.remove.disabled = this.busy || this.onlinePending || this.saveFailed;
+		}
+	}
+	/** Bytes and references commit before the attachment appears in the draft.
+	 * One file is read at a time; a failed file preserves earlier successful picks.
+	 */
+	async addPictures(files: readonly File[]): Promise<void> {
+		await this.ready;
+		if (!files.length || this.disposed || this.busy || this.onlinePending || this.saveFailed || !this.session.canAttachPictures || !this.session.permission(this.entryId)?.comment) return;
+		if (files.length + this.pictures.length > 10) { this.status.setText("A comment can contain at most ten pictures."); return; }
+		this.busy = true; this.textarea.readOnly = true; this.update();
+		this.attachmentFlight = this.session.trackLocal((async () => {
+			try {
+				await this.chain; if (this.saveFailed) return;
+				for (const file of files) {
+					this.status.setText("Saving picture on this device…");
+					const bytes = await readPictureFile(file); inspectPicture(bytes);
+					const source = await prepareLocalPicture(uuid(), this.entryId, bytes);
+					if (this.disposed || this.session.status === "closed") return;
+					const pictures = [...this.pictures, { type: "picture" as const, picture_id: source.id, alt: "" }];
+					const draft = { text: this.textarea.value, mentions: this.mentions.map(m => ({ ...m })), pictures };
+					await this.session.store.saveDraft({ id: this.draftId, scopeId: this.entryId, revision: this.revision + 1, body: protocolJson(draft),
+						...(this.target ? { target: protocolJson(this.target) } : {}) }, this.revision < 0 ? null : this.revision, [source]);
+					this.revision++; this.savedValue = JSON.stringify(draft); this.pictures = pictures;
+					if (!this.disposed) this.update();
+				}
+				if (!this.disposed) this.status.setText("Draft and pictures saved on this device");
+			} catch (error) {
+				if (this.disposed) return;
+				if (error instanceof PictureInputError) this.status.setText(error.message);
+				else if (error instanceof Error && error.message.includes("100 MiB")) this.status.setText("Local picture storage is full. Send or remove other draft pictures before adding more.");
+				else {
+					this.saveFailed = error instanceof Error && error.message.includes("another view");
+					this.status.setText(this.saveFailed ? "This draft changed in another window. Reopen it before adding pictures." : "Could not save this picture. Check device storage and try again. Earlier saved pictures are retained.");
+				}
+			} finally { this.busy = false; this.textarea.readOnly = this.onlinePending; if (!this.disposed) this.update(); }
+		})());
+		await this.attachmentFlight;
 	}
 	private persist(): void {
 		if (this.disposed || this.textarea.disabled || this.busy || this.onlinePending) return;
@@ -174,5 +260,5 @@ export class CommentComposer {
 			this.busy = false; this.textarea.readOnly = this.onlinePending; this.update();
 		}
 	}
-	dispose(): void { this.disposed = true; this.el.remove(); }
+	dispose(): void { this.disposed = true; for (const card of this.pictureViews.values()) card.view.dispose(); this.pictureViews.clear(); this.el.remove(); }
 }
