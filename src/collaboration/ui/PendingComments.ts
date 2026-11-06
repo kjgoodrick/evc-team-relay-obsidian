@@ -2,6 +2,7 @@ import type { DiscussionSession } from "../DiscussionSession";
 import { isRecord, parseBody, REACTIONS } from "../DiscussionProtocol";
 import type { OutboxOperation } from "../storage/DiscussionStore";
 import { commentBodyText, renderCommentBody } from "./CommentBody";
+import { commandPictures } from "../storage/PictureRecords";
 
 const failureHelp: Record<string, string> = {
 	anchor_generation_mismatch: "This note was rebuilt or restored. Review and reattach this comment before sending.",
@@ -18,6 +19,7 @@ const failureHelp: Record<string, string> = {
 	identifier_unavailable: "This comment’s target could not be used. Keep your text and review the discussion.",
 	pictures_disabled: "Pictures are disabled on this server. The picture and comment remain saved here.",
 	picture_expired: "The picture upload expired. Its original bytes remain saved here for recovery.",
+	operation_withdrawn: "The original send was retired during recovery. Refresh picture uploads to finish restoring this saved comment.",
 	picture_staging_quota: "The server’s pending-picture allowance is full. Your picture remains saved here.",
 	picture_too_many_pixels: "This picture exceeds 20 million pixels. Keep the original and choose a smaller copy.",
 	picture_output_too_large: "The processed picture is too large. Keep the original and choose a smaller copy.",
@@ -28,7 +30,7 @@ const failureHelp: Record<string, string> = {
 };
 
 /** Keyed cards preserve text selection while incoming polling refreshes the
- * sidebar. Recovery never changes a submitted payload or creates a new ID.
+ * sidebar. A replacement requires definitive server withdrawal of the original.
  */
 export class PendingComments {
 	private cards = new Map<string, { el: HTMLElement; signature: string }>();
@@ -48,7 +50,7 @@ export class PendingComments {
 		for (const [id, card] of this.cards) if (!ids.has(id)) { card.el.remove(); this.cards.delete(id); }
 		for (const op of operations) {
 			const canRetry = this.session.online && !!this.session.permission(this.entryId)?.comment;
-			const signature = JSON.stringify([op, canRetry, this.session.participants(this.entryId)]);
+			const signature = JSON.stringify([op, canRetry, this.session.canRepairPictures, this.session.participants(this.entryId)]);
 			let card = this.cards.get(op.operationId);
 			if (!card) {
 				card = { el: this.parent.createDiv({ cls: "relay-comment-pending-item" }), signature: "" };
@@ -79,6 +81,22 @@ export class PendingComments {
 				text.hidden = true; text.value = commentBodyText(body, name);
 				select.onclick = () => { text.hidden = false; text.focus(); text.select(); };
 			} catch { box.createEl("p", { text: "Saved local change could not be displayed. Its original data is still kept on this device." }); }
+		}
+		let hasPictures = false;
+		try { hasPictures = op.type !== "picture.upload" && commandPictures(payload).length > 0; } catch { /* Keep malformed saved work for manual recovery. */ }
+		if (hasPictures) {
+			const repair = box.createEl("button", { text: "Refresh picture uploads and retry", attr: { type: "button" } });
+			repair.disabled = !canRetry || !this.session.canRepairPictures;
+			box.createEl("p", { cls: "relay-comment-muted", text: "Keeps your saved text, pictures and target. Checks delivery before retrying to avoid a duplicate comment." });
+			const status = box.createDiv({ attr: { role: "status" } });
+			repair.onclick = () => {
+				repair.disabled = true;
+				void this.session.repairPictures(op).then(result => {
+					if (!this.disposed) status.setText(result === "accepted" ? "The original comment was already delivered." : "Pictures refreshed. Your saved comment is queued again.");
+				}).catch(() => {
+					if (!this.disposed) { status.setText("Recovery could not finish. Your saved work is retained. Reconnect and try again; delivery will be checked first."); repair.disabled = !this.session.canRepairPictures || !this.session.permission(this.entryId)?.comment; }
+				});
+			};
 		}
 		if (op.state !== "rejected") return;
 		box.createEl("p", { text: failureHelp[op.error ?? ""] ?? "The server has not confirmed this change. Check your connection and access to this note." });

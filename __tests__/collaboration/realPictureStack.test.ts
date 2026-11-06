@@ -16,13 +16,17 @@ const fixturePath = process.env.EVC_PICTURE_FIXTURE;
 const integration = fixturePath ? test : test.skip;
 
 integration("offline picture dependencies recover a lost upload ack against real HTTP and MinIO", async () => {
-	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string; picturePath: string };
+	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string; picturePath: string; expiredPictureId: string };
 	if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(fixture.base)) throw new Error("Only the disposable loopback fixture is allowed");
 	const identity = { serverId: fixture.base, shareId: fixture.share, accountId: fixture.reviewer, vaultId: randomUUID() };
 	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory), time = Date.now(), online = false, loseUpload = true, puts = 0;
+	let loseCommand: string | undefined;
 	const fetcher = async (url: string, init: PlatformRequestInit): Promise<Response> => {
 		if (!online) throw new Error("Synthetic offline period");
 		const response = await fetch(url, init);
+		if (url.endsWith("/commands") && response.ok && typeof init.body === "string" && JSON.parse(init.body).operation_id === loseCommand) {
+			loseCommand = undefined; throw new Error("Synthetic lost comment acknowledgment");
+		}
 		if (init.method === "PUT" && url.includes("/pictures/") && response.ok) {
 			puts++;
 			if (loseUpload) { loseUpload = false; throw new Error("Synthetic lost upload acknowledgment"); }
@@ -104,6 +108,45 @@ integration("offline picture dependencies recover a lost upload ack against real
 			expect((await transport.thread(fixture.entry, threadId)).thread.state).toBe("open");
 			expect(await uiStore.getDraft("reopen")).toBeUndefined(); expect(await uiStore.pictureSource(fresh.id, fixture.entry)).toBeUndefined();
 			expect((await owner.picture(fixture.entry, fresh.id)).state).toBe("attached");
+
+			// Repair a real expired reservation and prove the old operation cannot
+			// be delivered later by another client/window.
+			expect(session.canRepairPictures).toBe(true);
+			const expired = await prepareLocalPicture(fixture.expiredPictureId, fixture.entry, original);
+			const recoveryThread = randomUUID(), recoveryMessage = randomUUID(), recoveryOperation = randomUUID();
+			const repairBody = { version: 1, blocks: [{ type: "picture", picture_id: expired.id, alt: "Recovered original" }] };
+			await uiStore.saveDraft({ id: "expired", scopeId: fixture.entry, revision: 0, body: { text: "", mentions: [], pictures: repairBody.blocks } }, null, [expired]);
+			await session.queue({ operationId: recoveryOperation, scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
+				type: "thread.create", thread_id: recoveryThread, message_id: recoveryMessage, anchor: { version: 1, type: "note" }, body: repairBody,
+			} }, { id: "expired", revision: 0 });
+			await session.outbox.settled();
+			expect((await uiStore.getOperation(expired.id))?.error).toBe("picture_expired");
+			const blocked = (await uiStore.getOperation(recoveryOperation))!;
+			expect(blocked.attempt).toBe(0);
+			expect(await session.repairPictures(blocked)).toBe("requeued"); await session.outbox.settled();
+			const retired = (await uiStore.getOperation(recoveryOperation))!;
+			expect(retired.state).toBe("withdrawn");
+			expect((await uiStore.getOperation(retired.replacementId!))?.state).toBe("accepted");
+			await expect(transport.send(blocked)).rejects.toMatchObject({ code: "operation_withdrawn", status: 410 });
+			expect((await transport.thread(fixture.entry, recoveryThread)).messages).toHaveLength(1);
+			expect(await uiStore.pictureSource(expired.id, fixture.entry)).toBeUndefined();
+
+			// A lost successful comment response resolves the existing receipt;
+			// recovery does not upload another copy or create a second message.
+			const acknowledgedPicture = await prepareLocalPicture(randomUUID(), fixture.entry, original);
+			const ackBody = { version: 1, blocks: [{ type: "picture", picture_id: acknowledgedPicture.id, alt: "Already sent" }] };
+			await uiStore.saveDraft({ id: "lost-comment", scopeId: fixture.entry, revision: 0, body: { text: "", mentions: [], pictures: ackBody.blocks } }, null, [acknowledgedPicture]);
+			const ackOperation = randomUUID(), ackMessage = randomUUID(); loseCommand = ackOperation;
+			await session.queue({ operationId: ackOperation, scopeId: fixture.entry, type: "reply.create", dependsOn: [], payload: {
+				type: "reply.create", thread_id: recoveryThread, message_id: ackMessage, body: ackBody,
+			} }, { id: "lost-comment", revision: 0 });
+			await session.outbox.settled();
+			const ambiguous = (await uiStore.getOperation(ackOperation))!, beforeRepairPuts = puts;
+			expect(ambiguous.state).toBe("queued");
+			expect(await session.repairPictures(ambiguous)).toBe("accepted");
+			expect((await uiStore.getOperation(ackOperation))?.replacementId).toBeUndefined();
+			expect(puts).toBe(beforeRepairPuts);
+			expect((await transport.thread(fixture.entry, recoveryThread)).messages).toHaveLength(2);
 		} finally { await session.close(); }
 
 		const secondId = randomUUID(), second = await prepareLocalPicture(secondId, fixture.entry, original);

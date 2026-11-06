@@ -1,6 +1,7 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
 import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, PICTURE_CACHE_QUOTA, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
+import { isId, isRecord, parseBody, protocolJson } from "../DiscussionProtocol";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -12,7 +13,8 @@ export interface QueuedCommand {
 	dependsOn: string[];
 }
 export interface OutboxOperation extends QueuedCommand {
-	state: "queued" | "sending" | "accepted" | "rejected";
+	state: "queued" | "sending" | "accepted" | "rejected" | "withdrawn";
+	replacementId?: string;
 	createdAt: number;
 	attempt: number;
 	nextAttemptAt: number;
@@ -80,7 +82,7 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 7);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 8);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -114,6 +116,7 @@ export class DiscussionStore {
 				const cache = db.createObjectStore("pictureCache", { keyPath: ["scopeId", "id", "variant"] });
 				cache.createIndex("scope", "scopeId"); cache.createIndex("usedAt", "usedAt");
 			}
+			if (event.oldVersion < 8) open.transaction!.objectStore("outbox").createIndex("dependency", "dependsOn", { multiEntry: true });
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -342,9 +345,82 @@ export class DiscussionStore {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
 	}
 
-	/** An explicit retry retains every immutable command field. A stale recovery
-	 * panel cannot requeue a newer attempt or an operation acknowledged elsewhere.
-	 */
+	/** Atomically replace pictures after the server has fenced the original request. */
+	async replacePicturesAfterWithdrawal(original: QueuedCommand, replacementId: string,
+		replacements: { oldId: string; newId: string }[], now = Date.now()): Promise<string> {
+		// Call only after an authenticated withdrawal. Never change a submitted
+		// payload; keep the original as a tombstone and create a separate request.
+		requiredId(replacementId);
+		original = JSON.parse(boundedJson(original as unknown as Json)) as QueuedCommand;
+		if (!commandTypes.has(original.type) || original.type === "reaction.set" || !isRecord(original.payload) ||
+			!Number.isFinite(now) || !replacements.length || replacements.length > 10) throw new Error("Invalid picture recovery");
+		const body = parseBody(original.payload.body), ids = commandPictures(original.payload);
+		const prepared = replacements.map(({ oldId, newId }) => {
+			requiredId(newId);
+			if (!isId(newId) || !ids.includes(oldId) || ids.includes(newId)) throw new Error("Invalid replacement picture identity");
+			return { oldId, newId };
+		});
+		if (new Set(prepared.map(item => item.oldId)).size !== prepared.length || new Set(prepared.map(item => item.newId)).size !== prepared.length) throw new Error("Duplicate replacement picture");
+		return this.transaction(["outbox", ...PICTURE_STORES], "readwrite", async tx => {
+			const outbox = tx.objectStore("outbox"), sources = tx.objectStore("pictureSources");
+			const previous: OutboxOperation | undefined = await request(outbox.get(original.operationId));
+			if (!previous || previous.scopeId !== original.scopeId || previous.type !== original.type || canonical(previous.payload) !== canonical(original.payload)) throw new Error("Saved command changed during recovery");
+			if (previous.state === "withdrawn" && previous.replacementId) return previous.replacementId;
+			if (previous.state === "accepted" || previous.state === "withdrawn") throw new Error("Saved command was already completed");
+			if (await request(outbox.get(replacementId))) throw new Error("Replacement identity was already used");
+			const map = new Map(prepared.map(item => [item.oldId, item.newId]));
+			for (const { newId } of prepared) {
+				if (await request(sources.getKey(newId)) || await request(outbox.get(newId))) throw new Error("Picture identity was already used");
+			}
+			const dependents: OutboxOperation[] = await request(outbox.index("dependency").getAll(original.operationId));
+			for (const dependent of dependents) {
+				if (dependent.state === "accepted" || dependent.state === "withdrawn") continue;
+				if (dependent.scopeId !== original.scopeId || dependent.attempt !== 0 || dependent.state !== "queued") throw new Error("A dependent change needs separate review");
+				dependent.dependsOn = dependent.dependsOn.map(id => id === original.operationId ? replacementId : id);
+				await request(outbox.put(dependent));
+			}
+			const payload = { ...original.payload as Record<string, Json>, body: protocolJson({ ...body, blocks: body.blocks.map(block =>
+				block.type === "picture" && map.has(block.picture_id) ? { ...block, picture_id: map.get(block.picture_id)! } : block) }) };
+			const nextIds = commandPictures(payload);
+			const next: OutboxOperation = { operationId: replacementId, scopeId: original.scopeId, type: original.type,
+				payload, dependsOn: [...new Set([...previous.dependsOn.map(id => map.get(id) ?? id), ...map.values()])],
+				state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now };
+			if (next.dependsOn.length > 100 || next.dependsOn.includes(replacementId)) throw new Error("Invalid replacement dependency");
+			previous.state = "withdrawn"; previous.replacementId = replacementId; delete previous.lease; delete previous.error;
+			await request(outbox.put(previous)); await request(outbox.add(next));
+			// Temporary references retain old blobs until each is transferred. Read
+			// one original at a time, rather than cloning the 100 MiB pool in RAM.
+			let transferring = [...nextIds, ...map.keys()];
+			await setPictureReferences(tx, "outbox", replacementId, original.scopeId, transferring);
+			await setPictureReferences(tx, "outbox", original.operationId, original.scopeId, []);
+			for (const { oldId } of prepared) {
+				const refs = await request(tx.objectStore("pictureReferences").index("picture").getAll(oldId)) as { kind: string; ownerId: string }[];
+				const dependencies: OutboxOperation[] = await request(outbox.index("dependency").getAll(oldId));
+				const upload: OutboxOperation | undefined = await request(outbox.get(oldId));
+				if (upload?.type === "picture.upload" && upload.scopeId === original.scopeId &&
+					!refs.some(ref => ref.kind !== "outbox" || ![oldId, replacementId].includes(ref.ownerId)) &&
+					!dependencies.some(op => op.state !== "accepted" && op.state !== "withdrawn")) {
+					if (upload.state !== "accepted") { upload.state = "withdrawn"; delete upload.lease; delete upload.error; await request(outbox.put(upload)); }
+					await setPictureReferences(tx, "outbox", oldId, original.scopeId, []);
+				}
+			}
+			for (const { oldId, newId } of prepared) {
+				const saved: LocalPicture | undefined = await request(sources.get(oldId));
+				if (!saved || saved.scopeId !== original.scopeId || saved.bytes.byteLength !== saved.size) throw new Error("Saved picture changed during recovery");
+				const source = { ...saved, id: newId };
+				transferring = transferring.filter(id => id !== oldId);
+				await setPictureReferences(tx, "outbox", replacementId, original.scopeId, transferring);
+				await putPictureSources(tx, [source], original.scopeId, nextIds);
+				const upload: OutboxOperation = { operationId: source.id, scopeId: original.scopeId, type: "picture.upload",
+					payload: { type: "picture.upload", picture_id: source.id, sha256: source.sha256, size: source.size }, dependsOn: [],
+					state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now };
+				await request(outbox.add(upload)); await setPictureReferences(tx, "outbox", source.id, original.scopeId, [source.id]);
+			}
+			return replacementId;
+		});
+	}
+
+	/** Explicit retry preserves every immutable field and checks the latest attempt. */
 	async retryRejected(operationId: string, scopeId: string, attempt: number, now = Date.now()): Promise<boolean> {
 		requiredId(operationId); requiredId(scopeId);
 		if (!Number.isSafeInteger(attempt) || attempt < 1 || !Number.isFinite(now)) throw new Error("Invalid retry");
@@ -456,7 +532,7 @@ export class DiscussionStore {
 
 	private async acceptInTransaction(tx: IDBTransaction, operationId: string, result: Json): Promise<void> {
 		const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
-		if (!op || op.state === "accepted") return;
+		if (!op || op.state === "accepted" || op.state === "withdrawn") return;
 		op.state = "accepted"; op.result = result; delete op.lease; delete op.error;
 		await request(store.put(op));
 		await setPictureReferences(tx, "outbox", operationId, op.scopeId, []);

@@ -19,6 +19,7 @@ function remote() {
 			sequence: 1, state: "open", state_revision: 1, message_revision: 1, message_deleted: false, removed: false, changed: true }),
 		sendOnline: jest.fn().mockResolvedValue({ changed: true }),
 		uploadPicture: jest.fn().mockResolvedValue({ state: "verified" }),
+		withdraw: jest.fn().mockResolvedValue({ status: "withdrawn" }),
 	};
 }
 const command = () => ({ operationId: id(4), scopeId: entry, type: "thread.create" as const, dependsOn: [], payload: {
@@ -92,6 +93,33 @@ test("manual recovery retries the same command after permission restoration and 
 		expect(transport.send.mock.calls[1][0]).toMatchObject(command());
 		expect((await store.getOperation(id(4)))?.state).toBe("accepted");
 		expect(await session.retryRejected(rejected)).toBe(false);
+	} finally { await close(); }
+});
+
+test.each(["withdrawn", "accepted", "lost response"])("picture recovery handles %s without duplicating a saved send", async outcome => {
+	const { store, session, transport, close } = await fixture();
+	try {
+		transport.capabilities.mockResolvedValue({ discussions: true, ...{ pictures: true, recovery: true } }); await session.refresh();
+		session.outbox.stop(); await session.outbox.settled();
+		const source = await prepareLocalPicture(id(40), entry, new TextEncoder().encode("Saved original").buffer);
+		const pictures = [{ type: "picture" as const, picture_id: source.id, alt: "Keep" }];
+		await store.saveDraft({ id: "recover", scopeId: entry, revision: 0, body: { text: "", mentions: [], pictures } }, null, [source]);
+		const pending = command(); pending.payload.body = { version: 1, blocks: pictures };
+		await store.enqueue(pending, 1, { id: "recover", revision: 0 });
+		const op = (await store.getOperation(pending.operationId))!;
+		if (outcome === "accepted") transport.withdraw.mockResolvedValue({ status: "accepted", result: await transport.send() });
+		if (outcome === "lost response") transport.withdraw.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		if (outcome === "lost response") {
+			await expect(session.repairPictures(op)).rejects.toMatchObject({ action: "retry" });
+			expect((await store.getOperation(op.operationId))?.state).toBe("queued");
+			expect(await store.pictureSource(source.id, entry)).toBeDefined();
+		} else {
+			expect(await session.repairPictures(op)).toBe(outcome === "accepted" ? "accepted" : "requeued");
+			expect((await store.getOperation(op.operationId))?.state).toBe(outcome === "accepted" ? "accepted" : "withdrawn");
+			await session.repairPictures(op); expect(transport.withdraw).toHaveBeenCalledTimes(1);
+		}
+		session.setForeground(false);
+		await expect(session.repairPictures(op)).rejects.toThrow("Reconnect");
 	} finally { await close(); }
 });
 

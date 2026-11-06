@@ -27,7 +27,7 @@ export interface DiscussionSender {
 }
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operation_id_conflict", "identifier_unavailable",
+const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operation_id_conflict", "operation_withdrawn", "identifier_unavailable",
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
@@ -73,6 +73,7 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 }
 
 export type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
+export type WithdrawalResult = { status: "withdrawn" } | { status: "accepted"; result: CommandResult };
 
 function accepted(value: unknown, op: OnlineOperation): CommandResult {
 	const command = op.payload as Record<string, Json>;
@@ -115,6 +116,19 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), op);
 	}
 
+	/** Resolve acceptance or fence every late send before creating a replacement. */
+	async withdraw(operation: QueuedCommand): Promise<WithdrawalResult> {
+		// A timeout never proves withdrawal; validate the exact operation/scope.
+		const body = queuedEnvelope(this.identity.shareId, operation);
+		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
+		const value = await this.request("/commands/withdraw", body);
+		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
+		if (!object(value) || value.status !== "withdrawn" || value.operation_id !== captured.operationId || value.entry_id !== captured.scopeId) {
+			throw new DiscussionFailure("pause", "invalid_withdrawal_response");
+		}
+		return { status: "withdrawn" };
+	}
+
 	/** One online-only attempt. Retain this operation ID for an explicit retry after an ambiguous failure. */
 	async sendOnline(operation: OnlineOperation): Promise<CommandResult> {
 		const command = operation.payload;
@@ -130,16 +144,16 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
-			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true };
+			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true };
 	}
 
 	async picture(entryId: string, pictureId: string): Promise<PictureMetadata> {

@@ -40,6 +40,7 @@ export class DiscussionSession {
 	private imagesEnabled = false;
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
+	private recoveryEnabled = false;
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -70,6 +71,7 @@ export class DiscussionSession {
 	get canAnchorImageFiles(): boolean { return this.canQueue && this.imageFilesEnabled; }
 	get canAnchorBlocks(): boolean { return this.canAnchorText && this.blocksEnabled; }
 	get canAttachPictures(): boolean { return this.canQueue && this.picturesEnabled; }
+	get canRepairPictures(): boolean { return this.online && this.canAttachPictures && this.recoveryEnabled; }
 	documentGeneration(entryId: string): string | undefined {
 		const entry = this.entries.get(entryId);
 		const enabled = entry?.kind === "image" ? this.canAnchorImageFiles : this.canAnchorText;
@@ -118,6 +120,7 @@ export class DiscussionSession {
 			this.imagesEnabled = capability.imageOccurrences === true;
 			this.imageFilesEnabled = capability.imageFiles === true;
 			this.picturesEnabled = capability.pictures === true;
+			this.recoveryEnabled = capability.recovery === true;
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
@@ -332,6 +335,29 @@ export class DiscussionSession {
 		const retried = await this.trackLocal(this.store.retryRejected(operation.operationId, operation.scopeId, operation.attempt));
 		if (!this.closed) { this.broadcast(); this.outbox.wake(); this.notify(); }
 		return retried;
+	}
+	async repairPictures(operation: OutboxOperation): Promise<"accepted" | "requeued"> {
+		if (!this.canRepairPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect with picture and comment permission before repairing uploads.");
+		queuedEnvelope(this.identity.shareId, operation);
+		return this.trackLocal((async () => {
+			const current = await this.store.getOperation(operation.operationId);
+			if (!current || current.scopeId !== operation.scopeId) throw new Error("Saved comment changed during recovery.");
+			if (current.state === "accepted") return "accepted" as const;
+			if (current.replacementId) return "requeued" as const;
+			const replacements = [];
+			for (const oldId of commandPictures(operation.payload)) {
+				const source = await this.store.pictureSource(oldId, operation.scopeId);
+				if (source) replacements.push({ oldId, newId: uuid() });
+			}
+			if (!replacements.length) throw new Error("No saved picture originals are available for this comment.");
+			if (!this.canRepairPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before repairing this comment.");
+			const outcome = await this.transport.withdraw(operation);
+			if (outcome.status === "accepted") { await this.store.accept(operation.operationId, protocolJson(outcome.result)); return "accepted" as const; }
+			await this.store.replacePicturesAfterWithdrawal(operation, uuid(), replacements);
+			return "requeued" as const;
+		})().finally(() => {
+			if (!this.closed) { this.broadcast(); this.invalidate(); if (this.foreground) this.outbox.wake(); this.notify(); }
+		}));
 	}
 	async onlineDraft(draft: Pick<Draft, "id" | "revision">, operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");

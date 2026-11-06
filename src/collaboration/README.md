@@ -96,7 +96,7 @@ intrinsic geometry, and cropped-out marks do not retain keyboard focus.
 
 Desktop tests verified duplicate-image pins, external regions, thread navigation,
 scrolling/sidebar resizing, reload and an off-center cover crop. Creation still
-uses the placement dialog. Direct manipulation, comment-picture recovery/cleanup,
+uses the placement dialog. Direct manipulation, remaining comment-picture recovery,
 image presence, arbitrary transforms, all format/EXIF
 cases, mobile and resource acceptance remain unfinished.
 
@@ -370,6 +370,44 @@ the thumbnail. Cache quota failures do not prevent displaying authorized bytes.
 Desktop Obsidian 1.13.7 has native evidence for picker, draft reload, picture-only
 send, edit/history, Send and reopen, scrolling and offline cache reload. Clipboard
 paste has automated DOM coverage; native clipboard/mobile/large-format and
-resource acceptance remain. Expiry repair, rejected dependency editing, server
-cleanup/storage accounting and backup/restore also remain. Keep the server
+resource acceptance remain. Draft/Send-and-reopen expiry repair, rejected dependency
+editing, complete storage accounting and backup/restore also remain. Server
+expiry/orphan cleanup has separate PostgreSQL/MinIO evidence. Keep the server
 creation flag disabled outside controlled fixtures until those parts are ready.
+
+## Saved picture-upload recovery
+
+The pending-comment panel now offers **Refresh picture uploads and retry** when
+online with picture/comment permission and the negotiated `discussion_recovery`
+capability. It preserves the exact text, rich blocks, descriptions, thread/message
+identity and target. This action refreshes saved local picture originals; it does
+not yet edit/remove rejected attachments or repair online-only Send and reopen.
+
+The transport first posts the exact original envelope to `/commands/withdraw`.
+An accepted receipt reconciles the existing comment without another upload. If
+the command has not committed, the server records a durable withdrawal under its
+original receipt primary key. All late sends, including a request returning from
+private anchor validation, are fenced by that receipt. A timeout or malformed
+response cannot authorize a replacement. Authorization is checked on every call.
+
+IndexedDB version **8** adds a dependency index. After confirmed withdrawal, one
+transaction records the old operation as withdrawn, creates the replacement and
+new upload dependencies, transfers picture references, and rewires dependent
+commands that have never been attempted. Picture bodies/targets are preserved;
+the new request changes only its operation ID and refreshed picture IDs. Shared
+originals remain available to other drafts/pending work. The transfer reads one
+source at a time, releases unused old references before checking quota for its
+replacement, and rolls back entirely on storage failure. Obsolete upload jobs
+cannot be revived by late responses. Competing windows converge on one replacement.
+
+If the server withdrawal commits but the local save fails or the app stops,
+original work remains in the outbox; repeating recovery obtains the same server
+decision and completes the transfer. Never prune withdrawal receipts during
+backup/restore or downgrade a client across an unsupported local schema.
+
+The normal suite includes storage, cross-window, source-quota, transport,
+session and DOM-control checks. The actual HTTP/MinIO fixture seeds an expired
+reservation, repairs it as a comment-only reviewer, verifies one resulting
+message and rejection of a late original send, then reconciles a deliberately
+lost successful comment acknowledgment without another upload. Native recovery
+button and mobile acceptance remain separate checks.

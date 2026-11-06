@@ -48,6 +48,7 @@ async function fixture() {
 		queue: jest.fn(async (command: QueuedCommand, draft?: { id: string; revision: number }) => { await store.enqueue(command, Date.now(), draft); }),
 		watch: jest.fn(() => jest.fn()), refresh: jest.fn(), local: jest.fn(), messages: jest.fn(),
 		retryRejected: jest.fn().mockResolvedValue(true),
+		canRepairPictures: true, repairPictures: jest.fn().mockResolvedValue("requeued"),
 	};
 	return { store, session, typed: session as unknown as DiscussionSession };
 }
@@ -118,6 +119,23 @@ test("retained local text is selectable without access, keeps selection on refre
 		expect(session.retryRejected).toHaveBeenCalledWith(operation);
 		expect((await store.getOperation(id(20)))?.payload).toEqual(operation.payload);
 	} finally { pending.dispose(); store.close(); parent.remove(); }
+});
+
+test("pending picture recovery is explicit, permission gated, and preserves the visible original", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div");
+	const pending = new PendingComments(parent, typed, entry);
+	await store.enqueue({ operationId: id(20), scopeId: entry, type: "reply.create", dependsOn: [], payload: {
+		type: "reply.create", thread_id: id(4), message_id: id(5), body: { version: 1, blocks: [{ type: "picture", picture_id: id(6), alt: "My saved diagram" }] } } });
+	const op = (await store.getOperation(id(20)))!;
+	try {
+		session.canRepairPictures = false; pending.update([op]);
+		const find = () => [...parent.querySelectorAll("button")].find(button => button.textContent === "Refresh picture uploads and retry")!;
+		expect(find().disabled).toBe(true); expect(parent.textContent).toContain("My saved diagram");
+		session.canRepairPictures = true; pending.update([op]); find().click();
+		await until(() => parent.textContent!.includes("queued again"));
+		expect(session.repairPictures).toHaveBeenCalledWith(op);
+		expect((await store.getOperation(id(20)))?.payload).toEqual(op.payload);
+	} finally { pending.dispose(); store.close(); }
 });
 
 test("the sidebar retains local recovery when access is revoked and clears it synchronously on account change", async () => {
