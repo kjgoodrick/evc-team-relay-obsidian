@@ -9,11 +9,16 @@ import { RECOVERY_FOLDER, isConflictCopyPath } from "../conflictCopyPath";
 import { baseId, basePath, encodeBaseBytes, retiredBaseEntries } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseSyncRecord } from "./BaseSyncStore";
-import { BaseSyncRunner, type BaseConflictReview, type BaseSyncAccess } from "./BaseSyncRunner";
+import { BaseSyncRunner, sameBaseBytes, type BaseConflictReview, type BaseSyncAccess } from "./BaseSyncRunner";
 import { NativeBaseFile, nativeBaseLock } from "./NativeBaseFile";
 import { BaseSyncModal } from "./BaseSyncModal";
 import { BaseRetirementController, type BaseRetirementReview } from "./BaseRetirement";
 import { BaseRestorationController, type BaseRestoreReview } from "./BaseRestoration";
+import { BaseRegistryTransport } from "./BaseRegistryTransport";
+import { BaseRegistryStore } from "./BaseRegistryStore";
+import { BaseViewsController, type BaseViewsAccess, type BaseViewsSource } from "./BaseViewsController";
+import { BaseViewsModal } from "./BaseViewsModal";
+import type { BaseRegistrySnapshot, BaseViewRepair } from "./BaseRegistryProtocol";
 
 export interface BaseSyncDelegate { sync(file: AttachmentFile): Promise<void>; open(): void }
 export interface BaseSyncRow { entryId: string; path: string; message: string; record: BaseSyncRecord; file?: AttachmentFile }
@@ -23,9 +28,10 @@ interface Slot {
 	ready: Promise<void>; failed: boolean; entries: Map<string, EntryRun>; unsubscribe(): void; delegate: BaseSyncDelegate;
 	retirements?: BaseRetirementController; retirementRuns: Map<string, { retryAt: number; message: string }>;
 	restorations?: BaseRestorationController;
+	viewTransport?: BaseRegistryTransport; views?: BaseViewsController; viewsReady?: Promise<void>;
 }
 
-export function baseSyncMessage(error: unknown): string {
+export function baseSyncMessage(error: unknown, retryMessage = "Bases sync will retry when the server is available."): string {
 	if (!(error instanceof BaseContentFailure)) return error instanceof Error ? error.message : "Bases sync could not finish. Local edits are retained.";
 	const messages: Record<string, string> = {
 		base_context_changed: "Bases sync paused because the account, file or permissions changed.",
@@ -38,8 +44,13 @@ export function baseSyncMessage(error: unknown): string {
 		base_local_too_large: "This Bases file exceeds the 256 KiB sync limit. Local edits are retained.",
 		base_content_too_large: "This Bases file exceeds the 256 KiB sync limit. Local edits are retained.",
 		base_entry_retired: "This Bases file was removed on the server. Review its retained local copies.",
+		bases_registry_disabled: "Saved-view associations are not enabled on this server.",
+		base_definition_not_synced: "Synchronize this Bases definition before reviewing saved-view associations.",
+		invalid_base_definition: "This Bases definition cannot be inspected. Review its syntax and supported configuration limits.",
+		stale_base_revision: "Saved-view associations changed. Refresh before choosing a repair.",
+		invalid_base_registry_response: "The server returned an unsupported saved-view mapping. Existing mappings and pending work are retained.",
 	};
-	return messages[error.code] ?? (error.action === "retry" ? "Bases sync will retry when the server is available." :
+	return messages[error.code] ?? (error.action === "retry" ? retryMessage :
 		error.action === "authenticate" ? "Sign in to this shared folder’s server to resume Bases sync." : "Bases sync needs review. Local edits are retained.");
 }
 
@@ -68,6 +79,8 @@ export class BaseSyncHost extends Component {
 			const folder = this.shares.shareFor(file.path);
 			if (file instanceof TFile && folder?.usesBaseSync(folder.toVirtualPath(file.path), folder.folderIndex.guidFor(folder.toVirtualPath(file.path)))) {
 				menu.addItem(item => item.setTitle("Review Bases sync").setIcon("table").onClick(() => folder.basesSync?.open()));
+				const entry = folder.trackedEntries.get(folder.folderIndex.guidFor(folder.toVirtualPath(file.path)) ?? "");
+				if (file.extension.toLowerCase() === "base" && entry && isAttachmentFile(entry)) menu.addItem(item => item.setTitle("Review Bases views").setIcon("list").onClick(() => new BaseViewsModal(this.plugin.app, this, folder, entry).open()));
 			}
 		}));
 		this.reconcile();
@@ -95,11 +108,15 @@ export class BaseSyncHost extends Component {
 				} catch { return false; }
 			};
 			let transport: BaseContentTransport;
-			try { transport = new BaseContentTransport({ serverId: endpoint, accountId, shareId: folder.entityGuid }, async () => {
+			const credential = async () => {
 				if (!slot.current()) return undefined;
 				const accessToken = await this.auth.getAuthProviderForServer(serverId)?.getValidToken();
 				return slot.current() && accessToken ? { accountId, accessToken } : undefined;
-			}); } catch { slot.failed = true; continue; }
+			};
+			try {
+				transport = new BaseContentTransport({ serverId: endpoint, accountId, shareId: folder.entityGuid }, credential);
+				slot.viewTransport = new BaseRegistryTransport(transport.identity, credential);
+			} catch { slot.failed = true; continue; }
 			slot.ready = BaseSyncStore.open({ ...transport.identity, vaultId: this.vaultId }).then(store => {
 				if (!slot.current()) { store.close(); return; }
 				const lock = nativeBaseLock(store.identity);
@@ -137,7 +154,7 @@ export class BaseSyncHost extends Component {
 		this.notify(true); this.scan();
 	}
 	private cancel(slot: Slot): void {
-		slot.cancelled = true; slot.unsubscribe(); slot.store?.close();
+		slot.cancelled = true; slot.unsubscribe(); slot.store?.close(); slot.views?.store.close();
 		if (slot.folder.basesSync === slot.delegate) slot.folder.basesSync = undefined;
 	}
 	onunload(): void { this.stopped = true; for (const slot of this.slots.values()) this.cancel(slot); this.slots.clear(); this.notify(true); this.listeners.clear(); }
@@ -279,6 +296,64 @@ export class BaseSyncHost extends Component {
 		const slot = this.slots.get(folder); if (!slot?.current()) throw new Error("Sign in to this shared folder’s server to review Bases sync.");
 		await slot.ready; if (!slot.current() || !slot.store || !slot.runner) throw new Error("Bases local storage is unavailable."); return slot;
 	}
+	private async requireViews(folder: VaultShare): Promise<Slot & { views: BaseViewsController }> {
+		const slot = await this.requireSlot(folder);
+		if (!slot.viewsReady) slot.viewsReady = BaseRegistryStore.open(slot.store!.identity).then(store => {
+			if (!slot.current()) { store.close(); throw new BaseContentFailure("pause", "base_context_changed"); }
+			slot.views = new BaseViewsController(store, slot.viewTransport!, nativeBaseLock(store.identity));
+		}).catch(error => { slot.viewsReady = undefined; throw error; });
+		await slot.viewsReady;
+		if (!slot.current() || !slot.views) throw new BaseContentFailure("pause", "base_context_changed");
+		return slot as Slot & { views: BaseViewsController };
+	}
+	private viewAccess(slot: Slot, file: AttachmentFile): BaseViewsAccess {
+		const folder = slot.folder, access = this.access(slot, file, true);
+		let captured: { source: BaseViewsSource; file: TFile; mtime: number; size: number } | undefined;
+		const current = (source: BaseViewsSource) => access.current() && !!captured && captured.source === source &&
+			file.path.toLowerCase().endsWith(".base") && file.path === source.path &&
+			folder._liveProvider?.managedIndex?.snapshot.records[source.path]?.hash === source.sha256 &&
+			this.plugin.app.vault.getAbstractFileByPath(folder.absolutePath(source.path)) === captured.file &&
+			captured.file.stat.mtime === captured.mtime && captured.file.stat.size === captured.size;
+		return { current, writable: source => current(source) && access.writable(), read: async () => {
+			await folder._liveProvider?.managedIndex?.flush();
+			if (!access.current() || !file.path.toLowerCase().endsWith(".base")) throw new BaseContentFailure("pause", "base_context_changed");
+			const record = await slot.store!.get(file.entityGuid), baseline = record.baseline;
+			if (!baseline?.bytes || !baseline.state.record.hash || record.pending || record.download || record.conflict || record.reviewRequired || record.retirement) throw new Error("Finish synchronizing or reviewing this Bases file before inspecting its saved views.");
+			const node = this.plugin.app.vault.getAbstractFileByPath(folder.absolutePath(file.path)), stat = node instanceof TFile ? { ...node.stat } : undefined;
+			const local = await access.read();
+			if (!sameBaseBytes(local.bytes, baseline.bytes) || !(local.identity instanceof TFile) || local.identity !== node ||
+				local.identity.stat.mtime !== stat?.mtime || local.identity.stat.size !== stat.size) throw new Error("The Bases file has local changes. Synchronize them before reviewing saved views.");
+			const source = { path: file.path, sha256: baseline.state.record.hash, generation: baseline.state.generation ?? undefined };
+			captured = { source, file: local.identity, mtime: local.identity.stat.mtime, size: local.identity.stat.size };
+			if (!current(source)) throw new BaseContentFailure("pause", "base_context_changed"); return source;
+		} };
+	}
+	async cachedViews(folder: VaultShare, file: AttachmentFile) {
+		const slot = await this.requireViews(folder);
+		const readable = () => {
+			const index = folder._liveProvider?.managedIndex;
+			return slot.current() && index?.registered(file.path, file.entityGuid) && (index.snapshot.owner || ["read", "write"].includes(index.snapshot.permissions[file.path]));
+		};
+		if (!readable()) throw new BaseContentFailure("pause", "base_context_changed");
+		const record = await slot.views.store.get(file.entityGuid);
+		if (!readable()) throw new BaseContentFailure("pause", "base_context_changed"); return record;
+	}
+	async refreshViews(folder: VaultShare, file: AttachmentFile) {
+		const slot = await this.requireViews(folder), result = await slot.views.refresh(file.entityGuid, this.viewAccess(slot, file));
+		if (!result) throw new Error("Another window is syncing this file. Try again shortly."); return result;
+	}
+	async savedViewPage(folder: VaultShare, file: AttachmentFile, reviewed: BaseRegistrySnapshot, state: "unmatched" | "archived", after?: string) {
+		const slot = await this.requireViews(folder), result = await slot.views.page(file.entityGuid, this.viewAccess(slot, file), reviewed, state, after);
+		if (!result) throw new Error("Another window is syncing this file. Try again shortly."); return result;
+	}
+	async repairViews(folder: VaultShare, file: AttachmentFile, reviewed: BaseRegistrySnapshot, bindings: BaseViewRepair["bindings"], archive: string[]) {
+		const slot = await this.requireViews(folder), result = await slot.views.repair(file.entityGuid, this.viewAccess(slot, file), reviewed, bindings, archive);
+		if (!result) throw new Error("Another window is syncing this file. Try again shortly."); return result;
+	}
+	async checkViewRepair(folder: VaultShare, file: AttachmentFile) {
+		const slot = await this.requireViews(folder), result = await slot.views.checkDelivery(file.entityGuid, this.viewAccess(slot, file));
+		if (!result) throw new Error("Another window is syncing this file. Try again shortly."); return result;
+	}
 	async rows(folder: VaultShare): Promise<BaseSyncRow[]> {
 		const slot = await this.requireSlot(folder), records = new Map<string, BaseSyncRecord>(); let after = "";
 		for (;;) { const page = await slot.store!.list(after); for (const record of page) records.set(record.entryId, record); if (page.length < 100) break; after = page[page.length - 1].entryId; }
@@ -358,6 +433,8 @@ export class BaseSyncHost extends Component {
 			for (const recovery of page) if (recovery.record.revision < captured.revision) await write(recovery.id, recovery);
 			if (page.length < 8) break; after = page[page.length - 1].id;
 		}
+		const views = await (await this.requireViews(folder)).views.store.exportRecord(entryId);
+		if (views.record.revision) await write("saved-views", views);
 		new Notice(`Bases recovery copies saved to ${path}`); return path;
 	}
 }

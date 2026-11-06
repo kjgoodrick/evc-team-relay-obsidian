@@ -11,7 +11,10 @@ export class BaseContentFailure extends Error {
 }
 const codes = new Set(["base_content_conflict", "base_content_changed", "base_content_lineage_changed", "base_content_withdrawn",
 	"base_content_disabled", "base_content_protocol_required", "base_content_not_synced", "base_content_unavailable",
-	"base_content_busy", "base_content_too_large", "invalid_base_content", "base_editor_required", "target_unavailable", "operation_id_conflict"]);
+	"base_content_busy", "base_content_too_large", "invalid_base_content", "base_editor_required", "target_unavailable", "operation_id_conflict",
+	"bases_registry_disabled", "base_generation_changed", "base_inspection_busy", "base_definition_unavailable", "base_definition_too_large",
+	"base_definition_not_synced", "invalid_base_definition", "base_definition_changed", "stale_base_revision", "incomplete_base_bindings",
+	"base_view_unavailable", "base_registry_conflict", "base_registry_unavailable"]);
 
 /** One authenticated attempt. Pending bytes/identity must already be committed
  * locally before publish/withdraw. A timeout never establishes non-acceptance. */
@@ -52,7 +55,7 @@ export class BaseContentTransport {
 			return { status: "withdrawn", operation_id: pending.operationId, entry_id: entryId };
 		} catch { throw new BaseContentFailure("pause", "invalid_base_response"); }
 	}
-	private async request(path: string, method: "GET" | "PUT" | "POST", body?: string): Promise<unknown> {
+	protected async request(path: string, method: "GET" | "PUT" | "POST", body?: string, responseLimit = method === "GET" ? 360_000 : 16_384): Promise<unknown> {
 		let timer: number | undefined, ended = false;
 		const credentials = async () => {
 			let value: BaseCredential;
@@ -74,7 +77,7 @@ export class BaseContentTransport {
 			await credentials();
 			if (response.status === 401) throw new BaseContentFailure("authenticate", "authentication_required", 401);
 			if (response.status === 408 || response.status === 429 || response.status >= 500) throw new BaseContentFailure("retry", "server_unavailable", response.status, parseRetryAfterMs(response.headers.get("Retry-After")));
-			const limit = method === "GET" && response.ok ? 360_000 : 16_384;
+			const limit = response.ok ? responseLimit : 16_384;
 			let raw: string;
 			try {
 				if (response.body) {
@@ -97,9 +100,9 @@ export class BaseContentTransport {
 			if (!response.ok) {
 				const message = baseObject(value) && baseObject(value.error) ? value.error.message : baseObject(value) ? value.detail : undefined;
 				const code = baseObject(message) && typeof message.code === "string" && codes.has(message.code) ? message.code : "base_request_rejected";
-				if (["base_content_changed", "base_content_not_synced", "base_content_unavailable"].includes(code)) throw new BaseContentFailure("retry", code, response.status);
-				if (code === "base_content_conflict") throw new BaseContentFailure("conflict", code, response.status);
-				if (["base_content_disabled", "base_content_protocol_required"].includes(code) || response.status === 404 && code !== "target_unavailable") throw new BaseContentFailure("pause", code, response.status);
+				if (["base_content_changed", "base_content_not_synced", "base_content_unavailable", "base_definition_changed", "base_definition_not_synced", "base_definition_unavailable"].includes(code)) throw new BaseContentFailure("retry", code, response.status);
+				if (["base_content_conflict", "stale_base_revision", "base_registry_conflict"].includes(code)) throw new BaseContentFailure("conflict", code, response.status);
+				if (["base_content_disabled", "base_content_protocol_required", "bases_registry_disabled"].includes(code) || response.status === 404 && code !== "target_unavailable") throw new BaseContentFailure("pause", code, response.status);
 				throw new BaseContentFailure("reject", code, response.status);
 			}
 			await credentials();

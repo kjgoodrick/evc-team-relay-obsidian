@@ -13,6 +13,7 @@ import { sha256Hex } from "../../src/contentDigest";
 import { decodeBaseBytes, encodeBaseBytes, type BaseSnapshot, type BaseRecord } from "../../src/bases/BaseContentProtocol";
 import { isConflictCopyPath } from "../../src/conflictCopyPath";
 import { same } from "../../src/client/managedRecovery";
+import type { BaseRegistrySnapshot } from "../../src/bases/BaseRegistryProtocol";
 
 jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/obsidian"),
 	Component: class { register() {} registerEvent() {} registerDomEvent() {} registerInterval(timer: number) { clearInterval(timer); } },
@@ -114,6 +115,42 @@ test("editing a native Bases file publishes conditional content and acknowledges
 		await s.file.runSync(); s.edit("views: []\n# edited\n"); await s.file.pushToRemote();
 		expect(new TextDecoder().decode(s.remote().bytes!)).toContain("edited"); expect(s.index.acknowledgeBaseContent).toHaveBeenCalledTimes(1);
 		expect(s.folder.blobs.pushFile).not.toHaveBeenCalled(); expect(s.file.lastUploadError).toBeUndefined();
+	} finally { s.close(); }
+});
+
+test("synchronized Bases allow read-only view inspection and export without modifying native bytes", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync(); s.manifest.owner = false; s.manifest.permissions[path] = "read";
+		const snapshot: BaseRegistrySnapshot = { protocol_version: 1, definition_id: id(40), entry_id: entryId, generation: s.remote().state.generation!, revision: 1,
+			content_sha256: s.remote().state.record.hash!, views: [{ slot: 0, id: id(41), name: "Planning", type: "table", descriptor_sha256: "a".repeat(64) }], unmatched: { views: [], has_more: false, next_after: null } };
+		fetchMock.mockImplementation(async (url, init) => {
+			expect(url).toContain("/bases/inspect"); expect(init?.method).toBe("POST"); return reply(200, snapshot);
+		});
+		expect((await s.host.refreshViews(s.folder, s.file)).snapshot).toEqual(snapshot);
+		expect((await s.host.cachedViews(s.folder, s.file)).snapshot).toEqual(snapshot);
+		await expect(s.host.repairViews(s.folder, s.file, snapshot, [{ slot: 0, view_id: null }], [])).rejects.toThrow("base_editor_required");
+		const destination = await s.host.export(s.folder, entryId);
+		expect([...s.exports].find(([name]) => name.startsWith(destination) && name.includes("saved-views"))?.[1]).toContain(snapshot.definition_id);
+		expect(s.vault.process).not.toHaveBeenCalled(); expect(s.disk()).toBe("views: []\n");
+	} finally { s.close(); }
+});
+
+test("dirty native bytes and permissions lost after inventory refresh block saved-view inspection", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync(); fetchMock.mockClear(); s.edit("views: []\n# unsynchronized");
+		await expect(s.host.refreshViews(s.folder, s.file)).rejects.toThrow("local changes"); expect(fetchMock).not.toHaveBeenCalled();
+		s.edit("views: []\n"); s.manifest.owner = false; s.manifest.permissions[path] = "none";
+		await expect(s.host.refreshViews(s.folder, s.file)).rejects.toThrow(); await expect(s.host.cachedViews(s.folder, s.file)).rejects.toThrow();
+		expect(fetchMock).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("an account change while inspecting views never delivers the previous account's response", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync();
+		fetchMock.mockImplementation(async () => { s.account(); return reply(200, {}); });
+		await expect(s.host.refreshViews(s.folder, s.file)).rejects.toThrow();
+		await expect(s.host.cachedViews(s.folder, s.file)).rejects.toThrow("Sign in");
 	} finally { s.close(); }
 });
 

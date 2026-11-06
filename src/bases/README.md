@@ -7,6 +7,53 @@ native review/export controls. This is a development sync preview, **not usable
 Bases commenting or a release-ready file lifecycle**. Production enablement and
 mobile acceptance remain separate gates.
 
+## Saved-view association preview
+
+The file menu now offers **Review Bases views** for synchronized standalone
+definitions. `BaseRegistryTransport` validates bounded server snapshots, history
+pages and exact repair receipts. `BaseRegistryStore` keeps a separate 8 MiB
+server/account/vault/share IndexedDB cache. It reserves space before accepting a
+pending repair and commits the exact request, operation ID and original reviewed
+mapping before transmission. Quota failure preserves existing state; no automatic
+eviction removes pending work or repair history.
+
+`BaseViewsController` uses the same per-entry lock as file synchronization.
+Inspection requires synchronized local bytes and current authorized inventory.
+Read-only members may inspect; edits require current file-write access and a
+fresh registry revision. Associations are one-to-one; choosing a new identity,
+archiving an earlier identity and restoring an archived association never edit
+the `.base` bytes. Ambiguous renamed/copied views require explicit choices.
+
+`BaseViewsModal` shows current/unmatched/archived associations, pages earlier
+views, rejects duplicate assignments, preserves keyboard focus after selection,
+and disables edits while offline or when review has become stale. A failed send
+retains the original choices. Opening or refreshing the dialog does not resend
+them; **Check repair delivery** retries the exact saved request. An old accepted
+receipt records success without rolling back a newer cached mapping. A newer
+server revision can fence a rejected pending CAS request; the recorded status
+is superseded, not proof that it was never accepted. Account changes clear the
+dialog and prevent old-account response delivery.
+
+Local recovery export includes a transactionally consistent view-registry
+snapshot and immutable repair history in `saved-views.json`. It is a diagnostic
+export; complete cross-store backup/restore remains separate work. Inspection
+is explicit, with no background registry polling. Cached associations remain
+reviewable offline; new identity repair requires connectivity.
+
+Validation: 1,884 plugin regression tests passed (ten opt-in tests skipped).
+Both actual HTTP fixtures passed separately, covering read-only inspection,
+unambiguous/ambiguous changes, exact retry after response loss, restart, later
+repairs, stale revisions and archive navigation. Native Obsidian 1.13.7 verified
+new identity, archive, reassociation, stale-review rejection, rename, reload,
+export and offline cached review in `/private/tmp/evc-bases-views-20261106`.
+Build/lint/main TypeScript and Svelte/test-type gates passed with existing
+baselines. This is **not Bases commenting**: inline definitions, provisional
+offline identities, native target adapters, target permissions and discussion
+bindings remain. Native reviewer/mobile and complete resource/lifecycle
+acceptance also remain.
+
+## Guarded file synchronization and recovery
+
 `BaseContentProtocol.ts` validates entry/path/generation/version identity,
 bounded bytes and SHA-256. Three-way comparison uses the last synchronized
 content, local bytes and current remote bytes; device timestamps never choose
