@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import { platformFetch } from "../platformFetch";
 import type { ItemRecord } from "../ItemKinds";
+import { parseBaseState, type BaseContentState } from "../bases/BaseContentProtocol";
 import { CONFLICTS, diff, groups, makeConflict, overlay, rebase, same, scope, select, touches, type Records, type StructuralConflict } from "./managedRecovery";
 
 export interface ManagedManifest {
@@ -9,6 +10,7 @@ export interface ManagedManifest {
 	activity: Record<string, string>;
 	owner: boolean;
 	deleted?: Record<string, string[]>;
+	base_content?: { protocol_version: number; enabled: boolean; recovery: boolean; versions: Record<string, string> };
 }
 
 const BASE = "managed_base_v1";
@@ -119,6 +121,28 @@ export class ManagedIndexTransport {
 		return this.exclusive(() => {
 			if (this.stopped) throw new Error("File inventory is offline");
 			return this.exchange();
+		});
+	}
+
+	/** A guarded save changes content metadata outside the inventory endpoint.
+	 * Advance only its exact prior snapshot, carrying the new metadata through
+	 * an in-flight local rename without publishing the old hash again. */
+	async acknowledgeBaseContent(expected: BaseContentState, accepted: BaseContentState): Promise<void> {
+		expected = parseBaseState(expected, expected.record.id); accepted = parseBaseState(accepted, expected.record.id);
+		if (accepted.path !== expected.path || !accepted.content_version || !accepted.record.hash || accepted.record.synctime === undefined) throw new Error("Invalid accepted Bases metadata");
+		await this.exclusive(async () => {
+			if (this.stopped) return;
+			const snapshot = this.snapshot, capability = snapshot.base_content;
+			if (!capability || !same(snapshot.records[expected.path], expected.record) ||
+				(capability.versions[expected.record.id] ?? null) !== expected.content_version) return;
+			Y.transact(this.doc, () => {
+				const records = this.doc.getMap<ItemRecord>("filemeta_v0");
+				for (const [path, record] of records) if (record.id === expected.record.id && same(record, expected.record)) records.set(path, accepted.record as ItemRecord);
+				this.doc.getMap<ManagedManifest>(BASE).set("snapshot", { ...snapshot,
+					records: { ...snapshot.records, [accepted.path]: accepted.record as ItemRecord },
+					base_content: { ...capability, versions: { ...capability.versions, [expected.record.id]: accepted.content_version! } } });
+			}, this);
+			this.schedule(100);
 		});
 	}
 

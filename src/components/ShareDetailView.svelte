@@ -621,6 +621,31 @@
 		localFolderPath = localFolder ? localFolder.path : "";
 	}
 
+	function basesSettings(node: HTMLElement) {
+		const folder = live.shareRegistry.locate((sf) => sf.entityGuid === share.id);
+		if (!folder) return;
+		let disposed = false;
+		let unsubscribe = () => {};
+		new Setting(node).setName("Sync Bases").setDesc("Sync saved Bases views and retain conflicting edits for review.")
+			.addToggle(toggle => {
+				unsubscribe = folder.attachmentSettings.subscribe(value => toggle.setValue(value.bases === true));
+				toggle.onChange(async enabled => {
+					toggle.setDisabled(true);
+					try {
+						await folder.attachmentSettings.setCategoryEnabled("bases", enabled);
+						if (enabled && folder.isOnline) await folder.refreshFromServer();
+					} catch (error) {
+						new Notice(error instanceof Error ? error.message : "Bases sync could not start.");
+					} finally {
+						if (!disposed) toggle.setValue(folder.attachmentSettings.readValue().bases === true).setDisabled(false);
+					}
+				});
+			});
+		new Setting(node).setName("Bases sync and recovery").setDesc("Review retained edits and export recovery copies.")
+			.addButton(button => button.setButtonText("Review Bases sync").onClick(() => folder.basesSync?.open()));
+		return { destroy() { disposed = true; unsubscribe(); } };
+	}
+
 	// Check on mount and whenever loading finishes
 	$: if (!loading) checkLocalConnection();
 
@@ -691,6 +716,7 @@
 						<button class="evc-small-btn" on:click={() => live.shareRegistry.locate((sf) => sf.entityGuid === share.id)?.openManagedConflicts()}>Review file conflicts</button>
 						<button class="evc-btn-danger evc-small-btn" on:click={disconnectFolder}>{uiText("shareDetail.localFolder.disconnectButton")}</button>
 					</div>
+					<div use:basesSettings></div>
 				{:else}
 					<div class="evc-connection-row">
 						<div class="evc-connection-info">

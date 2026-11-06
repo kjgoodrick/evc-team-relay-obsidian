@@ -72,7 +72,7 @@ type ItemKindToRecord = {
 	[ItemKind.File]: FileRecord;
 };
 
-export const SyncFlagToItemKind: Record<keyof AttachmentToggles, ItemKind> = {
+export const SyncFlagToItemKind: Record<Exclude<keyof AttachmentToggles, "bases">, ItemKind> = {
 	images: ItemKind.Image,
 	audio: ItemKind.Audio,
 	videos: ItemKind.Video,
@@ -213,6 +213,7 @@ export class KindRegistry extends Notifier<KindRegistry> {
 	static defaultProtocols = DEFAULT_PROTOCOLS;
 
 	private supportByKind = new Map<ItemKind, KindSupport>();
+	private basesEnabled = false;
 	// Reverse index (mimetype -> ItemKind) rebuilt whenever supportByKind
 	// changes, so kindForPath is a lookup instead of a scan over every protocol.
 	private mimetypeIndex = new Map<string, ItemKind>();
@@ -248,6 +249,8 @@ export class KindRegistry extends Notifier<KindRegistry> {
 	}
 
 	supportsSync(vpath: string, meta?: ItemRecord): boolean {
+		if (meta?.type !== ItemKind.Folder && vpath.toLowerCase().endsWith(".base")) return this.attachmentSettings.isFileTypeAllowed(vpath) &&
+			(!meta || meta.type === ItemKind.File && meta.version === 0);
 		if (vpath.endsWith(".md")) return true;
 		if (currentToggles().enableCanvasSync && vpath.endsWith(".canvas")) return true;
 
@@ -264,6 +267,7 @@ export class KindRegistry extends Notifier<KindRegistry> {
 	}
 
 	private applySettingsUpdate(settings: Record<keyof AttachmentToggles, boolean>): void {
+		this.basesEnabled = settings.bases === true;
 		for (const [flagKey, syncType] of Object.entries(SyncFlagToItemKind)) {
 			this.setKindEnabled(syncType, settings[flagKey as keyof AttachmentToggles]);
 		}
@@ -276,6 +280,7 @@ export class KindRegistry extends Notifier<KindRegistry> {
 				enabledTypes.push(syncType);
 			}
 		}
+		if (this.basesEnabled && !enabledTypes.includes(ItemKind.File)) enabledTypes.push(ItemKind.File);
 		return enabledTypes;
 	}
 

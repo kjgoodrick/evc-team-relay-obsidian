@@ -726,3 +726,6 @@
 .relay-rendered-image-mark:focus-visible, .relay-rendered-image-controls button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
 .relay-rendered-image-evidence { font-family: var(--font-interface); font-size: var(--font-ui-smaller); background: var(--background-primary); color: var(--text-muted); padding: 2px 5px; border-radius: 3px; }
 .is-mobile .relay-rendered-image-controls button { min-height: 44px; }
+.evc-bases-sync textarea { width: 100%; font-family: var(--font-monospace); }
+.evc-bases-sync .setting-item-control { flex-wrap: wrap; }
+.is-mobile .evc-bases-sync button { min-height: 44px; }

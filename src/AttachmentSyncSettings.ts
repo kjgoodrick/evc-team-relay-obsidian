@@ -13,6 +13,7 @@ export interface AttachmentToggles {
 	audio?: boolean;
 	videos?: boolean;
 	pdfs?: boolean;
+	bases?: boolean;
 	otherTypes?: boolean;
 }
 
@@ -56,6 +57,13 @@ const ATTACHMENT_TYPES: readonly AttachmentTypeSpec[] = [
 		summary: "Sync PDF files (.pdf)",
 		fileExtensions: ["pdf"],
 		initiallyEnabled: true,
+	},
+	{
+		toggleKey: "bases",
+		displayName: "Bases",
+		summary: "Sync Bases views and preserve conflicting edits for review",
+		fileExtensions: ["base"],
+		initiallyEnabled: false,
 	},
 	{
 		toggleKey: "otherTypes",
@@ -104,6 +112,9 @@ export class AttachmentSyncSettings extends SettingsScope<
 		if (!this.syncEnabled) return false;
 
 		const current = this.readValue();
+		// Bases have a separate content protocol and must never fall through to
+		// the catch-all attachment switch when explicitly disabled.
+		if (extension === "base") return current.bases ?? false;
 		for (const descriptor of ATTACHMENT_TYPES) {
 			const enabled = current[descriptor.toggleKey] ?? descriptor.initiallyEnabled;
 			if (enabled && descriptor.fileExtensions.includes(extension)) {

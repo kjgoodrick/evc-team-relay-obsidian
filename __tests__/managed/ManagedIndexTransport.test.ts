@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { ManagedIndexTransport, type ManagedManifest } from "../../src/client/ManagedIndexTransport";
 import { platformFetch } from "../../src/platformFetch";
 import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
+import type { BaseContentState } from "../../src/bases/BaseContentProtocol";
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 const fetchMock = platformFetch as jest.MockedFunction<typeof platformFetch>;
 const response = (status: number, body: unknown) => ({ status, ok: status < 400, text: async () => JSON.stringify(body) }) as Response;
@@ -19,6 +20,43 @@ function setup(bytes?: Uint8Array) {
 }
 beforeEach(() => jest.resetAllMocks());
 afterEach(() => { transports.splice(0).forEach(t => t.destroy()); documents.splice(0).forEach(d => d.destroy()); });
+
+const baseId = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+function baseState(version: number): BaseContentState {
+	return { path: "Planning.base", generation: baseId(9), content_version: baseId(version), record: {
+		id: baseId(3), type: "file", version: 0, hash: String(version).padStart(64, "0"), mimetype: "application/yaml", synctime: version } };
+}
+const baseManifest = (state: BaseContentState): ManagedManifest => ({ ...empty(), records: { [state.path]: state.record as ItemRecord },
+	base_content: { protocol_version: 1, enabled: true, recovery: true, versions: { [state.record.id]: state.content_version! } } });
+
+test("accepted Bases metadata follows a pending local rename without publishing an obsolete hash", async () => {
+	const before = baseState(10), accepted = baseState(11);
+	fetchMock.mockResolvedValueOnce(response(200, baseManifest(before))); const { transport, records, doc } = setup(); await transport.flush();
+	doc.transact(() => { records.delete(before.path); records.set("Moved.base", before.record as ItemRecord); });
+	await transport.acknowledgeBaseContent(before, accepted);
+	expect(records.get("Moved.base")).toEqual(accepted.record); expect(records.has(before.path)).toBe(false);
+	expect(transport.snapshot.records[before.path]).toEqual(accepted.record);
+	fetchMock.mockResolvedValueOnce(response(200, { ...baseManifest(accepted), records: { "Moved.base": accepted.record } }));
+	await transport.flush();
+	expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string).changes).toEqual([
+		{ path: "Planning.base", previous: accepted.record, value: null }, { path: "Moved.base", previous: null, value: accepted.record },
+	]); expect(transport.conflicts).toEqual([]);
+});
+
+test("late accepted Bases receipts cannot roll back a newer inventory version", async () => {
+	const old = baseState(10), accepted = baseState(11), newer = baseState(12);
+	fetchMock.mockResolvedValueOnce(response(200, baseManifest(newer))); const { transport, records } = setup(); await transport.flush();
+	await transport.acknowledgeBaseContent(old, accepted); expect(records.get(old.path)).toEqual(newer.record);
+	expect(transport.snapshot.base_content?.versions[old.record.id]).toBe(newer.content_version);
+});
+
+test("Bases acknowledgement waits for an in-flight inventory read before advancing its exact snapshot", async () => {
+	const before = baseState(10), accepted = baseState(11); let finish!: (value: Response) => void;
+	fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })); const { transport, records } = setup();
+	const refreshing = transport.flush(), acknowledgement = transport.acknowledgeBaseContent(before, accepted);
+	finish(response(200, baseManifest(before))); await Promise.all([refreshing, acknowledgement]);
+	expect(records.get(before.path)).toEqual(accepted.record); expect(transport.snapshot.records[before.path]).toEqual(accepted.record);
+});
 
 test("a restart publishes only offline metadata changes, with the previous server value", async () => {
 	const snapshot = { ...empty(), records: { "Note.md": note("a") } };

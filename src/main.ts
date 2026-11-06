@@ -23,6 +23,7 @@ import {
 import { Platform } from "obsidian";
 import { PluginUpdater } from "./updates/PluginUpdater";
 import { DiscussionHost } from "./collaboration/DiscussionHost";
+import { BaseSyncHost } from "./bases/BaseSyncHost";
 import { UpdateFiles } from "./updates/UpdateFiles";
 
 /** Internal Obsidian App properties not exposed in the public API */
@@ -235,6 +236,7 @@ export default class TeamRelayPlugin extends Plugin {
 	// Auth + settings UI
 	authSession!: AuthSession;
 	private discussions?: DiscussionHost;
+	private basesSync?: BaseSyncHost;
 	presence?: PresenceController;
 	presenceSettings!: SettingsScope<PresenceSettings>;
 	settingsPage!: RelaySettingsPage;
@@ -901,6 +903,7 @@ export default class TeamRelayPlugin extends Plugin {
 		}
 
 		this.discussions = this.addChild(new DiscussionHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
+		this.basesSync = this.addChild(new BaseSyncHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
 
 		this.app.workspace.onLayoutReady(() => {
 			this.shareRegistry.restore();
@@ -2266,6 +2269,7 @@ export default class TeamRelayPlugin extends Plugin {
 		if (this.updaterBlockedStartup) return;
 		this.presence?.unload();
 		this.discussions?.unload();
+		this.basesSync?.unload();
 		// Save settings before cleanup to persist any changes
 		// Must await to ensure settings are persisted before destroying namespaced settings
 		void this.pluginSettings?.persist();

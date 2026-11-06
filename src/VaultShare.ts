@@ -65,6 +65,7 @@ import { VaultScopedMap } from "./VaultScopedMap";
 import { withRootRelativePaths } from "./rootRelativeProxy";
 import { BlobClient } from "./BlobClient";
 import { AttachmentSyncSettings, type AttachmentToggles } from "./AttachmentSyncSettings";
+import type { BaseSyncDelegate } from "./bases/BaseSyncHost";
 import { currentToggles } from "./featureToggleState";
 import { findNestingConflictPath } from "./vaultShareNesting";
 import { isRootSharePath, resolveShareFolder } from "./vaultRootPath";
@@ -208,6 +209,13 @@ export class VaultShare extends ProviderBacked {
 	/** Per-document change markers -- see docActivity.ts. */
 	docActivity: DocActivityChannel;
 	attachmentSettings: AttachmentSyncSettings;
+	basesSync?: BaseSyncDelegate;
+
+	usesBaseSync(path: string, entryId?: string): boolean {
+		const tracked = entryId ? this.trackedEntries?.get(entryId) : undefined;
+		return path.toLowerCase().endsWith(".base") || !!(tracked && isAttachmentFile(tracked) && tracked.guardedBase) ||
+			!!(entryId && this._liveProvider?.managedIndex?.snapshot.base_content?.versions?.[entryId]);
+	}
 	private isAuthority: boolean;
 	// Narrower than isAuthority (which the "migrate" recreate path in
 	// loadRelayOnPremShares() also sets true, for its own unrelated
@@ -391,6 +399,7 @@ export class VaultShare extends ProviderBacked {
 
 	/** Reserve the file identity in the server inventory before asking for content access. */
 	async ensureManagedEntry(path: string, record: ItemRecord): Promise<void> {
+		if (this.usesBaseSync(path, record.id)) throw new Error("Use Bases sync to publish this file. Local edits are retained.");
 		const index = this._liveProvider.managedIndex;
 		if (!index) return;
 		if (index.isBlocked(path, record.id)) throw new Error("Resolve the file conflict before publishing. Local edits are retained.");
@@ -1261,6 +1270,7 @@ export class VaultShare extends ProviderBacked {
 		if (isConflictCopyPath(tfile.path)) return false;
 		const inFolder = this.containsPath(tfile.path);
 		const vpath = this.toVirtualPath(tfile.path);
+		if (tfile instanceof TFile && this.usesBaseSync(vpath, this.folderIndex.guidFor(vpath))) return inFolder && this.attachmentSettings.readValue().bases === true;
 		const isSupportedFileType = this.folderIndex.isSyncable(vpath);
 		if (!inFolder || !isSupportedFileType) {
 			return false;
@@ -1599,7 +1609,7 @@ export class VaultShare extends ProviderBacked {
 				diffLog?.push(`mirrored new linked folder ${vpath} locally`);
 				return this.folderAt(vpath, false);
 			default:
-				if (this.folderIndex.isSyncable(vpath)) {
+				if (this.folderIndex.isSyncable(vpath) || this.usesBaseSync(vpath, meta.id) && this.attachmentSettings.readValue().bases === true) {
 					diffLog?.push(`pulled down new file ${vpath}`);
 					return this.pullAttachment(vpath, false);
 				}
@@ -1823,6 +1833,14 @@ export class VaultShare extends ProviderBacked {
 		allRemotePaths: Set<string>,
 		diffLog: string[],
 	): DeleteOp | null {
+		const basePath = this.toVirtualPath(file.path);
+		const guarded = [...(this.trackedEntries?.values() ?? [])].find(entry => entry.entryPath === basePath && isAttachmentFile(entry) && entry.guardedBase);
+		if (file instanceof TFile && (basePath.toLowerCase().endsWith(".base") || guarded)) {
+			// Bases deletion review must preserve unsent disk edits as well as the
+			// outbox. Never use the generic attachment/document trash fallback.
+			if (guarded && !allRemotePaths.has(basePath)) (guarded as AttachmentFile).lastUploadError = "This Bases file is unavailable on the server. The local copy is retained for recovery.";
+			return null;
+		}
 		if (this.isRecoveringStructure || this._liveProvider?.managedIndex?.isBlocked(this.toVirtualPath(file.path))) return null;
 		if (this._liveProvider.managedIndex) {
 			// Revocation is not deletion. Trash only an explicit tombstone for
@@ -2002,7 +2020,10 @@ export class VaultShare extends ProviderBacked {
 	) {
 		folderIndex.eachRecord((meta, path) => {
 			this._requireInScope(path);
-			if (types.contains(meta.type)) {
+			const supported = meta.type !== ItemKind.Folder && this.usesBaseSync(path, meta.id)
+				? this.attachmentSettings.readValue().bases === true && meta.type === ItemKind.File && meta.version === 0
+				: meta.type !== ItemKind.File || folderIndex.isSyncable(path);
+			if (types.contains(meta.type) && supported) {
 				this._requireInScope(path);
 				ops.push(
 					this.applyServerRecord(meta.id, path, folderIndex.knownGuids, diffLog),
@@ -2291,6 +2312,7 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	async noteUploaded(file: SyncableEntry): Promise<void> {
+		if (this.usesBaseSync(file.entryPath, file.entityGuid)) return;
 		const meta = await this._metaForUpload(file);
 		if (meta) {
 			this._commitMeta(file, meta);
@@ -2730,7 +2752,7 @@ export class VaultShare extends ProviderBacked {
 
 	/** Shared guid-resolution prefix for the four AttachmentFile accessors below. */
 	private _requireSyncFileGuid(vpath: string, missingGuidMessage: string): string {
-		if (!this.folderIndex.isSyncable(vpath)) {
+		if (!this.folderIndex.isSyncable(vpath) && !(this.usesBaseSync(vpath, this.folderIndex.guidFor(vpath)) && this.attachmentSettings.readValue().bases === true)) {
 			throw new Error("path's extension doesn't match this file type");
 		}
 		if (!this.isSynced && !this.folderIndex.tracks(vpath)) {
@@ -2780,10 +2802,10 @@ export class VaultShare extends ProviderBacked {
 			`called download on item that is not in ids ${vpath}`,
 		);
 		const meta = this.folderIndex.recordFor(vpath);
-		if (!meta || !meta.hash) {
+		if (!meta || !meta.hash && !this.usesBaseSync(vpath, guid)) {
 			return this.publishAttachment(vpath, update);
 		}
-		const file = this.ensureAttachment(guid, vpath, meta.hash);
+		const file = this.ensureAttachment(guid, vpath, meta.hash ?? "");
 
 		void this.transfers.enqueueFetch(file);
 

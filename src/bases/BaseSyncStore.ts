@@ -56,6 +56,10 @@ export class BaseSyncStore {
 		return await request(tx.objectStore("files").get(entryId)) as BaseSyncRecord | undefined ?? { entryId, revision: 0 };
 	}
 	get(entryId: string): Promise<BaseSyncRecord> { return this.transaction("readonly", tx => this.current(tx, entryId)); }
+	list(after = "", limit = 100): Promise<BaseSyncRecord[]> {
+		if (!Number.isInteger(limit) || limit < 1 || limit > 100 || after && !baseId(after)) throw new Error("Invalid Bases storage page");
+		return this.transaction("readonly", tx => request(tx.objectStore("files").getAll(IDBKeyRange.lowerBound(after, true), limit)) as Promise<BaseSyncRecord[]>);
+	}
 
 	private async write(tx: IDBTransaction, before: BaseSyncRecord, after: BaseSyncRecord, archive?: BaseRecovery | BaseRecovery[]): Promise<void> {
 		const meta = tx.objectStore("meta"), used = await request(meta.get("bytes")) as number | undefined ?? 0;

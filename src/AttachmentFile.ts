@@ -250,6 +250,7 @@ export class AttachmentFile
 	isConnected: boolean = true;
 	unsubscribeFileInfo: Unsubscriber = () => {};
 	lastUploadError?: string = undefined;
+	guardedBase = false;
 
 	constructor(
 		public path: string,
@@ -329,8 +330,8 @@ export class AttachmentFile
 	}
 
 	public get statusTag() {
-		if (this.hasRemoteMeta) return "";
 		if (this.lastUploadError) return this.lastUploadError;
+		if (this.hasRemoteMeta) return "";
 		return this.hasPendingUpload ? "pending" : "unknown";
 	}
 
@@ -397,7 +398,18 @@ export class AttachmentFile
 		}
 	}
 
+	private async syncBase(): Promise<boolean> {
+		if (!this.vaultShare?.usesBaseSync(this.path, this.entityGuid)) return false;
+		this.guardedBase = true;
+		try {
+			if (!this.vaultShare.basesSync) throw new Error("Bases sync is starting. Your local edits are retained.");
+			await this.vaultShare.basesSync.sync(this);
+		} catch (error) { this.lastUploadError = AttachmentFile.formatUploadError(error); }
+		this.notifySubscribers(); return true;
+	}
+
 	public async pushToRemote(force = false) {
+		if (await this.syncBase()) return;
 		this.log("push");
 		if (!this.canPush()) {
 			return;
@@ -451,6 +463,7 @@ export class AttachmentFile
 	}
 
 	public async runSync() {
+		if (await this.syncBase()) return;
 		this.log("sync");
 		this.refreshRemoteMeta();
 
@@ -467,6 +480,9 @@ export class AttachmentFile
 	}
 
 	needsPull(meta: FileRecord) {
+		// Bases inventory changes are scheduled by BaseSyncHost; timestamps do
+		// not express whether a guarded configuration needs reconciliation.
+		if (this.vaultShare?.usesBaseSync(this.path, this.entityGuid)) return false;
 		return !this.obsidianFile || meta.synctime > this.stat.mtime;
 	}
 
@@ -480,6 +496,7 @@ export class AttachmentFile
 	}
 
 	public async pullFromRemote() {
+		if (await this.syncBase()) return;
 		this.log("pull");
 		this.refreshRemoteMeta();
 		if (!this.syncMeta) {

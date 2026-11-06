@@ -509,6 +509,13 @@ export class ShareManagementModal extends Modal {
 		contentEl.createEl("h4", { text: "Local folder" });
 
 		if (localFolder) {
+			new Setting(contentEl).setName("Sync Bases").setDesc("Sync saved Bases views and retain conflicting edits for review.")
+				.addToggle(toggle => toggle.setValue(localFolder.attachmentSettings.readValue().bases === true).onChange(async enabled => {
+					await localFolder.attachmentSettings.setCategoryEnabled("bases", enabled);
+					if (enabled && localFolder.isOnline) void localFolder.refreshFromServer().catch(error => new Notice(error instanceof Error ? error.message : "Bases sync could not start."));
+				}));
+			new Setting(contentEl).setName("Bases sync and recovery").setDesc("Review retained edits and export recovery copies.")
+				.addButton(button => button.setButtonText("Review Bases sync").onClick(() => localFolder.basesSync?.open()));
 			new Setting(contentEl).setName("File and folder conflicts").setDesc("Review changes that need a decision; recovery copies stay on this device.")
 				.addButton(button => button.setButtonText("Review conflicts").onClick(() => localFolder.openManagedConflicts()));
 			new Setting(contentEl)
