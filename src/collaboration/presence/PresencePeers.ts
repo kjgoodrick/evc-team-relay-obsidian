@@ -8,6 +8,7 @@ export type PresenceLocation = { viewport?: Y.RelativePosition | null; selection
 export type PresencePeer = PresenceLocation & {
 	key: string; clientId: number; userId: string; sessionId: string; name: string;
 	avatarUrl?: string; surface: NotePresenceSurface; cursor?: PresenceRange | null;
+	instanceId?: string;
 };
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const integer = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
@@ -31,6 +32,7 @@ export function presencePeers(awareness: Awareness): PresencePeer[] {
 		if (typeof id !== "string" || !id.length || id.length > 128 || typeof name !== "string" || !name.trim() || [...name].length > 255 ||
 			typeof sessionId !== "string" || !/^[0-9a-f]{32}$/.test(sessionId) || ![undefined, "editor", "reading"].includes(raw.surface as NotePresenceSurface)) continue;
 		peers.push({ key: JSON.stringify([id, sessionId, clientId]), userId: id, sessionId, clientId, name,
+			instanceId: typeof raw.instanceId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(raw.instanceId) ? raw.instanceId : undefined,
 			avatarUrl: safeAvatarUrl(raw.user.avatarUrl), surface: raw.surface === "reading" ? "reading" : "editor",
 			cursor: raw.surface !== "reading" && presenceRange(raw.cursor) ? raw.cursor : null,
 			selection: raw.surface === "reading" && presenceRange(raw.selection) ? raw.selection : null,

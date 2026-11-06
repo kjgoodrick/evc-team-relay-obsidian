@@ -1,5 +1,6 @@
 import { Component, MarkdownView, Modal, Notice, Setting, setIcon, type Plugin } from "obsidian";
 import * as Y from "yjs";
+import { v4 as uuidv4 } from "uuid";
 import type { AuthSession } from "../../AuthSession";
 import { DocumentViewBinding, type ViewBindingRegistry } from "../../ViewBindings";
 import type { SettingsScope } from "../../SettingsPersistence";
@@ -26,6 +27,7 @@ const descriptions: Record<PresenceStatus, string> = {
 /** One owner across all leaves/popout windows. It neither creates documents nor
  * opens sockets; note sync retains its existing connection lifecycle. */
 export class PresenceController extends Component {
+	readonly instanceId = uuidv4();
 	private active?: { binding: Binding; surface: NotePresenceSurface };
 	private candidate?: Binding;
 	private observed?: YSweetProvider;
@@ -170,7 +172,7 @@ export class PresenceController extends Component {
 			if (!allowed || changed) this.clearActive();
 			if (allowed) {
 				this.active = { binding: candidate, surface };
-				candidate.boundDocument.setPresenceActive(surface);
+				candidate.boundDocument.setPresenceActive(surface, this.instanceId);
 				// Activation may happen after the editor's focus transaction. Capture
 				// its actual selection once; Reading never invents an editor caret.
 				if (changed && surface === "editor" && view!.editor.hasFocus()) this.captureEditor(candidate);

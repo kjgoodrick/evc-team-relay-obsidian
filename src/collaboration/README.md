@@ -57,6 +57,14 @@ duplicate controls when the same root is processed again. The authorized
 cross-note location channel, remote Reading highlights, image/Bases adapters,
 socket backpressure, two-native-client rendering and mobile acceptance remain.
 
+Cross-note preparation now gives the foreground controller one random instance
+UUID per plugin lifetime and publishes it across active-note transitions. Profile
+refresh preserves this identifier; background/privacy still removes the whole
+awareness state. Peer parsing accepts the optional validated UUID, retaining
+compatibility with previous states. The matching server has an opt-in location
+transport preview documented at `docs/presence-location-channel.md`; this plugin
+does not yet connect to it. Cross-note Follow is still unavailable.
+
 ## Local commands and delivery
 
 `DiscussionStore` persists drafts, operations, cached entities and checkpoints in

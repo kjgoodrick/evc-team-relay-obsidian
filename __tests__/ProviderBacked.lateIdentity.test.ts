@@ -133,12 +133,14 @@ describe("ProviderBacked identity restoration", () => {
 		const { provider, restoreIdentity, refreshProfile } = makeClient();
 		const account = new Account("local-user", "Local User", "user@example.com", "https://id.example/one.png", "");
 		restoreIdentity(account);
-		provider.setPresenceActive("editor");
+		const instance = "a8c90563-f8dd-466c-aeaa-87493d018754";
+		provider.setPresenceActive("editor", instance);
 		expect(provider._liveProvider.awareness.getLocalState()?.user.avatarUrl).toBe(account.avatarUrl);
 		const changed = jest.fn();
 		provider.crdtDoc.on("update", changed);
 		refreshProfile(new Account(account.accountId, "Updated Name", account.emailAddress, "https://id.example/two.png", ""));
 		expect(provider._liveProvider.awareness.getLocalState()?.user).toMatchObject({ name: "Updated Name", avatarUrl: "https://id.example/two.png" });
+		expect(provider._liveProvider.awareness.getLocalState()?.instanceId).toBe(instance);
 		expect(changed).not.toHaveBeenCalled();
 		refreshProfile(new Account(account.accountId, "Updated Name", account.emailAddress, "", ""));
 		expect(provider._liveProvider.awareness.getLocalState()?.user.avatarUrl).toBeUndefined();

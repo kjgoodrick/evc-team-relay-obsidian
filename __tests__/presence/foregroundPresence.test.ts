@@ -104,12 +104,15 @@ test("only the active bound note publishes; private views and unloaded bindings 
 	try {
 		const [first, second] = f.notes;
 		expect(first.doc._liveProvider.awareness.getLocalState()?.surface).toBe("editor");
+		expect(first.doc._liveProvider.awareness.getLocalState()?.instanceId).toBe(f.controller.instanceId);
+		expect(f.controller.instanceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 		expect(second.doc._liveProvider.awareness.getLocalState()).toBeNull();
 		const position = first.doc._liveProvider.awareness.getLocalState()!.cursor.head;
 		expect(Y.createAbsolutePositionFromRelativePosition(position, first.doc.crdtDoc)?.index).toBe(10);
 		f.select(second.view);
 		expect(first.doc._liveProvider.awareness.getLocalState()).toBeNull();
 		expect(second.doc._liveProvider.awareness.getLocalState()?.surface).toBe("editor");
+		expect(second.doc._liveProvider.awareness.getLocalState()?.instanceId).toBe(f.controller.instanceId);
 		f.select(null); expect(second.doc._liveProvider.awareness.getLocalState()).toBeNull();
 		f.select(first.view); f.registry.trackedViews = [];
 		f.viewListeners.forEach(fn => fn()); expect(first.doc._liveProvider.awareness.getLocalState()).toBeNull();

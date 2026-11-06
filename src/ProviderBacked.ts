@@ -135,6 +135,7 @@ export class ProviderBacked extends Loggable {
 	private seededAccountId?: string;
 	private seededProfile?: string;
 	private presenceSurface?: NotePresenceSurface;
+	private presenceInstanceId?: string;
 
 	constructor(
 		public entityGuid: string,
@@ -231,8 +232,9 @@ export class ProviderBacked extends Loggable {
 	}
 
 	/** Only the shared foreground controller activates this ephemeral state. */
-	setPresenceActive(surface?: NotePresenceSurface): void {
+	setPresenceActive(surface?: NotePresenceSurface, instanceId?: string): void {
 		this.presenceSurface = surface;
+		this.presenceInstanceId = instanceId;
 		this.refreshPresence(this.authSession?.getCurrentUserForServer(this.getOnpremServerId()));
 	}
 
@@ -243,9 +245,9 @@ export class ProviderBacked extends Loggable {
 			return;
 		}
 		const profile = presenceProfile(user);
-		if (current?.surface === this.presenceSurface && JSON.stringify(current.user) === JSON.stringify(profile)) return;
+		if (current?.surface === this.presenceSurface && current?.instanceId === this.presenceInstanceId && JSON.stringify(current.user) === JSON.stringify(profile)) return;
 		const preserve = current?.surface === this.presenceSurface && current?.user?.id === user.accountId;
-		awareness.setLocalState({ user: profile, surface: this.presenceSurface,
+		awareness.setLocalState({ user: profile, surface: this.presenceSurface, ...(this.presenceInstanceId ? { instanceId: this.presenceInstanceId } : {}),
 			cursor: preserve ? current.cursor ?? null : null, viewport: preserve ? current.viewport ?? null : null,
 			selection: preserve ? current.selection ?? null : null });
 	}
