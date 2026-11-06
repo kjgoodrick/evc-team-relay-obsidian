@@ -4,6 +4,8 @@ import type { OutboxOperation } from "../storage/DiscussionStore";
 import { commentBodyText, renderCommentBody } from "./CommentBody";
 
 const failureHelp: Record<string, string> = {
+	anchor_generation_mismatch: "This note was rebuilt or restored. Review and reattach this comment before sending.",
+	invalid_anchor: "The saved selection could not be validated. Keep your text and select a new target.",
 	comment_forbidden: "Comment permission was denied. Restore access before retrying.",
 	target_unavailable: "The note or discussion could not be reached. Sync the note or restore access before retrying.",
 	stale_message_revision: "This comment changed elsewhere. Review the current version before editing again.",

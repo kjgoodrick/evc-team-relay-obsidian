@@ -292,6 +292,7 @@ export class DiscussionStore {
 			await request(tx.objectStore("cursors").delete(scopeId));
 			await request(tx.objectStore("preferences").delete("permission:" + scopeId));
 			await request(tx.objectStore("preferences").delete("people:" + scopeId));
+			await request(tx.objectStore("preferences").delete("documentGeneration:" + scopeId));
 			await request(generations.put(generation + 1, scopeId));
 			return true;
 		});

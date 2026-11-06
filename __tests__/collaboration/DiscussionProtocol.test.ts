@@ -1,4 +1,6 @@
-import { bodyFromText, parseBody, parseChanges, parseMessage, parseThreadPage, safeDiscussionUrl } from "../../src/collaboration/DiscussionProtocol";
+import * as Y from "yjs";
+import { captureTextAnchor, resolveTextAnchor } from "../../src/collaboration/anchors/text";
+import { bodyFromText, localTextAnchor, parseAnchor, parseBody, parseChanges, parseMessage, parseThreadPage, safeDiscussionUrl, wireTextAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -73,4 +75,23 @@ test("online-only state changes accept responses without inventing message field
 	expect(await transport.sendOnline({ operationId: id(6), scopeId: id(3), payload: { type: "thread.state", thread_id: id(4),
 		expected_state_revision: 1, state: "resolved" } })).toEqual(result);
 	expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+test("text anchors round-trip the real Yjs selection and reject malformed metadata", async () => {
+	const doc = new Y.Doc(), text = doc.getText("contents"); text.insert(0, "🙂 café beta");
+	try {
+		const local = captureTextAnchor(text, id(3), id(8), 3, 7), wire = wireTextAnchor(local);
+		expect(localTextAnchor(wire)).toEqual(local);
+		expect(parseThreadPage({ ...page(), anchor: wire }, id(4), 0).anchor).toEqual(wire);
+		text.insert(0, "prefix ");
+		expect(resolveTextAnchor(text, id(3), id(8), localTextAnchor(wire))).toEqual({ status: "attached", from: 10, to: 14 });
+		for (const patch of [{ document_id: "Note.md" }, { selected_length: -1 }, { selected_length: 2 ** 32 },
+			{ dependency: "" }, { start: "AB==" }, { end: "a".repeat(400) }, { generation: null },
+			{ context: { ...wire.context, quote: "\ud83d" } }, { context: { ...wire.context, prefix: "x".repeat(65) } }]) {
+			expect(() => parseAnchor({ ...wire, ...patch })).toThrow();
+		}
+		const fetcher = jest.fn().mockResolvedValue(new Response(JSON.stringify({ ...page(), anchor: wire })));
+		await expect(new DiscussionTransport(identity, credential, fetcher).thread(id(9), id(4)))
+			.rejects.toMatchObject({ action: "pause", code: "invalid_read_response" });
+	} finally { doc.destroy(); }
 });

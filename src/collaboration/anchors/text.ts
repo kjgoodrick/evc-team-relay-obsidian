@@ -61,15 +61,23 @@ export function captureTextAnchor(
 	const source = text.toString();
 	const dependency = Y.encodeSnapshot(Y.snapshot(text.doc));
 	if (dependency.byteLength > 64 * 1024) throw new Error("Anchor dependency exceeds protocol limit");
+	// Context is only recovery text. Cutting a UTF-16 window through an emoji
+	// must not create invalid JSON Unicode or change the actual selection offsets.
+	const contextSlice = (start: number, end: number) => {
+		let value = source.slice(start, end);
+		if (value.length && value.charCodeAt(0) >= 0xdc00 && value.charCodeAt(0) <= 0xdfff) value = value.slice(1);
+		if (value.length && value.charCodeAt(value.length - 1) >= 0xd800 && value.charCodeAt(value.length - 1) <= 0xdbff) value = value.slice(0, -1);
+		return [...value].map(char => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff ? "\ufffd" : char).join("");
+	};
+	const quote = contextSlice(from, Math.min(to, from + 512));
 	return {
 		version: 1, type: "text", documentId, generation,
 		start: toBase64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(text, from, 0))),
 		end: toBase64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(text, to, from === to ? 0 : -1))),
 		dependency: toBase64(dependency), selectedLength: to - from,
 		context: {
-			quote: source.slice(from, Math.min(to, from + 512)),
-			prefix: source.slice(Math.max(0, from - 64), from),
-			suffix: source.slice(to, to + 64), truncated: to - from > 512,
+			quote, prefix: contextSlice(Math.max(0, from - 64), from),
+			suffix: contextSlice(to, to + 64), truncated: quote.length < to - from,
 		},
 	};
 }

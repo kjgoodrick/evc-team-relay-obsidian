@@ -1,7 +1,7 @@
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
-import { isId, isSequence, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState } from "./DiscussionProtocol";
+import { isId, isSequence, parseAnchor, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type DiscussionAnchor } from "./DiscussionProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -29,6 +29,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operation_id_conflict", "identifier_unavailable",
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
+for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "text_anchors_disabled"]) errorCodes.add(code);
 function validId(value: unknown): value is string { return typeof value === "string" && uuid.test(value); }
 function object(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -50,7 +51,15 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 		body = JSON.stringify({ protocol_version: 1, operation_id: op.operationId, share_id: shareId,
 			entry_id: op.scopeId, command: payload });
 	} catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
-	if (new TextEncoder().encode(body).byteLength > 65536) throw new DiscussionFailure("reject", "command_too_large");
+	let limit = 65536;
+	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "text") {
+		try {
+			const anchor = parseAnchor(payload.anchor);
+			if (anchor.type !== "text" || anchor.document_id !== op.scopeId) throw new Error("Wrong document");
+		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
+		limit = 256 * 1024;
+	}
+	if (new TextEncoder().encode(body).byteLength > limit) throw new DiscussionFailure("reject", "command_too_large");
 	return body;
 }
 
@@ -112,11 +121,17 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		return { discussions: value.features.discussion_commands };
+		if (value.features.discussion_text_anchors !== undefined && typeof value.features.discussion_text_anchors !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
+		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true };
+	}
+	async anchorContext(entryId: string): Promise<{ entryId: string; generation: string }> {
+		const value = await this.request(this.scopePath(entryId) + "/anchor-context");
+		if (!object(value) || value.protocol_version !== 1 || value.entry_id !== entryId || !isId(value.generation)) throw new DiscussionFailure("pause", "invalid_read_response");
+		return { entryId, generation: value.generation };
 	}
 
 	async permissions(entryId: string): Promise<DiscussionPermissions> {
@@ -151,20 +166,24 @@ export class DiscussionTransport implements DiscussionSender {
 	private parse<T>(value: unknown, parser: (value: unknown) => T): T {
 		try { return parser(value); } catch { throw new DiscussionFailure("pause", "invalid_read_response"); }
 	}
+	private scoped<T extends { anchor?: DiscussionAnchor }>(value: T, entryId: string): T {
+		if (value.anchor?.type === "text" && value.anchor.document_id !== entryId) throw new DiscussionFailure("pause", "invalid_read_response");
+		return value;
+	}
 	async threads(entryId: string, after = 0) {
 		return this.parse(await this.request(this.scopePath(entryId) + "/threads" + this.page(after)), v => parseThreadList(v, after));
 	}
 	async thread(entryId: string, threadId: string, after = 0) {
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}` + this.page(after)), v => parseThreadPage(v, threadId, after));
+		return this.scoped(this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}` + this.page(after)), v => parseThreadPage(v, threadId, after)), entryId);
 	}
 	async message(entryId: string, threadId: string, messageId: string) {
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}`), v => parseMessageRead(v, threadId, messageId));
+		return this.scoped(this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}`), v => parseMessageRead(v, threadId, messageId)), entryId);
 	}
 	async state(entryId: string, threadId: string) {
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => parseThreadState(v, threadId));
+		return this.scoped(this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => parseThreadState(v, threadId)), entryId);
 	}
 	async history(entryId: string, threadId: string, messageId: string, after = 0) {
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
@@ -214,6 +233,8 @@ export class DiscussionTransport implements DiscussionSender {
 			if (!response.ok) {
 				const message = object(value) && object(value.error) ? value.error.message : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
+				if (response.status === 409 && code === "anchor_dependency_not_ready") throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
+				if (response.status === 409 && code === "text_anchors_disabled") throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 413, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

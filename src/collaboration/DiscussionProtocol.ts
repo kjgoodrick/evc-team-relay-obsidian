@@ -1,4 +1,5 @@
 import type { Json } from "./storage/DiscussionStore";
+import { decodeBoundedBase64, type TextAnchor } from "./anchors/text";
 
 export const isId = (value: unknown): value is string => typeof value === "string" &&
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -28,9 +29,12 @@ export type DiscussionMessage = {
 	reactions: { emoji: ReactionKey; count: number; mine: boolean }[];
 };
 export type NoteAnchor = { version: 1; type: "note" };
-export type ThreadPage = { thread: ThreadSummary; anchor: NoteAnchor; messages: DiscussionMessage[]; has_more: boolean; next_after: number };
-export type MessageRead = { thread: ThreadSummary; anchor: NoteAnchor; message: DiscussionMessage };
-export type ThreadStateRead = { thread: ThreadSummary; anchor?: NoteAnchor };
+export type WireTextAnchor = { version: 1; type: "text"; document_id: string; generation: string; start: string; end: string;
+	dependency: string; selected_length: number; context: TextAnchor["context"] };
+export type DiscussionAnchor = NoteAnchor | WireTextAnchor;
+export type ThreadPage = { thread: ThreadSummary; anchor: DiscussionAnchor; messages: DiscussionMessage[]; has_more: boolean; next_after: number };
+export type MessageRead = { thread: ThreadSummary; anchor: DiscussionAnchor; message: DiscussionMessage };
+export type ThreadStateRead = { thread: ThreadSummary; anchor?: DiscussionAnchor };
 export type ThreadList = { threads: ThreadSummary[]; has_more: boolean; next_after: number };
 export type HistoryPage = { revisions: { revision: number; body: MessageBody | null; actor_id: string | null; created_at: string; reason: string | null }[];
 	has_more: boolean; next_after: number };
@@ -99,9 +103,33 @@ export function parseMessage(value: unknown): DiscussionMessage {
 		body: value.deleted ? null : parseBody(value.body), created_sequence: value.created_sequence, created_at: value.created_at as string,
 		edited_at: value.edited_at as string | null, reactions };
 }
-function anchor(value: unknown): NoteAnchor {
-	requireValue(isRecord(value) && value.version === 1 && value.type === "note");
-	return { version: 1, type: "note" };
+export function parseAnchor(value: unknown): DiscussionAnchor {
+	requireValue(isRecord(value) && value.version === 1);
+	if (value.type === "note") return { version: 1, type: "note" };
+	requireValue(value.type === "text" && isId(value.document_id) && isId(value.generation) &&
+		isSequence(value.selected_length) && value.selected_length <= 4294967295 && isRecord(value.context) &&
+		typeof value.context.truncated === "boolean");
+	const context = value.context;
+	for (const [key, limit] of [["quote", 512], ["prefix", 64], ["suffix", 64]] as const) {
+		const text = context[key];
+		requireValue(typeof text === "string" && [...text].length <= limit &&
+			![...text].some(char => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff));
+	}
+	for (const [key, limit] of [["dependency", 65536], ["start", 256], ["end", 256]] as const) {
+		requireValue(typeof value[key] === "string" && decodeBoundedBase64(value[key], limit).length > 0);
+	}
+	return { version: 1, type: "text", document_id: value.document_id, generation: value.generation,
+		start: value.start as string, end: value.end as string, dependency: value.dependency as string,
+		selected_length: value.selected_length, context: { quote: context.quote as string, prefix: context.prefix as string,
+			suffix: context.suffix as string, truncated: context.truncated as boolean } };
+}
+export function wireTextAnchor(value: TextAnchor): WireTextAnchor {
+	return parseAnchor({ version: value.version, type: value.type, document_id: value.documentId, generation: value.generation,
+		start: value.start, end: value.end, dependency: value.dependency, selected_length: value.selectedLength, context: value.context }) as WireTextAnchor;
+}
+export function localTextAnchor(value: WireTextAnchor): TextAnchor {
+	return { version: value.version, type: value.type, documentId: value.document_id, generation: value.generation,
+		start: value.start, end: value.end, dependency: value.dependency, selectedLength: value.selected_length, context: { ...value.context } };
 }
 function pagination(value: Record<string, unknown>, positions: number[], after: number) {
 	requireValue(typeof value.has_more === "boolean" && isSequence(value.next_after));
@@ -120,19 +148,19 @@ export function parseThreadPage(value: unknown, threadId: string, after: number)
 	requireValue(isRecord(value) && array(value.messages, 100));
 	const thread = parseThread(value.thread), messages = value.messages.map(parseMessage);
 	requireValue(thread.id === threadId && new Set(messages.map(m => m.id)).size === messages.length);
-	return { thread, anchor: anchor(value.anchor), messages, ...pagination(value, messages.map(m => m.created_sequence), after) };
+	return { thread, anchor: parseAnchor(value.anchor), messages, ...pagination(value, messages.map(m => m.created_sequence), after) };
 }
 export function parseMessageRead(value: unknown, threadId: string, messageId: string): MessageRead {
 	requireValue(isRecord(value));
 	const thread = parseThread(value.thread), message = parseMessage(value.message);
 	requireValue(thread.id === threadId && message.id === messageId);
-	return { thread, anchor: anchor(value.anchor), message };
+	return { thread, anchor: parseAnchor(value.anchor), message };
 }
 export function parseThreadState(value: unknown, threadId: string): ThreadStateRead {
 	requireValue(isRecord(value));
 	const thread = parseThread(value.thread);
 	requireValue(thread.id === threadId);
-	return thread.removed ? { thread } : { thread, anchor: anchor(value.anchor) };
+	return thread.removed ? { thread } : { thread, anchor: parseAnchor(value.anchor) };
 }
 export function parseHistory(value: unknown, after: number): HistoryPage {
 	requireValue(isRecord(value) && array(value.revisions, 100));

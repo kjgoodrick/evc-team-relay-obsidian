@@ -70,3 +70,18 @@ test("insertion dependencies wait, and a point anchor stays a point", () => {
 	expect(resolveTextAnchor(text, "note", "generation", point)).toEqual({ status: "attached", from: 10, to: 10 });
 	doc.destroy(); peer.destroy();
 });
+
+test("UTF-16 context windows never split emoji or alter the anchored range", () => {
+	const { doc, capture, resolve } = setup("a".repeat(511) + "🙂" + "b".repeat(63) + "🙂" + "end");
+	try {
+		const anchor = capture(0, 578);
+		expect(anchor.context.quote).toBe("a".repeat(511)); expect(anchor.context.truncated).toBe(true);
+		expect(resolve(anchor)).toEqual({ status: "attached", from: 0, to: 578 });
+		for (const range of [[512, 576], [511, 512], [513, 514]]) {
+			const context = capture(range[0], range[1]).context;
+			for (const value of [context.quote, context.prefix, context.suffix]) {
+				expect([...value].some(c => c.length === 1 && c.charCodeAt(0) >= 0xd800 && c.charCodeAt(0) <= 0xdfff)).toBe(false);
+			}
+		}
+	} finally { doc.destroy(); }
+});

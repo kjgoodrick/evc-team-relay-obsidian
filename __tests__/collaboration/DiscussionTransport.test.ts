@@ -1,6 +1,7 @@
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope } from "../../src/collaboration/DiscussionTransport";
 import type { QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 import { RelayHttpError } from "../../src/relayRequestErrors";
+import { toBase64 } from "lib0/buffer";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const identity = { serverId: "https://relay.example", accountId: id(1), shareId: id(2) };
@@ -42,6 +43,8 @@ test.each([
 	[404, "target_unavailable", "reject"], [409, "stale_message_revision", "reject"],
 	[413, "command_too_large", "reject"], [422, "invalid_command", "reject"],
 	[429, "server_unavailable", "retry"], [503, "server_unavailable", "retry"],
+	[409, "anchor_dependency_not_ready", "retry"], [409, "anchor_generation_mismatch", "reject"],
+	[409, "text_anchors_disabled", "pause"], [422, "invalid_anchor", "reject"],
 ])("classifies HTTP %s without exposing response content", async (status, code, action) => {
 	const fetcher = jest.fn().mockResolvedValue(reply(status as number, { error: { message: { code }, private_body: "secret-comment" } }, { "Retry-After": "60" }));
 	const failure = await new DiscussionTransport(identity, credentials, fetcher).send(op()).catch(e => e);
@@ -97,4 +100,24 @@ test("missing or disabled preview pauses the queue without marking drafts reject
 test("non-JSON forbidden responses still invalidate access and do not expose raw response text", async () => {
 	await expect(new DiscussionTransport(identity, credentials, jest.fn().mockResolvedValue(new Response("private text", { status: 403 }))).send(op()))
 		.rejects.toMatchObject({ action: "reject", code: "command_rejected", status: 403 });
+});
+
+test("negotiates text anchors and binds document context to the requested entry", async () => {
+	const fetcher = jest.fn().mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_text_anchors: true } }));
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true });
+	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, entry_id: id(4), generation: id(8) }));
+	expect(await transport.anchorContext(id(4))).toEqual({ entryId: id(4), generation: id(8) });
+	expect(fetcher.mock.calls[1][0]).toContain(`/entries/${id(4)}/anchor-context`);
+	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, entry_id: id(9), generation: id(8) }));
+	await expect(transport.anchorContext(id(4))).rejects.toMatchObject({ action: "pause", code: "invalid_read_response" });
+});
+
+test("text commands allow a bounded 64 KiB dependency without increasing whole-note limits", () => {
+	const anchor = { version: 1, type: "text", document_id: id(4), generation: id(8), start: "AA==", end: "AA==",
+		dependency: toBase64(new Uint8Array(65536)), selected_length: 0, context: { quote: "", prefix: "", suffix: "", truncated: false } };
+	const operation = { ...op(), payload: { ...op().payload as object, anchor } };
+	expect(queuedEnvelope(id(2), operation).length).toBeGreaterThan(65536);
+	expect(() => queuedEnvelope(id(2), { ...operation, payload: { ...operation.payload, anchor: { ...anchor, document_id: id(9) } } })).toThrow("invalid_local_anchor");
+	expect(() => queuedEnvelope(id(2), { ...operation, payload: { ...operation.payload, anchor: { ...anchor, dependency: toBase64(new Uint8Array(65537)) } } })).toThrow("invalid_local_anchor");
 });

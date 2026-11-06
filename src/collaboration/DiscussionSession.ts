@@ -2,11 +2,11 @@ import { v4 as uuid } from "uuid";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
-import { isRecord, parseMessage, parseThread, protocolJson, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
+import { isId, isRecord, parseMessage, parseThread, protocolJson, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
-type Entry = { listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions;
+type Entry = { listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
 	permissionFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
 export type DiscussionLocalView = { threads: ThreadSummary[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
 
@@ -25,6 +25,7 @@ export class DiscussionSession {
 	private channel?: BroadcastChannel;
 	private statusValue: SessionStatus = "starting";
 	private enabled = false;
+	private textEnabled = false;
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
@@ -50,6 +51,11 @@ export class DiscussionSession {
 	get status(): SessionStatus { return this.statusValue; }
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
+	get canAnchorText(): boolean { return this.canQueue && this.textEnabled; }
+	documentGeneration(entryId: string): string | undefined {
+		const entry = this.entries.get(entryId);
+		return this.canAnchorText && entry?.permission?.read && !entry.unavailable ? entry.documentGeneration : undefined;
+	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private notify(): void {
 		for (const listener of [...this.listeners, ...[...this.entries.values()].flatMap(entry => [...entry.listeners])]) {
@@ -75,10 +81,14 @@ export class DiscussionSession {
 			const cached = await this.store.preference("enabled");
 			if (this.closed) return;
 			this.enabled = cached === true;
+			this.textEnabled = await this.store.preference("textAnchorsEnabled") === true;
+			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
 			this.enabled = capability.discussions;
+			this.textEnabled = capability.textAnchors === true;
 			await this.store.setPreference("enabled", this.enabled);
+			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -118,7 +128,7 @@ export class DiscussionSession {
 	private syncChanged(id: string, status: SyncStatus): void {
 		if (this.closed) return;
 		const entry = this.entries.get(id);
-		if (entry && status === "unavailable") { entry.unavailable = true; entry.permission = undefined; entry.people = []; }
+		if (entry && status === "unavailable") { entry.unavailable = true; entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined; }
 		if (status === "authentication_required") this.statusValue = "authentication_required";
 		if (status === "protocol_error" || status === "storage_error") this.statusValue = "error";
 		if (status === "offline") this.statusValue = "offline";
@@ -144,6 +154,9 @@ export class DiscussionSession {
 					if (Array.isArray(people) && people.every(p => isRecord(p) && typeof p.id === "string" && typeof p.name === "string")) {
 						entry.people = people as unknown as DiscussionParticipant[];
 					}
+					const generation = await this.store.preference("documentGeneration:" + id);
+					if (this.closed) return;
+					entry.documentGeneration = isId(generation) ? generation : undefined;
 					this.notify();
 				}
 				if (!this.enabled) return;
@@ -152,6 +165,23 @@ export class DiscussionSession {
 				entry.permission = permission; entry.unavailable = !permission.read;
 				if (permission.read) {
 					await this.store.setPreference("permission:" + id, protocolJson(permission));
+					if (this.textEnabled) {
+						try {
+							const context = await this.transport.anchorContext(id);
+							if (this.closed) return;
+							entry.documentGeneration = context.generation;
+							await this.store.setPreference("documentGeneration:" + id, context.generation);
+						} catch (error) {
+							// A transient failure retains the last verified generation for offline
+							// capture. Existing drafts/queued anchors are never rewritten.
+							if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
+								entry.documentGeneration = undefined;
+								await this.store.setPreference("documentGeneration:" + id, null);
+							}
+							if (error instanceof DiscussionFailure && (error.action === "authenticate" ||
+								error.action === "reject" && [403, 404].includes(error.status))) throw error;
+						}
+					}
 					// Directory pages include only users authorized for this entry.
 					// Keep prior offline names on a transient failure, never on revocation.
 					try {
@@ -163,11 +193,11 @@ export class DiscussionSession {
 						}
 						if (!this.closed) { entry.people = people; await this.store.setPreference("people:" + id, protocolJson(people)); }
 					} catch { /* Display stable fallbacks until the directory can refresh. */ }
-				} else { entry.people = []; await this.store.clearRemoteScope(id); }
+				} else { entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id); }
 			} catch (error) {
 				if (this.closed) return;
 				if (error instanceof DiscussionFailure && [403, 404].includes(error.status)) {
-					entry.permission = undefined; entry.unavailable = true; entry.people = []; await this.store.clearRemoteScope(id);
+					entry.permission = undefined; entry.unavailable = true; entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id);
 				} else if (error instanceof DiscussionFailure && error.action === "authenticate") this.statusValue = "authentication_required";
 			} finally {
 				entry.permissionChecked = Date.now(); entry.permissionFlight = undefined;
@@ -211,6 +241,10 @@ export class DiscussionSession {
 	async queue(command: QueuedCommand, draft?: Pick<Draft, "id" | "revision">): Promise<void> {
 		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment permission is required.");
 		queuedEnvelope(this.identity.shareId, command);
+		if (command.type === "thread.create" && isRecord(command.payload) && isRecord(command.payload.anchor) && command.payload.anchor.type === "text") {
+			if (!this.canAnchorText) throw new Error("Selected-text comments are not enabled on this server.");
+			if (command.payload.anchor.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this selection after refreshing the note’s comment context.");
+		}
 		await this.store.enqueue(command, Date.now(), draft);
 		if (this.closed) return;
 		this.broadcast(); if (this.foreground) this.outbox.wake(); this.notify();

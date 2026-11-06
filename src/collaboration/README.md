@@ -5,8 +5,10 @@ constructs `DiscussionHost`, which owns account-bound `DiscussionSession` instan
 and negotiates the server's disabled-by-default discussion capability. The complete
 text/image/Bases/presence feature is not enabled or finished. The server protocol is documented
 in the matching server checkout at `docs/discussion-preview.md`. Current commands
-support whole-note discussions only; text/Bases target primitives remain separate
-until their authorization, identity, and native rendering gates are complete.
+support whole-note discussions in the native sidebar. The transport/session now
+also support selected-text commands behind a separate capability; native capture,
+highlights, persistent target-aware drafts and Reading mapping remain unfinished.
+Bases primitives still require identity, authorization and native adapters.
 
 ## Local commands and delivery
 
@@ -55,6 +57,8 @@ is 20 seconds, below the worker's 30-second lease.
 - Network/408/429/5xx failures retain the immutable command, use exponential
   backoff with jitter, honor bounded Retry-After, and cool down the whole worker.
   New enqueue/wake notifications cannot bypass that cooldown.
+- 409 `anchor_dependency_not_ready` also retains queued work and honors backoff;
+  note synchronization must reach the relay before validation can succeed.
 - 401 pauses; malformed successful responses and missing/disabled previews pause.
   403/target-404/conflict/invalid-command errors preserve a rejected local draft
   for review. 403/404 also clear the affected remote cache/checkpoint, preserving
@@ -73,6 +77,16 @@ reopen. Keep an ambiguous online operation's ID/payload for an explicit retry;
 never put it into the offline queue. Reads validate response IDs, revisions,
 pagination progress, supported structured bodies and event kinds. Read responses
 are capped at 512 KiB; command responses remain capped at 64 KiB.
+
+Text commands allow a 256 KiB envelope containing at most 64 KiB decoded snapshot
+evidence, while whole-note commands retain the 64 KiB limit. Wire parsing binds
+text anchors to their requested document and validates UUIDs, Unicode and byte
+limits. Sessions cache authorized generations for offline capture; refresh never
+changes a queued anchor's generation. Revocation removes the cached generation.
+The current Rust relay, Python control plane and plugin pass a real-connection
+fixture covering deletion-only dependencies, private authentication, lost replies,
+and relay restart: run the server's `tests/integration/managed_stack.py` with
+`--text-anchors --plugin <this checkout>` after building the Rust relay.
 
 The native host now provides capability negotiation, account/logout lifecycle,
 foreground/hidden-surface handling and cross-window notifications. The sidebar

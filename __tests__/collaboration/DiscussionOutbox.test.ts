@@ -107,3 +107,16 @@ test("caller mutation cannot change a queued payload during IndexedDB persistenc
 	expect((await store.getOperation("send"))?.payload).toMatchObject({ body: "original draft" });
 	await expect(store.enqueue({ ...command("reopen"), payload: { reopen: true } })).rejects.toThrow("online");
 });
+
+test("settled includes a wake that arrives while an empty pump finishes its store read", async () => {
+	const original = store.nextWakeAt.bind(store); let finish!: () => void, started!: () => void;
+	const readStarted = new Promise<void>(resolve => { started = resolve; });
+	jest.spyOn(store, "nextWakeAt").mockImplementationOnce(async () => {
+		started(); await new Promise<void>(resolve => { finish = resolve; }); return original();
+	});
+	const item = worker(jest.fn(async op => accepted(op.operationId)));
+	item.resume(); await readStarted;
+	await store.enqueue(command("late"), 1); item.wake();
+	const settling = item.settled(); finish(); await settling;
+	expect((await store.getOperation("late"))?.state).toBe("accepted");
+});

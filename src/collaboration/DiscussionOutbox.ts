@@ -54,7 +54,11 @@ export class DiscussionOutbox {
 	 * a later worker recovers the same immutable operation after the lease expires.
 	 */
 	stop(): void { this.pause("stopped"); }
-	async settled(): Promise<void> { await this.flight; }
+	async settled(): Promise<void> {
+		// A wake received during the last asynchronous store read starts another
+		// pump in finally. Include that pump before allowing a caller to close IDB.
+		while (this.flight) await this.flight;
+	}
 	private pause(status: OutboxStatus): void {
 		this.active = false; this.generation++; this.requested = false; this.clearTimer(); this.statusChanged(status);
 	}

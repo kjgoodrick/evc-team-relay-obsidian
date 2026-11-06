@@ -10,6 +10,7 @@ const identity = { serverId: "https://relay.test", accountId: id(1), shareId: id
 const entry = id(3);
 function remote() {
 	return { identity, capabilities: jest.fn().mockResolvedValue({ discussions: true }),
+		anchorContext: jest.fn().mockResolvedValue({ entryId: entry, generation: id(30) }),
 		permissions: jest.fn().mockResolvedValue({ read: true, comment: true, edit: false, moderate: false }),
 		participants: jest.fn().mockResolvedValue({ participants: [{ id: id(1), name: "Alice" }], hasMore: false }),
 		changes: jest.fn().mockResolvedValue({ events: [], cursor: "current", has_more: false }),
@@ -157,4 +158,50 @@ test("an unconfirmed online reply retains its exact operation across restart and
 		await store.completeOnlineDraft("reply", 0, first.operationId);
 		expect(await store.getDraft("reply")).toBeUndefined(); expect(await store.preference("online:reply")).toBeUndefined();
 	} finally { store.close(); }
+});
+
+test("generation refresh never rewrites a queued selection, and revocation clears its cached context", async () => {
+	const { store, session, transport, close } = await fixture();
+	const anchor = { version: 1, type: "text", document_id: entry, generation: id(30), start: "AA==", end: "AA==",
+		dependency: "AAA=", selected_length: 0, context: { quote: "", prefix: "", suffix: "", truncated: false } };
+	try {
+		expect(session.canAnchorText).toBe(false); expect(transport.anchorContext).not.toHaveBeenCalled();
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true }); await session.refresh();
+		expect(session.documentGeneration(entry)).toBe(id(30));
+		session.setForeground(false); await session.outbox.settled();
+		await session.queue({ ...command(), payload: { ...command().payload, anchor } });
+		transport.anchorContext.mockResolvedValue({ entryId: entry, generation: id(31) });
+		transport.send.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session.setForeground(true); await session.refresh(); await session.outbox.settled();
+		expect(session.documentGeneration(entry)).toBe(id(31));
+		expect((await store.getOperation(id(4)))?.payload).toMatchObject({ anchor: { generation: id(30) } });
+		await expect(session.queue({ ...command(), operationId: id(40), payload: { ...command().payload, anchor } })).rejects.toThrow("selection");
+		transport.permissions.mockResolvedValue({ read: false, comment: false, edit: false, moderate: false });
+		await session.refresh();
+		expect(session.documentGeneration(entry)).toBeUndefined();
+		expect(await store.preference("documentGeneration:" + entry)).toBeUndefined();
+		expect((await store.getOperation(id(4)))?.payload).toMatchObject({ anchor: { generation: id(30) } });
+	} finally { await close(); }
+});
+
+test("verified text context can be used offline after restart, but disabled text support leaves note comments available", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	await store.setPreference("enabled", true); await store.setPreference("textAnchorsEnabled", true);
+	await store.setPreference("permission:" + entry, { read: true, comment: true, edit: false, moderate: false });
+	await store.setPreference("documentGeneration:" + entry, id(30));
+	transport.capabilities.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+	transport.permissions.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+	transport.changes.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(entry, () => {}); await session.refresh();
+		expect(session.documentGeneration(entry)).toBe(id(30));
+		transport.capabilities.mockResolvedValue({ discussions: true, textAnchors: true });
+		transport.permissions.mockResolvedValue({ read: true, comment: true, edit: false, moderate: false });
+		transport.anchorContext.mockRejectedValue(new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404));
+		await session.refresh();
+		expect(session.documentGeneration(entry)).toBeUndefined();
+		expect(await store.preference("documentGeneration:" + entry)).toBeNull();
+		expect(session.permission(entry)?.comment).toBe(true); expect(session.canQueue).toBe(true);
+	} finally { await session.close(); }
 });
