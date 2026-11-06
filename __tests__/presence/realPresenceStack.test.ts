@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import * as Y from "yjs";
 import * as encoding from "lib0/encoding";
 import { YSweetProvider } from "../../src/client/provider";
+import { presencePeers, peerLocation } from "../../src/collaboration/presence/PresencePeers";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 const run = process.env.EVC_PRESENCE_FIXTURE ? test : test.skip;
@@ -81,8 +82,11 @@ run("managed awareness authenticates readers, rejects impersonation/collisions a
 		expect(Date.now() - resumed).toBeLessThan(3000);
 		expect(remote()?.sessionId).toBe(session);
 		expect(remote()?.user.id).toBe(f.bobId);
-		reader.provider.awareness.setLocalState({ surface: "reading", cursor: null });
-		await until(() => remote()?.surface === "reading" && remote()?.cursor === null, "Reading presence without a caret");
+		reader.provider.awareness.setLocalState({ surface: "reading", cursor: null, viewport: cursor.anchor, selection: cursor });
+		await until(() => remote()?.surface === "reading" && remote()?.cursor === null && !!remote()?.selection, "Reading semantic presence without a caret");
+		const readingPeer = presencePeers(owner.provider.awareness).find(peer => peer.clientId === reader.provider.awareness.clientID)!;
+		expect(peerLocation(readingPeer, owner.text, false)).toEqual({ from: 6, to: 10 });
+		expect(peerLocation(readingPeer, owner.text, true)).toEqual({ from: 6, to: 6 });
 		reader.provider.awareness.setLocalState(null);
 		await until(() => !remote(), "privacy removes the whole presence state");
 		expect(reader.provider.wsconnected).toBe(true);

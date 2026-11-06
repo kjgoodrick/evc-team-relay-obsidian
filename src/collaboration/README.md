@@ -43,9 +43,19 @@ its surface with no editor caret. Account/session grant changes cannot republish
 an old identity. Native settings, a note-header control and commands provide
 persistent privacy and status/retry controls. A disposable desktop Obsidian
 instance plus a protocol observer verified privacy/reload, active-note switching,
-Reading transitions and popout transfer. Semantic Reading location, grouped
-rosters, socket backpressure, jump/follow, two-native-client rendering and mobile
-presence acceptance remain unfinished.
+Reading transitions and popout transfer. The next increment adds a grouped
+current-note roster with separate session actions, semantic editor viewport and
+Reading block/selection publication, and current-note Jump/Follow. Navigation
+scrolls without editing or changing the local selection. Follow stops on manual
+interaction, view/note change, peer departure, disconnect or access loss. A
+visible Stop control and command remain available while following. Reading
+navigation materializes offscreen targets through the public source-line scroll
+API, then verifies the rendered section; cancellation fences late rendering.
+Desktop testing verified Live Preview and Reading jumps/follow, Reading selection,
+manual scroll interruption and reload. Reading postprocessor ownership now avoids
+duplicate controls when the same root is processed again. The authorized
+cross-note location channel, remote Reading highlights, image/Bases adapters,
+socket backpressure, two-native-client rendering and mobile acceptance remain.
 
 ## Local commands and delivery
 

@@ -75,6 +75,19 @@ test("Reading capture uses the actual shared text, survives prefix edits and fre
 	} finally { f.close(); }
 });
 
+test("reprocessing an existing Reading root transfers ownership without duplicate controls or stale teardown", async () => {
+	const f = fixture(); let replacement: ReadingCommentSection | undefined;
+	try {
+		await until(() => !!f.roots[0].querySelector("button"));
+		replacement = new ReadingCommentSection(f.comments, f.roots[0], f.sections[0].context); replacement.onload();
+		await until(() => f.roots[0].querySelectorAll(".relay-reading-comment-controls").length === 1);
+		f.sections[0].unload(); f.comments.invalidate();
+		await until(() => f.roots[0].classList.contains("relay-reading-comment-section"));
+		expect(f.roots[0].querySelectorAll(".relay-reading-comment-controls")).toHaveLength(1);
+		expect(f.comments.snapshot(f.sections[0])).toBeUndefined(); expect(f.comments.snapshot(replacement)).toBeDefined();
+	} finally { replacement?.unload(); f.close(); }
+});
+
 test("Reading allows cross-section selection and explicit block fallback, then clears immediately on revoke", async () => {
 	const f = fixture();
 	try {

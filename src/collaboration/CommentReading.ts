@@ -20,6 +20,7 @@ const controlsSelector = ".relay-reading-comment-controls,.relay-reading-comment
  * all sections of each Reading leaf. Rendered content is never rewritten. */
 export class ReadingComments extends Component {
 	private sections = new Set<ReadingCommentSection>();
+	private sectionOwners = new WeakMap<HTMLElement, ReadingCommentSection>();
 	private scopes = new Map<MarkdownView, Scope>();
 	private documents = new Map<Document, { count: number; stop: () => void }>();
 	private selections = new WeakMap<MarkdownView, Range>();
@@ -44,6 +45,11 @@ export class ReadingComments extends Component {
 		} });
 	}
 	add(section: ReadingCommentSection): () => void {
+		// Obsidian can postprocess the same live section again while plugins or
+		// view options load. Transfer ownership instead of duplicating controls.
+		const previous = this.sectionOwners.get(section.containerEl);
+		if (previous && previous !== section) previous.unload();
+		this.sectionOwners.set(section.containerEl, section);
 		this.sections.add(section);
 		const doc = section.containerEl.ownerDocument, known = this.documents.get(doc);
 		if (known) known.count++;
@@ -69,11 +75,13 @@ export class ReadingComments extends Component {
 		this.schedule();
 		return () => {
 			this.sections.delete(section); section.clear();
+			if (this.owns(section)) this.sectionOwners.delete(section.containerEl);
 			const current = this.documents.get(doc);
 			if (current && --current.count === 0) { current.stop(); this.clearHighlights(doc); this.documents.delete(doc); }
 			this.schedule();
 		};
 	}
+	owns(section: ReadingCommentSection): boolean { return this.sectionOwners.get(section.containerEl) === section; }
 	invalidate(): void {
 		// Ordinary cache/status notifications keep controls and keyboard focus.
 		// Account/read revocation still clears synchronously before storage reads.
@@ -141,6 +149,7 @@ export class ReadingComments extends Component {
 		} finally { this.refreshing = false; }
 	}
 	snapshot(section: ReadingCommentSection): SectionSnapshot | undefined {
+		if (!this.owns(section)) return undefined;
 		const view = this.host.readingViewFor(section.containerEl, section.context.sourcePath), scope = view ? this.scopes.get(view) : undefined;
 		if (!view || !scope || !scope.session.canAnchorText || !scope.session.permission(scope.entryId)?.read) return undefined;
 		const target = this.host.targetFor(view.file ?? undefined), binding = readingCommentBinding(view), generation = scope.session.documentGeneration(scope.entryId);
@@ -330,6 +339,9 @@ export class ReadingCommentSection extends MarkdownRenderChild {
 		}
 		this.svg = svg; this.containerEl.append(svg);
 	}
-	clear(): void { this.bar?.remove(); this.bar = undefined; this.svg?.remove(); this.svg = undefined; this.signature = ""; this.mapped = undefined; this.containerEl.classList.remove("relay-reading-comment-section", "relay-reading-has-comments", "relay-reading-comment-active", "relay-reading-block-comment"); }
-	onunload(): void { this.clear(); this.containerEl.classList.remove("relay-reading-comment-section"); }
+	clear(): void {
+		this.bar?.remove(); this.bar = undefined; this.svg?.remove(); this.svg = undefined; this.signature = ""; this.mapped = undefined;
+		if (this.owner.owns(this)) this.containerEl.classList.remove("relay-reading-comment-section", "relay-reading-has-comments", "relay-reading-comment-active", "relay-reading-block-comment");
+	}
+	onunload(): void { this.clear(); }
 }

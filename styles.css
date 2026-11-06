@@ -676,3 +676,11 @@
 .relay-reading-comment-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .relay-reading-comment-overlay rect { fill: var(--text-highlight-bg); opacity: 0.45; }
 .is-mobile .relay-reading-comment-controls button { min-height: 44px; }
+
+.relay-presence-person { border-inline-start: 3px solid var(--presence-person-color); padding-inline-start: var(--size-4-2); margin-block: var(--size-4-3); }
+.relay-presence-person h4 { margin-block: var(--size-4-2); }
+.relay-presence-session { display: flex; align-items: center; flex-wrap: wrap; gap: var(--size-4-2); margin-block: var(--size-4-1); }
+.relay-presence-session span { flex: 1 1 150px; }
+.relay-presence-follow { position: absolute; top: 42px; inset-inline-end: 12px; z-index: 10; display: flex; align-items: center; flex-wrap: wrap; gap: var(--size-4-2); max-width: calc(100% - 24px); padding: var(--size-4-2); border: 1px solid var(--interactive-accent); border-radius: var(--radius-m); background: var(--background-primary); }
+.relay-presence-session button, .relay-presence-follow button { min-height: 32px; height: auto; }
+.is-mobile .relay-presence-session button, .is-mobile .relay-presence-follow button { min-height: 44px; }

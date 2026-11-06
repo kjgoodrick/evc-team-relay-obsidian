@@ -244,12 +244,19 @@ export class ProviderBacked extends Loggable {
 		}
 		const profile = presenceProfile(user);
 		if (current?.surface === this.presenceSurface && JSON.stringify(current.user) === JSON.stringify(profile)) return;
+		const preserve = current?.surface === this.presenceSurface && current?.user?.id === user.accountId;
 		awareness.setLocalState({ user: profile, surface: this.presenceSurface,
-			cursor: current?.surface === this.presenceSurface && current?.user?.id === user.accountId ? current.cursor ?? null : null });
+			cursor: preserve ? current.cursor ?? null : null, viewport: preserve ? current.viewport ?? null : null,
+			selection: preserve ? current.selection ?? null : null });
 	}
 
 	/** Local stale-account/session guard, not signature verification. The gateway
 	 * remains authoritative. Never send a new account's location on an old grant. */
+	hasCurrentPresenceAccount(): boolean {
+		const user = this.authSession?.getCurrentUserForServer(this.getOnpremServerId());
+		return !!user && this.presenceGrantMatches(user);
+	}
+
 	private presenceGrantMatches(user: Account): boolean {
 		if (!this.issuedToken.url.includes("/v1/managed/")) return true;
 		try {
