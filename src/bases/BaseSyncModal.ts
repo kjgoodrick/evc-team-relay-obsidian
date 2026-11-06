@@ -4,29 +4,32 @@ import { BaseSyncHost, baseSyncMessage, type BaseSyncRow } from "./BaseSyncHost"
 import { baseText } from "./NativeBaseFile";
 import type { BaseConflictReview } from "./BaseSyncRunner";
 import type { BaseRetirementReview } from "./BaseRetirement";
+import type { BaseRestoreReview } from "./BaseRestoration";
 
 export class BaseSyncModal extends Modal {
 	private busy = false;
 	private closed = false;
 	private serial = 0;
+	private context = 0;
 	private error = "";
 	private rows: BaseSyncRow[] = [];
 	private reviewed?: { row: BaseSyncRow; review: BaseConflictReview };
 	private removal?: { row: BaseSyncRow; review: BaseRetirementReview };
+	private restoration?: { row: BaseSyncRow; review: BaseRestoreReview; key: string; path: string };
 	private unsubscribe?: () => void;
 	constructor(app: App, private host: BaseSyncHost, private folder: VaultShare) { super(app); }
 	onOpen(): void {
 		this.closed = false; this.contentEl.addClass("evc-bases-sync");
 		this.unsubscribe = this.host.onChange(reset => {
-			if (reset) { this.serial++; this.reviewed = undefined; this.removal = undefined; this.rows = []; this.render(); }
+			if (reset) { this.context++; this.serial++; this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; this.rows = []; this.render(); }
 			if (!this.busy || reset) void this.refresh();
 		}); void this.refresh();
 	}
-	onClose(): void { this.closed = true; this.serial++; this.unsubscribe?.(); this.contentEl.empty(); }
+	onClose(): void { this.closed = true; this.context++; this.serial++; this.unsubscribe?.(); this.contentEl.empty(); }
 	private async refresh(): Promise<void> {
 		const serial = ++this.serial;
 		try { const rows = await this.host.rows(this.folder); if (this.closed || serial !== this.serial) return; this.rows = rows; }
-		catch (error) { if (!this.closed && serial === this.serial) { this.error = baseSyncMessage(error); this.rows = []; this.reviewed = undefined; this.removal = undefined; } }
+		catch (error) { if (!this.closed && serial === this.serial) { this.error = baseSyncMessage(error); this.rows = []; this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; } }
 		if (!this.closed && serial === this.serial) this.render();
 	}
 	private render(): void {
@@ -34,26 +37,54 @@ export class BaseSyncModal extends Modal {
 		this.contentEl.empty(); this.contentEl.createEl("h2", { text: "Bases sync" });
 		this.contentEl.createEl("p", { text: "Conflicting edits stay on this device until you choose a copy. Recovery copies are retained after each choice and can be exported." });
 		if (this.error) this.contentEl.createEl("p", { text: this.error, cls: "mod-warning", attr: { role: "alert" } });
-		new Setting(this.contentEl).setName("Refresh status").addButton(button => button.setButtonText("Refresh").setDisabled(this.busy).onClick(() => { this.reviewed = undefined; this.removal = undefined; return this.act(async () => {}); }));
+		new Setting(this.contentEl).setName("Refresh status").addButton(button => button.setButtonText("Refresh").setDisabled(this.busy).onClick(() => { this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; return this.act(async () => {}); }));
 		if (!this.rows.length) this.contentEl.createEl("p", { text: "No Bases files are tracked yet. Enable Bases sync in the shared folder’s settings." });
 		for (const row of this.rows) {
 			this.contentEl.createEl("h3", { text: row.path }); this.contentEl.createEl("p", { text: row.message });
 			const controls = new Setting(this.contentEl).setName("Sync and recovery");
 			if (row.record.retirement) {
 				if (row.record.retirement.move?.state !== "complete") controls.addButton(button => button.setButtonText("Review removal").setDisabled(this.busy).onClick(() => this.act(async () => {
-					this.reviewed = undefined; this.removal = { row, review: await this.host.reviewRemoval(this.folder, row.entryId) };
+					const context = this.context, review = await this.host.reviewRemoval(this.folder, row.entryId);
+					if (context === this.context) { this.reviewed = undefined; this.restoration = undefined; this.removal = { row, review }; }
+				})));
+				if (row.record.restore?.state === "prepared") {
+					controls.addButton(button => button.setButtonText("Check restoration").setDisabled(this.busy).onClick(() => this.act(() => this.host.resumeRestore(this.folder, row.entryId))));
+					controls.addButton(button => button.setButtonText("Stop restoration").setDisabled(this.busy).onClick(() => this.act(() => this.host.cancelRestore(this.folder, row.entryId, row.record.revision))));
+				} else controls.addButton(button => button.setButtonText("Restore as new file").setDisabled(this.busy).onClick(() => this.act(async () => {
+					const context = this.context, review = await this.host.reviewRestore(this.folder, row.entryId);
+					if (context !== this.context) return;
+					this.reviewed = undefined; this.removal = undefined;
+					this.restoration = { row, review, key: review.copies[0]?.key ?? "", path: row.path.replace(/\.[^/.]+$/, "") + " (restored).base" };
 				})));
 			} else if (row.file) {
 				controls.addButton(button => button.setButtonText("Retry sync").setDisabled(this.busy).onClick(() => this.act(() => this.host.retry(this.folder, row.file!))));
 				if (row.record.pending) controls.addButton(button => button.setButtonText("Check delivery / withdraw").setDisabled(this.busy).onClick(() => this.act(() => this.host.withdraw(this.folder, row.file!))));
 				if (row.record.conflict || row.record.reviewRequired) controls.addButton(button => button.setButtonText("Review copies").setDisabled(this.busy).onClick(() => this.act(async () => {
-					this.reviewed = { row, review: await this.host.review(this.folder, row.file!) };
+					const context = this.context, review = await this.host.review(this.folder, row.file!);
+					if (context === this.context) { this.removal = undefined; this.restoration = undefined; this.reviewed = { row, review }; }
 				})));
 			}
 			controls.addButton(button => button.setButtonText("Export recovery copies").setDisabled(this.busy).onClick(() => this.act(async () => { await this.host.export(this.folder, row.entryId); })));
 			if (this.reviewed?.row.entryId === row.entryId) this.renderReview(row, this.reviewed.review);
 			if (this.removal?.row.entryId === row.entryId) this.renderRemoval(row, this.removal.review);
+			if (this.restoration?.row.entryId === row.entryId) this.renderRestore(this.restoration);
 		}
+	}
+	private renderRestore(restore: NonNullable<BaseSyncModal["restoration"]>): void {
+		this.contentEl.createEl("p", { text: "Choose a retained copy and a new .base path relative to this shared folder. The destination folder must already exist. Originals stay retained; the new file synchronizes separately and does not inherit the removed file’s discussions." });
+		const select = this.contentEl.createEl("select", { attr: { "aria-label": "Copy to restore" } });
+		for (const copy of restore.review.copies) select.createEl("option", { text: copy.label, attr: { value: copy.key } });
+		select.value = restore.key; select.disabled = this.busy;
+		select.onchange = () => { restore.key = select.value; this.render(); };
+		const selected = restore.review.copies.find(copy => copy.key === restore.key);
+		if (selected) this.preview(selected.label, restore.row.path, selected.bytes);
+		else this.contentEl.createEl("p", { text: "No retained copy is available here. Export recovery history to inspect older copies." });
+		const input = this.contentEl.createEl("input", { attr: { type: "text", "aria-label": "New Bases path", placeholder: "Folder/Restored.base" } });
+		input.value = restore.path; input.disabled = this.busy; input.oninput = () => { restore.path = input.value; };
+		new Setting(this.contentEl).setName("Create the reviewed copy")
+			.addButton(button => button.setButtonText("Create restored file").setDisabled(this.busy || !selected).onClick(() => this.act(async () => {
+				await this.host.restore(this.folder, restore.row.entryId, restore.review, restore.key, restore.path); this.restoration = undefined;
+			})));
 	}
 	private renderRemoval(row: BaseSyncRow, review: BaseRetirementReview): void {
 		this.contentEl.createEl("p", { text: "The server removed this file identity. Moving the local file into recovery keeps its contents and stops it occupying the shared path. Retained sync requests and earlier copies stay available for export." });
@@ -83,7 +114,7 @@ export class BaseSyncModal extends Modal {
 	private async act(action: () => Promise<void>): Promise<void> {
 		if (this.busy || this.closed) return;
 		this.busy = true; this.error = ""; this.render();
-		try { await action(); } catch (error) { this.error = baseSyncMessage(error); this.reviewed = undefined; this.removal = undefined; }
+		try { await action(); } catch (error) { this.error = baseSyncMessage(error); this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; }
 		finally { this.busy = false; await this.refresh(); }
 	}
 }

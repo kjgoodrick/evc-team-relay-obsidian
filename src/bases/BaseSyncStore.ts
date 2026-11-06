@@ -10,11 +10,15 @@ export interface BaseRetirement {
 	path: string; local: ArrayBuffer | null;
 	move?: { path: string; local: ArrayBuffer; state: "prepared" | "complete" };
 }
+export interface BaseRestore {
+	id: string; path: string; bytes: ArrayBuffer; label: string; state: "prepared" | "created";
+}
 export interface BaseSyncRecord {
 	entryId: string; revision: number; baseline?: BaseSnapshot; pending?: BasePending;
 	conflict?: BaseConflict; download?: BaseDownload;
 	reviewRequired?: "withdrawn";
 	retirement?: BaseRetirement;
+	restore?: BaseRestore;
 }
 export interface BaseRecovery { entryId: string; id: string; createdAt: number; record: BaseSyncRecord }
 
@@ -28,7 +32,7 @@ function footprint(record: BaseSyncRecord): number {
 	return (record.baseline?.bytes?.byteLength ?? 0) + (record.pending?.bytes.byteLength ?? 0) +
 		(record.conflict?.local?.byteLength ?? 0) + (record.conflict?.remote.bytes?.byteLength ?? 0) +
 		(record.download?.before?.byteLength ?? 0) + (record.download?.remote.bytes?.byteLength ?? 0) +
-		(record.retirement?.local?.byteLength ?? 0) + (record.retirement?.move?.local.byteLength ?? 0);
+		(record.retirement?.local?.byteLength ?? 0) + (record.retirement?.move?.local.byteLength ?? 0) + (record.restore?.bytes.byteLength ?? 0);
 }
 
 /** Private IndexedDB state, isolated by server/account/vault/share. All mutation
@@ -41,8 +45,11 @@ export class BaseSyncStore {
 			!baseId(identity.accountId) || !baseId(identity.shareId) || !identity.vaultId || identity.vaultId.length > 512 ||
 			!Number.isSafeInteger(quota) || quota < 1 || quota > BASE_LOCAL_QUOTA) throw new Error("Invalid Bases storage identity");
 		identity = { ...identity, serverId: url.toString().replace(/\/+$/, "") };
-		const open = factory.open("team-relay-bases:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]), 1);
-		open.onupgradeneeded = () => {
+		// Version 2 accounts for retained restoration bytes. Older workers must
+		// close instead of archiving these records with an outdated quota model.
+		const open = factory.open("team-relay-bases:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]), 2);
+		open.onupgradeneeded = event => {
+			if (event.oldVersion !== 0) return;
 			open.result.createObjectStore("files", { keyPath: "entryId" });
 			open.result.createObjectStore("recoveries", { keyPath: ["entryId", "id"] });
 			open.result.createObjectStore("meta");
@@ -120,6 +127,35 @@ export class BaseSyncStore {
 			if (!retired?.move || retired.move.path !== path) throw new Error("Bases recovery destination changed");
 			if (retired.move.state === "complete") return;
 			await this.write(tx, before, { ...before, retirement: { ...retired, move: { ...retired.move, state: "complete" } } });
+		});
+	}
+	/** Persist the exact local creation before calling Vault.create. Restoration
+	 * never settles old requests or reuses the retired managed identity. */
+	async prepareRestore(entryId: string, revision: number, path: string, bytes: ArrayBuffer, label: string): Promise<BaseRestore> {
+		if (!basePath(path) || !path.toLowerCase().endsWith(".base") || path.startsWith(RECOVERY_FOLDER + "/")) throw new Error("Choose a new .base file inside the shared folder.");
+		const restore: BaseRestore = { id: uuidv4(), path, bytes: copyBaseBytes(bytes), label: label.slice(0, 160), state: "prepared" };
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId); this.check(before, revision);
+			if (!before.retirement || before.restore?.state === "prepared") throw new Error("Review the current Bases restoration first.");
+			if (path.toLowerCase() === before.retirement.path.toLowerCase()) throw new Error("Choose a new path so the removed file and its identity remain separate.");
+			await this.write(tx, before, { ...before, restore }, before.restore ? { entryId, id: uuidv4(), createdAt: Date.now(), record: { entryId, revision, restore: before.restore } } : undefined);
+		});
+		return { ...restore, bytes: restore.bytes.slice(0) };
+	}
+	async completeRestore(entryId: string, restoreId: string): Promise<void> {
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId);
+			if (before.restore?.id !== restoreId) throw new Error("Bases restoration changed; review it again.");
+			if (before.restore.state === "created") return;
+			await this.write(tx, before, { ...before, restore: { ...before.restore, state: "created" } });
+		});
+	}
+	async cancelRestore(entryId: string, revision: number): Promise<void> {
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId); this.check(before, revision);
+			if (!before.restore) return;
+			const after = { ...before }; delete after.restore;
+			await this.write(tx, before, after, { entryId, id: uuidv4(), createdAt: Date.now(), record: { entryId, revision, restore: before.restore } });
 		});
 	}
 

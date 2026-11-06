@@ -34,6 +34,7 @@ async function fixture(local = "views: []\n", remoteValue: string | null = local
 	const flags = { bases: false, otherTypes: true }, configuration = { enabled: true, servers: [{ id: "server", controlPlaneUrl: "https://relay.fixture", name: "Fixture", isValidated: true }] };
 	const node = Object.assign(Object.create(TFile.prototype) as TFile, { path: "Team/" + path, stat: { mtime: 1, ctime: 1, size: bytes(local).byteLength } });
 	const nodes = new Map<string, TFile | TFolder>([[node.path, node]]), exports = new Map<string, string>();
+	nodes.set("Team", Object.assign(Object.create(TFolder.prototype) as TFolder, { path: "Team" }));
 	const events = new Map<string, (...args: unknown[]) => void>(); let beforeWrite = () => {};
 	const vault = { on: (event: string, handler: (...args: unknown[]) => void) => { events.set(event, handler); },
 		getAbstractFileByPath: (name: string) => nodes.get(name) ?? null,
@@ -49,6 +50,7 @@ async function fixture(local = "views: []\n", remoteValue: string | null = local
 		base_content: { protocol_version: 1, enabled: true, recovery: true, versions: remote.state.content_version ? { [entryId]: remote.state.content_version } : {} as Record<string, string> } };
 	const refresh = () => { manifest.records[path] = remote.state.record; if (remote.state.content_version) manifest.base_content.versions[entryId] = remote.state.content_version; };
 	const index = { snapshot: manifest, flush: jest.fn(async () => refresh()), isBlocked: jest.fn(() => false),
+		publishablePaths: jest.fn(async (paths: string[]) => new Set(paths)),
 		registered: (name: string, entry: string) => manifest.records[name]?.id === entry,
 		claim: jest.fn(async () => true), acknowledgeBaseContent: jest.fn(async () => refresh()) };
 	const file = Object.create(AttachmentFile.prototype) as AttachmentFile;
@@ -82,6 +84,15 @@ async function fixture(local = "views: []\n", remoteValue: string | null = local
 		settings as unknown as SettingsScope<RelayOnPremSettings>, "fixture-vault");
 	host.onload(); await host.rows(folder); flags.bases = true;
 	return { host, file, folder, flags, manifest, index, vault, exports, node, disk: () => disk, remote: () => remote,
+		removed: async () => {
+			delete manifest.records[path]; Object.assign(manifest, { deleted: { [path]: [entryId] } }); Object.assign(manifest.base_content, { retired: { [entryId]: path } });
+			index.flush.mockImplementation(async () => {}); authChanged();
+			for (let count = 0; count < 100; count++) {
+				if ((await host.rows(folder)).some(row => row.record.retirement)) return;
+				await new Promise(resolve => setTimeout(resolve, 0));
+			}
+			throw new Error("Retirement observation did not finish");
+		},
 		edit: (value: string) => { disk = value; node.stat.mtime++; node.stat.size = bytes(value).byteLength; },
 		remoteEdit: async (value: string) => { remote = await snap(value, version++); refresh(); },
 		beforeWrite: (callback: () => void) => { beforeWrite = callback; },
@@ -90,6 +101,7 @@ async function fixture(local = "views: []\n", remoteValue: string | null = local
 
 test("all attachment entry points use guarded Bases sync and unchanged inventory avoids repeated HTTP", async () => {
 	const s = await fixture(); try {
+		expect((await s.host.rows(s.folder))[0].message).toBe("Waiting for first Bases sync");
 		await s.file.runSync(); const count = fetchMock.mock.calls.length;
 		await s.file.pushToRemote(true); await s.file.pullFromRemote();
 		expect(fetchMock.mock.calls.length).toBe(count); expect(s.folder.blobs.pushFile).not.toHaveBeenCalled(); expect(s.folder.blobs.pullFile).not.toHaveBeenCalled();
@@ -188,6 +200,35 @@ test("local recovery export includes exact copies and stays outside synchronizat
 		const exported = await s.host.export(s.folder, entryId);
 		expect(isConflictCopyPath(exported)).toBe(true); expect(s.exports.size).toBe(3);
 		const values = [...s.exports.values()].join("\n"); expect(values).toContain(encodeBaseBytes(bytes("local"))); expect(values).not.toContain("synthetic-token");
+	} finally { s.close(); }
+});
+
+test("native host restoration creates a separate local file, retains the retired identity and never claims server delivery", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync(); await s.removed(); fetchMock.mockClear();
+		const review = await s.host.reviewRestore(s.folder, entryId); await s.host.restore(s.folder, entryId, review, "baseline", "Restored.base");
+		expect(s.exports.get("Team/Restored.base")).toBe("views: []\n"); expect(s.disk()).toBe("views: []\n");
+		const row = (await s.host.rows(s.folder))[0]; expect(row.record.restore?.state).toBe("created");
+		expect(row.message).toContain("Check that file’s sync status"); expect(s.index.claim).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test.each(["permission", "occupied", "account"])("native host restore rejects %s changes before creating a file", async kind => {
+	const s = await fixture(); try {
+		await s.file.runSync(); await s.removed(); const review = await s.host.reviewRestore(s.folder, entryId);
+		if (kind === "permission") s.index.publishablePaths.mockResolvedValueOnce(new Set());
+		if (kind === "occupied") s.manifest.records["RESTORED.BASE"] = { id: id(99), version: 0, type: "file" };
+		if (kind === "account") s.index.publishablePaths.mockImplementationOnce(async () => { s.account(); return new Set(["Restored.base"]); });
+		await expect(s.host.restore(s.folder, entryId, review, "baseline", "Restored.base")).rejects.toThrow();
+		expect(s.vault.create).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("a replacement at the former path cannot be read as the retired file's restore source", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync(); await s.removed(); s.manifest.records[path] = { id: id(99), version: 0, type: "file" }; s.vault.readBinary.mockClear();
+		const review = await s.host.reviewRestore(s.folder, entryId);
+		expect(review.copies.map(copy => copy.key)).toEqual(["removed", "baseline"]); expect(s.vault.readBinary).not.toHaveBeenCalled();
 	} finally { s.close(); }
 });
 

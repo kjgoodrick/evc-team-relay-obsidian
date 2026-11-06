@@ -91,6 +91,34 @@ requests remain available for export; deletion never pretends to confirm their
 delivery or withdrawal. Another identity at the same path blocks removal review.
 Recognized removed files stay in place until that explicit recovery choice.
 
+`BaseRestoration.ts` provides **Restore as new file**. The user previews and
+selects the current retained file, observed removal copy, baseline, pending edit
+or retained conflict/download bytes. Creation requires current source visibility,
+destination write access, a new `.base` path and an existing parent folder. A
+replacement at the former path cannot become the old identity's source. All
+originals remain intact. The exact destination and reviewed bytes commit locally
+before `Vault.create`; existing files are never replaced. The ordinary guarded
+sync flow assigns and publishes the new identity. The UI distinguishes local
+creation from confirmed synchronization; it never transfers old discussions.
+
+Interrupted creation offers explicit **Check restoration** and **Stop
+restoration**. Checking can acknowledge the exact bytes already present without
+writing again, or retry creation if absent and currently permitted. Changed or
+occupied destinations remain untouched. Stopping archives the exact intent and
+does not remove any resulting file. A subsequent restore archives the previous
+intent. These archives account for their bytes without duplicating unrelated
+retained state; stopping does not require extra byte quota. IndexedDB version 2
+preserves version-one records and closes older workers whose quota accounting
+does not include restore bytes. Export remains available through the current
+preview; downgrading to a version-one worker cannot reopen that cache.
+
+Obsidian 1.13.7 verified restoration after a closed-vault local edit and server
+deletion, occupied-destination refusal, choosing the earlier synchronized copy,
+two separate new managed IDs with exact server/local bytes, recovery export,
+cache upgrade/reopen and rendering the restored definition. The original remained
+deleted and no duplicate appeared on reopen. Interrupted creation and competing
+windows use controlled Vault tests; mobile and native crash/race acceptance remain.
+
 Native Obsidian 1.13.7 verified a server-directed rename away from `.base`, restart,
 remote deletion while the vault was closed, retention of an offline local edit,
 and review/move/export. The server entry remained deleted; the recovery directory
@@ -99,10 +127,17 @@ startup reclaim attempts, which has regression coverage. A separate external
 filesystem rename to `.txt` was reported as deletion by Obsidian; the renamed
 bytes remained on disk but their managed identity was not preserved.
 
-Remaining sync work includes guided restoration as a separate file/coherent
-identity restore, complete local deletion recovery, unsupported external renames,
+Remaining sync work includes coherent backup/identity restore, complete local
+deletion recovery, unsupported external renames,
 parent-folder and native rename races, quota reclamation, and mobile/resource
 acceptance. No Bases comment targets are available yet.
+
+Restoration validation: **1,860 plugin tests passed**, nine opt-in tests skipped,
+including 112 Bases unit tests. Preview build, main TypeScript, changed-source
+lint and the test-type gate passed with existing warning/type baselines. The
+disposable vault is `/private/tmp/evc-bases-restore-20261106`; it retains the two
+restored files and exported originals. The local services/database were stopped
+and removed. No production deployment or live-vault installation occurred.
 
 Native testing on November 6, 2026 used a disposable vault and actual local
 Python/Rust services. A UI column change reached the server; a conditional server

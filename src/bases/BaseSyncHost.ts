@@ -5,14 +5,15 @@ import { ItemKind, type ItemRecord } from "../ItemKinds";
 import type { ShareRegistry, VaultShare } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
-import { RECOVERY_FOLDER } from "../conflictCopyPath";
-import { baseId, encodeBaseBytes, retiredBaseEntries } from "./BaseContentProtocol";
+import { RECOVERY_FOLDER, isConflictCopyPath } from "../conflictCopyPath";
+import { baseId, basePath, encodeBaseBytes, retiredBaseEntries } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseSyncRecord } from "./BaseSyncStore";
 import { BaseSyncRunner, type BaseConflictReview, type BaseSyncAccess } from "./BaseSyncRunner";
 import { NativeBaseFile, nativeBaseLock } from "./NativeBaseFile";
 import { BaseSyncModal } from "./BaseSyncModal";
 import { BaseRetirementController, type BaseRetirementReview } from "./BaseRetirement";
+import { BaseRestorationController, type BaseRestoreReview } from "./BaseRestoration";
 
 export interface BaseSyncDelegate { sync(file: AttachmentFile): Promise<void>; open(): void }
 export interface BaseSyncRow { entryId: string; path: string; message: string; record: BaseSyncRecord; file?: AttachmentFile }
@@ -21,6 +22,7 @@ interface Slot {
 	folder: VaultShare; key: string; current(): boolean; cancelled: boolean; store?: BaseSyncStore; runner?: BaseSyncRunner;
 	ready: Promise<void>; failed: boolean; entries: Map<string, EntryRun>; unsubscribe(): void; delegate: BaseSyncDelegate;
 	retirements?: BaseRetirementController; retirementRuns: Map<string, { retryAt: number; message: string }>;
+	restorations?: BaseRestorationController;
 }
 
 export function baseSyncMessage(error: unknown): string {
@@ -106,6 +108,14 @@ export class BaseSyncHost extends Component {
 					absolute: path => folder.absolutePath(path),
 					refresh: async () => { if (!slot.current()) throw new BaseContentFailure("pause", "base_context_changed"); await folder._liveProvider?.managedIndex?.flush(); },
 				}, lock);
+				slot.restorations = new BaseRestorationController(store, this.plugin.app.vault, {
+					current: (entryId, path) => this.retiredVisible(slot, entryId, path),
+					absolute: path => folder.absolutePath(path),
+					localSource: record => record.retirement?.move?.state === "complete" ? record.retirement.move.path :
+						record.retirement && this.retiredCurrent(slot, record.entryId, record.retirement.path) ? folder.absolutePath(record.retirement.path) : undefined,
+					refresh: async () => { if (!slot.current()) throw new BaseContentFailure("pause", "base_context_changed"); await folder._liveProvider?.managedIndex?.flush(); },
+					destination: path => this.restoreDestination(slot, path),
+				}, lock);
 				slot.store = store; slot.runner = new BaseSyncRunner(store, {
 					read: entryId => transport.read(entryId),
 					publish: async (entryId, pending) => {
@@ -148,6 +158,28 @@ export class BaseSyncHost extends Component {
 			retiredBaseEntries(index.snapshot).some(([id, oldPath]) => id === entryId && oldPath === path) && !index.snapshot.records[path] &&
 			!Object.values(index.snapshot.records).some(record => record.id === entryId) && (!localId || localId === entryId) &&
 			!folder.isRecoveringStructure && !folder.isDeletePending(path) && !index.isBlocked(path, entryId);
+	}
+	private retiredVisible(slot: Slot, entryId: string, path: string): boolean {
+		const manifest = slot.folder._liveProvider?.managedIndex?.snapshot;
+		return this.enabled(slot) && manifest?.base_content?.protocol_version === 1 && manifest.base_content.recovery === true &&
+			retiredBaseEntries(manifest).some(([id, former]) => id === entryId && former === path) &&
+			!Object.values(manifest.records).some(record => record.id === entryId);
+	}
+	private async restoreDestination(slot: Slot, path: string): Promise<void> {
+		const folder = slot.folder, index = folder._liveProvider?.managedIndex;
+		const check = () => {
+			if (!basePath(path) || !path.toLowerCase().endsWith(".base") || isConflictCopyPath(folder.absolutePath(path))) throw new Error("Choose a new .base path inside the shared folder.");
+			if (!this.enabled(slot) || !index || folder._liveProvider?.managedIndex !== index || folder.isRecoveringStructure ||
+				index.snapshot.base_content?.enabled !== true || index.isBlocked(path) || folder.isDeletePending(path)) throw new BaseContentFailure("pause", "base_context_changed");
+			const folded = path.toLowerCase();
+			if (folder.folderIndex.guidFor(path) || Object.entries(index.snapshot.records).some(([name, record]) => {
+				const existing = name.toLowerCase();
+				return existing === folded || existing.startsWith(folded + "/") || record.type !== ItemKind.Folder && folded.startsWith(existing + "/");
+			})) throw new Error("That destination is already tracked or occupied. Choose another name.");
+		};
+		check(); await index!.flush(); check();
+		const allowed = await index!.publishablePaths([path]); check();
+		if (!allowed.has(path)) throw new BaseContentFailure("pause", "base_editor_required");
 	}
 	private scanRetired(slot: Slot): void {
 		if (!slot.retirements || this.running >= 2) return;
@@ -254,9 +286,10 @@ export class BaseSyncHost extends Component {
 		return [...records.values()].map(record => {
 			const entry = folder.trackedEntries.get(record.entryId), file = entry && isAttachmentFile(entry) ? entry : undefined;
 			return { entryId: record.entryId, file, record, path: record.retirement?.path ?? file?.path ?? record.pending?.expected.path ?? record.conflict?.remote.state.path ?? record.baseline?.state.path ?? record.entryId,
-				message: record.retirement ? record.retirement.move?.state === "complete" ? `Removed from sync. Local recovery: ${record.retirement.move.path}` : "Removed on the server. Review the local file and retain it outside sync." :
+				message: record.restore ? record.restore.state === "created" ? `Local copy created at ${record.restore.path}. Check that file’s sync status; originals remain retained.` : `Restoration to ${record.restore.path} needs a delivery check. Retained copies are safe.` :
+					record.retirement ? record.retirement.move?.state === "complete" ? `Removed from sync. Local recovery: ${record.retirement.move.path}` : "Removed on the server. Review the local file and retain it outside sync." :
 					!this.enabled(slot) ? "Bases sync is paused. Saved edits are retained." : slot.retirementRuns.get(record.entryId)?.message || slot.entries.get(record.entryId)?.message ||
-					(record.pending ? "A saved edit is awaiting confirmed delivery." : record.conflict || record.reviewRequired ? "Both copies are retained for review." : "Up to date") };
+					(record.pending ? "A saved edit is awaiting confirmed delivery." : record.conflict || record.reviewRequired ? "Both copies are retained for review." : record.baseline ? "Up to date" : "Waiting for first Bases sync") };
 		});
 	}
 	async reviewRemoval(folder: VaultShare, entryId: string): Promise<BaseRetirementReview> {
@@ -267,6 +300,25 @@ export class BaseSyncHost extends Component {
 		const slot = await this.requireSlot(folder), path = await slot.retirements!.move(entryId, reviewed);
 		if (!path) throw new Error("Another window is syncing this file. Try again shortly.");
 		new Notice(`Removed Bases file retained at ${path}`); this.notify();
+	}
+	async reviewRestore(folder: VaultShare, entryId: string): Promise<BaseRestoreReview> {
+		const slot = await this.requireSlot(folder), review = await slot.restorations!.review(entryId);
+		if (!review) throw new Error("Another window is syncing this file. Try again shortly."); return review;
+	}
+	async restore(folder: VaultShare, entryId: string, review: BaseRestoreReview, key: string, path: string): Promise<void> {
+		const slot = await this.requireSlot(folder), restored = await slot.restorations!.restore(entryId, review, key, path);
+		if (!restored) throw new Error("Another window is syncing this file. Try again shortly.");
+		new Notice(`Local Bases copy created at ${restored}. Check its sync status before sharing.`); this.notify();
+	}
+	async resumeRestore(folder: VaultShare, entryId: string): Promise<void> {
+		const slot = await this.requireSlot(folder), restored = await slot.restorations!.resume(entryId);
+		if (!restored) throw new Error("Another window is syncing this file. Try again shortly.");
+		new Notice(`Bases copy is present at ${restored}. Check its sync status before sharing.`); this.notify();
+	}
+	async cancelRestore(folder: VaultShare, entryId: string, revision: number): Promise<void> {
+		const slot = await this.requireSlot(folder);
+		if (!await slot.restorations!.cancel(entryId, revision)) throw new Error("Another window is syncing this file. Try again shortly.");
+		new Notice("Restoration stopped. Existing files and the saved restore copy are retained."); this.notify();
 	}
 	async retry(folder: VaultShare, file: AttachmentFile): Promise<void> {
 		const slot = await this.requireSlot(folder); await slot.entries.get(file.entityGuid)?.pending;

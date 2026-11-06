@@ -16,7 +16,7 @@ jest.mock("obsidian", () => {
 		createEl(tag: string, options: { text?: string; attr?: Record<string, string> }) {
 			const child = document.createElement(tag); child.textContent = options.text ?? "";
 			for (const [name, value] of Object.entries(options.attr ?? {})) child.setAttribute(name, value);
-			element.append(child); return child;
+			element.append(child); return enhance(child);
 		},
 	});
 	class Setting {
@@ -40,6 +40,8 @@ function fixture() {
 	let changed = (_reset: boolean) => {};
 	const host = { rows: jest.fn(async () => [row]), review: jest.fn(async () => review), resolve: jest.fn(async () => {}), retry: jest.fn(async () => {}),
 		reviewRemoval: jest.fn(async () => ({ record: row.record, local: review.local })), moveRemoved: jest.fn(async () => {}),
+		reviewRestore: jest.fn(async () => ({ record: row.record, copies: [{ key: "removed", label: "Saved original", bytes: bytes("original") }, { key: "baseline", label: "Last synchronized", bytes: bytes("base") }] })),
+		restore: jest.fn(async () => {}), resumeRestore: jest.fn(async () => {}), cancelRestore: jest.fn(async () => {}),
 		withdraw: jest.fn(async () => {}), export: jest.fn(async () => "export"), onChange: (listener: typeof changed) => { changed = listener; return () => {}; } };
 	const folder = { canWriteManagedPath: jest.fn(() => true) };
 	const modal = new BaseSyncModal({} as App, host as unknown as BaseSyncHost, folder as unknown as VaultShare);
@@ -96,5 +98,39 @@ test("removed identities expose local recovery without retrying pending publicat
 		s.button("Move to local recovery").click(); await flush();
 		expect(s.host.moveRemoved).toHaveBeenCalledWith(s.folder, s.row.entryId, { record: s.row.record, local: s.review.local });
 		expect(s.host.retry).not.toHaveBeenCalled(); expect(s.host.withdraw).not.toHaveBeenCalled();
+	} finally { s.modal.onClose(); }
+});
+
+test("restoration lets a user choose and preview exact bytes, then name a new local file", async () => {
+	const s = fixture(); try {
+		Object.assign(s.row.record, { retirement: { path: s.row.path, local: bytes("original") } });
+		await flush(); s.button("Restore as new file").click(); await flush();
+		expect(s.modal.contentEl.querySelector("textarea")?.value).toBe("original");
+		const select = s.modal.contentEl.querySelector("select")!; select.value = "baseline"; select.dispatchEvent(new Event("change"));
+		expect(s.modal.contentEl.querySelector("textarea")?.value).toBe("base");
+		const input = s.modal.contentEl.querySelector("input")!; input.value = "Archive/Copy.base"; input.dispatchEvent(new Event("input"));
+		s.button("Create restored file").click(); await flush();
+		expect(s.host.restore).toHaveBeenCalledWith(s.folder, s.row.entryId, await s.host.reviewRestore.mock.results[0].value, "baseline", "Archive/Copy.base");
+		expect(s.modal.contentEl.querySelector("select")).toBeNull();
+	} finally { s.modal.onClose(); }
+});
+
+test("pending restoration exposes explicit check and stop controls without creating another file", async () => {
+	const s = fixture(); try {
+		Object.assign(s.row.record, { retirement: { path: s.row.path }, restore: { state: "prepared" } });
+		await flush(); expect(s.button("Restore as new file")).toBeUndefined();
+		s.button("Check restoration").click(); await flush(); expect(s.host.resumeRestore).toHaveBeenCalledWith(s.folder, s.row.entryId);
+		s.button("Stop restoration").click(); await flush(); expect(s.host.cancelRestore).toHaveBeenCalledWith(s.folder, s.row.entryId, s.row.record.revision);
+		expect(s.host.restore).not.toHaveBeenCalled();
+	} finally { s.modal.onClose(); }
+});
+
+test("an account reset during a delayed restore review never renders old-account copies", async () => {
+	const s = fixture(); try {
+		Object.assign(s.row.record, { retirement: { path: s.row.path } }); await flush();
+		let finish!: (value: Awaited<ReturnType<typeof s.host.reviewRestore>>) => void;
+		const original = await s.host.reviewRestore(); s.host.reviewRestore.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		s.button("Restore as new file").click(); s.changed(true); finish(original); await flush();
+		expect(s.modal.contentEl.querySelector("textarea")).toBeNull(); expect(s.modal.contentEl.querySelector("select")).toBeNull();
 	} finally { s.modal.onClose(); }
 });
