@@ -1,6 +1,6 @@
 /** @jest-environment jsdom */
 /* eslint-disable @typescript-eslint/no-require-imports -- Jest's hoisted host mocks require their dependencies inside the factory. */
-import { MarkdownView, type Plugin } from "obsidian";
+import { MarkdownView, type Plugin, type TFile, type WorkspaceLeaf } from "obsidian";
 import type { AuthSession } from "../../src/AuthSession";
 import { Account } from "../../src/Account";
 import { ProviderBacked } from "../../src/ProviderBacked";
@@ -17,6 +17,10 @@ import { EditorView } from "@codemirror/view";
 import { editorInfoField } from "obsidian";
 import { bindCommentEditor } from "../../src/collaboration/EditorTextBinding";
 import { applyAwarenessUpdate, encodeAwarenessUpdate, Awareness } from "y-protocols/awareness";
+import { platformFetch } from "../../src/platformFetch";
+import type { RelayOnPremSettings } from "../../src/RelayOnPremConfig";
+
+jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 
 jest.mock("jose", () => {
 	const { TextEncoder, TextDecoder } = require("node:util");
@@ -41,10 +45,14 @@ jest.mock("obsidian", () => {
 jest.mock("../../src/ViewBindings", () => ({ DocumentViewBinding: class {} }));
 Object.assign(HTMLElement.prototype, { setText(this: HTMLElement, text: string) { this.textContent = text; } });
 
-function fixture() {
-	let account: Account | undefined = new Account("member", "Member", "member@example.com", "", "");
+function fixture(crossNote = false) {
+	const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+	const token = Buffer.from('{"alg":"HS256"}').toString("base64url") + "." + Buffer.from(JSON.stringify({ sub: id(10), session_id: id(11), exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url") + ".synthetic";
+	let account: Account | undefined = new Account(crossNote ? id(10) : "member", "Member", "member@example.com", "", crossNote ? token : "");
 	const authListeners = new Set<() => void>(), refreshListeners = new Set<() => void>(), viewListeners = new Set<() => void>();
 	const auth = { getCurrentUserForServer: () => account,
+		getAuthProviderForServer: () => ({ getCurrentUser: () => account ? { id: account.accountId } : undefined, isLoggedIn: () => !!account,
+			getToken: () => token, getValidToken: async () => token }),
 		on: (fn: () => void) => { authListeners.add(fn); return () => { authListeners.delete(fn); }; },
 		onTokenRefreshed: (fn: () => void) => { refreshListeners.add(fn); return () => { refreshListeners.delete(fn); }; },
 	} as unknown as AuthSession;
@@ -65,13 +73,21 @@ function fixture() {
 		return { doc, view, binding, text, mode: (value: string) => { mode = value; } };
 	});
 	let active: MarkdownView | null = notes[0].view;
+	const folderDoc = new Y.Doc();
+	folderDoc.getMap("managed_base_v1").set("snapshot", { owner: true, permissions: {} });
+	const folder = { entityGuid: id(3), config: { onpremServerId: "server" }, wantsConnection: true, isRecoveringStructure: false, crdtDoc: folderDoc,
+		toVirtualPath: (path: string) => path, absolutePath: (path: string) => path,
+		_liveProvider: { managedIndex: { registered: (path: string, entry: string) => notes.some(note => note.view.file?.path === path && note.doc.entityGuid === entry), isBlocked: () => false } },
+		folderIndex: { on: () => () => {}, recordFor: (path: string) => { const note = notes.find(note => note.view.file?.path === path); return note && { id: note.doc.entityGuid, type: "markdown" }; },
+			eachRecord: (callback: (record: { id: string; type: string }, path: string) => void) => notes.forEach(note => callback({ id: note.doc.entityGuid, type: "markdown" }, note.view.file!.path)) } };
+	if (crossNote) for (const note of notes) Object.assign(note.binding.boundDocument, { vaultShare: folder });
 	const events = new Map<string, Set<() => void>>();
 	const workspace = { getActiveViewOfType: () => active, on: (name: string, fn: () => void) => {
 		const listeners = events.get(name) ?? new Set(); listeners.add(fn); events.set(name, listeners);
 		return () => listeners.delete(fn);
 	} };
 	const registry = { trackedViews: notes.map(note => note.binding), isShutDown: false,
-		shareRegistry: { shareFor: (path: string) => notes.find(note => note.view.file?.path === path && !path.startsWith("Private/"))?.binding.boundDocument.vaultShare },
+		shareRegistry: { toArray: () => [folder], on: () => () => {}, shareFor: (path: string) => notes.find(note => note.view.file?.path === path && !path.startsWith("Private/"))?.binding.boundDocument.vaultShare },
 		onViewsChanged: (fn: () => void) => { viewListeners.add(fn); return () => viewListeners.delete(fn); } };
 	let preferences = { visible: true };
 	const settingListeners = new Set<(value: PresenceSettings) => void>();
@@ -82,8 +98,16 @@ function fixture() {
 	let deleted = false;
 	const vault = { on: workspace.on, getFileByPath: (path: string) => deleted ? null : notes.find(note => note.view.file?.path === path)?.view.file };
 	const extensions: Extension[] = [];
+	const select = (view: MarkdownView | null) => { active = view; events.get("active-leaf-change")?.forEach(fn => fn()); };
+	const openFile = jest.fn(async (file: TFile) => {
+		const note = notes.find(note => note.view.file === file)!;
+		note.view.leaf = notes[0].view.leaf; note.view.leaf.view = note.view;
+		select(note.view);
+	});
+	for (const note of notes) note.view.leaf = { view: note.view, openFile, getViewState: () => ({ type: "markdown", state: { mode: note.view.getMode(), source: true } }) } as unknown as WorkspaceLeaf;
+	const serverSettings = { readValue: () => ({ enabled: true, servers: [{ id: "server", controlPlaneUrl: "https://relay.example" }] }), subscribe: () => () => {} };
 	const controller = new PresenceController({ app: { workspace, vault }, addCommand: jest.fn(), registerMarkdownPostProcessor: jest.fn(), registerEditorExtension: (extension: Extension) => extensions.push(extension) } as unknown as Plugin,
-		registry as unknown as ViewBindingRegistry, auth, settings as unknown as SettingsScope<PresenceSettings>);
+		registry as unknown as ViewBindingRegistry, auth, settings as unknown as SettingsScope<PresenceSettings>, crossNote ? serverSettings as unknown as SettingsScope<RelayOnPremSettings> : undefined);
 	controller.onload();
 	const editors = notes.map(note => {
 		const editor = new EditorView({ parent: note.view.contentEl, state: EditorState.create({ doc: note.text.toString(), extensions: [
@@ -91,11 +115,10 @@ function fixture() {
 		const stop = bindCommentEditor(editor, () => ({ documentId: note.doc.entityGuid, text: note.text }));
 		return { editor, stop };
 	});
-	return { controller, notes, editors, registry, settings, authListeners, viewListeners, focus, hidden,
-		select: (view: MarkdownView | null) => { active = view; events.get("active-leaf-change")?.forEach(fn => fn()); },
+	return { controller, notes, editors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select,
 		logout: () => { account = undefined; authListeners.forEach(fn => fn()); },
 		fileEvent: (event: "rename" | "delete") => { if (event === "delete") deleted = true; events.get(event)?.forEach(fn => fn()); },
-		close: () => { controller.unload(); editors.forEach(({ editor, stop }) => { stop(); editor.destroy(); }); notes.forEach(({ doc, view }) => { doc.dismantle(); doc.crdtDoc.destroy(); view.containerEl.remove(); }); focus.mockRestore(); hidden.mockRestore(); },
+		close: () => { controller.unload(); editors.forEach(({ editor, stop }) => { stop(); editor.destroy(); }); notes.forEach(({ doc, view }) => { doc.dismantle(); doc.crdtDoc.destroy(); view.containerEl.remove(); }); folderDoc.destroy(); focus.mockRestore(); hidden.mockRestore(); },
 	};
 }
 
@@ -120,10 +143,10 @@ test("only the active bound note publishes; private views and unloaded bindings 
 });
 
 async function settled() { await new Promise(resolve => setTimeout(resolve, 240)); }
-function remotePeer(f: ReturnType<typeof fixture>) {
-	const doc = new Y.Doc(), awareness = new Awareness(doc), target = f.notes[0].doc._liveProvider.awareness;
-	const position = (at: number) => Y.createRelativePositionFromTypeIndex(f.notes[0].text, at);
-	const state = (at: number) => ({ user: { id: "peer", name: "Peer" }, sessionId: "a".repeat(32), surface: "editor", cursor: { anchor: position(at), head: position(at) }, viewport: position(at) });
+function remotePeer(f: ReturnType<typeof fixture>, index = 0) {
+	const doc = new Y.Doc(), awareness = new Awareness(doc), target = f.notes[index].doc._liveProvider.awareness;
+	const position = (at: number) => Y.createRelativePositionFromTypeIndex(f.notes[index].text, at);
+	const state = (at: number) => ({ user: { id: "00000000-0000-4000-8000-000000000008", name: "Peer" }, sessionId: "a".repeat(32), instanceId: "00000000-0000-4000-8000-000000000009", surface: "editor", cursor: { anchor: position(at), head: position(at) }, viewport: position(at) });
 	const send = (at?: number) => { awareness.setLocalState(at === undefined ? null : state(at)); applyAwarenessUpdate(target, encodeAwarenessUpdate(awareness, [awareness.clientID]), "test"); };
 	send(6); return { send, close: () => { awareness.destroy(); doc.destroy(); } };
 }
@@ -216,4 +239,78 @@ test("status and explicit retry reflect the active provider; unload removes stat
 		expect(f.viewListeners.size).toBe(0);
 		window.dispatchEvent(new Event("focus")); expect(provider.awareness.getLocalState()).toBeNull();
 	} finally { f.close(); }
+});
+
+function crossNetwork() {
+	const sockets: ReturnType<typeof makeSocket>[] = [];
+	function makeSocket() {
+		const socket = { readyState: 0, bufferedAmount: 0, onopen: null as WebSocket["onopen"], onmessage: null as WebSocket["onmessage"],
+			onclose: null as WebSocket["onclose"], onerror: null as WebSocket["onerror"], frames: [] as Record<string, unknown>[],
+			send: (raw: string) => { socket.frames.push(JSON.parse(raw)); }, close: () => { socket.readyState = 3; },
+			message: (value: unknown) => socket.onmessage?.call(socket as unknown as WebSocket, { data: JSON.stringify(value) } as MessageEvent),
+			ready: () => {
+				socket.readyState = 1; socket.onopen?.call(socket as unknown as WebSocket, new Event("open"));
+				socket.message({ type: "ready", protocol_version: 1, instance_id: socket.frames[0].instance_id, session_id: "b".repeat(32), expires_at: Math.floor(Date.now() / 1000) + 3600 });
+			},
+			location: (f: ReturnType<typeof fixture>, index?: number) => {
+				const subscription = socket.frames.filter(frame => frame.type === "follow").at(-1)!.subscription_id;
+				socket.message({ type: "location", subscription_id: subscription, status: index === undefined ? "unavailable" : "available",
+					...(index === undefined ? {} : { location: { kind: "note", share_id: f.folder.entityGuid, entry_id: f.notes[index].doc.entityGuid, surface: "reading" } }) });
+			},
+		};
+		return socket;
+	}
+	jest.mocked(platformFetch).mockImplementation(async url => ({ status: 200, ok: true, text: async () => JSON.stringify(String(url).includes("/capabilities?") ?
+		{ protocol_version: 1, features: { presence_locations_preview: true } } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
+	const mock = jest.spyOn(window, "WebSocket").mockImplementation(url => {
+		expect(String(url)).toBe("wss://relay.example/v1/collaboration/events");
+		const socket = makeSocket(); sockets.push(socket); return socket as unknown as WebSocket;
+	});
+	return { sockets, close: () => { mock.mockRestore(); jest.mocked(platformFetch).mockReset(); } };
+}
+async function until(check: () => boolean) {
+	const deadline = Date.now() + 3000;
+	while (!check()) { if (Date.now() > deadline) throw new Error("Presence condition not reached"); await new Promise(resolve => setTimeout(resolve, 20)); }
+}
+
+test("cross-note follow survives old-room departure, opens the authorized entry and resumes semantic following", async () => {
+	const network = crossNetwork(), f = fixture(true), first = remotePeer(f); let second: ReturnType<typeof remotePeer> | undefined;
+	try {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+		await until(() => f.controller.peers.length === 1);
+		expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+		expect(socket.frames.filter(frame => frame.type === "follow")).toHaveLength(1);
+		first.send(); expect(f.controller.following?.name).toBe("Peer");
+		socket.location(f, 1); second = remotePeer(f, 1);
+		const dispatch = jest.spyOn(f.editors[1].editor, "dispatch");
+		await until(() => f.openFile.mock.calls.length === 1 && dispatch.mock.calls.length > 0);
+		expect(f.openFile).toHaveBeenCalledWith(f.notes[1].view.file, { active: true, state: { mode: "source", source: true } });
+		expect(f.controller.following?.name).toBe("Peer"); expect(f.notes[1].view.getMode()).toBe("source");
+		expect(f.notes.map(note => note.text.toString())).toEqual(["alpha beta", "alpha beta"]);
+		expect(network.sockets).toHaveLength(1); // Same account/instance channel across documents.
+		f.notes[1].view.contentEl.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+		expect(f.controller.following).toBeUndefined();
+		const count = dispatch.mock.calls.length; second.send(9); await settled(); expect(dispatch.mock.calls.length).toBe(count);
+	} finally { first.close(); second?.close(); f.close(); network.close(); }
+});
+
+test.each(["manual", "unavailable", "permission", "privacy", "background"])("cross-note follow handles %s without a late unauthorized navigation", async action => {
+	const network = crossNetwork(), f = fixture(true), remote = remotePeer(f);
+	try {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+		await until(() => f.controller.peers.length === 1);
+		expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+		if (action === "manual") f.select(f.notes[1].view);
+		else if (action === "unavailable") socket.location(f);
+		else if (action === "permission") f.folder.crdtDoc.getMap("managed_base_v1").set("snapshot", { owner: false, permissions: {} });
+		else if (action === "background") { f.focus.mockReturnValue(false); window.dispatchEvent(new Event("blur")); }
+		else {
+			await f.controller.setVisible(false);
+			expect(f.controller.following?.name).toBe("Peer");
+			expect(socket.frames.at(-1)).toEqual({ type: "presence", location: null });
+			f.controller.stopFollowing();
+		}
+		expect(f.controller.following).toBeUndefined();
+		socket.location(f, 1); await settled(); expect(f.openFile).not.toHaveBeenCalled();
+	} finally { remote.close(); f.close(); network.close(); }
 });

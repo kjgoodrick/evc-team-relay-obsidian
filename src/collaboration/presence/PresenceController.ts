@@ -1,6 +1,9 @@
-import { Component, MarkdownView, Modal, Notice, Setting, setIcon, type Plugin } from "obsidian";
+import { Component, MarkdownView, Modal, Notice, Setting, setIcon, type Plugin, type TFile, type WorkspaceLeaf } from "obsidian";
 import * as Y from "yjs";
 import { v4 as uuidv4 } from "uuid";
+import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
+import { LocationHost } from "./LocationHost";
+import { sameNote, type LocationEvent, type NoteLocation } from "./LocationProtocol";
 import type { AuthSession } from "../../AuthSession";
 import { DocumentViewBinding, type ViewBindingRegistry } from "../../ViewBindings";
 import type { SettingsScope } from "../../SettingsPersistence";
@@ -24,8 +27,8 @@ const descriptions: Record<PresenceStatus, string> = {
 	unavailable: "Presence is unavailable. You can retry; note sync remains available.",
 };
 
-/** One owner across all leaves/popout windows. It neither creates documents nor
- * opens sockets; note sync retains its existing connection lifecycle. */
+/** One owner across leaves/popouts. Note sync retains its existing lifecycle;
+ * the optional location channel carries only authorized active-note descriptors. */
 export class PresenceController extends Component {
 	readonly instanceId = uuidv4();
 	private active?: { binding: Binding; surface: NotePresenceSurface };
@@ -50,6 +53,9 @@ export class PresenceController extends Component {
 	private followBusy = false;
 	private followingMode?: string;
 	private controls?: PresenceControls;
+	private locations?: LocationHost;
+	private crossFollow?: { subscriptionId: string; peer: PresencePeer; location: NoteLocation; file: TFile;
+		leaf: WorkspaceLeaf; opening?: TFile; busy: boolean; waitUntil: number };
 	peers: PresencePeer[] = [];
 	following?: PresencePeer;
 	navigationMessage = "";
@@ -57,11 +63,14 @@ export class PresenceController extends Component {
 	visible = true;
 
 	constructor(private plugin: Plugin, private registry: ViewBindingRegistry, private auth: AuthSession,
-		private settings: SettingsScope<PresenceSettings>) { super(); }
+		private settings: SettingsScope<PresenceSettings>, private serverSettings?: SettingsScope<RelayOnPremSettings>) { super(); }
 
 	onload(): void {
 		const workspace = this.plugin.app.workspace;
 		this.surfaces = this.addChild(new NotePresenceSurfaces(this.plugin, location => this.publishLocation(location), () => this.stopFollowing("Following stopped because you interacted with the note.")));
+		if (this.serverSettings) this.locations = this.addChild(new LocationHost(this.plugin, this.registry.shareRegistry, this.auth,
+			this.serverSettings, this.instanceId, { changed: () => this.refresh(), location: event => this.remoteLocation(event),
+				stopped: () => this.stopFollowing("Following stopped because the connection changed.") }));
 		this.register(this.registry.onViewsChanged(() => this.refresh()));
 		this.register(this.auth.on(() => this.refresh()));
 		this.register(this.auth.onTokenRefreshed(() => this.refresh()));
@@ -87,14 +96,19 @@ export class PresenceController extends Component {
 
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	get description(): string { return descriptions[this.status]; }
-	get canRetry(): boolean { return this.visible && !!this.active && ["unavailable", "capacity"].includes(this.status); }
+	get canRetry(): boolean { return this.visible && !!this.active && ["unavailable", "capacity"].includes(this.status) ||
+		!!this.locations && ["authentication", "unavailable", "unsupported"].includes(this.locations.status); }
+	get navigationDescription(): string {
+		return this.locations?.ready ? "Follow can move between shared notes." : this.locations?.status === "connecting" || this.locations?.status === "reconnecting" ?
+			"Connecting across notes. Current-note navigation is available." : "Follow is currently limited to this note.";
+	}
 	async setVisible(visible: boolean): Promise<void> {
 		// Apply privacy immediately, including if saving preferences fails.
 		this.visible = visible; this.refresh();
 		try { await this.settings.mutateValue(current => ({ ...current, visible })); }
 		catch { new Notice("Presence visibility changed for this session, but the preference could not be saved."); }
 	}
-	retry(): void { if (this.canRetry) { this.active!.binding.boundDocument._liveProvider.presence.retry(); this.refresh(); } }
+	retry(): void { if (this.canRetry) { this.active?.binding.boundDocument._liveProvider.presence.retry(); this.locations?.retry(); this.refresh(); } }
 	openControls(): void {
 		if (this.stopped) return;
 		this.controls?.close(); this.controls = new PresenceControls(this.plugin, this); this.controls.open();
@@ -107,7 +121,7 @@ export class PresenceController extends Component {
 	}
 	private observe(provider?: YSweetProvider): void {
 		if (provider === this.observed) return;
-		this.stopFollowing("Following stopped because the active note changed.");
+		if (!this.crossFollow) this.stopFollowing("Following stopped because the active note changed.");
 		this.stopProvider?.(); this.observed = provider;
 		if (!provider) { this.stopProvider = undefined; return; }
 		const changed = () => this.refresh();
@@ -151,6 +165,8 @@ export class PresenceController extends Component {
 		try {
 			this.watchWindows();
 			const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+			const cross = this.crossFollow;
+			if (cross && (view?.leaf !== cross.leaf || view.file !== cross.file && view.file !== cross.opening)) this.stopFollowing("Following stopped because you changed notes.");
 			const candidate = !this.registry.isShutDown && this.registry.trackedViews.find((item): item is Binding =>
 				item instanceof DocumentViewBinding && item.hostView === view && !!item.boundDocument &&
 				view?.file?.extension === "md" && item.boundDocument._obsidianFile === view.file &&
@@ -159,8 +175,10 @@ export class PresenceController extends Component {
 			this.candidate = candidate || undefined;
 			this.observe(this.candidate?.boundDocument._liveProvider);
 			const surface: NotePresenceSurface = view?.getMode() === "preview" ? "reading" : "editor";
-			if (this.following && view?.getMode() !== this.followingMode) this.stopFollowing("Following stopped because the view changed.");
+			if (this.following && !this.crossFollow?.opening && view?.getMode() !== this.followingMode) this.stopFollowing("Following stopped because the view changed.");
 			const owner = view?.containerEl.ownerDocument;
+			const foreground = !!view?.containerEl.isConnected && !!owner?.hasFocus() && !owner.hidden && !this.blurred.has(owner);
+			this.locations?.update(view, foreground && !this.registry.isShutDown, this.visible);
 			const reading = surface === "reading" && view ? readingCommentBinding(view) : undefined;
 			const bound = !!candidate && (surface === "editor" ? candidate.isTracking :
 				reading?.documentId === candidate.boundDocument.entityGuid && reading.text === candidate.boundDocument.crdtText);
@@ -180,7 +198,7 @@ export class PresenceController extends Component {
 			const navigable = candidate && bound && currentAccount && candidate.connectionAllowed && candidate.wantsConnection &&
 				candidate.boundDocument.vaultShare.wantsConnection && view?.containerEl.isConnected && owner?.hasFocus() && !owner.hidden && !this.blurred.has(owner);
 			this.surfaces.setActive(navigable ? view! : undefined, navigable ? candidate.boundDocument.crdtText : undefined, navigable ? candidate.boundDocument.entityGuid : undefined);
-			if (!navigable || !this.observed?.wsconnected) this.stopFollowing("Location unavailable.");
+			if (!foreground || !this.crossFollow && (!navigable || !this.observed?.wsconnected)) this.stopFollowing("Location unavailable.");
 			const provider = this.observed;
 			this.status = !this.visible ? "hidden" : !candidate || !owner?.hasFocus() || this.blurred.has(owner) || owner.hidden ? "idle" :
 				!bound || !currentAccount ? "waiting" : !provider?.wsconnected ? "offline" :
@@ -212,8 +230,10 @@ export class PresenceController extends Component {
 	private refreshPeers(): void {
 		this.peers = this.canNavigate() && this.observed ? presencePeers(this.observed.awareness) : [];
 		if (this.following) {
-			const current = this.peers.find(peer => peer.key === this.following!.key);
+			const cross = this.crossFollow;
+			const current = cross ? this.peers.find(peer => this.atFollowDestination() && this.sameParticipant(peer, cross.peer)) : this.peers.find(peer => peer.key === this.following!.key);
 			if (current) { this.following = current; this.scheduleFollow(); }
+			else if (cross) this.scheduleFollow();
 			else this.stopFollowing("Location unavailable.");
 		}
 		this.updateFollowBar(); this.notify();
@@ -234,11 +254,15 @@ export class PresenceController extends Component {
 		}
 		this.following = follow ? this.peers.find(item => item.key === key) : undefined; this.lastFollowPosition = JSON.stringify(position);
 		this.followingMode = follow ? candidate?.hostView.getMode() : undefined;
-		this.navigationMessage = follow ? `Following ${peer.name}.` : `Jumped to ${peer.name}.`;
+		const subscriptionId = follow ? this.locations?.follow(peer) : undefined, location = this.locations?.currentLocation;
+		if (subscriptionId && location && candidate?.hostView.file) this.crossFollow = { subscriptionId, peer, location,
+			file: candidate.hostView.file, leaf: candidate.hostView.leaf, busy: false, waitUntil: Date.now() + 8000 };
+		this.navigationMessage = follow ? `Following ${peer.name}${this.crossFollow ? "." : " in this note."}` : `Jumped to ${peer.name}.`;
 		this.updateFollowBar(); this.notify(); this.scheduleFollow(); return true;
 	}
 	stopFollowing(message = "Following stopped."): void {
 		this.navigationVersion++;
+		this.crossFollow = undefined; this.locations?.unfollow();
 		if (this.followTimer !== undefined) window.clearTimeout(this.followTimer); this.followTimer = undefined;
 		if (!this.following) return;
 		this.following = undefined; this.followingMode = undefined; this.lastFollowPosition = undefined; this.navigationMessage = message;
@@ -252,9 +276,28 @@ export class PresenceController extends Component {
 		}, 100);
 	}
 	private async advanceFollow(): Promise<void> {
+		if (this.crossFollow) {
+			const cross = this.crossFollow;
+			if (!this.following || !this.locations?.ready) { this.stopFollowing("Location unavailable."); return; }
+			const peer = this.peers.find(peer => this.atFollowDestination() && this.sameParticipant(peer, cross.peer));
+			if (!peer || !this.canNavigate()) {
+				if (!cross.waitUntil) cross.waitUntil = Date.now() + 8000;
+				if (Date.now() >= cross.waitUntil) { this.stopFollowing("Following stopped. The shared location is unavailable or still synchronizing."); return; }
+				void this.openFollowDestination(cross); this.scheduleFollow(); return;
+			}
+			this.following = peer;
+		}
 		if (!this.following || !this.candidate || !this.canNavigate()) { this.stopFollowing("Location unavailable."); return; }
 		const position = peerLocation(this.following, this.candidate.boundDocument.crdtText, true);
-		if (!position) { this.stopFollowing("Location unavailable."); return; }
+		if (!position) {
+			const cross = this.crossFollow;
+			if (cross) {
+				if (!cross.waitUntil) cross.waitUntil = Date.now() + 8000;
+				if (Date.now() >= cross.waitUntil) this.stopFollowing("Location unavailable or still synchronizing."); else this.scheduleFollow();
+			} else this.stopFollowing("Location unavailable.");
+			return;
+		}
+		if (this.crossFollow) this.crossFollow.waitUntil = 0;
 		if (JSON.stringify(position) === this.lastFollowPosition) return;
 		const version = this.navigationVersion, key = this.following.key;
 		const current = () => version === this.navigationVersion && this.following?.key === key && this.canNavigate();
@@ -270,8 +313,39 @@ export class PresenceController extends Component {
 			if (this.following && this.candidate && JSON.stringify(peerLocation(this.following, this.candidate.boundDocument.crdtText, true)) !== this.lastFollowPosition) this.scheduleFollow();
 		}
 	}
+	private sameParticipant(a: PresencePeer, b: PresencePeer): boolean {
+		return a.userId === b.userId && a.sessionId === b.sessionId && !!a.instanceId && a.instanceId === b.instanceId;
+	}
+	private atFollowDestination(): boolean {
+		const cross = this.crossFollow, doc = this.candidate?.boundDocument;
+		return !!cross && !!doc && cross.location.entry_id === doc.entityGuid && cross.location.share_id === doc.vaultShare.entityGuid;
+	}
+	private remoteLocation(event: LocationEvent): void {
+		const cross = this.crossFollow;
+		if (!cross || event.subscriptionId !== cross.subscriptionId) return;
+		if (!event.location) { this.stopFollowing("Location unavailable."); return; }
+		if (!sameNote(event.location, cross.location)) this.lastFollowPosition = undefined;
+		cross.location = event.location; cross.waitUntil = Date.now() + 8000; this.scheduleFollow();
+	}
+	private async openFollowDestination(cross: NonNullable<PresenceController["crossFollow"]>): Promise<void> {
+		if (cross !== this.crossFollow || cross.busy || this.atFollowDestination()) return;
+		const location = cross.location, file = this.locations?.fileFor(location);
+		if (!file) return;
+		const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view || view.leaf !== cross.leaf || view.file !== cross.file) { this.stopFollowing("Following stopped because you changed notes."); return; }
+		cross.busy = true; cross.opening = file;
+		try {
+			const state = cross.leaf.getViewState().state;
+			await cross.leaf.openFile(file, { active: true, state: { mode: this.followingMode, ...(typeof state?.source === "boolean" ? { source: state.source } : {}) } });
+			if (cross !== this.crossFollow) return;
+			const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+			if (active?.leaf !== cross.leaf || active.file !== file || this.locations?.fileFor(location) !== file) { this.stopFollowing("Location unavailable."); return; }
+			cross.file = file; cross.opening = undefined; this.refresh();
+		} catch { if (cross === this.crossFollow) this.stopFollowing("The shared note could not be opened."); }
+		finally { cross.busy = false; if (cross === this.crossFollow) { cross.opening = undefined; this.scheduleFollow(); } }
+	}
 	private updateFollowBar(): void {
-		const view = this.following ? this.candidate?.hostView : undefined;
+		const view = this.following ? this.candidate?.hostView ?? (this.crossFollow?.leaf.view instanceof MarkdownView ? this.crossFollow.leaf.view : undefined) : undefined;
 		if (this.followView !== view) {
 			this.followBar?.remove(); this.followBar = undefined; this.followLabel = undefined; this.followView = view;
 			if (view) {
@@ -305,7 +379,7 @@ export class PresenceController extends Component {
 	}
 	onunload(): void {
 		this.controls?.close(); this.controls = undefined;
-		this.stopFollowing(); this.surfaces?.unload();
+		this.stopFollowing(); this.locations?.unload(); this.surfaces?.unload();
 		this.stopped = true; this.clearActive(); this.observe();
 		for (const stop of this.windows.values()) stop(); this.windows.clear();
 		this.action?.remove(); this.action = undefined; this.actionView = undefined;
@@ -327,11 +401,12 @@ class PresenceControls extends Modal {
 		this.contentEl.createEl("h3", { text: "People in this note" });
 		const roster = new PresenceRoster(this.contentEl.createDiv({ cls: "relay-presence-roster" }), this.presence, () => this.close());
 		const navigation = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
+		const navigationScope = this.contentEl.createEl("p");
 		const refresh = () => {
 			status.setText(this.presence.description); toggle.setValue(this.presence.visible);
 			// Obsidian themes can override the browser's [hidden] display rule.
 			retry.style.display = this.presence.canRetry ? "" : "none"; retry.disabled = !this.presence.canRetry;
-			roster.update(); navigation.setText(this.presence.navigationMessage);
+			roster.update(); navigation.setText(this.presence.navigationMessage); navigationScope.setText(this.presence.navigationDescription);
 		};
 		this.stop = this.presence.onChange(refresh); refresh();
 	}

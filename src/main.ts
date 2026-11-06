@@ -912,7 +912,7 @@ export default class TeamRelayPlugin extends Plugin {
 				this.serviceHealth,
 			);
 			this._viewRegistry = liveViews;
-			this.presence = this.addChild(new PresenceController(this, liveViews, this.authSession, this.presenceSettings));
+			this.presence = this.addChild(new PresenceController(this, liveViews, this.authSession, this.presenceSettings, this.relayOnPremSettings));
 			// The editor extensions list is registered exactly once here; after
 			// that it's mutated in place and this.app.workspace.updateOptions()
 			// is what applies further changes — not another registerEditorExtension call.

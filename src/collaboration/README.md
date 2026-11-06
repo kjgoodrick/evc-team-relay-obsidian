@@ -195,6 +195,32 @@ identity types and currently supports calendar-date/instant ranges. Historical
 and ordinal timeline codecs, saved-view reconciliation and the Time & Line API
 bridge are still required. No generic DOM/pixel identity is used.
 
+## Cross-note presence preview
+
+`presence/LocationChannel` provides one ephemeral foreground connection per
+account/login session/plugin instance. It negotiates `presence_locations_preview`,
+authenticates with single-use tickets outside the socket URL, refreshes credentials
+in place, coalesces publication and bounds retries, heartbeat and buffered sends.
+`LocationHost` resolves only unique authorized local managed entries, isolates
+account/server changes and stops on private/background views. No presence history,
+outbox or extra background note connection is created.
+
+The native controller follows a known participant across shared Markdown notes
+while preserving the viewer's Source, Live Preview or Reading mode. An awareness
+departure does not immediately cancel an active cross-note subscription; waiting
+for a new destination/binding is bounded to eight seconds. Manual interaction,
+navigation, backgrounding, disconnect and inaccessible destinations stop Follow.
+Presence reconnects automatically, but Follow requires an explicit restart.
+Hiding the viewer's own presence does not prevent following another participant.
+Older servers/peers retain current-note navigation with an explicit scope message.
+
+The actual Python/Rust/plugin fixture runs with the server harness's
+`--presence-locations --plugin <this checkout>` option. Desktop Source, Live
+Preview and Reading have disposable-vault evidence with a protocol peer;
+two-native-client and mobile acceptance remain open. The server preview is
+disabled by default and currently requires one designated application process.
+Image/Bases presence and remote Reading selection rendering are not implemented.
+
 ## Validation
 
 Unit tests use fake IndexedDB and controlled transports to exercise restart,
