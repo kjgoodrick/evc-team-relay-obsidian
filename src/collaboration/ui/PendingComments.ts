@@ -5,6 +5,9 @@ import { commentBodyText, renderCommentBody } from "./CommentBody";
 import { commandPictures } from "../storage/PictureRecords";
 
 const failureHelp: Record<string, string> = {
+	base_target_definition_changed: "The formula or summary definition changed after capture. Your saved comment retains its original target. Review the current definition before choosing a new target.",
+	base_target_definition_unavailable: "The captured definition is unavailable in this saved view. Your comment and original target are retained for review.",
+	base_definition_targets_disabled: "Formula and summary comments are disabled on this server. Your saved work is retained; retry after support is restored.",
 	base_view_unavailable: "This saved view is archived or needs an association review. The comment keeps its original view; restore that association before retrying.",
 	base_definition_not_synced: "Waiting for the Bases definition and saved-view associations to synchronize.",
 	base_discussions_disabled: "Bases comments are disabled on this server. Your saved work is kept here.",

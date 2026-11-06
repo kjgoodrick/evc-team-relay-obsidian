@@ -109,7 +109,8 @@ class ThreadCard {
 	async update(thread: AnchoredThread): Promise<void> {
 		this.thread = thread;
 		const key = JSON.stringify([thread.activity_sequence, this.count, this.after, this.expanded,
-			this.session.permission(this.entryId), this.session.online, this.session.canQueue, this.session.participants(this.entryId)]);
+			this.session.permission(this.entryId), this.session.online, this.session.canQueue, this.session.participants(this.entryId),
+			this.session.baseRegistryRevision(this.entryId)]);
 		this.composer?.update();
 		if (key === this.renderedKey) return;
 		const generation = ++this.generation;
@@ -124,8 +125,15 @@ class ThreadCard {
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "base") {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
-			const target = this.controls.createEl("button", { text: "Show Bases target" });
+			const defined = thread.anchor.target.type === "formula" || thread.anchor.target.type === "summary";
+			const target = this.controls.createEl("button", { text: defined ? "Definition details" : "Show Bases target" });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
+			if (defined) {
+				const status = this.controls.createEl("p", { text: "Checking the saved definition…", attr: { role: "status" } });
+				void this.session.baseDefinitionStatus(this.entryId, thread.anchor).then(message => {
+					if (!this.disposed && this.generation === generation && this.session.permission(this.entryId)?.read) status.setText(message);
+				});
+			}
 		}
 		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
 		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };

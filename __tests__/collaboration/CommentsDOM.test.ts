@@ -52,6 +52,7 @@ async function fixture() {
 		retryRejected: jest.fn().mockResolvedValue(true),
 		canRepairPictures: true, repairPictures: jest.fn().mockResolvedValue("requeued"),
 		canAnchorBase: () => true, documentGeneration: () => id(7),
+		baseRegistryRevision: () => 1, baseDefinitionStatus: jest.fn().mockResolvedValue("Matches the latest verified definition."),
 	};
 	return { store, session, typed: session as unknown as DiscussionSession };
 }
@@ -245,6 +246,32 @@ test("Send and reopen after recovery uses a fresh identity and the reviewed draf
 		expect(send.mock.calls[0][1].operationId).not.toBe(original.operationId);
 		expect(send.mock.calls[0][1].payload).toMatchObject({ expected_state_revision: 2, body: bodyFromText("Reviewed reply") });
 		expect(await store.getDraft(draftId)).toBeUndefined();
+	} finally { await view.onClose(); store.close(); }
+});
+
+test("definition status refreshes after registry changes without replacing the active draft", async () => {
+	const { store, session, typed } = await fixture(), scope = baseDiscussionScope(entry, id(8));
+	const thread = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z", anchor: { version: 1, type: "base",
+			definition_id: id(6), view_id: id(8), generation: id(7), registry_revision: 1,
+			target: { type: "formula", definition_id: id(9), definition_revision: 1, property: { source: "formula", name: "Total" } } } };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockResolvedValue({ messages: [], hasMore: false });
+	let notify!: () => void;
+	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
+		current: () => ({ path: "Review.base", kind: "base", baseViewName: "Review", entryId: scope, session: typed }),
+		targetLabel: () => "Formula definition: Total" } as unknown as DiscussionHost;
+	const draftId = "selection:" + scope + ":active";
+	await store.saveDraft({ id: draftId, scopeId: scope, revision: 0, body: "Original", target: protocolJson(thread.anchor) });
+	await store.setPreference("activeNewDraft:" + scope, draftId);
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("latest verified definition") && !!view.contentEl.querySelector("textarea:not([disabled])"));
+		const draft = view.contentEl.querySelector("textarea")!; draft.value = "Keep this"; draft.dispatchEvent(new Event("input"));
+		session.baseRegistryRevision = () => 2; session.baseDefinitionStatus.mockResolvedValue("The definition has changed. Original discussion retained.");
+		notify(); await until(() => view.contentEl.textContent!.includes("definition has changed"));
+		expect(view.contentEl.querySelector("textarea")).toBe(draft); expect(draft.value).toBe("Keep this");
+		expect(session.baseDefinitionStatus).toHaveBeenCalledTimes(2);
 	} finally { await view.onClose(); store.close(); }
 });
 

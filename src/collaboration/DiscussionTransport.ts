@@ -4,6 +4,7 @@ import type { Json, QueuedCommand } from "./storage/DiscussionStore";
 import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictureHash, type PictureMetadata, type PictureRendition, type PictureUpload } from "./PictureProtocol";
 import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type BaseRecordType, type DiscussionAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
+import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -33,6 +34,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
+for (const code of ["base_definition_targets_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
 for (const code of ["pictures_disabled", "picture_identity_conflict", "picture_staging_quota", "picture_digest_mismatch", "picture_not_verified",
 	"picture_expired", "picture_too_large", "picture_output_too_large", "picture_too_many_pixels", "animated_picture_unsupported", "invalid_picture", "picture_changed"]) errorCodes.add(code);
 function validId(value: unknown): value is string { return typeof value === "string" && uuid.test(value); }
@@ -169,16 +171,18 @@ export class DiscussionTransport implements DiscussionSender {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
 		let baseRecordTypes: BaseRecordType[] = [];
+		const definitionCatalog = value.features.discussion_base_definition_catalog === true;
 		if (value.features.discussion_bases === true) {
 			if (!Array.isArray(value.discussion_base_targets) || value.discussion_base_targets.length > 32 ||
 				value.discussion_base_targets.some(kind => typeof kind !== "string" || kind.length > 64) ||
 				new Set(value.discussion_base_targets).size !== value.discussion_base_targets.length) throw new DiscussionFailure("pause", "invalid_read_response");
-			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind));
+			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind) &&
+				(!["formula", "summary"].includes(kind) || definitionCatalog));
 			const records = value.discussion_base_record_types;
 			// The initial Bases protocol only accepted Markdown records.
 			if (records === undefined) baseRecordTypes = ["markdown"];
@@ -229,6 +233,23 @@ export class DiscussionTransport implements DiscussionSender {
 		this.scopeView(entryId, viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + "/bases/target-context", JSON.stringify({ view_id: viewId,
 			...(recordId !== undefined ? { record_id: recordId } : {}) })), value => parseBaseTargetContext(value, parseDiscussionScope(entryId)!.entryId, viewId, recordId));
+	}
+	async baseDefinitions(entryId: string, viewId: string): Promise<BaseDefinitionCatalog> {
+		if (!isId(viewId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		this.scopeView(entryId, viewId);
+		let result: BaseDefinitionCatalog | undefined, after: string | undefined;
+		for (let pageNumber = 0; pageNumber < 3; pageNumber++) {
+			const value = await this.request(this.scopePath(entryId) + "/bases/target-definitions", JSON.stringify({ view_id: viewId,
+				...(result ? { expected_revision: result.registry_revision, after } : {}) }));
+			const page = this.parse(value, item => parseBaseDefinitionPage(item, parseDiscussionScope(entryId)!.entryId, viewId, after));
+			if (result && (result.definition_id !== page.definition_id || result.generation !== page.generation || result.registry_revision !== page.registry_revision)) throw new DiscussionFailure("pause", "invalid_read_response");
+			if (!result) result = parseBaseDefinitionCatalog(page, parseDiscussionScope(entryId)!.entryId, viewId);
+			else result.targets.push(...page.targets);
+			if (result.targets.length > 256) throw new DiscussionFailure("pause", "invalid_read_response");
+			if (!page.has_more) return result;
+			after = page.next_after!;
+		}
+		throw new DiscussionFailure("pause", "invalid_read_response");
 	}
 
 	async permissions(entryId: string): Promise<DiscussionPermissions> {
@@ -374,7 +395,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

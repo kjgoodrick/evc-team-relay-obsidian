@@ -2,6 +2,7 @@
 import type { App } from "obsidian";
 import { BaseDiscussionPicker, type BaseDiscussionChoices } from "../../src/collaboration/ui/BaseDiscussionPicker";
 import { BaseTargetPicker, type BaseRecordPage } from "../../src/collaboration/ui/BaseTargetPicker";
+import type { BaseDefinitionCatalog } from "../../src/collaboration/BaseDefinitionProtocol";
 
 jest.mock("obsidian", () => ({ Modal: class {
 	// The native host retains its prior DOM selection on this own property.
@@ -13,6 +14,34 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const button = (el: HTMLElement, text: string) => [...el.querySelectorAll("button")].find(button => button.textContent === text)!;
 const change = (el: HTMLSelectElement | HTMLInputElement, value: string) => { el.value = value; el.dispatchEvent(new Event(el.tagName === "SELECT" ? "change" : "input")); };
+
+test("definition picker waits for verified choices and captures identity/revision without computed values", async () => {
+	let finish!: (page: BaseDefinitionCatalog) => void;
+	const choose = jest.fn().mockResolvedValue(true), load = () => new Promise<BaseDefinitionCatalog>(resolve => { finish = resolve; });
+	const modal = new BaseTargetPicker({} as App, "Planning", () => ({ records: [], hasMore: false }), () => [], choose,
+		() => true, () => true, () => () => {}, load);
+	modal.onOpen();
+	change(modal.contentEl.querySelector<HTMLSelectElement>('[aria-label="Target"]')!, "summary");
+	expect(button(modal.contentEl, "Write comment").disabled).toBe(true);
+	finish({ protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 8, computed_values: false,
+		targets: [{ id: id(5), revision: 7, fingerprint: "a".repeat(64), kind: "summary", property: { source: "formula", name: "<Total>" }, summary: "Average" },
+			{ id: id(6), revision: 7, fingerprint: "a".repeat(64), kind: "group", property: { source: "note", name: "status" } }] });
+	await flush();
+	const field = modal.contentEl.querySelector<HTMLSelectElement>('[aria-label="Definition"]')!;
+	expect([...field.options].map(option => option.textContent)).toEqual(["Choose a definition…", "formula.<Total> · Average"]);
+	change(field, id(5)); button(modal.contentEl, "Write comment").click(); await flush();
+	expect(choose).toHaveBeenCalledWith({ type: "summary", definitionId: id(5), definitionRevision: 7 });
+	expect(modal.contentEl.childElementCount).toBe(0);
+});
+
+test("late definition responses cannot populate a closed or switched-account picker", async () => {
+	let finish!: (page: BaseDefinitionCatalog) => void, current = true, changed!: () => void;
+	const modal = new BaseTargetPicker({} as App, "Planning", () => ({ records: [], hasMore: false }), () => [], jest.fn(), () => true,
+		() => current, listener => { changed = listener; return () => {}; }, () => new Promise(resolve => { finish = resolve; }));
+	modal.onOpen(); current = false; changed();
+	finish({ protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 1, computed_values: false, targets: [] });
+	await flush(); expect(modal.contentEl.childElementCount).toBe(0);
+});
 
 test("saved-view selection is explicit, defers paging until current associations arrive and uses stable IDs", async () => {
 	let finish!: (page: BaseDiscussionChoices) => void;

@@ -2,6 +2,7 @@ import { Modal, type App } from "obsidian";
 import { v4 as uuid } from "uuid";
 import { isBaseProperty, type BaseTargetKind, type BaseRecordType } from "../DiscussionProtocol";
 import type { BaseTargetSelection } from "../DiscussionSession";
+import type { BaseDefinitionCatalog, BaseTargetDefinition } from "../BaseDefinitionProtocol";
 
 export type BaseRecordChoice = { id: string; path: string; kind: BaseRecordType };
 export type BaseRecordPage = { records: BaseRecordChoice[]; hasMore: boolean };
@@ -26,18 +27,25 @@ export class BaseTargetPicker extends Modal {
 	private status!: HTMLElement;
 	private accept!: HTMLButtonElement;
 	private records = new Map<string, BaseRecordChoice>();
+	private definitionFields!: HTMLElement;
+	private definitionChoice!: HTMLSelectElement;
+	private definitionStatus!: HTMLElement;
+	private refreshDefinitions!: HTMLButtonElement;
+	private definitionLoading = false;
+	private definitions: BaseTargetDefinition[] = [];
 	constructor(app: App, private viewName: string,
 		private search: (query: string) => BaseRecordPage,
 		private properties: (recordId: string) => string[],
 		private choose: (target: BaseTargetSelection) => Promise<boolean>,
 		private available: (kind: BaseTargetKind) => boolean,
-		private current: () => boolean, private subscribe: (listener: () => void) => () => void) { super(app); }
+		private current: () => boolean, private subscribe: (listener: () => void) => () => void,
+		private loadDefinitions?: () => Promise<BaseDefinitionCatalog>) { super(app); }
 	onOpen(): void {
 		this.setTitle("Choose discussion target");
 		this.contentEl.classList.add("relay-base-target-picker");
 		this.contentEl.createEl("p", { text: "Discussion view: " + this.viewName });
 		this.kind = this.field("Target", this.contentEl.createEl("select"));
-		for (const [value, label] of [["view", "Entire saved view"], ["item", "Row or card"], ["cell", "Cell or property on a record"], ["property", "Column or property header"]]) {
+		for (const [value, label] of [["view", "Entire saved view"], ["item", "Row or card"], ["cell", "Cell or property on a record"], ["property", "Column or property header"], ["formula", "Formula definition"], ["summary", "Summary definition"]]) {
 			const option = this.kind.createEl("option", { text: label, attr: { value } });
 			option.disabled = !this.available(value as BaseTargetKind);
 		}
@@ -53,6 +61,13 @@ export class BaseTargetPicker extends Modal {
 		this.propertyName = this.field("Property name", this.propertyFields.createEl("input", { attr: { type: "text", list: listId, maxlength: "512", placeholder: "status" } }));
 		this.propertyFields.createEl("p", { text: "Use the property’s original name, without the note. or file. prefix. A renamed column’s display label may differ. Note properties are available only for Markdown records; choose a file property for other records." });
 		this.suggestions = this.propertyFields.createEl("datalist", { attr: { id: listId } });
+		this.definitionFields = this.contentEl.createDiv();
+		this.definitionChoice = this.field("Definition", this.definitionFields.createEl("select"));
+		this.definitionFields.createEl("p", { text: "The comment concerns this saved definition. Calculated values are not copied. Offline choices use the last verified definitions." });
+		this.definitionStatus = this.definitionFields.createDiv({ attr: { role: "status", "aria-live": "polite" } });
+		this.refreshDefinitions = this.definitionFields.createEl("button", { text: "Refresh definitions", attr: { type: "button" } });
+		this.refreshDefinitions.onclick = () => { void this.readDefinitions(); };
+		this.definitionChoice.onchange = () => this.update();
 		this.status = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
 		this.accept = this.contentEl.createEl("button", { text: "Write comment", cls: "mod-cta" });
 		this.kind.onchange = () => this.update();
@@ -63,6 +78,19 @@ export class BaseTargetPicker extends Modal {
 		this.accept.onclick = () => { void this.submit(); };
 		this.unsubscribe = this.subscribe(() => { if (!this.current()) this.close(); else this.update(); });
 		this.loadRecords(); this.kind.focus();
+		if (this.loadDefinitions && (this.available("formula") || this.available("summary"))) void this.readDefinitions();
+	}
+	private async readDefinitions(): Promise<void> {
+		if (!this.loadDefinitions || this.closed || this.definitionLoading || !this.current()) return;
+		this.definitionLoading = true; this.definitionStatus.setText("Loading saved definitions…"); this.update();
+		try {
+			const catalog = await this.loadDefinitions();
+			if (this.closed || !this.current()) return;
+			this.definitions = catalog.targets.filter(item => item.kind !== "group");
+			this.definitionStatus.setText(this.definitions.length ? "Choose a definition to discuss." : "No formula or summary definitions are available in this saved view.");
+		} catch {
+			if (!this.closed) { this.definitions = []; this.definitionStatus.setText("Definitions could not be verified. Reconnect and refresh; existing drafts are retained."); }
+		} finally { this.definitionLoading = false; this.update(); }
 	}
 	private field<T extends HTMLElement>(label: string, element: T): T {
 		const row = element.parentElement!.createDiv({ cls: "relay-base-target-field" }); row.append(element);
@@ -82,8 +110,13 @@ export class BaseTargetPicker extends Modal {
 	}
 	private selectedTarget(): BaseTargetSelection | undefined {
 		const type = this.kind.value;
-		if (!["view", "item", "cell", "property"].includes(type) || !this.available(type as BaseTargetKind)) return;
+		if (!["view", "item", "cell", "property", "formula", "summary"].includes(type) || !this.available(type as BaseTargetKind)) return;
 		if (type === "view") return { type };
+		if (type === "formula" || type === "summary") {
+			if (this.definitionLoading) return;
+			const definition = this.definitions.find(item => item.id === this.definitionChoice.value && item.kind === type);
+			return definition ? { type, definitionId: definition.id, definitionRevision: definition.revision } : undefined;
+		}
 		const recordId = this.records.get(this.record.value)?.id;
 		if (type === "item") return recordId ? { type, recordId } : undefined;
 		const property = { source: this.propertySource.value, name: this.propertyName.value };
@@ -95,6 +128,16 @@ export class BaseTargetPicker extends Modal {
 		if (this.closed) return;
 		this.recordFields.hidden = !["item", "cell"].includes(this.kind.value);
 		this.propertyFields.hidden = !["cell", "property"].includes(this.kind.value);
+		this.definitionFields.hidden = !["formula", "summary"].includes(this.kind.value);
+		const definitions = this.definitions.filter(item => item.kind === this.kind.value), signature = JSON.stringify(definitions);
+		if (this.definitionChoice.dataset.options !== signature) {
+			const selected = this.definitionChoice.value; this.definitionChoice.dataset.options = signature; this.definitionChoice.empty();
+			this.definitionChoice.createEl("option", { text: "Choose a definition…", attr: { value: "" } });
+			for (const item of definitions) this.definitionChoice.createEl("option", { text: item.property.source + "." + item.property.name + (item.kind === "summary" ? " · " + item.summary : ""), attr: { value: item.id } });
+			this.definitionChoice.value = definitions.some(item => item.id === selected) ? selected : "";
+		}
+		this.definitionChoice.disabled = this.busy || this.definitionLoading;
+		this.refreshDefinitions.disabled = this.busy || this.definitionLoading;
 		const noteProperties = this.kind.value !== "cell" || this.records.get(this.record.value)?.kind === "markdown";
 		this.propertySource.options[0].disabled = !noteProperties;
 		this.suggestions.empty();
@@ -111,7 +154,9 @@ export class BaseTargetPicker extends Modal {
 			if (await this.choose(target)) { this.close(); return; }
 			if (!this.closed) this.status.setText("The target could not be saved. Check comment access and synchronization, then try again.");
 		} catch {
-			if (!this.closed) this.status.setText("The target could not be verified. Reconnect with comment access to this view and record, then try again.");
+			if (!this.closed) this.status.setText(target.type === "formula" || target.type === "summary" ?
+				"The definition changed or could not be verified. Refresh definitions before trying again. Existing drafts are retained." :
+				"The target could not be verified. Reconnect with comment access to this view and record, then try again.");
 		} finally { this.busy = false; this.update(); }
 	}
 	onClose(): void { this.closed = true; this.unsubscribe?.(); this.contentEl.empty(); }

@@ -10,14 +10,17 @@ import { BASE_TARGET_KINDS, isId, isRecord, parseAnchor, parseBaseTargetContext,
 import { parseDiscussionScope } from "./DiscussionScope";
 import { BASE_RECORD_TYPES, isBaseRecordType, type BaseRecordType } from "./DiscussionProtocol";
 import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
+import { parseBaseDefinitionCatalog, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
 type Entry = { kind: "note" | "image" | "base"; listeners: Set<() => void>; sync: DiscussionSync; permission?: DiscussionPermissions; documentGeneration?: string;
+	baseRegistryRevision?: number;
 	permissionFlight?: Promise<void>; permissionRestoreFlight?: Promise<void>; permissionChecked: number; unavailable: boolean; people: DiscussionParticipant[] };
 export type AnchoredThread = ThreadSummary & { anchor?: DiscussionAnchor };
 export type DiscussionLocalView = { threads: AnchoredThread[]; pending: OutboxOperation[]; hasMore: boolean; nextAfter: number };
 export type BaseTargetSelection = { type: "view" } | { type: "property"; property: BaseProperty } |
-	{ type: "item"; recordId: string } | { type: "cell"; recordId: string; property: BaseProperty };
+	{ type: "item"; recordId: string } | { type: "cell"; recordId: string; property: BaseProperty } |
+	{ type: "formula" | "summary"; definitionId: string; definitionRevision: number };
 function storedThread(value: unknown): AnchoredThread {
 	const thread = parseThread(value);
 	return { ...thread, ...(isRecord(value) && value.anchor !== undefined ? { anchor: parseAnchor(value.anchor) } : {}) };
@@ -47,6 +50,7 @@ export class DiscussionSession {
 	private recoveryEnabled = false;
 	private baseKinds: BaseTargetKind[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
+	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
 	private baseRecordTypes: BaseRecordType[] = [];
 	private lastPublish = 0;
 
@@ -81,6 +85,13 @@ export class DiscussionSession {
 	get canRepairPictures(): boolean { return this.online && this.canAttachPictures && this.recoveryEnabled; }
 	get canRecoverOnlineDraft(): boolean { return this.online && this.recoveryEnabled; }
 	canAnchorBase(kind: BaseTargetKind): boolean { return this.canQueue && this.baseKinds.includes(kind); }
+	baseRegistryRevision(scopeId: string): number { return this.entries.get(scopeId)?.baseRegistryRevision ?? 0; }
+	private observeBaseRevision(scopeId: string, generation: string, revision: number): void {
+		const entry = this.entries.get(scopeId);
+		if (entry?.documentGeneration === generation && (entry.baseRegistryRevision ?? 0) < revision) {
+			entry.baseRegistryRevision = revision; this.notify();
+		}
+	}
 	canAnchorBaseRecord(kind: unknown): boolean {
 		return (this.canAnchorBase("item") || this.canAnchorBase("cell")) && isBaseRecordType(kind) && this.baseRecordTypes.includes(kind);
 	}
@@ -250,7 +261,9 @@ export class DiscussionSession {
 						try {
 							const context = entry.kind === "base" ? await this.fetchBaseContext(id) : await this.transport.anchorContext(id);
 							if (this.closed) return;
+							if (entry.documentGeneration !== context.generation) entry.baseRegistryRevision = undefined;
 							entry.documentGeneration = context.generation;
+							if ("registry_revision" in context) this.observeBaseRevision(id, context.generation, context.registry_revision);
 							await this.store.setPreference("documentGeneration:" + id, context.generation);
 						} catch (error) {
 							// A transient failure retains the last verified generation for offline
@@ -397,6 +410,7 @@ export class DiscussionSession {
 			try { previous = parseBaseTargetContext(proof.previous, scope.entryId, scope.viewId, recordId); } catch { /* No prior verified target. */ }
 			if (previous?.generation === context.generation && previous.registry_revision > context.registry_revision) throw new Error("Saved view association changed.");
 			if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(context))) throw new Error("Saved target verification changed. Try again.");
+			this.observeBaseRevision(scopeId, context.generation, context.registry_revision);
 			return context;
 		})().finally(() => { if (this.baseContextFlights.get(key) === flight) this.baseContextFlights.delete(key); });
 		this.baseContextFlights.set(key, flight); return flight;
@@ -426,6 +440,17 @@ export class DiscussionSession {
 	async captureBaseTarget(scopeId: string, target: BaseTargetSelection): Promise<BaseAnchor> {
 		const scope = parseDiscussionScope(scopeId), entry = this.entries.get(scopeId);
 		if (!scope?.viewId || entry?.kind !== "base" || !entry.permission?.comment || !this.canAnchorBase(target.type)) throw new Error("Open this saved view with comment permission first.");
+		if (target.type === "formula" || target.type === "summary") {
+			const catalog = await this.readBaseDefinitions(scopeId);
+			const definition = catalog.targets.find(item => item.id === target.definitionId && item.kind === target.type);
+			if (!definition || definition.revision !== target.definitionRevision) throw new Error("This definition changed. Choose its current definition before starting another comment. Existing drafts are retained.");
+			if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
+				this.documentGeneration(scopeId) !== catalog.generation) throw new Error("Comment access or the saved view changed during capture.");
+			return parseAnchor({ version: 1, type: "base", definition_id: catalog.definition_id, view_id: catalog.view_id,
+				generation: catalog.generation, registry_revision: catalog.registry_revision,
+				target: { type: target.type, definition_id: definition.id, definition_revision: definition.revision,
+					property: definition.property, ...(definition.kind === "summary" ? { summary: definition.summary } : {}) } }) as BaseAnchor;
+		}
 		const recordId = target.type === "item" || target.type === "cell" ? target.recordId : undefined;
 		if (recordId !== undefined && !isId(recordId)) throw new Error("The selected record has no synchronized identity.");
 		const permissionKey = "baseRecordComment:" + scopeId + ":" + recordId;
@@ -455,6 +480,57 @@ export class DiscussionSession {
 					record_generation: context.record_generation, ...(target.type === "cell" ? { property: target.property } : {}) } });
 			return parsed as BaseAnchor;
 		})());
+	}
+	/** Complete, account-scoped catalogue. Pagination commits as one proof; stale
+	 * successes/denials and resets cannot overwrite another window's newer proof. */
+	readBaseDefinitions(scopeId: string): Promise<BaseDefinitionCatalog> {
+		const existing = this.baseDefinitionFlights.get(scopeId); if (existing) return existing;
+		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
+		const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const key = "baseDefinitions:" + scopeId;
+		const flight = this.trackLocal((async () => {
+			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
+			const parse = (value: unknown) => parseBaseDefinitionCatalog(value, scope.entryId, scope.viewId!);
+			try {
+				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				let catalog: BaseDefinitionCatalog;
+				try { catalog = await this.transport.baseDefinitions(scopeId, scope.viewId); }
+				catch (error) {
+					if (!this.closed && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+					throw error;
+				}
+				if (!current() || catalog.generation !== generation) throw new Error("Saved view changed during verification.");
+				const context = await this.cachedBaseContext(scopeId);
+				if (!current() || context?.generation === catalog.generation && context.registry_revision > catalog.registry_revision) throw new Error("Saved definition verification is stale. Refresh the definitions.");
+				let previous: BaseDefinitionCatalog | undefined; try { previous = parse(proof.previous); } catch { /* No prior proof. */ }
+				if (previous?.generation === catalog.generation && previous.registry_revision > catalog.registry_revision) throw new Error("Saved definition verification is stale.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved definition verification changed. Try again.");
+				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
+				return catalog;
+			} catch (error) {
+				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
+				let catalog: BaseDefinitionCatalog | undefined;
+				try { catalog = parse(await this.store.preference(key)); } catch { /* An incomplete catalogue cannot authorize offline capture. */ }
+				const context = await this.cachedBaseContext(scopeId);
+				if (!current() || !catalog || catalog.generation !== generation || context?.generation === generation && context.registry_revision > catalog.registry_revision) {
+					throw new Error("Connect to verify this view’s definitions before using them offline.");
+				}
+				return catalog;
+			}
+		})()).finally(() => { if (this.baseDefinitionFlights.get(scopeId) === flight) this.baseDefinitionFlights.delete(scopeId); });
+		this.baseDefinitionFlights.set(scopeId, flight); return flight;
+	}
+	async baseDefinitionStatus(scopeId: string, anchor: BaseAnchor): Promise<string> {
+		if (anchor.target.type !== "formula" && anchor.target.type !== "summary") return "";
+		try {
+			const catalog = await this.readBaseDefinitions(scopeId), target = anchor.target;
+			if (catalog.definition_id !== anchor.definition_id || catalog.generation !== anchor.generation || catalog.view_id !== anchor.view_id) return "This discussion belongs to an earlier saved-view identity. Its original target is retained.";
+			const found = catalog.targets.find(item => item.id === target.definition_id && item.kind === target.type);
+			if (!found) return this.statusValue === "ready" ? "This definition is no longer available in the saved view. The original discussion is retained." : "This definition is absent from the cached view. Reconnect to verify it.";
+			if (found.revision !== target.definition_revision) return "The definition has changed since this discussion was created. The original discussion is retained.";
+			return this.statusValue === "ready" ? "Matches the latest verified definition." : "Matches the last verified definition. Reconnect to check for changes.";
+		} catch { return "The current definition could not be verified. The original discussion and target are retained."; }
 	}
 	async onlineAction(operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");

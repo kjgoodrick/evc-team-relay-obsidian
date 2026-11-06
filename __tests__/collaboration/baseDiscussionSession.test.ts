@@ -217,7 +217,7 @@ test("scope encoding and HTTP routing never substitute a different view or a loc
 	await expect(transport.changes(scope, undefined, id(5))).rejects.toMatchObject({ code: "invalid_local_target" });
 });
 
-test.each([8, 9])("schema upgrade from %i preserves earlier work and fences workers without verification tickets", async version => {
+test.each([8, 9, 10])("schema upgrade from %i preserves earlier work and fences earlier protocol workers", async version => {
 	const factory = new IDBFactory(), name = "team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
 	await new Promise<void>((resolve, reject) => {
 		const open = factory.open(name, version);
@@ -238,6 +238,6 @@ test.each([8, 9])("schema upgrade from %i preserves earlier work and fences work
 	});
 	const store = await DiscussionStore.open(identity, factory);
 	expect((await store.getDraft("old-note"))?.body).toBe("Keep this"); store.close();
-	await expect(new Promise((resolve, reject) => { const open = factory.open(name, 9); open.onsuccess = () => { open.result.close(); resolve(undefined); }; open.onerror = () => reject(open.error); }))
+	await expect(new Promise((resolve, reject) => { const open = factory.open(name, version); open.onsuccess = () => { open.result.close(); resolve(undefined); }; open.onerror = () => reject(open.error); }))
 		.rejects.toMatchObject({ name: "VersionError" });
 });

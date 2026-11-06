@@ -247,6 +247,7 @@ export class DiscussionHost extends Component {
 				native: anchor => {
 					if (!authorized() || anchor.definition_id !== binding.snapshot.definition_id || anchor.view_id !== binding.viewId || anchor.generation !== binding.snapshot.generation || anchor.registry_revision > binding.snapshot.revision) return;
 					const target = anchor.target; if (target.type === "view" || target.type === "property") return target;
+					if (target.type === "formula" || target.type === "summary") return;
 					const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === target.record_id) paths.push(path); });
 					const recordFile = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
 					if (!recordFile || !recordFor(recordFile) || target.type === "cell" && target.property.source === "note" && recordFor(recordFile)?.type !== "markdown") return;
@@ -387,7 +388,8 @@ export class DiscussionHost extends Component {
 			const anchor = await session.captureBaseTarget(scopeId, selection);
 			if (!current()) return false;
 			return this.saveCommentSelection({ file, session, entryId: scopeId, anchor });
-		}, kind => current() && session.canAnchorBase(kind), current, listener => this.onChange(listener)).open();
+		}, kind => current() && session.canAnchorBase(kind), current, listener => this.onChange(listener),
+			() => session.readBaseDefinitions(scopeId)).open();
 	}
 	imageFileContext(file: TFile, writable = true): ImageFileCommentContext {
 		const target = this.targetFor(file), session = target.session, entryId = target.entryId;
@@ -467,6 +469,8 @@ export class DiscussionHost extends Component {
 		const target = anchor.target;
 		if (target.type === "view") return "Entire saved view";
 		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
+		if (target.type === "formula") return "Formula definition: " + target.property.name;
+		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });
@@ -481,6 +485,11 @@ export class DiscussionHost extends Component {
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;
+				if (anchor.target.type === "formula" || anchor.target.type === "summary") {
+					const status = await session.baseDefinitionStatus(entryId, anchor);
+					if (available()) new Notice(this.targetLabel(session, entryId, anchor) + ". " + status + " Definition placement in the native view is not available yet.", 10000);
+					return;
+				}
 				if (await this.baseComments?.reveal(session, entryId, anchor)) return;
 				new Notice("Discussion view: " + (this.baseSelection(session, scope.entryId)?.name ?? "saved view") + ". " +
 					this.targetLabel(session, entryId, anchor) + ". Inline navigation is unavailable here. The discussion and its target are retained.");
