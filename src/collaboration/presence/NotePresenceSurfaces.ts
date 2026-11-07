@@ -6,6 +6,8 @@ import { readingCommentBinding } from "../ReadingTextBinding";
 import { ReadingSource, ReadingSectionMap, mapReadingSection } from "../anchors/reading";
 import type { PresenceLocation } from "./PresencePeers";
 import { ReadingPresenceLayer, type ReadingPresenceScope } from "./ReadingPresenceLayer";
+import type { ImageOccurrence } from "../anchors/images";
+import { editorImageTargets, readingImageTargets, type RenderedImageTarget } from "../anchors/renderedImages";
 
 /** Scroll exact rendered text without replacing native selection. */
 export function revealReadingRange(root: HTMLElement, range: Range): boolean {
@@ -128,6 +130,22 @@ export class NotePresenceSurfaces extends Component {
 			this.editorContent = { doc: editor.state.doc, revision: this.revision, matches: editor.state.doc.toString() === this.active.text.toString() };
 		}
 		return this.editorContent.matches;
+	}
+	/** Reuse the actual source-bound editor/Reading renderer; URL order alone
+	 * cannot identify repeated embeds or images inside transcluded notes. */
+	imageTargets(occurrences: ImageOccurrence[]): RenderedImageTarget[] {
+		const active = this.active; if (!active || this.closed) return [];
+		let targets: RenderedImageTarget[];
+		if (active.mode === "preview") targets = this.snapshots().flatMap(({ section, source, from, to }) =>
+			readingImageTargets(section.containerEl, source.source, from, to, occurrences));
+		else {
+			const editor = this.editor();
+			if (!editor || !this.editorMatches(editor)) return [];
+			targets = editorImageTargets(editor.dom, occurrences, node => editor.posAtDOM(node));
+		}
+		// Overlapping renderer sections must not give an image two identities.
+		return targets.filter((target, i) => targets.findIndex(other => other.image === target.image) === i &&
+			!targets.some(other => other.image === target.image && (other.occurrence.from !== target.occurrence.from || other.occurrence.to !== target.occurrence.to)));
 	}
 	private snapshots(): { section: PresenceSection; from: number; to: number; source: ReadingSource }[] {
 		const active = this.active; if (!active || active.mode !== "preview") return [];

@@ -1,4 +1,5 @@
 /** @jest-environment jsdom */
+/* eslint-disable obsidianmd/no-static-styles-assignment -- Fixture geometry emulates native nested scrollers, not product styling. */
 import * as Y from "yjs";
 import type { MarkdownPostProcessorContext, MarkdownView, Plugin } from "obsidian";
 import { NotePresenceSurfaces, PresenceSection } from "../../src/collaboration/presence/NotePresenceSurfaces";
@@ -62,6 +63,7 @@ test("stale rendered source and changed binding cannot publish or reveal a guess
 	try {
 		f.text.insert(0, "prefix ");
 		expect(f.surfaces.capture()).toEqual({ viewport: null, selection: null }); expect(await f.surfaces.reveal(2, 3)).toBe(false);
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- This fixture must match the exact lowercase source.
 		f.updateSource(); f.roots[0].querySelector("p")!.firstChild!.textContent = "prefix repeat ";
 		expect(f.surfaces.capture().viewport).not.toBeNull();
 		f.unbind(); expect(f.surfaces.capture()).toEqual({ viewport: null, selection: null });
@@ -147,4 +149,20 @@ test("Jump scrolls both a nested horizontal container and its outer vertical pan
 		expect(inner.scrollBy).toHaveBeenCalledWith({ top: 0, left: 310, behavior: "auto" });
 		expect(f.root.scrollBy).toHaveBeenCalledWith({ top: 909, left: 0, behavior: "auto" });
 	} finally { Range.prototype.getClientRects = original; f.close(); }
+});
+
+test("Reading image targets distinguish repeated occurrences and reject stale or ambiguous sections", () => {
+	const f = fixture();
+	try {
+		const source = "![same](one.png)\n\n![same](one.png)";
+		f.text.delete(0, f.text.length); f.text.insert(0, source); f.updateSource();
+		f.roots[0].innerHTML = '<p><img src="one.png"></p>'; f.roots[1].innerHTML = '<p><img src="one.png"></p>';
+		const images = [{ from: 0, to: 16, destination: "one.png", syntax: "markdown" as const }, { from: 18, to: 34, destination: "one.png", syntax: "markdown" as const }];
+		const targets = f.surfaces.imageTargets(images);
+		expect(targets).toEqual([{ image: f.roots[0].querySelector("img"), occurrence: images[0] }, { image: f.roots[1].querySelector("img"), occurrence: images[1] }]);
+		f.roots[0].appendChild(document.createElement("img")).src = "one.png";
+		expect(f.surfaces.imageTargets(images)).toEqual([targets[1]]);
+		f.text.insert(0, "new\n"); expect(f.surfaces.imageTargets(images)).toEqual([]);
+		f.unbind(); f.updateSource(); expect(f.surfaces.imageTargets(images)).toEqual([]);
+	} finally { f.close(); }
 });

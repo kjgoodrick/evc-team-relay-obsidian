@@ -30,8 +30,9 @@ Exact location shapes are defined in
 The parser copies and freezes these descriptors. It rejects arbitrary fields,
 external URLs, computed results and not-yet-supported subtargets. Image movement
 uses a separate typed message rather than changing the room descriptor.
-Revisions must be positive safe integers. Embedded-image occurrence and
-fine-grained Bases/timeline state still need typed extensions and authorization.
+Revisions must be positive safe integers. Embedded-image occurrences now have
+a separate typed transport and source-anchor foundation below. Fine-grained
+Bases/timeline state still needs typed extensions and authorization.
 
 ## Direct image binding
 
@@ -110,7 +111,7 @@ text nodes and continue to enforce local surface/account ownership.
 
 ## Validation
 
-The full plugin suite passes **2,582 tests in 212 suites**; 17 opt-in tests in 16
+The full plugin suite passes **2,608 tests in 214 suites**; 17 opt-in tests in 16
 suites are skipped in that default run. Preview build/main types and changed
 source/test lint pass. The build retains 15 existing Svelte warnings. The frozen
 test-type gate passes with 206 known errors/45 signatures, below its 207/46
@@ -154,3 +155,39 @@ high-frequency movement from membership snapshots and measure its authorization,
 rendering and battery costs. Native desktop/mobile, touch, accessibility and
 resource acceptance remain required. The server preview still needs one
 designated application process; no live-vault installation or deployment occurred.
+
+
+## Embedded-image transport and exact source anchors
+
+`presence_embedded_images_preview` enables `publishEmbeddedImage` and
+`watchEmbeds` on the same version-two socket. A note embed and a direct-image/
+Bases watch are mutually exclusive on that connection. Hidden users can observe.
+The parser freezes bounded relative source positions, source SHA-256, exact
+managed asset generation/hash or external URL hash with unknown version evidence,
+intrinsic dimensions and normalized geometry. No URL, source text, path or
+untrusted display identity is sent. Authenticated user/session/instance tuples
+will join movement to the existing note-awareness identity, without another roster.
+
+This separate channel is necessary because a note reader may lack access to its
+image. The server checks both participants against both entries and omits all
+image metadata for a denied asset. Note access denial ends the observation;
+image denial leaves the readable note watch available. Source/asset changes fence
+pending authorization; geometry-only changes coalesce without starving it.
+The transport retains the latest movement, clears on privacy/context changes,
+and never replays a previous pointer after reconnect.
+
+`EmbeddedImageAnchors` parses the current Y.Text once per source revision and
+reuses up to 128 syntax-hash promises. It captures exact relative source intervals
+and resolves only a complete, forward image occurrence with the matching syntax
+hash. Tests with real Yjs documents verify repeated images and remote edits;
+deleted/replaced occurrences, stale asynchronous hashes and closed bindings fail
+without guessing another image. Asset and renderer verification remain separate
+requirements. `NotePresenceSurfaces.imageTargets` exposes the already verified
+CodeMirror/Reading mapping and rejects stale or ambiguous sections.
+
+The native `LocationHost` does **not yet opt into this stream**. Pointer capture,
+local image verification, overlay rendering, identity joining, and image-aware
+Jump/Follow inside a note remain the next integration work. No new native or
+mobile embedded-image behavior is claimed by the transport tests. The real HTTP/
+WebSocket fixture covers transport across editor/Reading descriptors, transitions
+back to directly opened images, explicit clearing and asset-denied observation.

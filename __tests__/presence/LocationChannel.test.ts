@@ -27,18 +27,18 @@ class Socket {
 	ready(expiresIn = 3600, protocolVersion = 1) { this.message({ type: "ready", protocol_version: protocolVersion, session_id: "b".repeat(32), instance_id: id(3), expires_at: Math.floor(Date.now() / 1000) + expiresIn }); }
 	disconnect(code = 1006) { this.readyState = 3; this.onclose?.call(this as unknown as WebSocket, { code } as CloseEvent); }
 }
-function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false) {
+function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false) {
 	const sockets: Socket[] = [], status = jest.fn(), location = jest.fn(), followStopped = jest.fn(), roster = jest.fn();
-	const imageStates = jest.fn();
+	const imageStates = jest.fn(), imageEmbeds = jest.fn();
 	let counter = 0;
 	const fetcher = jest.fn(async (url: string) => url.includes("/capabilities?") ? response({ protocol_version: 1, features: { presence_locations_preview: true,
-		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement } : {}) } }) :
+		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds } : {}) } }) :
 		response({ protocol_version: 1, ticket: "ticket_" + String(++counter).padStart(32, "0"), expires_in: 30, socket_path: "/v1/collaboration/events" }));
 	const options = { credential: jest.fn(credentials), fetcher, status, location, followStopped, roster, surfaceLocations, random: () => 0.5,
-		imageStates: movement ? imageStates : undefined,
+		imageStates: movement ? imageStates : undefined, imageEmbeds: embeds ? imageEmbeds : undefined,
 		socket: (url: string) => { const socket = new Socket(url); sockets.push(socket); return socket as unknown as WebSocket; } };
 	const channel = new LocationChannel(identity, options);
-	return { channel, options, sockets, fetcher, status, location, followStopped, roster, serverSupports, imageStates };
+	return { channel, options, sockets, fetcher, status, location, followStopped, roster, serverSupports, imageStates, imageEmbeds };
 }
 const flush = () => jest.advanceTimersByTimeAsync(0);
 async function ready(f: ReturnType<typeof fixture>, expiresIn = 3600) {
@@ -366,4 +366,59 @@ test("extended location schemas reject unsupported targets, stale format and imp
 			expect(() => f.channel.publish(location)).toThrow("Invalid location");
 		}
 	} finally { f.channel.stop(); }
+});
+
+const embedded = (x = 0.5) => ({ version: 1, occurrence: { anchor: { type: null, tname: "contents", item: { client: 7, clock: 10 }, assoc: 0 }, head: { type: null, tname: "contents", item: { client: 7, clock: 30 }, assoc: -1 } },
+    source_sha256: "c".repeat(64), asset: { kind: "external", url_sha256: "d".repeat(64), version_evidence: "unknown" },
+    basis: { width: 640, height: 480, orientation: "display" }, state: { pointer: { x, y: 0.5 }, viewport: null } } as const);
+
+test("embed publication coalesces, clears on hide and never replays after reconnect", async () => {
+    const f = fixture(true, true, false, true);
+    try {
+        const socket = await ready(f);
+        expect(f.channel.supportsEmbeddedImages).toBe(true);
+        for (let x = 0; x <= 1000; x++) f.channel.publishEmbeddedImage(embedded(x / 1000));
+        await jest.advanceTimersByTimeAsync(125);
+        const frames = socket.frames.filter(frame => frame.type === "image_embed");
+        expect(frames).toHaveLength(2);
+        expect(frames.at(-1)).toEqual({ type: "image_embed", location: note(), embed: embedded(1) });
+        f.channel.publishEmbeddedImage(null); expect(socket.frames.at(-1)).toMatchObject({ type: "image_embed", embed: null });
+        f.channel.publishEmbeddedImage(embedded()); f.channel.publish(null); await jest.advanceTimersByTimeAsync(125);
+        expect(socket.frames.at(-1)).toEqual({ type: "presence", location: null });
+        f.channel.publish(note()); f.channel.publishEmbeddedImage(embedded()); await jest.advanceTimersByTimeAsync(125);
+        socket.disconnect(); await jest.advanceTimersByTimeAsync(1000);
+        const next = f.sockets.at(-1)!; next.open(); next.ready(3600, 2);
+        expect(next.frames.some(frame => frame.type === "image_embed")).toBe(false);
+    } finally { f.channel.stop(); }
+    expect(jest.getTimerCount()).toBe(0);
+});
+
+test("embed observation is independent of publishing, changes scopes and ignores stale delivery", async () => {
+    const f = fixture(true, true, true, true);
+    try {
+        const socket = await ready(f); f.channel.publish(null); f.channel.watchEmbeds(note());
+        const watch = socket.frames.at(-1)!;
+        expect(watch).toMatchObject({ type: "watch_embeds", location: note() });
+        const frame = { type: "image_embeds", subscription_id: watch.subscription_id, status: "available", peers: [{ target, embed: embedded() }] };
+        const rosterCalls = f.roster.mock.calls.length; socket.message(frame);
+        expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: note(), status: "available", peers: frame.peers });
+        expect(f.roster.mock.calls).toHaveLength(rosterCalls);
+        f.channel.watch(picture()); expect(socket.frames.slice(-2)).toMatchObject([{ type: "unwatch", subscription_id: watch.subscription_id }, { type: "watch", image_states: true }]);
+        expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
+        const count = f.imageEmbeds.mock.calls.length; socket.message(frame); expect(f.imageEmbeds.mock.calls).toHaveLength(count);
+        f.channel.watchEmbeds(note(99)); const current = socket.frames.at(-1)!;
+        socket.message({ type: "image_embeds", subscription_id: current.subscription_id, status: "unavailable" });
+        expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: note(99), status: "unavailable", peers: [] });
+        socket.message({ ...frame, subscription_id: current.subscription_id });
+        expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: note(99), status: "unavailable", peers: [] });
+    } finally { f.channel.stop(); }
+});
+
+test.each([false, true])("embed capability is required, including on extended servers: %s", async server => {
+    const f = fixture(true, server);
+    try {
+        const socket = await ready(f); f.channel.watchEmbeds(note()); f.channel.publishEmbeddedImage(embedded()); await jest.advanceTimersByTimeAsync(125);
+        expect(f.channel.supportsEmbeddedImages).toBe(false);
+        expect(socket.frames.some(frame => frame.type === "watch_embeds" || frame.type === "image_embed")).toBe(false);
+    } finally { f.channel.stop(); }
 });

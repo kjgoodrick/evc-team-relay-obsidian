@@ -3,6 +3,7 @@ import { v4 as uuid } from "uuid";
 import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
 import { parseRetryAfterMs, RelayHttpError } from "../../relayRequestErrors";
 import { isRecord } from "../DiscussionProtocol";
+import { parseEmbeddedImage, parseEmbeddedPeers, type EmbeddedImage, type EmbeddedImagesEvent } from "./EmbeddedImageProtocol";
 import { parseImageState, parseImagePeers, type ImagePresenceState, type ImageStatesEvent } from "./LocationProtocol";
 import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type ImageLocation, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 
@@ -18,6 +19,7 @@ type Options = {
 	surfaceLocations?: boolean;
 	roster?: (event: SurfaceRosterEvent) => void;
 	imageStates?: (event: ImageStatesEvent) => void;
+	imageEmbeds?: (event: EmbeddedImagesEvent) => void;
 	fetcher?: (url: string, init: PlatformRequestInit) => Promise<Response>;
 	socket?: (url: string) => WebSocket;
 	random?: () => number;
@@ -40,12 +42,14 @@ export class LocationChannel {
 	private rosterSupported = false;
 	private imageContextSupported = false;
 	private imageStatesSupported = false;
+	private embedsSupported = false;
+	private desiredEmbed: EmbeddedImage | null = null;
 	private desiredImageState: ImagePresenceState | null = null;
 	private sentImageState?: string;
 	private imageTimer?: number;
 	private lastImageSent = 0;
-	private desiredWatch: NonNoteLocation | null = null;
-	private watching?: { id: string; scope: NonNoteLocation };
+	private desiredWatch: SurfaceLocation | null = null;
+	private watching?: { id: string; scope: SurfaceLocation };
 	private sentWatch?: string;
 	private sent?: string;
 	private ws?: WebSocket;
@@ -75,13 +79,23 @@ export class LocationChannel {
 	get supportsSurfaceRoster(): boolean { return this.supportsSurfaceLocations && this.rosterSupported; }
 	get supportsImageContext(): boolean { return this.supportsSurfaceLocations && this.imageContextSupported; }
 	get supportsImageStates(): boolean { return this.supportsSurfaceRoster && this.imageStatesSupported; }
+	get supportsEmbeddedImages(): boolean { return this.supportsSurfaceLocations && this.embedsSupported; }
+	publishEmbeddedImage(embed: EmbeddedImage | null): void {
+		const next = embed === null ? null : parseEmbeddedImage(embed);
+		if (JSON.stringify(next) === JSON.stringify(this.desiredEmbed)) return;
+		this.desiredEmbed = next;
+		if (this.supportsEmbeddedImages && this.desired?.kind === "note") this.queueImageMovement(next === null);
+	}
 	/** Latest state only; never persisted or replayed after reconnect. */
 	publishImageState(state: ImagePresenceState | null): void {
 		const next = state === null ? null : parseImageState(state);
 		if (JSON.stringify(next) === JSON.stringify(this.desiredImageState)) return;
 		this.desiredImageState = next;
 		if (!this.supportsImageStates || this.desired?.kind !== "image") return;
-		if (next === null) { if (this.imageTimer !== undefined) window.clearTimeout(this.imageTimer); this.imageTimer = undefined; this.flushImageState(); }
+		this.queueImageMovement(next === null);
+	}
+	private queueImageMovement(clear: boolean): void {
+		if (clear) { if (this.imageTimer !== undefined) window.clearTimeout(this.imageTimer); this.imageTimer = undefined; this.flushImageState(); }
 		else if (this.imageTimer === undefined) {
 			const delay = Math.max(0, 125 - (Date.now() - this.lastImageSent));
 			if (!delay) this.flushImageState();
@@ -107,7 +121,7 @@ export class LocationChannel {
 	publish(location: SurfaceLocation | null): void {
 		const next = location === null ? null : this.options.surfaceLocations ? parseSurfaceLocation(location) : parseNoteLocation(location);
 		if (JSON.stringify(this.desired) === JSON.stringify(next)) return;
-		this.desiredImageState = null; this.sentImageState = undefined; this.lastImageSent = 0;
+		this.desiredImageState = null; this.desiredEmbed = null; this.sentImageState = undefined; this.lastImageSent = 0;
 		if (this.imageTimer !== undefined) window.clearTimeout(this.imageTimer); this.imageTimer = undefined;
 		this.desired = next;
 		if (this.publishTimer !== undefined) window.clearTimeout(this.publishTimer);
@@ -129,8 +143,15 @@ export class LocationChannel {
 	watch(location: NonNoteLocation | null): void {
 		const next = location === null ? null : parseSurfaceLocation(location);
 		if (next && (!this.options.surfaceLocations || next.kind === "note")) throw new Error("Unsupported presence scope");
+		this.setWatch(next);
+	}
+	watchEmbeds(location: import("./LocationProtocol").NoteLocation | null): void {
+		if (!this.options.surfaceLocations) throw new Error("Unsupported presence scope");
+		this.setWatch(location === null ? null : parseNoteLocation(location));
+	}
+	private setWatch(next: SurfaceLocation | null): void {
 		if (JSON.stringify(next) === JSON.stringify(this.desiredWatch)) return;
-		this.desiredWatch = next as NonNoteLocation | null;
+		this.desiredWatch = next;
 		const previous = this.watching; this.watching = undefined;
 		this.emitRoster(null, "unavailable");
 		if (previous && this.ready) this.send({ type: "unwatch", subscription_id: previous.id });
@@ -163,7 +184,7 @@ export class LocationChannel {
 	private current(version: number): boolean { return this.active && version === this.version; }
 	private drop(): void {
 		for (const timer of [this.retryTimer, this.heartbeat, this.refreshTimer, this.deadline, this.publishTimer, this.imageTimer]) if (timer !== undefined) window.clearTimeout(timer);
-		this.imageTimer = undefined; this.desiredImageState = null; this.sentImageState = undefined; this.imageStatesSupported = false; this.lastImageSent = 0;
+		this.imageTimer = undefined; this.desiredImageState = null; this.desiredEmbed = null; this.sentImageState = undefined; this.imageStatesSupported = false; this.embedsSupported = false; this.lastImageSent = 0;
 		this.retryTimer = this.heartbeat = this.refreshTimer = this.deadline = this.publishTimer = undefined;
 		for (const cancel of this.requests) cancel(); this.requests.clear();
 		// Native HTTP may finish independently; generation checks fence every late
@@ -234,12 +255,13 @@ export class LocationChannel {
 			if (enabled === false || enabled === undefined) throw new ChannelFailure("unsupported");
 			if (enabled !== true) throw new ChannelFailure("unavailable");
 			if (this.options.surfaceLocations) {
-				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview, states = capability.features.presence_image_states_preview;
-				if ([extended, roster, image, states].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true) && extended !== true || states === true && roster !== true) throw new ChannelFailure("unavailable");
+				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview, states = capability.features.presence_image_states_preview, embeds = capability.features.presence_embedded_images_preview;
+				if ([extended, roster, image, states, embeds].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true || embeds === true) && extended !== true || states === true && roster !== true) throw new ChannelFailure("unavailable");
 				this.protocolVersion = extended === true ? 2 : 1;
 				this.rosterSupported = roster === true;
 				this.imageContextSupported = image === true;
 				this.imageStatesSupported = states === true;
+				this.embedsSupported = embeds === true;
 			}
 			const ticket = await this.ticket(version);
 			if (!this.current(version)) return;
@@ -266,32 +288,37 @@ export class LocationChannel {
 		this.flushImageState();
 	}
 	private flushImageState(): void {
-		if (!this.supportsImageStates || this.desired?.kind !== "image" || this.sent !== JSON.stringify(this.desired)) return;
-		const encoded = JSON.stringify(this.desiredImageState);
+		if (this.sent !== JSON.stringify(this.desired) || !(this.supportsImageStates && this.desired?.kind === "image" || this.supportsEmbeddedImages && this.desired?.kind === "note")) return;
+		const embedded = this.desired?.kind === "note", state = embedded ? this.desiredEmbed : this.desiredImageState;
+		const encoded = JSON.stringify(state);
 		// A new publication starts with no state on the server.
-		if (this.sentImageState === undefined && this.desiredImageState === null) { this.sentImageState = encoded; return; }
-		if (encoded !== this.sentImageState && this.send({ type: "image_state", location: this.desired, state: this.desiredImageState })) { this.sentImageState = encoded; this.lastImageSent = Date.now(); }
+		if (this.sentImageState === undefined && state === null) { this.sentImageState = encoded; return; }
+		if (encoded !== this.sentImageState && this.send(embedded ? { type: "image_embed", location: this.desired, embed: state } : { type: "image_state", location: this.desired, state })) { this.sentImageState = encoded; this.lastImageSent = Date.now(); }
 	}
 	private emitRoster(scope: NonNoteLocation | null, status: SurfaceRosterEvent["status"], peers: SurfaceRosterEvent["peers"] = []): void {
-		if (status === "unavailable") this.emitImageStates(null, "unavailable");
+		if (status === "unavailable") { this.emitImageStates(null, "unavailable"); this.emitEmbeddedImages(null, "unavailable"); }
 		try { this.options.roster?.({ scope, status, peers }); } catch { /* Isolate UI. */ }
 	}
 	private emitImageStates(scope: ImageLocation | null, status: ImageStatesEvent["status"], peers: ImageStatesEvent["peers"] = []): void {
 		try { this.options.imageStates?.({ scope, status, peers }); } catch { /* Isolate UI. */ }
 	}
+	private emitEmbeddedImages(scope: EmbeddedImagesEvent["scope"], status: EmbeddedImagesEvent["status"], peers: EmbeddedImagesEvent["peers"] = []): void {
+		try { this.options.imageEmbeds?.({ scope, status, peers }); } catch { /* Isolate UI. */ }
+	}
 	private flushWatch(): void {
-		if (!this.supportsSurfaceRoster || !this.desiredWatch || this.sentWatch === JSON.stringify(this.desiredWatch)) return;
+		if (!this.desiredWatch || this.sentWatch === JSON.stringify(this.desiredWatch)) return;
+		if (this.desiredWatch.kind === "note" ? !this.supportsEmbeddedImages || !this.options.imageEmbeds : !this.supportsSurfaceRoster) return;
 		const scope = this.desiredWatch, id = uuid(); this.watching = { id, scope };
-		if (this.send({ type: "watch", subscription_id: id, location: scope, ...(scope.kind === "image" && this.supportsImageStates && this.options.imageStates ? { image_states: true } : {}) })) this.sentWatch = JSON.stringify(scope);
+		if (this.send({ type: scope.kind === "note" ? "watch_embeds" : "watch", subscription_id: id, location: scope, ...(scope.kind === "image" && this.supportsImageStates && this.options.imageStates ? { image_states: true } : {}) })) this.sentWatch = JSON.stringify(scope);
 	}
 	private receive(raw: unknown): void {
 		try {
-			const limit = this.rosterSupported ? 192 * 1024 : 4096;
+			const limit = this.rosterSupported || this.embedsSupported ? 192 * 1024 : 4096;
 			if (typeof raw !== "string" || raw.length > limit) throw new Error();
 			const bytes = new TextEncoder().encode(raw).length;
 			if (bytes > limit) throw new Error();
 			const value: unknown = JSON.parse(raw);
-			if (!isRecord(value) || value.type !== "roster" && value.type !== "image_states" && bytes > 4096) throw new Error();
+			if (!isRecord(value) || !["roster", "image_states", "image_embeds"].includes(String(value.type)) && bytes > 4096) throw new Error();
 			if (value.type === "ready") {
 				if (this.status !== "connecting" || !exactFields(value, ["type", "protocol_version", "session_id", "instance_id", "expires_at"]) ||
 					value.protocol_version !== this.protocolVersion || value.instance_id !== this.identity.instanceId || !publicSessionId(value.session_id) || !expiry(value.expires_at)) throw new Error();
@@ -316,6 +343,16 @@ export class LocationChannel {
 						if (!available) this.subscription = undefined;
 						try { this.options.location?.({ subscriptionId: value.subscription_id, location }); } catch { /* Isolate UI. */ }
 					}
+				} else if (value.type === "image_embeds") {
+					const available = value.status === "available";
+					if (!this.supportsEmbeddedImages || !this.options.imageEmbeds || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
+						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
+					const peers = available ? parseEmbeddedPeers(value.peers) : [];
+					if (this.watching?.id === value.subscription_id) {
+						const scope = this.watching.scope; if (scope.kind !== "note") throw new Error();
+						if (!available) this.watching = undefined;
+						this.emitEmbeddedImages(scope, available ? "available" : "unavailable", peers);
+					}
 				} else if (value.type === "image_states") {
 					const available = value.status === "available";
 					if (!this.supportsImageStates || !this.options.imageStates || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
@@ -333,6 +370,7 @@ export class LocationChannel {
 					const peers = available ? parseSurfacePeers(value.peers) : [];
 					if (this.watching?.id === value.subscription_id) {
 						const scope = this.watching.scope;
+						if (scope.kind === "note") throw new Error();
 						if (!available) this.watching = undefined;
 						this.emitRoster(scope, available ? "available" : "unavailable", peers);
 					}
