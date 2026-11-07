@@ -141,6 +141,9 @@ export class PermissionPolicyModal extends Modal {
 		const el = this.contentEl, base = this.base!, proposed = this.proposed!, draft = this.draft;
 		el.createEl("p", { text: "File access and commenting are independent. Members start hidden; the most specific path wins, with exact rules winning ties. Editors can comment unless a comment rule denies it. Comment allowance never grants file reading. Owners and administrators keep full access." });
 		el.createEl("p", { text: "Changes stay in this editor until saved. A folder preset preserves narrower exceptions unless you explicitly replace them below." });
+		el.createEl("h3", { text: "Rule draft" });
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- Edit rule is the exact button label.
+		el.createEl("p", { text: "New drafts start with read and comment. These fields do not show saved access. Choose Edit rule below to load an existing rule, then check its effect in the preview." });
 		const eligible = base.members.filter(m => m.active && !m.administrator && m.user_id !== base.owner_id);
 		if (!draft.user_id) draft.user_id = eligible[0]?.user_id ?? "";
 		const form = el.createDiv({ cls: "evc-permission-fields" });

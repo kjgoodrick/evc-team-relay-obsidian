@@ -93,13 +93,45 @@ falls back to two separate writes.
   `moderate=false` for `Note.md` and HTTP 403 for `Budget.md`. No rejected action
   was sent before approval. Test windows were closed and the original vault
   window restored afterward.
-- Reopening correctly lists saved rules, but its new-rule fields start with a
-  reviewer draft. Edit rule loads the actual saved overrides. Clarify this initial
-  field behavior before release so it cannot be mistaken for saved access.
+- Reopening correctly lists saved rules, while its new-rule fields start with a
+  reviewer draft. The form now labels this section **Rule draft** and explicitly
+  explains that the fields do not show saved access. **Edit rule** loads existing
+  overrides. This clarification has native desktop evidence below.
 
-Native interrupted-response recovery acceptance, non-owner administrator entry,
+Non-owner administrator entry,
 the alternate share-management entry point, mobile/popout/screen-reader/touch
 coverage and resource measurements remain. No live-vault plugin installation or
 production deployment/restart is part of this checkpoint. The broader comments,
 reattachment, target coverage, recovery/backup and release work remains in the
 [project status](../../../docs/Plans/obsidian-presence-comments-status.md).
+
+## Native interrupted-response recovery
+
+On November 7, the user-authorized synthetic permission workflow passed in
+Obsidian 1.13.7 using `/private/tmp/evc-permission-response-native-20261107` and
+a new disposable Python/Rust stack. A loopback-only proxy forwarded each reviewed
+permission PUT, received the successful server response, then deliberately
+truncated that response. No production endpoint or live-vault permission was used.
+
+The native editor changed Bob's whole-share comment allowance to deny, then
+restored it to allow in a separate reviewed save. Each lost response removed
+the Save action and required **Read current permissions**. A transient failed
+GET recovered through the existing bounded read retry. A later persistent fault
+failed all three GET attempts: the form kept recovery available, retained its
+proposal and offered no write action. After clearing the fault, another explicit
+read confirmed that the proposed rules were already present.
+
+Proxy evidence records exactly **two deliberate PUTs**, both accepted upstream,
+and no automatic mutation retry or extra save during reconciliation. Independent
+upstream checks confirm final `read=true`, `comment=true`, `edit=false`,
+`moderate=false` on `Note.md` and HTTP 403 for `Budget.md`; the hidden exception
+remained in both policy versions. The Rule draft explanation and editing the
+saved root rule were also verified natively.
+
+The eight existing permission-modal regression cases, preview build/main types
+and changed-file lint pass. The last full plugin run, before this copy-only
+clarification, passed 3,204 tests / 249 suites. Evidence is
+`/private/tmp/permission-response-native-evidence.json`; test logs use
+`/private/tmp/permission-response-*.log`. The temporary proxy and services are
+stopped and the original Knowledge Base window restored. Native mobile,
+accessibility, other management entry points and account-loss acceptance remain.
