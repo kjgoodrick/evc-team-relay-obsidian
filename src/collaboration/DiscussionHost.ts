@@ -30,9 +30,10 @@ import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
 import { InboxView, INBOX_VIEW } from "./ui/InboxView";
 import { inboxScope, parseInboxItem, type InboxItem } from "./InboxProtocol";
 import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection, type ImageCommentContext } from "./CommentEditor";
+import { noteTargetStatuses, imageFileTargetStatus, baseTargetStatus, uncheckedTarget, type CommentTargetStatus } from "./CommentTargetStatus";
 import { BlockSelectionError } from "./anchors/blocks";
 import { ReadingComments } from "./CommentReading";
-import { readingCommentBinding } from "./ReadingTextBinding";
+import { readingCommentBinding, onReadingBindingChange } from "./ReadingTextBinding";
 import { ImageComments } from "./ImageComments";
 import type { ImageOccurrence } from "./anchors/images";
 import type { RenderedImageTarget } from "./anchors/renderedImages";
@@ -915,6 +916,62 @@ export class DiscussionHost extends Component {
 		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });
 		const record = paths.length === 1 ? paths[0] : "Unavailable record (" + target.record_id.slice(0, 8) + ")";
 		return target.type === "item" ? "Record: " + record : "Cell: " + record + " · " + target.property.source + "." + target.property.name;
+	}
+	private targetNoteContext(session: DiscussionSession, entryId: string): ImageCommentContext | undefined {
+		for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
+			if (!(leaf.view instanceof MarkdownView)) continue;
+			const target = this.targetFor(leaf.view.file ?? undefined); if (target.session !== session || target.entryId !== entryId) continue;
+			try { const context = this.imageContext(leaf.view, false); if (context.session === session && context.entryId === entryId && context.current()) return context; } catch { /* An unbound or composing pane is not evidence of a deleted target. */ }
+		}
+	}
+	watchTargetStatus(session: DiscussionSession, entryId: string, listener: () => void): () => void {
+		let text: ImageCommentContext["text"] | undefined, stopped = false;
+		const rebind = () => {
+			if (stopped) return;
+			const next = this.targetNoteContext(session, entryId)?.text;
+			if (next === text) return;
+			text?.unobserve(listener); text = next; text?.observe(listener); listener();
+		};
+		const host = this.onChange(rebind), reading = onReadingBindingChange(rebind); rebind();
+		return () => { stopped = true; host(); reading(); text?.unobserve(listener); text = undefined; };
+	}
+	async targetStatuses(session: DiscussionSession, entryId: string, threads: AnchoredThread[], current: () => boolean): Promise<Map<string, CommentTargetStatus>> {
+		const result = new Map<string, CommentTargetStatus>();
+		const generation = session.knownDocumentGeneration(entryId);
+		const available = () => current() && !this.stopped && session.status !== "closed" && !["authentication_required", "unavailable"].includes(session.status) &&
+			session.permission(entryId)?.read === true && session.knownDocumentGeneration(entryId) === generation;
+		if (!available() || threads.length > 100) return result;
+		const anchors = threads.map(thread => thread.anchor), base = anchors.filter((anchor): anchor is BaseAnchor => anchor?.type === "base");
+		const [definitions, axis, markers] = await Promise.all([
+			base.some(anchor => anchor.target.type !== "timeline_marker" && anchor.target.type !== "timeline_range") ? session.readBaseDefinitions(entryId).catch(() => undefined) : undefined,
+			base.some(anchor => anchor.target.type === "timeline_range") ? session.readTimelineAxis(entryId).catch(() => undefined) : undefined,
+			base.some(anchor => anchor.target.type === "timeline_marker") ? session.readTimelineMarkers(entryId).catch(() => undefined) : undefined,
+		]);
+		if (!available()) return result;
+		const context = this.targetNoteContext(session, entryId);
+		const notes = noteTargetStatuses(anchors.map(anchor => anchor ?? { version: 1, type: "note" }), context ? {
+			text: context.text, entryId, generation: context.generation, asset: destination => {
+				const asset = this.images?.describeTargetAsset(context.file, destination); if (!asset) throw new Error("Image evidence unavailable"); return asset;
+			},
+		} : undefined);
+		const file = this.lastFile ?? this.plugin.app.workspace.getActiveFile() ?? undefined;
+		const fileMatches = !!file && this.plugin.app.vault.getFileByPath(file.path) === file && this.targetFor(file).session === session && this.targetFor(file).entryId === entryId;
+		for (let index = 0; index < threads.length; index++) {
+			const anchor = anchors[index]; let status = notes[index];
+			if (!anchor) status = uncheckedTarget("The saved target has not been loaded.");
+			else if (anchor.type === "note" && fileMatches) status = { state: "attached", message: "Attached to this note." };
+			else if (anchor.type === "base") {
+				const catalog = anchor.target.type === "timeline_marker" ? markers : anchor.target.type === "timeline_range" ? axis : definitions;
+				status = catalog && catalog.registry_revision < session.baseRegistryRevision(entryId) ? { state: "waiting", message: "Waiting for a newer saved-view revision before checking this target." } :
+					baseTargetStatus(anchor, { generation, definitions, axis, markers, online: session.verifiedTargetCatalog(catalog) });
+			} else if (anchor.type === "image_file") {
+				let asset;
+				try { if (file && fileMatches) asset = this.images?.describeTargetAsset(file); } catch { /* Missing image bytes/access are not evidence of deletion. */ }
+				status = imageFileTargetStatus(anchor, generation, asset);
+			}
+			result.set(threads[index].id, status);
+		}
+		return available() ? result : new Map();
 	}
 	async revealTarget(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor, current: () => boolean = () => true): Promise<void> {
 		const available = () => current() && !this.stopped && session.status !== "closed" && session.permission(entryId)?.read === true;

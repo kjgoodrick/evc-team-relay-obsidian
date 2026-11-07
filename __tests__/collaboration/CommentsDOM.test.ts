@@ -184,7 +184,7 @@ test("the sidebar retains local recovery when access is revoked and clears it sy
 	await store.enqueue({ operationId: id(20), scopeId: entry, type: "reply.create", dependsOn: [], payload: {
 		type: "reply.create", thread_id: id(4), message_id: id(5), body: bodyFromText("Retained local text") } });
 	let notify!: () => void, currentSession: DiscussionSession | undefined = typed;
-	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
 		current: () => ({ path: "Note.md", entryId: entry, session: currentSession }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
@@ -203,7 +203,7 @@ test("incoming sidebar refresh preserves the focused draft and closes the old no
 	session.messages.mockResolvedValue({ messages: [{ id: id(5), author_id: id(1), revision: 1, deleted: false, body: bodyFromText("Existing"),
 		created_sequence: 1, created_at: thread.created_at, edited_at: null, reactions: [] }], hasMore: false });
 	let notify!: () => void, currentEntry = entry, currentSession: DiscussionSession | undefined = typed;
-	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
 		current: () => ({ path: "Note.md", entryId: currentEntry, session: currentSession }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
@@ -230,7 +230,7 @@ test("direct message focus shows an older reply, preserves previous-page navigat
 	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
 	session.messages.mockImplementation(async (_scope, _thread, after) => ({ messages: after === 800 ? [message] : [], hasMore: false }));
 	const discussionUrl = jest.fn().mockResolvedValue("obsidian://evc-team-relay-comment?test=portable");
-	const host = { focusedThread: () => ({ threadId: id(4), serial: 1, messageId: id(5), messageSequence: 801 }), discussionUrl,
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: () => ({ threadId: id(4), serial: 1, messageId: id(5), messageSequence: 801 }), discussionUrl,
 		onChange: () => () => {}, current: () => ({ path: "Linked discussion", entryId: entry, session: typed, message: "The file is not present locally." }) } as unknown as DiscussionHost;
 	const scroll = jest.fn(); Object.assign(HTMLElement.prototype, { scrollIntoView: scroll });
 	const copy = jest.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined), view = new CommentsView({} as WorkspaceLeaf, host);
@@ -255,7 +255,7 @@ test("closing the sidebar while a copied link resolves prevents a stale clipboar
 	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
 	session.messages.mockResolvedValue({ messages: [], hasMore: false });
 	let release!: (value: string) => void;
-	const host = { focusedThread: jest.fn(), discussionUrl: () => new Promise<string>(resolve => { release = resolve; }),
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), discussionUrl: () => new Promise<string>(resolve => { release = resolve; }),
 		onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
 	const copy = jest.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined), view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
@@ -275,7 +275,7 @@ test("permission loss immediately clears linked content and rejects a delayed me
 	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
 	session.messages.mockResolvedValue(result);
 	let notify!: () => void;
-	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
 		current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
@@ -306,7 +306,7 @@ test("Send and reopen after recovery uses a fresh identity and the reviewed draf
 		await store.prepareOnlineDraft(draft.id, draft.revision, operation); await store.completeOnlineDraft(draft.id, draft.revision, operation.operationId);
 	});
 	Object.assign(typed, { canRecoverOnlineDraft: true, onlineDraft: send, recoverOnlineDraft: async () => ({ status: "editable", draft: await store.withdrawOnlineDraft(draftId, 0, original) }) });
-	const host = { focusedThread: jest.fn(), onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	const find = (text: string) => [...view.contentEl.querySelectorAll("button")].find(button => button.textContent === text)!;
 	try {
@@ -331,7 +331,8 @@ test("definition status refreshes after registry changes without replacing the a
 	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
 	session.messages.mockResolvedValue({ messages: [], hasMore: false });
 	let notify!: () => void;
-	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
+	const targetStatuses = jest.fn().mockResolvedValue(new Map([[id(4), { state: "attached", message: "Matches the latest verified definition." }]]));
+	const host = { targetStatuses, watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
 		current: () => ({ path: "Review.base", kind: "base", baseViewName: "Review", entryId: scope, session: typed }),
 		targetLabel: () => "Formula definition: Total" } as unknown as DiscussionHost;
 	const draftId = "selection:" + scope + ":active";
@@ -341,10 +342,10 @@ test("definition status refreshes after registry changes without replacing the a
 	try {
 		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("latest verified definition") && !!view.contentEl.querySelector("textarea:not([disabled])"));
 		const draft = view.contentEl.querySelector("textarea")!; draft.value = "Keep this"; draft.dispatchEvent(new Event("input"));
-		session.baseRegistryRevision = () => 2; session.baseDefinitionStatus.mockResolvedValue("The definition has changed. Original discussion retained.");
+		session.baseRegistryRevision = () => 2; targetStatuses.mockResolvedValue(new Map([[id(4), { state: "changed", message: "The definition has changed. Original discussion retained." }]]));
 		notify(); await until(() => view.contentEl.textContent!.includes("definition has changed"));
 		expect(view.contentEl.querySelector("textarea")).toBe(draft); expect(draft.value).toBe("Keep this");
-		expect(session.baseDefinitionStatus).toHaveBeenCalledTimes(2);
+		expect(targetStatuses).toHaveBeenCalledTimes(2);
 	} finally { await view.onClose(); store.close(); }
 });
 
@@ -466,4 +467,49 @@ test.each([false, true])("pending group drafts survive composer recreation and e
 		await until(() => !parent.querySelector("textarea"));
 		expect((await store.pending(scope))[0].payload).toMatchObject({ anchor: target });
 	} finally { drafts.dispose(); await new Promise(resolve => setTimeout(resolve, 10)); store.close(); }
+});
+
+
+test("target filters separate unanchored from unchecked discussions without discarding reply drafts", async () => {
+	const { store, session, typed } = await fixture();
+	const threads = [4, 6, 8].map((n, index) => ({ id: id(n), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: index + 1, activity_sequence: index + 1, created_at: "2026-11-05T00:00:00Z" }));
+	session.local.mockResolvedValue({ threads, pending: [], hasMore: true, nextAfter: 3 }); session.messages.mockResolvedValue({ messages: [], hasMore: false });
+	const statuses = new Map([[id(4), { state: "unanchored", message: "Deleted selection" }], [id(6), { state: "unknown", message: "Filtered record remains unchecked" }], [id(8), { state: "changed", message: "New generation" }]]);
+	const stop = jest.fn(), host = { targetStatuses: jest.fn().mockResolvedValue(statuses), watchTargetStatus: () => stop, focusedThread: () => undefined,
+		onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("3 of 3 discussions"));
+		const filter = view.contentEl.querySelector<HTMLSelectElement>('select[aria-label="Filter comment targets"]')!;
+		const cards = Array.from(view.contentEl.querySelectorAll<HTMLElement>(".relay-comment-thread")); expect(cards).toHaveLength(3);
+		Array.from(cards[1].querySelectorAll("button")).find(button => button.textContent === "Show replies")!.click();
+		await until(() => !!cards[1].querySelector("textarea:not([disabled])"));
+		const draft = cards[1].querySelector("textarea")!; draft.value = "Keep hidden draft"; draft.dispatchEvent(new Event("input"));
+		filter.value = "unanchored"; filter.dispatchEvent(new Event("change")); await until(() => view.contentEl.textContent!.includes("1 of 3 discussions"));
+		expect(cards.map(card => card.hidden)).toEqual([false, true, true]); expect(cards[1].querySelector("textarea")).toBe(draft);
+		const label = cards[0].querySelector<HTMLElement>(".relay-comment-thread-target-status")!;
+		expect(label.textContent).toBe("Deleted selection"); expect(label.hidden).toBe(false);
+		filter.value = "review"; filter.dispatchEvent(new Event("change")); await until(() => view.contentEl.textContent!.includes("2 of 3 discussions"));
+		expect(cards.map(card => card.hidden)).toEqual([false, true, false]);
+		filter.value = "unchecked"; filter.dispatchEvent(new Event("change")); await until(() => cards[1].hidden === false);
+		expect(cards.map(card => card.hidden)).toEqual([true, false, true]); expect(draft.value).toBe("Keep hidden draft");
+		expect(view.contentEl.textContent).toContain("Next discussions");
+	} finally { await view.onClose(); expect(stop).toHaveBeenCalled(); store.close(); }
+});
+
+test("slow target verification does not delay cached comments and cannot restore labels after revocation", async () => {
+	const { store, session, typed } = await fixture(); let finish!: (value: Map<string, { state: "changed"; message: string }>) => void, notify!: () => void;
+	const thread = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false, created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z" };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockResolvedValue({ messages: [{ id: id(5), author_id: id(1), revision: 1, deleted: false, body: bodyFromText("Cached comment before target check"), created_sequence: 1, created_at: thread.created_at, edited_at: null, reactions: [] }], hasMore: false });
+	const host = { targetStatuses: () => new Promise(resolve => { finish = resolve; }), watchTargetStatus: () => () => {}, focusedThread: () => undefined,
+		onChange: (fn: () => void) => { notify = fn; return () => {}; }, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Cached comment before target check")); expect(finish).toBeDefined();
+		expect(view.contentEl.textContent).toContain("background"); session.permission = () => ({ read: false, comment: false, edit: false, moderate: false }); notify();
+		finish(new Map([[id(4), { state: "changed", message: "Private target label" }]])); await new Promise(resolve => setTimeout(resolve, 100));
+		expect(view.contentEl.textContent).not.toContain("Private target label"); expect(view.contentEl.textContent).not.toContain("Cached comment before target check");
+	} finally { await view.onClose(); store.close(); }
 });

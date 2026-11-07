@@ -85,6 +85,7 @@ export class DiscussionSession {
 	private baseKinds: BaseTargetKind[] = [];
 	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
+	private verifiedTargetCatalogs = new WeakMap<object, { epoch: number; at: number }>();
 	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
 	private timelineAxisFlights = new Map<string, Promise<TimelineAxisContext>>();
 	private timelineMarkerFlights = new Map<string, Promise<TimelineMarkerCatalog>>();
@@ -753,6 +754,11 @@ export class DiscussionSession {
 			return parsed as BaseAnchor;
 		})());
 	}
+	/** A successful HTTP catalogue is distinct from a safe offline fallback. */
+	verifiedTargetCatalog(value: object | undefined): boolean {
+		const proof = value && this.verifiedTargetCatalogs.get(value);
+		return !!proof && this.online && proof.epoch === this.authenticationEpoch && Date.now() >= proof.at && Date.now() - proof.at < 10_000;
+	}
 	/** Complete, account-scoped catalogue. Pagination commits as one proof; stale
 	 * successes/denials and resets cannot overwrite another window's newer proof. */
 	readBaseDefinitions(scopeId: string): Promise<BaseDefinitionCatalog> {
@@ -779,6 +785,7 @@ export class DiscussionSession {
 				if (previous?.generation === catalog.generation && previous.registry_revision > catalog.registry_revision) throw new Error("Saved definition verification is stale.");
 				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved definition verification changed. Try again.");
 				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
+				this.verifiedTargetCatalogs.set(catalog, { epoch: this.authenticationEpoch, at: Date.now() });
 				return catalog;
 			} catch (error) {
 				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
@@ -817,6 +824,7 @@ export class DiscussionSession {
 				if (previous?.generation === catalog.generation && previous.registry_revision > catalog.registry_revision) throw new Error("Saved axis verification is stale.");
 				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved axis verification changed. Try again.");
 				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
+				this.verifiedTargetCatalogs.set(catalog, { epoch: this.authenticationEpoch, at: Date.now() });
 				return catalog;
 			} catch (error) {
 				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
@@ -890,6 +898,7 @@ export class DiscussionSession {
 					previous.catalog_revision > catalog.catalog_revision)) throw new Error("Saved marker verification is stale.");
 				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved marker verification changed. Try again.");
 				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
+				this.verifiedTargetCatalogs.set(catalog, { epoch: this.authenticationEpoch, at: Date.now() });
 				return catalog;
 			} catch (error) {
 				if (proof && !this.closed && (!(error instanceof DiscussionFailure) || error.action !== "retry")) await this.store.finishPreferenceVerification(scopeId, key, proof, null);

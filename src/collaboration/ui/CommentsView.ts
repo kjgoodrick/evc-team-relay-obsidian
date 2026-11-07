@@ -1,3 +1,4 @@
+import { targetNeedsReview, uncheckedTarget, type CommentTargetStatus } from "../CommentTargetStatus";
 import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { DiscussionHost } from "../DiscussionHost";
@@ -64,6 +65,7 @@ class EditCommentModal extends AccountModal {
 }
 
 class ThreadCard {
+	private targetStatus = uncheckedTarget();
 	private subscription: ThreadSubscription;
 	readonly el: HTMLElement;
 	private content: HTMLElement;
@@ -91,9 +93,9 @@ class ThreadCard {
 		this.error = this.el.createDiv({ attr: { role: "status" } });
 		this.composerContainer = this.el.createDiv();
 	}
-	async update(thread: AnchoredThread): Promise<void> {
-		this.thread = thread;
-		const key = JSON.stringify([thread.activity_sequence, this.count, this.after, this.expanded,
+	async update(thread: AnchoredThread, targetStatus?: CommentTargetStatus): Promise<void> {
+		this.thread = thread; if (targetStatus) this.targetStatus = targetStatus;
+		const key = JSON.stringify([thread.activity_sequence, this.targetStatus, this.count, this.after, this.expanded,
 			this.session.permission(this.entryId), this.session.online, this.session.canQueue, this.session.participants(this.entryId),
 			this.session.baseRegistryRevision(this.entryId)]);
 		this.composer?.update();
@@ -101,6 +103,7 @@ class ThreadCard {
 		const generation = ++this.generation;
 		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
 		this.controls.empty();
+		this.controls.createEl("p", { text: this.targetStatus.message, cls: "relay-comment-thread-target-status" });
 		this.copyLink(this.controls, "Copy discussion link");
 		if (thread.anchor?.type === "image" || thread.anchor?.type === "image_file") {
 			const target = this.controls.createEl("button", { text: "Show image " + (thread.anchor.geometry.type === "whole" ? "discussion" : thread.anchor.geometry.type) });
@@ -111,15 +114,8 @@ class ThreadCard {
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "base") {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
-			const defined = "definition_id" in thread.anchor.target || thread.anchor.target.type === "timeline_marker";
 			const target = this.controls.createEl("button", { text: thread.anchor.target.type === "summary" ? "Definition details" : thread.anchor.target.type === "timeline_marker" ? "Show captured marker position" : "Show Bases target" });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
-			if (defined) {
-				const status = this.controls.createEl("p", { text: "Checking the saved definition…", attr: { role: "status" } });
-				void this.session.baseDefinitionStatus(this.entryId, thread.anchor).then(message => {
-					if (!this.disposed && this.generation === generation && this.session.permission(this.entryId)?.read) status.setText(message);
-				});
-			}
 		}
 		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
 		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
@@ -263,6 +259,12 @@ export class CommentsView extends ItemView {
 	private pending?: HTMLElement;
 	private moveSelection?: HTMLElement;
 	private pendingView?: PendingComments;
+	private targetWatch?: () => void;
+	private targetEpoch = 0;
+	private targetCheck?: { key: string; epoch: number; pending: boolean };
+	private targetStatuses = new Map<string, CommentTargetStatus>();
+	private targetFilter?: HTMLSelectElement;
+	private targetSummary?: HTMLElement;
 	private closed = false;
 	constructor(leaf: WorkspaceLeaf, private host: DiscussionHost) { super(leaf); }
 	getViewType(): string { return COMMENTS_VIEW; }
@@ -271,6 +273,7 @@ export class CommentsView extends ItemView {
 	async onOpen(): Promise<void> {
 		this.contentEl.addClass("relay-comments-view");
 		this.unsubscribe = this.host.onChange(() => {
+			this.targetEpoch++;
 			const next = this.host.current();
 			// Clear the old account/note synchronously; debounce only subsequent rendering.
 			if (this.session && (next.session !== this.session || next.entryId !== this.entryId || this.session.status === "closed")) this.reset();
@@ -290,6 +293,7 @@ export class CommentsView extends ItemView {
 	}
 	private reset(): void {
 		this.search?.dispose(); this.search = undefined;
+		this.targetWatch?.(); this.targetWatch = undefined; this.targetEpoch++; this.targetCheck = undefined; this.targetStatuses.clear(); this.targetFilter = undefined; this.targetSummary = undefined;
 		this.generation++; this.session = undefined; this.entryId = undefined;
 		const watch = this.watch; this.watch = undefined; watch?.(); this.drafts?.dispose(); this.drafts = undefined; this.focusedSerial = 0;
 		for (const card of this.cards.values()) card.dispose(); this.cards.clear();
@@ -331,9 +335,14 @@ export class CommentsView extends ItemView {
 			}
 			this.status = this.contentEl.createDiv({ cls: "relay-comment-status", attr: { role: "status", "aria-live": "polite" } });
 			this.moveSelection = this.contentEl.createDiv({ cls: "relay-comment-target-selection", attr: { role: "status", "aria-live": "polite" } });
-			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { void this.session?.refresh(); };
+			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { this.targetEpoch++; this.schedule(); void this.session?.refresh(); };
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
 			this.pendingView = new PendingComments(this.pending, this.session, this.entryId, operation => this.host.openCommandRecovery(this.session!, operation));
+			const targetLabel = this.contentEl.createEl("label", { text: "Target status " });
+			this.targetFilter = targetLabel.createEl("select", { attr: { "aria-label": "Filter comment targets" } });
+			for (const [value, text] of [["all", "All targets"], ["review", "Targets needing review"], ["unanchored", "Unanchored targets"], ["unchecked", "Waiting or unchecked targets"]]) this.targetFilter.createEl("option", { text, attr: { value } });
+			this.targetFilter.onchange = () => this.schedule();
+			this.targetSummary = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
 			const session = this.session, entryId = this.entryId;
 			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); },
@@ -342,6 +351,7 @@ export class CommentsView extends ItemView {
 				target.kind === "base" ? anchor => this.host.targetLabel(session, entryId, anchor) : undefined);
 		}
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");
+		this.targetWatch ??= this.host.watchTargetStatus(this.session, this.entryId, () => { this.targetEpoch++; this.schedule(); });
 		this.contentEl.querySelector("h2")?.setText(target.path.split("/").pop() ?? "Comments");
 		const targetStatus = this.contentEl.querySelector(".relay-comment-target-status");
 		if (targetStatus) { targetStatus.setText(target.message ?? ""); (targetStatus as HTMLElement).hidden = !target.message; }
@@ -362,7 +372,9 @@ export class CommentsView extends ItemView {
 			statuses[session.status] + (permission?.read && !permission.comment ? " · You can read comments" : ""));
 		this.drafts?.update();
 		const canRead = !!permission?.read && session.status !== "authentication_required" && session.status !== "unavailable";
+		if (this.targetFilter) this.targetFilter.disabled = !canRead;
 		if (!canRead) {
+			this.targetCheck = undefined; this.targetStatuses.clear(); this.targetSummary?.setText("");
 			for (const card of this.cards.values()) card.dispose(); this.cards.clear(); this.list!.empty();
 		}
 		// Local authored work remains recoverable after read access is revoked;
@@ -378,17 +390,28 @@ export class CommentsView extends ItemView {
 			if (this.closed || generation !== this.generation || !session.permission(entryId)?.read || ["authentication_required", "unavailable"].includes(session.status)) return;
 			if (thread) local.threads.unshift(thread);
 		}
+		const current = () => !this.closed && generation === this.generation && session.status !== "closed" && session.permission(entryId)?.read === true && !["authentication_required", "unavailable"].includes(session.status);
+		if (!current()) return;
+		const targetStatuses = this.checkTargets(session, entryId, local.threads);
+		if (focus && focus.serial !== this.focusedSerial && this.targetFilter) this.targetFilter.value = "all";
+		const filter = this.targetFilter?.value ?? "all";
+		const matches = (status: CommentTargetStatus) => filter === "all" || filter === "review" && targetNeedsReview(status) || filter === "unanchored" && status.state === "unanchored" || filter === "unchecked" && (status.state === "waiting" || status.state === "unknown");
+		let shown = 0, unchecked = 0;
 		const retained = new Set(local.threads.map(thread => thread.id));
 		for (const [id, card] of this.cards) if (!retained.has(id)) { card.dispose(); this.cards.delete(id); }
 		for (const thread of local.threads) {
 			let card = this.cards.get(thread.id);
 			if (!card) { card = new ThreadCard(this.list!, this.app, session, entryId, thread, this.host); this.cards.set(thread.id, card); }
-			await card.update(thread);
+			const targetStatus = targetStatuses.get(thread.id) ?? uncheckedTarget();
+			card.el.hidden = !matches(targetStatus); if (!card.el.hidden) shown++;
+			if (targetStatus.state === "waiting" || targetStatus.state === "unknown") unchecked++;
+			await card.update(thread, targetStatus);
 			if (this.closed || generation !== this.generation) return;
 			if (focus?.threadId === thread.id && focus.serial !== this.focusedSerial) {
 				if (await card.focus(focus.messageId, focus.messageSequence, focus.notice, () => !this.closed && generation === this.generation)) this.focusedSerial = focus.serial;
 			}
 		}
+		this.targetSummary?.setText(`${shown} of ${local.threads.length} discussions on this page · ${unchecked} waiting or unchecked.${this.targetCheck?.pending ? " Updating target checks in the background." : ""} Hidden Bases records or properties are not treated as detached. Use Next discussions to check older pages.`);
 		this.list!.querySelectorAll(".relay-comment-more").forEach(el => el.remove());
 		if (local.hasMore) {
 			const more = this.list!.createEl("button", { text: "Next discussions", cls: "relay-comment-more" });
@@ -397,6 +420,21 @@ export class CommentsView extends ItemView {
 		if (this.pages.length) { const previous = this.list!.createEl("button", { text: "Previous discussions", cls: "relay-comment-more" });
 			previous.onclick = () => { this.after = this.pages.pop() ?? 0; this.schedule(); }; }
 		if (!local.threads.length && !local.pending.length && sync === "current") this.list!.createEl("p", { cls: "relay-comment-more", text: "No comments yet. Start a discussion below." });
+	}
+	private checkTargets(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Map<string, CommentTargetStatus> {
+		const key = JSON.stringify([entryId, session.baseRegistryRevision(entryId), threads.map(thread => [thread.id, thread.anchor_revision, thread.anchor !== undefined])]);
+		if (this.targetCheck?.key === key && this.targetCheck.epoch === this.targetEpoch) return this.targetStatuses;
+		if (this.targetCheck?.key !== key) this.targetStatuses = new Map();
+		const check = { key, epoch: this.targetEpoch, pending: true }; this.targetCheck = check;
+		const current = () => !this.closed && this.session === session && this.entryId === entryId && this.targetCheck === check && check.epoch === this.targetEpoch &&
+			session.status !== "closed" && !["authentication_required", "unavailable"].includes(session.status) && session.permission(entryId)?.read === true;
+		void this.host.targetStatuses(session, entryId, threads, current).then(statuses => {
+			if (!current()) return;
+			this.targetStatuses = statuses;
+		}).catch(() => { if (current()) this.targetStatuses = new Map(); }).finally(() => {
+			if (current()) { check.pending = false; this.schedule(); }
+		});
+		return this.targetStatuses;
 	}
 	async onClose(): Promise<void> {
 		this.closed = true; if (this.timer !== undefined) window.clearTimeout(this.timer);

@@ -734,3 +734,34 @@ test("a local database opening after logout is closed without constructing a ses
 		expect(test.store.close).toHaveBeenCalledTimes(1); expect(mockSessions).toHaveLength(0);
 	} finally { test.close(); }
 });
+
+test("target status batches one definition read per page and does not treat an offline catalog miss as deletion", async () => {
+	const f = fixture(); Object.assign(f.plugin.app.workspace, { getLeavesOfType: () => [] });
+	const scope = baseDiscussionScope(id(3), id(4)), generation = id(6);
+	const catalog: BaseDefinitionCatalog = { protocol_version: 1, entry_id: id(3), view_id: id(4), definition_id: id(5), generation, registry_revision: 2, computed_values: false, targets: [] };
+	let fresh = true;
+	const session = { status: "ready", permission: () => ({ read: true }), knownDocumentGeneration: () => generation, baseRegistryRevision: () => 2,
+		readBaseDefinitions: jest.fn().mockResolvedValue(catalog), verifiedTargetCatalog: () => fresh } as unknown as DiscussionSession;
+	const anchor: BaseAnchor = { version: 1, type: "base", generation, view_id: id(4), definition_id: id(5), registry_revision: 2,
+		target: { type: "formula", definition_id: id(8), definition_revision: 2, property: { source: "formula", name: "Total" } } };
+	const threads = Array.from({ length: 20 }, (_, n) => ({ id: id(100 + n), anchor }) as AnchoredThread);
+	try {
+		const verified = await f.host.targetStatuses(session, scope, threads, () => true);
+		expect(verified.size).toBe(20); expect([...verified.values()].every(value => value.state === "unanchored")).toBe(true); expect(session.readBaseDefinitions).toHaveBeenCalledTimes(1);
+		fresh = false; const cached = await f.host.targetStatuses(session, scope, threads, () => true);
+		expect([...cached.values()].every(value => value.state === "unknown")).toBe(true);
+	} finally { f.close(); }
+});
+
+test("a late target catalog cannot report status after read access or the view context changes", async () => {
+	const f = fixture(); Object.assign(f.plugin.app.workspace, { getLeavesOfType: () => [] }); let readable = true;
+	let finish!: (value: BaseDefinitionCatalog) => void;
+	const session = { status: "ready", permission: () => ({ read: readable }), knownDocumentGeneration: () => id(6), baseRegistryRevision: () => 2,
+		readBaseDefinitions: () => new Promise<BaseDefinitionCatalog>(resolve => { finish = resolve; }), verifiedTargetCatalog: () => true } as unknown as DiscussionSession;
+	const anchor: BaseAnchor = { version: 1, type: "base", generation: id(6), view_id: id(4), definition_id: id(5), registry_revision: 2, target: { type: "view" } };
+	try {
+		const loading = f.host.targetStatuses(session, baseDiscussionScope(id(3), id(4)), [{ id: id(10), anchor } as AnchoredThread], () => true);
+		readable = false; finish({ protocol_version: 1, entry_id: id(3), view_id: id(4), definition_id: id(5), generation: id(6), registry_revision: 2, computed_values: false, targets: [] });
+		expect((await loading).size).toBe(0);
+	} finally { f.close(); }
+});

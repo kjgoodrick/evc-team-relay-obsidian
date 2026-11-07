@@ -20,6 +20,7 @@ export class ImageComments extends Component {
 	private request = 0;
 	private stopped = false;
 	constructor(private host: DiscussionHost, private plugin: Plugin, shares: ShareRegistry) { super(); this.assets = new ImageAssets(plugin.app, shares); }
+	describeTargetAsset(file: TFile, destination?: string): ImageAsset { return destination === undefined ? this.assets.describeFile(file) : this.assets.describe(file, destination); }
 	onload(): void {
 		this.addChild(new RenderedImageComments(this.host, this.plugin, this.assets, (context, image, surface) => this.draft(context, image, surface)));
 		this.addChild(new ImageFileOverlays(this.host, this.plugin, this.assets, (file, surface) => { void this.commentFile(file, surface); }));

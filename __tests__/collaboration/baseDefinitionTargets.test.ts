@@ -306,3 +306,16 @@ test("capture freezes local value before asynchronous verification and rejects c
 		expect((await s.store.getDraft("group"))?.target).toEqual(captured); expect(await s.store.pending(scope)).toHaveLength(0);
 	} finally { await s.session.close(); }
 });
+
+
+test("fresh HTTP catalog proof never transfers to a retry fallback or an offline session", async () => {
+	const s = await open(new IDBFactory());
+	try {
+		s.session.setForeground(true); await s.session.refresh(); s.session.outbox.stop(); await s.session.outbox.settled();
+		const verified = await s.session.readBaseDefinitions(scope); expect(s.session.verifiedTargetCatalog(verified)).toBe(true);
+		s.transport.baseDefinitions.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+		const cached = await s.session.readBaseDefinitions(scope); expect(cached).toEqual(verified);
+		expect(s.session.verifiedTargetCatalog(cached)).toBe(false);
+		s.session.setForeground(false); expect(s.session.verifiedTargetCatalog(verified)).toBe(false);
+	} finally { await s.session.close(); }
+});
