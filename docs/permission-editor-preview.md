@@ -83,13 +83,21 @@ falls back to two separate writes.
   settings entry point, member and independent controls, read-only preview,
   preserved hidden `Budget.md` exception, one-rule review and Escape/Keep editing
   protection. These observations precede the final small binding/form hardening.
-- **The native Save action has not been exercised.** Automatic approval review
-  rejected the synthetic member's permission change and requested specific user
-  authorization. An approval question is pending. No workaround was used to send
-  that rejected native change. The separate actual-service fixture above had
-  already passed before this rejection.
+- After explicit user approval on November 7, the rebuilt preview passed native
+  read-only Save and reopen. A competing local API write removed only Bob's root
+  comment override, leaving his read permission and hidden-file exception intact.
+  Saving the stale native proposal was rejected. Read current permissions showed
+  the conflicting inherited value; the user-facing choice and another review
+  were required before the final native Save restored read-and-comment access.
+  Independent server reads verified `read=true`, `comment=true`, `edit=false`,
+  `moderate=false` for `Note.md` and HTTP 403 for `Budget.md`. No rejected action
+  was sent before approval. Test windows were closed and the original vault
+  window restored afterward.
+- Reopening correctly lists saved rules, but its new-rule fields start with a
+  reviewer draft. Edit rule loads the actual saved overrides. Clarify this initial
+  field behavior before release so it cannot be mistaken for saved access.
 
-Native save/reopen/conflict/recovery acceptance, non-owner administrator entry,
+Native interrupted-response recovery acceptance, non-owner administrator entry,
 the alternate share-management entry point, mobile/popout/screen-reader/touch
 coverage and resource measurements remain. No live-vault plugin installation or
 production deployment/restart is part of this checkpoint. The broader comments,
