@@ -60,9 +60,10 @@ function fixture() {
 		}),
 		verifyBaseTarget: jest.fn(async () => valid), commentBaseHandle: jest.fn(), commentBaseGroupHandle: jest.fn(), openBaseThread: jest.fn(), openBaseView: jest.fn() };
 	jest.spyOn(NativeBasesSurface, "inspect").mockImplementation(() => valid ? surface as unknown as NativeBasesSurface : undefined);
-	const pane = new BaseCommentPane(host as unknown as DiscussionHost, { file, contentEl: root } as unknown as FileView);
+	const targetsChanged = jest.fn();
+	const pane = new BaseCommentPane(host as unknown as DiscussionHost, { file, contentEl: root } as unknown as FileView, undefined, targetsChanged);
 	const buttons = () => Array.from(root.querySelectorAll<HTMLButtonElement>(".relay-bases-comment-tools button"));
-	return { root, row, cell, host, pane, surface, session, contexts, releases, anchor, cellHandle, buttons,
+	return { root, row, cell, host, pane, surface, session, contexts, releases, anchor, cellHandle, buttons, targetsChanged,
 		readOnly() { comment = false; pane.invalidate(); }, disable() { enabled = false; pane.invalidate(); }, revoke() { valid = false; pane.invalidate(); },
 		hideProperty() { mounted = false; pane.invalidate(); }, refuseBinding() { bound = false; }, close() { pane.close(); root.remove(); } };
 }
@@ -397,5 +398,58 @@ test("group markers deduplicate target verification, share a header badge and na
 		expect(badge.textContent).toBe("2"); expect(badge.getAttribute("aria-label")).toContain('group · "Done" (text)');
 		expect(await f.pane.reveal(context, handle.target)).toBe("revealed"); expect(reveal).toHaveBeenCalled();
 		expect(f.surface.reveal).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
+test("group status uses exact current local targets, not stale anchors, hidden or ambiguous handles, and scroll does not repeat checks", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0]; let current = true, visible = true, duplicate = false;
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Done" } },
+			element: f.row, ambiguous: false, current: () => current, members: () => [] };
+		const native = jest.fn().mockResolvedValue(handle.target);
+		context.groups = { handles: () => visible ? duplicate ? [handle, handle] : [handle] : [], hit: () => [handle], canCapture: () => true, native } as unknown as NativeBaseGroupComments;
+		const anchor = { ...f.anchor, target: { type: "group", definition_id: id(10), definition_revision: 1, property: handle.target.property,
+			value: { type: "text", value: "Done" }, group_id: id(11), witness_id: id(12) } } as BaseAnchor;
+		const threads = [{ id: id(20), author_id: null, state: "open" as const, anchor, state_revision: 1, anchor_revision: 1,
+			removed: false, created_sequence: 1, activity_sequence: 1, created_at: "2026-11-07T00:00:00Z" }];
+		f.session.anchorThreads.mockResolvedValue(threads as never); f.pane.invalidate(); await settle();
+		const present = () => f.pane.presentGroups(context.session, context.entryId, threads);
+		expect(present()).toEqual(new Set([id(20)])); expect(f.targetsChanged).toHaveBeenCalledTimes(1);
+		const reads = f.session.anchorThreads.mock.calls.length;
+		f.root.dispatchEvent(new Event("scroll")); await settle();
+		expect(f.targetsChanged).toHaveBeenCalledTimes(1); expect(native).toHaveBeenCalledTimes(1); expect(f.session.anchorThreads).toHaveBeenCalledTimes(reads);
+		expect(f.pane.presentGroups(context.session, context.entryId, [{ ...threads[0], anchor: { ...anchor, registry_revision: 2 } }])).toEqual(new Set());
+		expect(f.pane.presentGroups(context.session, baseDiscussionScope(id(1), id(99)), threads)).toEqual(new Set());
+		current = false; expect(present()).toEqual(new Set()); f.pane.invalidate(false); await settle(); expect(f.targetsChanged).toHaveBeenCalledTimes(2);
+		current = true; duplicate = true; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set());
+		duplicate = false; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set([id(20)])); expect(f.targetsChanged).toHaveBeenCalledTimes(3);
+		visible = false; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set()); expect(f.targetsChanged).toHaveBeenCalledTimes(4);
+		visible = true; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set([id(20)]));
+		f.revoke(); expect(present()).toEqual(new Set()); expect(f.targetsChanged).toHaveBeenCalledTimes(6);
+	} finally { f.close(); }
+});
+
+test("lane-range status loses positive evidence when the captured lane disappears or the native axis changes", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0]; context.binding.type = "sabidurian-timeline"; let present = true;
+		const axis = { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "UTC" };
+		const proof = { protocol_version: 1, entry_id: id(1), definition_id: id(3), generation: id(4), view_id: id(2), registry_revision: 1,
+			axis: { id: id(40), kind: "axis", revision: 1, fingerprint: "a".repeat(64), axis } };
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Ready" } },
+			element: f.row, ambiguous: false, current: () => present, members: () => [] };
+		context.groups = { handles: () => present ? [handle] : [], native: jest.fn().mockResolvedValue(handle.target), canCapture: () => true } as unknown as NativeBaseGroupComments;
+		f.anchor.target = { type: "timeline_range", axis_definition_id: id(40), axis_definition_revision: 1, axis,
+			range: { version: 1, kind: "calendar", start: "2026-01-01", end: "2026-01-02", time_zone: "UTC", start_inclusive: true, end_inclusive: true },
+			lane: { ...handle.target, definition_id: id(10), definition_revision: 1, group_id: id(11), witness_id: id(12) } } as BaseAnchor["target"];
+		Object.assign(f.session, { readTimelineAxis: jest.fn().mockResolvedValue(proof), canAnchorBase: () => true, permission: () => ({ read: true, comment: true }) });
+		Object.assign(f.surface, { rangeContext: () => ({ axis, effectiveTimeZone: "UTC", kinds: ["calendar"], current: () => true }),
+			rangeGeometry: () => ({ startX: 100, endX: 300, top: 40, bottom: 60, discontinuous: false, current: () => true }) });
+		f.pane.invalidate(); await settle(); const threads = await f.session.anchorThreads();
+		expect(f.pane.presentGroups(context.session, context.entryId, threads)).toEqual(new Set([id(7)]));
+		present = false; f.pane.invalidate(false); await settle(); expect(f.pane.presentGroups(context.session, context.entryId, threads)).toEqual(new Set());
+		present = true; proof.axis.revision = 2; f.pane.invalidate(); await settle();
+		expect(f.pane.presentGroups(context.session, context.entryId, threads)).toEqual(new Set());
 	} finally { f.close(); }
 });

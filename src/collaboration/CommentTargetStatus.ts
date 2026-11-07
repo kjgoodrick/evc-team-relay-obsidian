@@ -53,7 +53,7 @@ export function imageFileTargetStatus(anchor: Extract<DiscussionAnchor, { type: 
 	return imageAssetChanged(anchor.asset, asset) ? status("changed", "The recorded image file version changed. Review its target.") : status("attached", "The image file matches its recorded version.");
 }
 
-export interface BaseTargetEvidence { generation?: string; definitions?: BaseDefinitionCatalog; axis?: TimelineAxisContext; markers?: TimelineMarkerCatalog; online: boolean }
+export interface BaseTargetEvidence { generation?: string; definitions?: BaseDefinitionCatalog; axis?: TimelineAxisContext; markers?: TimelineMarkerCatalog; online: boolean; groupPresent?: boolean }
 export function baseTargetStatus(anchor: BaseAnchor, evidence: BaseTargetEvidence): CommentTargetStatus {
 	if (!evidence.generation) return status("waiting", "Waiting for this saved view's synchronized identity.");
 	if (anchor.generation !== evidence.generation) return status("changed", "The saved-view identity changed. The original target is retained.");
@@ -72,12 +72,14 @@ export function baseTargetStatus(anchor: BaseAnchor, evidence: BaseTargetEvidenc
 	if (target.type === "timeline_range") {
 		const axis = evidence.axis?.axis;
 		if (!axis || axis.id !== target.axis_definition_id || axis.revision !== target.axis_definition_revision) return status("changed", "The timeline axis changed after this range was captured.");
-		return target.lane ? uncheckedTarget("The timeline axis matches. The captured lane still needs a membership check; absence from the layout alone does not detach it.") : status("attached", evidence.online ? "Matches the latest verified timeline axis." : "Matches the last verified timeline axis. Reconnect to check for changes.");
+		return target.lane ? evidence.groupPresent ? status("attached", "The timeline axis matches and the captured lane is present in the current local saved view.") :
+			uncheckedTarget("The timeline axis matches. The captured lane still needs a membership check; absence from the layout alone does not detach it.") : status("attached", evidence.online ? "Matches the latest verified timeline axis." : "Matches the last verified timeline axis. Reconnect to check for changes.");
 	}
 	if (target.type === "formula" || target.type === "formula_cell" || target.type === "summary" || target.type === "group") {
 		const found = evidence.definitions?.targets.find(item => item.id === target.definition_id && item.kind === (target.type === "formula_cell" ? "formula" : target.type));
 		if (!found) return evidence.online ? status("unanchored", "This definition is absent from the latest verified saved view.") : uncheckedTarget("This definition is absent from the cached view. Reconnect to verify it.");
 		if (found.revision !== target.definition_revision) return status("changed", "The target definition changed after this discussion was created.");
+		if (target.type === "group" && evidence.groupPresent) return status("attached", "The saved definition matches and the captured group is present in the current local saved view.");
 		if (target.type === "formula_cell" || target.type === "group") return uncheckedTarget("The saved definition matches. Its record or group still needs verification; view filters alone do not detach it.");
 		return status("attached", evidence.online ? "Matches the latest verified definition." : "Matches the last verified definition. Reconnect to check for changes.");
 	}

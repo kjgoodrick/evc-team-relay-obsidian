@@ -60,3 +60,18 @@ test("missing definitions need fresh proof, while stale catalogs and hidden reco
 	const cell: BaseAnchor = { ...base, target: { type: "cell", record_id: id(8), record_generation: id(9), property: { source: "note", name: "Status" } } };
 	const hidden = baseTargetStatus(cell, { generation, definitions: catalog, online: true }); expect(hidden.state).toBe("unknown"); expect(targetNeedsReview(hidden)).toBe(false);
 });
+
+test("positive local group presence supplements matching definitions but never overrides changed or stale identity", () => {
+	const property = { source: "note" as const, name: "Status" };
+	const anchor: BaseAnchor = { ...base, target: { type: "group", definition_id: id(5), definition_revision: 2,
+		property, value: { type: "text", value: "Ready" }, group_id: id(6), witness_id: id(7) } };
+	const definitions: BaseDefinitionCatalog = { ...catalog, targets: [{ ...catalog.targets[0], kind: "group", property }] };
+	const evidence = { generation, definitions, online: true, groupPresent: true };
+	expect(baseTargetStatus(anchor, evidence).state).toBe("attached");
+	expect(baseTargetStatus(anchor, { ...evidence, groupPresent: false }).state).toBe("unknown");
+	expect(baseTargetStatus(anchor, { ...evidence, online: false }).message).toContain("local saved view");
+	expect(baseTargetStatus(anchor, { ...evidence, generation: id(90) }).state).toBe("changed");
+	expect(baseTargetStatus(anchor, { ...evidence, definitions: { ...definitions, registry_revision: 1 } }).state).toBe("waiting");
+	expect(baseTargetStatus(anchor, { ...evidence, definitions: { ...definitions, targets: [{ ...definitions.targets[0], revision: 3 }] } }).state).toBe("changed");
+	expect(baseTargetStatus(anchor, { ...evidence, definitions: { ...definitions, targets: [] } }).state).toBe("unanchored");
+});

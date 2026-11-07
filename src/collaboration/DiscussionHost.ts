@@ -935,8 +935,10 @@ export class DiscussionHost extends Component {
 			if (next === text) return;
 			text?.unobserve(listener); text = next; text?.observe(listener); listener();
 		};
-		const host = this.onChange(rebind), reading = onReadingBindingChange(rebind); rebind();
-		return () => { stopped = true; host(); reading(); text?.unobserve(listener); text = undefined; };
+		const host = this.onChange(rebind), reading = onReadingBindingChange(rebind);
+		const bases = parseDiscussionScope(entryId)?.viewId ? this.baseComments?.watchTargetStatus(session, entryId, () => { if (!stopped) listener(); }) : undefined;
+		rebind();
+		return () => { stopped = true; host(); reading(); bases?.(); text?.unobserve(listener); text = undefined; };
 	}
 	async targetStatuses(session: DiscussionSession, entryId: string, threads: AnchoredThread[], current: () => boolean): Promise<Map<string, CommentTargetStatus>> {
 		const result = new Map<string, CommentTargetStatus>();
@@ -951,6 +953,7 @@ export class DiscussionHost extends Component {
 			base.some(anchor => anchor.target.type === "timeline_marker") ? session.readTimelineMarkers(entryId).catch(() => undefined) : undefined,
 		]);
 		if (!available()) return result;
+		const presentGroups = base.length ? this.baseComments?.presentGroups(session, entryId, threads) : undefined;
 		const context = this.targetNoteContext(session, entryId);
 		const notes = noteTargetStatuses(anchors.map(anchor => anchor ?? { version: 1, type: "note" }), context ? {
 			text: context.text, entryId, generation: context.generation, asset: destination => {
@@ -966,7 +969,7 @@ export class DiscussionHost extends Component {
 			else if (anchor.type === "base") {
 				const catalog = anchor.target.type === "timeline_marker" ? markers : anchor.target.type === "timeline_range" ? axis : definitions;
 				status = catalog && catalog.registry_revision < session.baseRegistryRevision(entryId) ? { state: "waiting", message: "Waiting for a newer saved-view revision before checking this target." } :
-					baseTargetStatus(anchor, { generation, definitions, axis, markers, online: session.verifiedTargetCatalog(catalog) });
+					baseTargetStatus(anchor, { generation, definitions, axis, markers, online: session.verifiedTargetCatalog(catalog), groupPresent: presentGroups?.has(threads[index].id) });
 			} else if (anchor.type === "image_file") {
 				let asset;
 				try { if (file && fileMatches) asset = this.images?.describeTargetAsset(file); } catch { /* Missing image bytes/access are not evidence of deletion. */ }

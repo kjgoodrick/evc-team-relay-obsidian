@@ -22,6 +22,7 @@ const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type 
 
 export class BaseComments extends Component {
 	private panes = new Map<FileView, BaseCommentPane>();
+	private targetListeners = new Set<{ session: DiscussionSession; entryId: string; listener: () => void }>();
 	private stopped = false;
 	private timeline: TimelineBridgeClient;
 	constructor(private host: DiscussionHost, private plugin: Plugin, private bases?: BaseSyncHost) {
@@ -54,9 +55,24 @@ export class BaseComments extends Component {
 		for (const [view, pane] of this.panes) if (!wanted.has(view)) { pane.close(); this.panes.delete(view); }
 		for (const view of wanted) {
 			let pane = this.panes.get(view);
-			if (!pane) { pane = new BaseCommentPane(this.host, view, this.timeline); this.panes.set(view, pane); }
+			if (!pane) { pane = new BaseCommentPane(this.host, view, this.timeline, (session, entryId) => {
+				for (const watched of this.targetListeners) if (watched.session === session && watched.entryId === entryId) {
+					try { watched.listener(); } catch { /* Isolate sidebar lifecycle failures. */ }
+				}
+			}); this.panes.set(view, pane); }
 			pane.invalidate();
 		}
+	}
+	watchTargetStatus(session: DiscussionSession, entryId: string, listener: () => void): () => void {
+		const watched = { session, entryId, listener }; this.targetListeners.add(watched);
+		return () => this.targetListeners.delete(watched);
+	}
+	presentGroups(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Set<string> {
+		const found = new Set<string>();
+		if (!this.stopped && threads.length <= 100) for (const pane of this.panes.values()) {
+			for (const id of pane.presentGroups(session, entryId, threads)) found.add(id);
+		}
+		return found;
 	}
 	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor, authorized: () => boolean = () => true): Promise<boolean> {
 		if (this.stopped || !authorized() || !this.host.nativeBasesCommentsEnabled) return false;
@@ -110,7 +126,7 @@ export class BaseComments extends Component {
 			return true;
 		} catch { new Notice("This target or its saved-view association changed. Refresh synchronization before navigating again."); return true; }
 	}
-	onunload(): void { this.stopped = true; for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.timeline.close(); }
+	onunload(): void { this.stopped = true; for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.targetListeners.clear(); this.timeline.close(); }
 }
 
 /** One visible native pane owns one scope subscription and an external overlay.
@@ -146,7 +162,9 @@ export class BaseCommentPane {
 	private poll?: number;
 	private flight?: Promise<void>;
 	private attemptedBinding = 0;
-	constructor(private host: DiscussionHost, private view: FileView, private integrations?: NativeBasesIntegrations) {
+	private presence?: { session: DiscussionSession; entryId: string; signature: string };
+	constructor(private host: DiscussionHost, private view: FileView, private integrations?: NativeBasesIntegrations,
+		private targetsChanged?: (session: DiscussionSession, entryId: string) => void) {
 		const root = view.contentEl, doc = root.ownerDocument; this.win = doc.defaultView ?? window;
 		this.layer = doc.createElement("div"); this.layer.className = "relay-bases-comments"; this.layer.hidden = true;
 		this.toolbar = doc.createElement("div"); this.toolbar.className = "relay-bases-comment-tools"; this.toolbar.hidden = true;
@@ -209,6 +227,42 @@ export class BaseCommentPane {
 		this.groupTargets.clear(); this.rangeAxis = undefined; this.sharedMarkers = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
 		this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true;
+		this.publishGroupPresence();
+	}
+	/** Positive local evidence only. Absence can mean filtering or virtualization.
+	 * One native handle snapshot serves a page; no new captures or server reads. */
+	presentGroups(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Set<string> {
+		const result = new Set<string>(), context = this.context;
+		if (!this.visible() || !context?.current() || context.session !== session || context.entryId !== entryId || !context.groups) return result;
+		const cached = new Map(this.threads.map(thread => [thread.id, thread.anchor]));
+		const candidates = threads.filter(thread => thread.anchor?.type === "base" &&
+			(thread.anchor.target.type === "group" || thread.anchor.target.type === "timeline_range" && thread.anchor.target.lane) &&
+			JSON.stringify(cached.get(thread.id)) === JSON.stringify(thread.anchor));
+		if (!candidates.length) return result;
+		const counts = new Map<string, number>();
+		for (const handle of context.groups.handles()) {
+			if (!handle.current()) continue;
+			const key = nativeGroupTargetKey(handle.target); counts.set(key, (counts.get(key) ?? 0) + 1);
+		}
+		for (const thread of candidates) {
+			const anchor = thread.anchor;
+			if (anchor?.type !== "base") continue;
+			if (anchor.target.type === "timeline_range" && (!this.rangeAxis || !timelineTargetMatchesAxis(context, anchor, this.rangeAxis))) continue;
+			const target = anchor.target.type === "group" ? this.groupTargets.get(thread.id) :
+				anchor.target.type === "timeline_range" && anchor.target.lane ? this.rangeLanes.get(thread.id) : undefined;
+			if (target && counts.get(nativeGroupTargetKey(target)) === 1) result.add(thread.id);
+		}
+		return context.current() ? result : new Set();
+	}
+	private publishGroupPresence(): void {
+		const context = this.context, previous = this.presence;
+		const present = context ? this.presentGroups(context.session, context.entryId, this.threads) : new Set<string>();
+		const next = context && present.size ? { session: context.session, entryId: context.entryId, signature: JSON.stringify(this.threads
+			.filter(thread => present.has(thread.id)).map(thread => [thread.id, thread.anchor]).sort(([a], [b]) => String(a).localeCompare(String(b)))) } : undefined;
+		this.presence = next;
+		const sameScope = previous?.session === next?.session && previous?.entryId === next?.entryId;
+		if (previous && (!sameScope || previous.signature !== next?.signature)) this.targetsChanged?.(previous.session, previous.entryId);
+		if (next && !sameScope) this.targetsChanged?.(next.session, next.entryId);
 	}
 	private updateMarkerTargets(next: Set<Element>): void {
 		for (const element of this.markerTargets) if (!next.has(element)) element.classList.remove("relay-base-comment-target");
@@ -264,7 +318,7 @@ export class BaseCommentPane {
 				this.threads = threads; this.groupTargets = groupTargets; this.rangeAxis = rangeAxis; this.sharedMarkers = sharedMarkers; this.rangeLanes = rangeLanes; this.dataDirty = false;
 			}
 			if (!context.current()) { this.detach(); return; }
-			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers();
+			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers(); this.publishGroupPresence();
 		} catch { this.detach(); }
 	}
 	async ready(): Promise<BaseCommentContext | undefined> {

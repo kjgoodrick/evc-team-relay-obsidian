@@ -53,7 +53,7 @@ completion/cancellation, blur or keyboard input. Two regressions reproduce the
 failure before the fix for cells and groups; both pass afterward. Native sidebar
 focus followed by one folder-header click now retains the group. Pending draft
 creation displays exactly `Group: folder · Shared folder root (verification pending)`.
-An empty synthetic draft is retained in the test vault; no seventh thread was
+An empty synthetic draft is retained in the test vault; no additional thread was
 posted during this label check.
 
 Validation: all 3,206 plugin tests across 249 suites pass, with 22 fixture-gated
@@ -74,13 +74,38 @@ the duplicate; subsequent view changes and three full reloads have not reproduce
 it. Its origin is unresolved and remains a lifecycle investigation, not a fixed
 or accepted behavior.
 
-Group target status still reports that the saved definition matches but the
-record/group needs verification. Marker/navigation capture does not substitute
-for the unfinished comprehensive target-status path. Native reviewer authoring,
-offline group capture/recovery, additional typed groups, cross-window/popout,
-physical mobile, accessibility and resource acceptance remain. Actual-service
-offline/retry/source-authorization coverage exists separately; this native run
-does not replace it.
+Group and lane-range target status now uses exact current native handles in the
+matching saved view. The sidebar reports a local match only when the captured
+anchor, synchronized definition/generation and (for ranges) axis still agree.
+Hidden, virtualized or duplicate handles withdraw positive evidence without
+claiming the target was deleted. Changes notify the relevant sidebar; scrolling
+alone does not repeat catalog reads or send status notifications.
+
+Native Sequence and folder discussions now report zero unchecked targets.
+Switching to another saved view withdraws that evidence; Show Bases target
+restores the matching view and positive status. A native Sequence lane range
+from 2.2 through 2.4, inclusive, retains the exact ordinal endpoints and Ready
+lane, with independent owner/reviewer API readback. Both group and range markers
+remain separate and both statuses explain their local evidence.
+
+The disposable relay and API were paused with an automatic-resume watchdog.
+A new Sequence group comment was captured and queued, then survived a full
+native reload. Cached group/range markers and positive local statuses returned
+while services were still paused; online-only moderation stayed disabled.
+After resume, the queue cleared and exactly one new thread appeared, confirmed
+independently through both owner and read-only reviewer APIs (eight total threads).
+Source Markdown and equivalent saved-view configuration remained unchanged.
+Initial capture waited for bounded network failure detection; this checks retained
+cached identities, not first-ever offline identity creation. The fixture was
+stopped and the original Obsidian window restored after readback.
+
+This follow-up passes all 3,210 plugin tests / 249 suites (22 tests / 17 suites
+skipped), preview build/main types, and the frozen test-type gate (206 errors /
+45 signatures against 207 / 46). Changed-source lint has no errors and five
+existing proper-name warnings. Positive evidence does not complete authoritative
+absence checks, other Bases target kinds, wider typed groups, native reviewer
+authoring, cross-window/popout, physical mobile, accessibility or resource
+acceptance.
 
 Local evidence: `/private/tmp/group-native-evidence.json`,
 `/private/tmp/group-native-readback.log`, `/private/tmp/group-native-seed.log`,
@@ -91,3 +116,9 @@ Local evidence: `/private/tmp/group-native-evidence.json`,
 `/private/tmp/group-picker-provider-validation.log` and
 `/private/tmp/group-picker-interop.log`. These are disposable machine-local
 artifacts; fixture credentials are not committed.
+
+Target-status follow-up evidence: `/private/tmp/group-status-regression.log`,
+`/private/tmp/group-status-focused.log`, `/private/tmp/group-status-build.log`,
+`/private/tmp/group-status-testtypes.log` and `/private/tmp/group-status-lint.log`.
+
+Offline timing: `/private/tmp/group-native-queue-timing.json`.

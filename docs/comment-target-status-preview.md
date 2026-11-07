@@ -19,8 +19,9 @@ Bases definitions, timeline axes and shared markers use complete account-scoped
 catalogs. One page performs at most one read per needed catalog type. Fresh HTTP
 proof is distinguished from cached retry fallback; absence from an old cache is
 not proof of deletion. Changed definitions/axes/markers retain the captured
-target and request review. Cells, records, properties, group membership and lane
-membership remain unchecked where authoritative existence evidence is missing.
+target and request review. Cells, records and properties remain unchecked where authoritative existence
+evidence is missing. Group and lane targets can additionally use exact positive
+evidence from the current native saved view, as described below.
 Being filtered out of a saved view is never treated as deletion.
 
 Checks run in the background while cached comments remain available. A page
@@ -100,3 +101,19 @@ passes **254 tests / 6 suites**; the full suite passes **3,110 tests / 246 suite
 with 22 tests / 17 suites skipped. Build/main types, frozen test types and
 changed-source lint pass. These checks do not complete native Bases placement,
 computed-result authorization or the remaining release matrix.
+
+## Native group and lane evidence
+
+Current native panes can confirm the captured group or range lane is present
+locally. One bounded page lookup reuses the pane's verified target mapping and
+reads its current handles once. Exact anchors, scope, generation, definition and
+range axis guards prevent stale matches; duplicate or absent handles remain
+unchecked. Filtering/virtualization never proves deletion. The wording explicitly
+describes local evidence, including when offline. Scope and semantic changes
+invalidate the sidebar; scroll paints alone do not repeat catalog reads.
+
+Native folder/Sequence status, view switching and navigation, and an exact
+Sequence lane range now pass against the actual temporary services. The full
+plugin suite passes 3,210 tests / 249 suites; build, main types, frozen test-type
+gate and changed-source lint pass. See [native group evidence](base-group-native-preview.md)
+for scope and outstanding acceptance.
