@@ -6,7 +6,7 @@ import { parseTimelineMarkerVersion, type TimelineMarkerVersion } from "./Discus
 import type { HistoryWindow } from "./DiscussionProtocol";
 import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
-import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
+import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, resolvePendingBaseGroupAnchor, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { DiscussionReattachment } from "./DiscussionReattachment";
 import { saveLocalWorkRecovery, type LocalWorkIO } from "./LocalWorkRecovery";
 import type { ReviewedAbandonment } from "./storage/DiscussionStore";
@@ -587,6 +587,13 @@ export class DiscussionSession {
 				definition.property.source !== (capture.source_kind === "file" ? "file" : "note") ||
 				definition.revision !== capture.group_definition_revision || definition.property.source !== anchor.property.source ||
 				definition.property.name !== anchor.property.name) throw new Error("Review this group's saved selection before sending. Your draft is retained.");
+			if (anchor.summary) {
+				const selected = anchor.summary, summary = catalog.targets.find(item => item.kind === "summary" && item.id === selected.definition_id);
+				if (!this.canAnchorBase("group_summary") || !summary || summary.kind !== "summary" || summary.revision !== selected.definition_revision ||
+					summary.summary !== selected.summary || summary.property.source !== selected.property.source || summary.property.name !== selected.property.name) {
+					throw new Error("Review this group's summary definition before sending. Your draft and group evidence are retained.");
+				}
+			}
 			if (anchor.range) {
 				const axis = await this.readTimelineAxis(command.scopeId), range = anchor.range;
 				if (this.closed || !this.canAnchorBase("timeline_range") || !this.permission(command.scopeId)?.comment ||
@@ -706,6 +713,21 @@ export class DiscussionSession {
 			generation: catalog.generation, registry_revision: catalog.registry_revision });
 		return parseLocalDiscussionAnchor({ version: 1, type: "base_group_pending", entry_id: catalog.entry_id,
 			property: definition.property, capture }) as PendingBaseGroupAnchor;
+	}
+	async captureBaseGroupSummary(scopeId: string, input: PendingBaseGroupAnchor, definitionId: string, definitionRevision: number): Promise<PendingBaseGroupAnchor> {
+		const group = parseLocalDiscussionAnchor(input), scope = parseDiscussionScope(scopeId), epoch = this.authenticationEpoch;
+		if (group.type !== "base_group_pending" || group.range || group.summary || group.entry_id !== scope?.entryId || group.capture.view_id !== scope.viewId ||
+			!this.canAnchorBase("group_summary") || !this.canAnchorBaseGroup(group.property) || !this.permission(scopeId)?.comment) throw new Error("Select a current group in this saved view first.");
+		const catalog = await this.readBaseDefinitions(scopeId), capture = group.capture;
+		const summary = catalog.targets.find(item => item.kind === "summary" && item.id === definitionId);
+		const grouping = catalog.targets.find(item => item.kind === "group" && item.id === capture.group_definition_id);
+		if (this.closed || epoch !== this.authenticationEpoch || !this.permission(scopeId)?.comment || !this.canAnchorBase("group_summary") || !this.canAnchorBaseGroup(group.property) ||
+			catalog.definition_id !== capture.definition_id || catalog.generation !== capture.generation || catalog.view_id !== capture.view_id ||
+			catalog.registry_revision !== capture.registry_revision || this.documentGeneration(scopeId) !== capture.generation ||
+			!grouping || grouping.revision !== capture.group_definition_revision || grouping.property.source !== group.property.source || grouping.property.name !== group.property.name ||
+			!summary || summary.kind !== "summary" || summary.revision !== definitionRevision) throw new Error("The group or summary changed. Select it again; your draft is retained.");
+		return parseLocalDiscussionAnchor({ ...group, summary: { type: "summary", definition_id: summary.id, definition_revision: summary.revision,
+			property: summary.property, summary: summary.summary } }) as PendingBaseGroupAnchor;
 	}
 	async captureBaseTarget(scopeId: string, target: BaseTargetSelection): Promise<BaseAnchor> {
 		const scope = parseDiscussionScope(scopeId), entry = this.entries.get(scopeId);
@@ -1038,7 +1060,7 @@ export class DiscussionSession {
 		const lane = laneAnchor === undefined ? undefined : parseLocalDiscussionAnchor(laneAnchor);
 		if (lane && lane.type !== "base_group_pending" && (lane.type !== "base" || lane.target.type !== "group" || lane.definition_id !== selection.definition_id ||
 			lane.view_id !== selection.view_id || lane.generation !== selection.generation)) throw new Error("The lane does not belong to this saved view.");
-		if (lane?.type === "base_group_pending" && (lane.range || lane.entry_id !== scope.entryId ||
+		if (lane?.type === "base_group_pending" && (lane.range || lane.summary || lane.entry_id !== scope.entryId ||
 			lane.capture.definition_id !== selection.definition_id || lane.capture.view_id !== selection.view_id ||
 			lane.capture.generation !== selection.generation || lane.capture.registry_revision !== selection.registry_revision ||
 			!this.canAnchorBaseGroup(lane.property))) throw new Error("Select a current supported lane in this saved view.");
@@ -1079,13 +1101,17 @@ export class DiscussionSession {
 				return this.statusValue === "ready" ? "Matches the latest verified timeline axis." : "Matches the last verified timeline axis. Reconnect to check for changes.";
 			} catch { return "The current timeline axis could not be verified. The original range and discussion are retained."; }
 		}
-		if (anchor.target.type !== "formula" && anchor.target.type !== "summary" && anchor.target.type !== "formula_cell" && anchor.target.type !== "group") return "";
+		if (anchor.target.type !== "formula" && anchor.target.type !== "summary" && anchor.target.type !== "formula_cell" && anchor.target.type !== "group" && anchor.target.type !== "group_summary") return "";
 		try {
 			const catalog = await this.readBaseDefinitions(scopeId), target = anchor.target;
 			if (catalog.definition_id !== anchor.definition_id || catalog.generation !== anchor.generation || catalog.view_id !== anchor.view_id) return "This discussion belongs to an earlier saved-view identity. Its original target is retained.";
-			const found = catalog.targets.find(item => item.id === target.definition_id && item.kind === (target.type === "formula_cell" ? "formula" : target.type));
+			const found = catalog.targets.find(item => item.id === target.definition_id && item.kind === (target.type === "formula_cell" ? "formula" : target.type === "group_summary" ? "summary" : target.type));
 			if (!found) return this.statusValue === "ready" ? "This definition is no longer available in the saved view. The original discussion is retained." : "This definition is absent from the cached view. Reconnect to verify it.";
 			if (found.revision !== target.definition_revision) return "The definition has changed since this discussion was created. The original discussion is retained.";
+			if (target.type === "group_summary") {
+				const group = catalog.targets.find(item => item.kind === "group" && item.id === target.group.definition_id);
+				if (!group || group.revision !== target.group.definition_revision) return "The grouping definition changed. The original group summary and discussion are retained.";
+			}
 			return this.statusValue === "ready" ? "Matches the latest verified definition." : "Matches the last verified definition. Reconnect to check for changes.";
 		} catch { return "The current definition could not be verified. The original discussion and target are retained."; }
 	}
@@ -1104,7 +1130,7 @@ export class DiscussionSession {
 				if (scope?.entryId !== local.entry_id || scope.viewId !== local.capture.view_id) throw new Error("Choose a target in the same saved view.");
 				const verified = await this.transport.captureBaseGroup(scopeId, local.capture);
 				if (!current() || verified.target.type !== "group" || verified.target.property.source !== local.property.source || verified.target.property.name !== local.property.name) throw new Error("The group selection changed. Select it again.");
-				anchor = local.range ? parseAnchor({ ...verified, target: { ...local.range, lane: verified.target } }) : verified;
+				anchor = resolvePendingBaseGroupAnchor(local, verified);
 			} else anchor = local;
 			return this.reattachments.prepare(scopeId, threadId, revision, anchor, current);
 		})());

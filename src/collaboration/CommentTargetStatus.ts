@@ -88,10 +88,17 @@ export function baseTargetStatus(anchor: BaseAnchor, evidence: BaseTargetEvidenc
 		return target.lane ? evidence.groupPresent ? status("attached", "The timeline axis matches and the captured lane is present in the current local saved view.") :
 			uncheckedTarget("The timeline axis matches. The captured lane still needs a membership check; absence from the layout alone does not detach it.") : status("attached", evidence.online ? "Matches the latest verified timeline axis." : "Matches the last verified timeline axis. Reconnect to check for changes.");
 	}
-	if (target.type === "formula" || target.type === "formula_cell" || target.type === "summary" || target.type === "group") {
-		const found = evidence.definitions?.targets.find(item => item.id === target.definition_id && item.kind === (target.type === "formula_cell" ? "formula" : target.type));
+	if (target.type === "formula" || target.type === "formula_cell" || target.type === "summary" || target.type === "group" || target.type === "group_summary") {
+		const found = evidence.definitions?.targets.find(item => item.id === target.definition_id && item.kind === (target.type === "formula_cell" ? "formula" : target.type === "group_summary" ? "summary" : target.type));
 		if (!found) return evidence.online ? status("unanchored", "This definition is absent from the latest verified saved view.") : uncheckedTarget("This definition is absent from the cached view. Reconnect to verify it.");
 		if (found.revision !== target.definition_revision) return status("changed", "The target definition changed after this discussion was created.");
+		if (target.type === "group_summary") {
+			const group = evidence.definitions?.targets.find(item => item.kind === "group" && item.id === target.group.definition_id);
+			if (!group) return evidence.online ? status("unanchored", "The grouping definition is absent from the latest verified saved view.") : uncheckedTarget("The grouping definition is absent from the cached view. Reconnect to verify it.");
+			if (group.revision !== target.group.definition_revision) return status("changed", "The grouping definition changed after this summary discussion was created.");
+			return evidence.targetPresent ? status("attached", "The summary and grouping definitions match the target in the current local saved view.") :
+				uncheckedTarget("The summary and grouping definitions match. The exact group summary still needs verification; a hidden group does not detach it.");
+		}
 		if (target.type === "group" && evidence.groupPresent) return status("attached", "The saved definition matches and the captured group is present in the current local saved view.");
 		if (target.type === "formula_cell") {
 			const issue = recordStatus(); if (issue) return issue;

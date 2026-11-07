@@ -523,7 +523,7 @@ export class DiscussionHost extends Component {
 						return definition?.id === target.definition_id && definition.revision === target.definition_revision && definition.summary === target.summary ?
 							{ type: "summary", property: target.property, summary: target.summary } : undefined;
 					}
-					if (target.type === "group" || target.type === "timeline_range" || target.type === "timeline_marker") return;
+					if (target.type === "group" || target.type === "group_summary" || target.type === "timeline_range" || target.type === "timeline_marker") return;
 					if (target.type === "formula" || target.type === "formula_cell") {
 						const definition = formulas.get(target.property.name);
 						if (!definition || definition.id !== target.definition_id || definition.revision !== target.definition_revision) return;
@@ -914,13 +914,14 @@ export class DiscussionHost extends Component {
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
 	targetLabel(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): string | undefined {
-		if (anchor.type === "base_group_pending") return (anchor.range ? timelineRangeLabel(anchor.range.range) + " · lane: " : "Group: ") + sharedBaseGroupLabel(anchor.property, anchor.capture.value) + " (verification pending)";
+		if (anchor.type === "base_group_pending") return (anchor.range ? timelineRangeLabel(anchor.range.range) + " · lane: " : anchor.summary ? "Summary: " + anchor.summary.property.source + "." + anchor.summary.property.name + " · " + anchor.summary.summary + " · group: " : "Group: ") + sharedBaseGroupLabel(anchor.property, anchor.capture.value) + " (verification pending)";
 		if (anchor.type !== "base" || parseDiscussionScope(entryId)?.viewId !== anchor.view_id) return;
 		const target = anchor.target;
 		if (target.type === "view") return "Entire saved view";
 		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
 		if (target.type === "formula") return "Formula definition: " + target.property.name;
 		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
+		if (target.type === "group_summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary + " · group: " + sharedBaseGroupLabel(target.group.property, target.group.value);
 		if (target.type === "group") return "Group: " + sharedBaseGroupLabel(target.property, target.value);
 		if (target.type === "timeline_range") return timelineRangeLabel(target.range) + (target.lane ? " · lane: " + sharedBaseGroupLabel(target.lane.property, target.lane.value) : "");
 		if (target.type === "timeline_marker") return "Marker: " + target.content.label + " · " + timelineRangeLabel(target.content.range);

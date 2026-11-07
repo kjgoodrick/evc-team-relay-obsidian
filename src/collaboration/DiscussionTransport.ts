@@ -44,7 +44,7 @@ for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "ti
 for (const code of ["timeline_markers_disabled", "timeline_marker_catalog_changed", "timeline_marker_changed", "timeline_marker_unavailable",
 	"timeline_marker_limit", "timeline_marker_placement_limit", "invalid_marker_placement", "base_editor_required", "base_generation_changed"]) errorCodes.add(code);
 for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
-for (const code of ["base_groups_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
+for (const code of ["base_groups_disabled", "base_group_summaries_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
 	"base_group_limit", "base_group_witness_limit", "base_group_identity_conflict", "operation_conflict"]) errorCodes.add(code);
 for (const code of ["pictures_disabled", "picture_identity_conflict", "picture_staging_quota", "picture_digest_mismatch", "picture_not_verified",
 	"picture_expired", "picture_too_large", "picture_output_too_large", "picture_too_many_pixels", "animated_picture_unsupported", "invalid_picture", "picture_changed"]) errorCodes.add(code);
@@ -74,7 +74,7 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "base") {
 		try { const anchor = parseAnchor(payload.anchor);
 			if (scope.viewId !== undefined && (anchor.type !== "base" || anchor.view_id !== scope.viewId)) throw new Error("Wrong saved view");
-			if (anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
+			if (anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "group_summary" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
 		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
 	}
 	if (op.type === "thread.create" && scope.viewId !== undefined && (!object(payload.anchor) || payload.anchor.type !== "base")) throw new DiscussionFailure("reject", "invalid_local_anchor");
@@ -110,7 +110,7 @@ function onlineEnvelope(shareId: string, operation: OnlineOperation): string {
 	if (command.type === "thread.reattach") {
 		try {
 			const anchor = reattachmentAnchor(operation);
-			if (sourceAnchor(anchor) || anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
+			if (sourceAnchor(anchor) || anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "group_summary" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
 		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
 	}
 	const body = JSON.stringify({ protocol_version: 1, operation_id: operation.operationId, share_id: shareId,
@@ -212,8 +212,8 @@ export class DiscussionTransport implements DiscussionSender {
 				value.discussion_base_targets.some(kind => typeof kind !== "string" || kind.length > 64) ||
 				new Set(value.discussion_base_targets).size !== value.discussion_base_targets.length) throw new DiscussionFailure("pause", "invalid_read_response");
 			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind) &&
-				(!["formula", "summary", "formula_cell", "group"].includes(kind) || definitionCatalog) &&
-				(kind !== "group" || groupCapture) && (kind !== "timeline_marker" || markerCapture));
+				(!["formula", "summary", "formula_cell", "group", "group_summary"].includes(kind) || definitionCatalog) &&
+				(!["group", "group_summary"].includes(kind) || groupCapture) && (kind !== "timeline_marker" || markerCapture));
 			const records = value.discussion_base_record_types;
 			// The initial Bases protocol only accepted Markdown records.
 			if (records === undefined) baseRecordTypes = ["markdown"];
@@ -544,7 +544,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "base_group_summaries_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

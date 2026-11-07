@@ -40,7 +40,7 @@ export type WireTextAnchor = { version: 1; type: "text"; document_id: string; ge
 export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
 export type ImageFileAnchor = { version: 1; type: "image_file"; generation: string; asset: Extract<ImageAsset, { kind: "managed" }>;
 	basis: ImageBasis; geometry: ImageGeometry };
-export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell", "group", "timeline_range", "timeline_marker"] as const;
+export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell", "group", "group_summary", "timeline_range", "timeline_marker"] as const;
 export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
 export const BASE_RECORD_TYPES = ["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as const;
 export type BaseRecordType = typeof BASE_RECORD_TYPES[number];
@@ -49,10 +49,12 @@ export function isBaseRecordType(value: unknown): value is BaseRecordType {
 }
 export type BaseProperty = { source: "note" | "file"; name: string };
 export type BaseDefinitionProperty = { source: "note" | "file" | "formula"; name: string };
+export type BaseGroupTarget = { type: "group"; definition_id: string; definition_revision: number; property: BaseDefinitionProperty; group_id: string; witness_id: string; value: BaseGroupValue };
+export type BaseSummaryTarget = { type: "summary"; definition_id: string; definition_revision: number; property: BaseDefinitionProperty; summary: string };
+export type BaseGroupSummaryTarget = Omit<BaseSummaryTarget, "type"> & { type: "group_summary"; group: BaseGroupTarget };
 export type BaseDefinedTarget = { type: "formula"; definition_id: string; definition_revision: number; property: { source: "formula"; name: string } } |
 	{ type: "formula_cell"; definition_id: string; definition_revision: number; property: { source: "formula"; name: string }; record_id: string; record_generation: string } |
-	{ type: "summary"; definition_id: string; definition_revision: number; property: BaseDefinitionProperty; summary: string } |
-	{ type: "group"; definition_id: string; definition_revision: number; property: BaseDefinitionProperty; group_id: string; witness_id: string; value: BaseGroupValue };
+	BaseSummaryTarget | BaseGroupTarget | BaseGroupSummaryTarget;
 export function isBaseDefinitionProperty(value: unknown): value is BaseDefinitionProperty {
 	return isRecord(value) && typeof value.source === "string" && ["note", "file", "formula"].includes(value.source) && isBaseProperty({ ...value, source: "note" });
 }
@@ -234,10 +236,11 @@ function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 		}
 		parsed = { type: "timeline_range", axis_definition_id: target.axis_definition_id, axis_definition_revision: target.axis_definition_revision,
 			axis, range, ...(lane ? { lane } : {}) };
-	} else if (target.type === "formula" || target.type === "summary" || target.type === "formula_cell" || target.type === "group") {
+	} else if (target.type === "formula" || target.type === "summary" || target.type === "formula_cell" || target.type === "group" || target.type === "group_summary") {
 		requireValue(isId(target.definition_id) && isRevision(target.definition_revision) && target.definition_revision <= value.registry_revision &&
 			isBaseDefinitionProperty(target.property) && Object.keys(target).every(key =>
-				["type", "definition_id", "definition_revision", "property", ...(target.type === "summary" ? ["summary"] : []),
+				["type", "definition_id", "definition_revision", "property", ...(["summary", "group_summary"].includes(target.type as string) ? ["summary"] : []),
+					...(target.type === "group_summary" ? ["group"] : []),
 					...(target.type === "formula_cell" ? ["record_id", "record_generation"] : []),
 					...(target.type === "group" ? ["group_id", "witness_id", "value"] : [])].includes(key)));
 		const property = { source: target.property.source, name: target.property.name };
@@ -254,7 +257,13 @@ function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 				group_id: target.group_id, witness_id: target.witness_id, value: parseBaseGroupValue(target.value) };
 		} else {
 			requireValue(isBaseProperty({ source: "note", name: target.summary }));
-			parsed = { type: "summary", definition_id: target.definition_id, definition_revision: target.definition_revision, property, summary: target.summary as string };
+			const summary = { definition_id: target.definition_id, definition_revision: target.definition_revision, property, summary: target.summary as string };
+			if (target.type === "group_summary") {
+				// Check the nested kind before parsing; arbitrary recursive targets are invalid.
+				requireValue(isRecord(target.group) && target.group.type === "group");
+				const group = parseBaseAnchor({ ...value, target: target.group }).target as BaseGroupTarget;
+				parsed = { type: "group_summary", ...summary, group };
+			} else parsed = { type: "summary", ...summary };
 		}
 	} else {
 		requireValue(target.type === "item" || target.type === "cell" || target.type === "property");

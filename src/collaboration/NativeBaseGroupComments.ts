@@ -161,6 +161,9 @@ export class NativeBaseGroupComments {
 		throw new Error("The file group or its source changed. Refresh this view and select the group again; existing drafts are retained.");
 	}
 	async native(anchor: BaseAnchor | PendingBaseGroupAnchor): Promise<NativeBaseGroupTarget | undefined> {
+		// A summary selection must never navigate to a plain group header while
+		// its exact native summary adapter is unavailable.
+		if (anchor.type === "base_group_pending" && anchor.summary) return;
 		try {
 			if (anchor.type === "base_group_pending" && anchor.entry_id !== this.context.baseEntryId) return;
 			const captured = anchor.type === "base_group_pending" ? anchor.capture : anchor;

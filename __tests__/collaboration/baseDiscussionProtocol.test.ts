@@ -95,7 +95,7 @@ test("record capabilities are explicit, bounded and conservative with older serv
 	expect((await transport.capabilities()).baseRecordTypes).toEqual([]);
 });
 
-test.each([["base_discussions_disabled", "pause"], ["base_definition_not_synced", "retry"], ["base_view_unavailable", "reject"]])(
+test.each([["base_discussions_disabled", "pause"], ["base_group_summaries_disabled", "pause"], ["base_definition_not_synced", "retry"], ["base_view_unavailable", "reject"]])(
 	"Bases error %s retains its delivery classification", async (code, action) => {
 		const operation = { operationId: id(12), scopeId: id(8), type: "thread.create" as const, dependsOn: [],
 			payload: { type: "thread.create", thread_id: id(9), message_id: id(10), anchor: anchor() } };
@@ -103,3 +103,12 @@ test.each([["base_discussions_disabled", "pause"], ["base_definition_not_synced"
 		const transport = new DiscussionTransport(identity, credential, async () => reply({ detail: { code } }, 409));
 		await expect(transport.send(operation)).rejects.toMatchObject({ code, action });
 	});
+
+test("group-summary creation requires an explicit target plus definition and group support", async () => {
+	for (const catalog of [false, true]) for (const groups of [false, true]) for (const advertised of [false, true]) {
+		const transport = new DiscussionTransport(identity, credential, async () => reply({ protocol_version: 1,
+			features: { discussion_commands: true, discussion_bases: true, discussion_base_definition_catalog: catalog, discussion_base_groups: groups },
+			discussion_base_targets: advertised ? ["group_summary"] : ["summary", "group"] }));
+		expect((await transport.capabilities()).baseTargets.includes("group_summary")).toBe(catalog && groups && advertised);
+	}
+});

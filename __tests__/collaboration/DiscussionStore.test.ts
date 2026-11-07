@@ -171,9 +171,9 @@ test("version-1 upgrade preserves drafts/outbox and adds scope cleanup without t
 	} finally { store.close(); other.close(); }
 });
 
-test("version-19 upgrade preserves existing work and fences clients that cannot preserve rich drafts", async () => {
+test.each([19, 23])("version-%s upgrade preserves existing work and fences older clients", async version => {
 	const factory = new IDBFactory();
-	const opening = jest.spyOn(factory, "open").mockImplementationOnce(name => IDBFactory.prototype.open.call(factory, name, 19));
+	const opening = jest.spyOn(factory, "open").mockImplementationOnce(name => IDBFactory.prototype.open.call(factory, name, version));
 	const old = await DiscussionStore.open(identity, factory); opening.mockRestore();
 	await old.saveDraft({ id: "legacy", scopeId: "note", revision: 0, body: "Saved before rich editing" });
 	await old.enqueue(command("before-upgrade"));
@@ -184,7 +184,7 @@ test("version-19 upgrade preserves existing work and fences clients that cannot 
 		expect(await current.getOperation("before-upgrade")).toBeDefined();
 		await expect(old.getDraft("legacy")).rejects.toThrow();
 		const name = "team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
-		await expect(new Promise((resolve, reject) => { const request = factory.open(name, 19); request.onsuccess = () => { request.result.close(); resolve(undefined); }; request.onerror = () => reject(request.error); })).rejects.toMatchObject({ name: "VersionError" });
+		await expect(new Promise((resolve, reject) => { const request = factory.open(name, version); request.onsuccess = () => { request.result.close(); resolve(undefined); }; request.onerror = () => reject(request.error); })).rejects.toMatchObject({ name: "VersionError" });
 	} finally { current.close(); old.close(); }
 });
 

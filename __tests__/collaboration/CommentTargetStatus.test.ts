@@ -97,3 +97,22 @@ test("record identity and exact native cell presence remain separate from visibi
 	expect(baseTargetStatus(header, evidence).state).toBe("attached");
 	expect(baseTargetStatus(header, { ...evidence, targetPresent: false }).state).toBe("unknown");
 });
+
+test("group-summary status verifies both definitions and needs the exact summary handle", () => {
+	const property = { source: "note" as const, name: "Status" };
+	const group = { type: "group" as const, definition_id: id(10), definition_revision: 2, property,
+		value: { type: "text" as const, value: "Ready" }, group_id: id(11), witness_id: id(12) };
+	const anchor: BaseAnchor = { ...base, target: { type: "group_summary", definition_id: id(5), definition_revision: 2,
+		property: { source: "formula", name: "Score" }, summary: "Average", group } };
+	const definitions: BaseDefinitionCatalog = { ...catalog, targets: [{ ...catalog.targets[0], kind: "summary", summary: "Average" },
+		{ id: id(10), kind: "group", revision: 2, fingerprint: "a".repeat(64), property }] };
+	const evidence = { generation, definitions, online: true, groupPresent: true, targetPresent: true };
+	expect(baseTargetStatus(anchor, evidence).state).toBe("attached");
+	expect(baseTargetStatus(anchor, { ...evidence, targetPresent: false }).state).toBe("unknown");
+	for (const kind of ["summary", "group"]) {
+		expect(baseTargetStatus(anchor, { ...evidence, definitions: { ...definitions, targets: definitions.targets.map(item => item.kind === kind ? { ...item, revision: 3 } : item) } }).state).toBe("changed");
+		const missing = { ...definitions, targets: definitions.targets.filter(item => item.kind !== kind) };
+		expect(baseTargetStatus(anchor, { ...evidence, definitions: missing }).state).toBe("unanchored");
+		expect(baseTargetStatus(anchor, { ...evidence, definitions: missing, online: false }).state).toBe("unknown");
+	}
+});

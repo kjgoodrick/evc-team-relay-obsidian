@@ -57,7 +57,8 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 	try {
 		const state = await content.read(f.baseEntry);
 		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: state.state, bytes: new TextEncoder().encode(JSON.stringify({
-			views: [{ name: "Groups", type: viewType, ...axisOptions, groupBy: { property: "status", direction: "ASC" } }],
+			views: [{ name: "Groups", type: viewType, ...axisOptions, groupBy: { property: "status", direction: "ASC" }, summaries: { "formula.total": "Average" } }],
+			formulas: { total: "2" },
 		})).buffer as ArrayBuffer });
 		const saved = await content.read(f.baseEntry), snapshot = await registry.inspect(f.baseEntry, saved.state.record.hash!, saved.state.generation!);
 		const view = snapshot.views[0].id!, scope = baseDiscussionScope(f.baseEntry, view);
@@ -152,6 +153,33 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 
 		expect((await transport.thread(scope, historical.thread_id)).anchor).toEqual(first);
 		expect((await transport.thread(scope, accepted.thread_id)).anchor).toEqual(intentAnchor);
+		// A summary in this exact group keeps both identities through independent
+		// capture/send response loss and cache reopen. No aggregate is transmitted.
+		expect((await transport.capabilities()).baseTargets).toContain("group_summary");
+		captureSession = new DiscussionSession(store, transport); await captureSession.start(); captureSession.watch(scope, () => {}, "base");
+		await captureSession.refresh(); captureSession.setForeground(false); await captureSession.outbox.settled();
+		const summaryDefinition = catalog.targets.find(item => item.kind === "summary")!;
+		const summaryGroup = await captureSession.captureBaseGroupSelection(scope, { ...localTarget.capture });
+		const summaryTarget = await captureSession.captureBaseGroupSummary(scope, summaryGroup, summaryDefinition.id, summaryDefinition.revision);
+		const summaryOp: QueuedCommand = { operationId: randomUUID(), scopeId: scope, type: "base.group.create", dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: summaryTarget, body: bodyFromText("This group's summary definition") }) };
+		await captureSession.queue(summaryOp); await captureSession.close(); captureSession = undefined;
+		store = await DiscussionStore.open(storeIdentity, factory); loseCapture = true; loseSend = true;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const claim = (await store.claimNext("summary-" + attempt))!;
+			await expect(new DiscussionDelivery(store, twoPhase).send(claim)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
+			await store.fail(summaryOp.operationId, claim.lease!, "network_unavailable", 0);
+			store.close(); store = await DiscussionStore.open(storeIdentity, factory);
+		}
+		const summaryClaim = (await store.claimNext("summary-reopened"))!, summaryAccepted = await new DiscussionDelivery(store, twoPhase).send(summaryClaim);
+		if (!("thread_id" in summaryAccepted)) throw new Error("Expected summary acceptance");
+		await store.accept(summaryOp.operationId, protocolJson(summaryAccepted));
+		const summaryPrepared = prepareBaseGroupCommand(summaryOp, summaryClaim.preparedAnchor);
+		expect(await transport.send(summaryPrepared)).toEqual(summaryAccepted);
+		const summaryPage = await transport.thread(scope, summaryAccepted.thread_id);
+		expect(summaryPage.anchor).toEqual((summaryPrepared.payload as Record<string, unknown>).anchor);
+		expect(summaryPage.anchor).toMatchObject({ target: { type: "group_summary", definition_id: summaryDefinition.id,
+			group: { type: "group", group_id: captured.target.group_id, value: captured.target.value } } });
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_id: f.secret }))
 			.rejects.toMatchObject({ action: "reject", code: "target_unavailable", status: 404 });
 		let rangeThread: string | undefined, rangeAnchor: BaseAnchor | undefined;
@@ -207,6 +235,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		await until(() => existsSync(join(f.restartDir, "restart-done")), "relay restarts");
 		const restored = await peer(f.bobToken, "read");
 		expect(restored.text.toString()).toBe(owner.text.toString());
+		expect((await transport.thread(scope, summaryAccepted.thread_id)).anchor).toEqual(summaryPage.anchor);
 		if (rangeThread) expect((await transport.thread(scope, rangeThread)).anchor).toEqual(rangeAnchor);
 		const fresh = await transport.captureBaseGroup(scope, request(restored.doc, "Done"));
 		expect(fresh.target).toEqual(captured.target);

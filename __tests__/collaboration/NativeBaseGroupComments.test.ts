@@ -235,3 +235,11 @@ test("the reference bridge freezes siblings before waiting and bounds malformed 
 	await expect(revealBaseGroupValue({ type: "unresolved_link", record_id: id(6), record_generation: id(8), link: "Missing", source_path_sha256: hash("old") },
 		async () => ({ file: f.a, sourcePathHash: hash("new") }))).rejects.toThrow("moved");
 });
+
+test("a pending group-summary selection cannot silently navigate to a plain group header", async () => {
+	const f = setup(), captured = await f.groups.capture(f.handle);
+	const summary = { type: "summary" as const, definition_id: id(20), definition_revision: 1,
+		property: { source: "formula" as const, name: "Total" }, summary: "Average" };
+	expect(await f.groups.native({ ...captured, summary })).toBeUndefined();
+	expect(await f.groups.native(captured)).toEqual(f.target);
+});

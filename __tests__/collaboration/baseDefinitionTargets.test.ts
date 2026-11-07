@@ -392,3 +392,52 @@ test.each(["definitions", "axis", "markers", "records"] as const)("%s authentica
 		await s.session.start(); expect(s.session.status).toBe("ready");
 	} finally { await s.session.close(); }
 });
+
+function groupSummaryRemote() {
+	const source = groupRemote();
+	source.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "group", "summary", "group_summary"], baseRecordTypes: ["markdown"] });
+	source.baseDefinitions.mockResolvedValue({ ...catalog(), targets: [{ id: id(10), kind: "group", revision: 2,
+		fingerprint: "a".repeat(64), property: { source: "note", name: "status" } }, catalog().targets[1]] });
+	return source;
+}
+
+test("group-summary selections and offline sends preserve both definitions without requiring source comment access", async () => {
+	const factory = new IDBFactory(); let s = await open(factory, groupSummaryRemote());
+	try {
+		const group = await s.session.captureBaseGroupSelection(scope, groupSelection());
+		const selected = await s.session.captureBaseGroupSummary(scope, group, id(11), 2);
+		expect(selected).toMatchObject({ ...group, summary: { type: "summary", definition_id: id(11), definition_revision: 2, summary: "Average" } });
+		await s.store.saveDraft({ id: "group-summary", scopeId: scope, revision: 0, body: "Keep me", target: protocolJson(selected) });
+		await s.session.close();
+		const offline = groupSummaryRemote();
+		for (const read of [offline.capabilities, offline.permissions, offline.baseDefinitions, offline.baseTargetContext, offline.changes]) read.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		s = await open(factory, offline);
+		expect(await s.session.captureBaseGroupSummary(scope, group, id(11), 2)).toEqual(selected);
+		const command = { operationId: id(30), scopeId: scope, type: "base.group.create" as const, dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Offline summary"), anchor: selected }) };
+		await s.session.queue(command, { id: "group-summary", revision: 0 });
+		expect(await s.store.getDraft("group-summary")).toBeUndefined(); expect((await s.store.pending(scope))[0].payload).toEqual(command.payload);
+		expect(offline.permissions.mock.calls.map(call => call[0])).not.toContain(id(20));
+	} finally { await s.session.close(); }
+});
+
+test.each(["summary", "group", "capability", "permission"])("group-summary %s changes preserve the original draft and prevent queueing", async change => {
+	const s = await open(new IDBFactory(), groupSummaryRemote());
+	try {
+		const group = await s.session.captureBaseGroupSelection(scope, groupSelection());
+		const selected = await s.session.captureBaseGroupSummary(scope, group, id(11), 2);
+		await s.store.saveDraft({ id: "summary", scopeId: scope, revision: 0, body: "Original", target: protocolJson(selected) });
+		if (change === "permission") {
+			s.transport.permissions.mockResolvedValue({ read: true, comment: false, edit: false, moderate: false }); s.session.setForeground(true); await s.session.refresh(); s.session.outbox.stop(); await s.session.outbox.settled();
+		} else if (change === "capability") {
+			s.transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "group", "summary"], baseRecordTypes: ["markdown"] }); await s.session.start(); s.session.setForeground(false);
+		} else {
+			const current = await s.session.readBaseDefinitions(scope);
+			s.transport.baseDefinitions.mockResolvedValue({ ...current, registry_revision: 3, targets: current.targets.map(item => item.kind === change ? { ...item, revision: 3 } : item) });
+		}
+		await expect(s.session.captureBaseGroupSummary(scope, group, id(11), 2)).rejects.toThrow();
+		await expect(s.session.queue({ operationId: id(30), scopeId: scope, type: "base.group.create", dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Original"), anchor: selected }) }, { id: "summary", revision: 0 })).rejects.toThrow();
+		expect((await s.store.getDraft("summary"))?.target).toEqual(selected); expect(await s.store.pending(scope)).toHaveLength(0);
+	} finally { await s.session.close(); }
+});
