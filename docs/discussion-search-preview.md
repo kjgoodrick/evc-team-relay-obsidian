@@ -16,5 +16,24 @@ navigation. Empty bounded-scan pages can offer **Continue searching**.
 
 See the [server contract and validation evidence](../../evc-team-relay/docs/discussion-search-preview.md)
 for migration `202611070002`, enablement, authorization, pagination, index tradeoffs
-and limits. The unanchored-target filter and native desktop/mobile/accessibility
-acceptance remain unfinished. No live-vault installation or deployment occurred.
+and limits. Loaded discussion target filters are documented separately in the
+[target-status preview](comment-target-status-preview.md). Share-wide target
+discovery and the remaining native/mobile/accessibility acceptance are unfinished.
+No live-vault installation or deployment occurred.
+
+## Native desktop verification, November 7
+
+Obsidian 1.13.7 with plugin `587101b` and disposable actual services verifies:
+
+- Searching `Aurora` finds three synthetic current comments.
+- Mentions me finds only the reviewer comment mentioning the signed-in owner.
+- Written by me finds the two owner comments.
+- Written by me plus Resolved finds only the owner's resolved discussion.
+- Open matching comment focuses that exact message and shows Send and reopen.
+
+The fixture contains an open reviewer mention, an open owner discussion and a
+resolved owner discussion. These checks cover current-note search; shared-folder
+and Bases scopes, native revocation/refresh/pagination, keyboard/touch/mobile and
+resource acceptance remain. The services are stopped and the original window
+restored. Local evidence is
+`/private/tmp/comment-inbox-search-native-evidence.json`.

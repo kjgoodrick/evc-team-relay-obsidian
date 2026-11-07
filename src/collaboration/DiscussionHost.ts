@@ -78,7 +78,6 @@ export class DiscussionHost extends Component {
 	private rangeWorkflow?: TimelineRangeWorkflow;
 	private markerPicker?: TimelineMarkerPicker;
 	private markerManager?: TimelineMarkerManager;
-	private inboxAction = 0;
 	private reattachSelection?: { session: DiscussionSession; entryId: string; thread: AnchoredThread };
 	private reattachModal?: ReattachCommentModal;
 	private recoveryModal?: RecoverCommentModal | CancelReactionModal;
@@ -305,13 +304,13 @@ export class DiscussionHost extends Component {
 		return result;
 	}
 	async openInboxItem(session: DiscussionSession, value: InboxItem): Promise<void> {
-		this.linkAction++;
-		const item = parseInboxItem(value), scopeId = inboxScope(item), action = ++this.inboxAction;
+		const item = parseInboxItem(value), scopeId = inboxScope(item), action = ++this.linkAction;
+		let expectedFile = this.lastFile;
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		if (!folder) throw new Error("This shared folder is no longer connected.");
-		const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === item.entry_id) paths.push(path); });
+		const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === item.entry_id && paths.length < 2) paths.push(path); });
 		const file = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
-		const current = () => !this.stopped && action === this.inboxAction && session.inbox.available && !!file &&
+		const current = () => this.sessionCurrent(session) && action === this.linkAction && this.lastFile === expectedFile && session.inbox.available && !!file &&
 			this.plugin.app.vault.getFileByPath(file.path) === file &&
 			this.targetFor(file).session === session && this.targetFor(file).kind === item.kind &&
 			(item.kind === "base" ? this.targetFor(file).baseEntryId : this.targetFor(file).entryId) === item.entry_id;
@@ -320,8 +319,8 @@ export class DiscussionHost extends Component {
 		try {
 			await session.scopeReady(scopeId);
 			if (!current() || !session.permission(scopeId)?.read) throw new Error("Discussion access changed. Refresh the inbox.");
-			const thread = await session.inboxThread(item);
-			if (!current() || !thread?.anchor) throw new Error("The discussion is unavailable or has not been saved for offline use.");
+			const result = await session.linkedThread(scopeId, item.thread_id, item.message_id), thread = result?.thread;
+			if (!current() || !session.permission(scopeId)?.read || !thread?.anchor) throw new Error("The discussion is unavailable or has not been saved for offline use.");
 			if (item.kind === "base") {
 				if (thread.anchor.type !== "base" || thread.anchor.view_id !== item.view_id) throw new Error("The saved discussion view changed.");
 				// Keep the authoritative original ID even if its display metadata
@@ -332,8 +331,12 @@ export class DiscussionHost extends Component {
 				if (!current()) return;
 				this.baseSelections.get(session)!.get(item.entry_id)!.choice = choice;
 			}
-			await this.openThread(file, session, scopeId, item.thread_id);
-			if (current()) await this.revealTarget(session, scopeId, thread.anchor);
+			this.detachedTarget = undefined; expectedFile = file; this.lastFile = file;
+			this.focus = { session, entryId: scopeId, threadId: item.thread_id, serial: ++this.focusSerial,
+				messageId: result?.message?.id, messageSequence: result?.message?.created_sequence,
+				notice: !result?.message ? "The notified message is unavailable or has not been saved offline. Showing its discussion." : undefined };
+			await this.open(current);
+			if (current() && session.permission(scopeId)?.read) await this.revealTarget(session, scopeId, thread.anchor, current);
 		} finally { stop(); }
 	}
 	targetFor(file?: TFile): CommentTarget {

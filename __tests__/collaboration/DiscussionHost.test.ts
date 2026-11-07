@@ -226,7 +226,8 @@ async function inboxFixture() {
 	const stop = jest.fn(), anchor = { version: 1 as const, type: "note" as const };
 	const session = Object.assign(mockSessions[0], { identity: { shareId: id(2) }, inbox: { available: true },
 		watch: jest.fn(() => stop), scopeReady: jest.fn().mockResolvedValue(undefined), permission: () => ({ read: true }),
-		inboxThread: jest.fn().mockResolvedValue({ id: id(30), anchor }) });
+		linkedThread: jest.fn().mockResolvedValue({ thread: { id: id(30), anchor }, message: { id: id(32), created_sequence: 801 } }),
+	});
 	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined), reveal = jest.spyOn(s.host, "revealTarget").mockResolvedValue(undefined);
 	return { ...s, session, stop, anchor, open, reveal };
 }
@@ -345,8 +346,26 @@ test("inbox navigation resolves the current local file by managed identity inste
 		await s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
 		expect(s.open).toHaveBeenCalledTimes(1);
 		expect(s.host.current()).toMatchObject({ path: "Team/Note.md", entryId: id(3) });
-		expect(s.reveal).toHaveBeenCalledWith(s.session, id(3), s.anchor);
+		expect(s.reveal).toHaveBeenCalledWith(s.session, id(3), s.anchor, expect.any(Function));
 		expect(s.stop).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("an inbox reply opens its exact message window without marking it read", async () => {
+	const s = await inboxFixture();
+	try {
+		await s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
+		expect(s.session.linkedThread).toHaveBeenCalledWith(id(3), id(30), id(32));
+		expect(s.host.focusedThread(s.session as unknown as DiscussionSession, id(3))).toMatchObject({ messageId: id(32), messageSequence: 801 });
+	} finally { s.close(); }
+});
+
+test("a missing inbox reply opens its discussion with an explanation", async () => {
+	const s = await inboxFixture();
+	s.session.linkedThread.mockResolvedValue({ thread: { id: id(30), anchor: s.anchor } });
+	try {
+		await s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
+		expect(s.host.focusedThread(s.session as unknown as DiscussionSession, id(3))).toMatchObject({ messageId: undefined, notice: expect.stringContaining("unavailable") });
 	} finally { s.close(); }
 });
 
@@ -364,7 +383,7 @@ test("an ambiguous inventory identity cannot navigate from an inbox notification
 test.each(["account", "deleted", "revoked"])("a delayed inbox read cannot navigate after %s changes", async change => {
 	const s = await inboxFixture();
 	let release!: (value: unknown) => void;
-	s.session.inboxThread.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+	s.session.linkedThread.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
 	const navigation = s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
 	const result = expect(navigation).rejects.toThrow();
 	try {
@@ -372,8 +391,37 @@ test.each(["account", "deleted", "revoked"])("a delayed inbox read cannot naviga
 		if (change === "account") s.account(id(90));
 		else if (change === "deleted") Object.assign(s.plugin.app.vault, { getFileByPath: () => null });
 		else s.session.inbox.available = false;
-		release({ id: id(30), anchor: s.anchor }); await result;
+		release({ thread: { id: id(30), anchor: s.anchor } }); await result;
 		expect(s.open).not.toHaveBeenCalled(); expect(s.reveal).not.toHaveBeenCalled(); expect(s.stop).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("opening another discussion cancels a delayed inbox message read", async () => {
+	const s = await inboxFixture(); let release!: (value: unknown) => void;
+	s.session.linkedThread.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+	const opening = s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
+	const rejected = expect(opening).rejects.toThrow("unavailable");
+	try {
+		await Promise.resolve();
+		await s.host.openThread(s.file, s.session as unknown as DiscussionSession, id(3), id(99));
+		release({ thread: { id: id(30), anchor: s.anchor }, message: { id: id(32), created_sequence: 801 } });
+		await rejected;
+		expect(s.host.focusedThread(s.session as unknown as DiscussionSession, id(3))?.threadId).toBe(id(99));
+		expect(s.open).toHaveBeenCalledTimes(1); expect(s.reveal).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("an inbox target is not revealed after its sidebar opening is superseded", async () => {
+	const s = await inboxFixture(); let release!: () => void;
+	s.open.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+	const opening = s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
+	try {
+		for (let tick = 0; tick < 10 && !release; tick++) await Promise.resolve();
+		expect(release).toEqual(expect.any(Function));
+		await s.host.openThread(s.file, s.session as unknown as DiscussionSession, id(3), id(99));
+		release(); await opening;
+		expect(s.host.focusedThread(s.session as unknown as DiscussionSession, id(3))?.threadId).toBe(id(99));
+		expect(s.reveal).not.toHaveBeenCalled();
 	} finally { s.close(); }
 });
 
@@ -382,13 +430,13 @@ test("a Bases notification pins its original saved view without adopting the act
 	s.store.preference.mockResolvedValue({ id: id(40), name: "Different view", type: "table", state: "active" });
 	s.host.targetFor(s.file); await Promise.resolve();
 	const anchor = await s.session.captureBaseTarget();
-	Object.assign(s.session, { inbox: { available: true }, inboxThread: jest.fn().mockResolvedValue({ id: id(30), anchor }) });
+	Object.assign(s.session, { inbox: { available: true }, linkedThread: jest.fn().mockResolvedValue({ thread: { id: id(30), anchor } }) });
 	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined), reveal = jest.spyOn(s.host, "revealTarget").mockResolvedValue(undefined);
 	try {
 		await s.host.openInboxItem(s.session as unknown as DiscussionSession, { ...inboxItem(), kind: "base", view_id: id(4) });
 		expect(s.savedPreference).toHaveBeenCalledWith("activeBaseView:" + id(3), expect.objectContaining({ id: id(4), state: "unmatched" }));
 		expect(s.host.current().entryId).toBe(s.scope); expect(open).toHaveBeenCalledTimes(1);
-		expect(reveal).toHaveBeenCalledWith(s.session, s.scope, anchor); expect(s.stops[0]).toHaveBeenCalledTimes(1);
+		expect(reveal).toHaveBeenCalledWith(s.session, s.scope, anchor, expect.any(Function)); expect(s.stops[0]).toHaveBeenCalledTimes(1);
 	} finally { s.close(); }
 });
 

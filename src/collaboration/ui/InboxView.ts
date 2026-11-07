@@ -70,7 +70,7 @@ export class InboxView extends ItemView {
 		this.status.setText(!sources.length ? "Sign in to a shared folder to see its comment notifications." : !available.length ?
 			"The inbox is unavailable. Check your connection, sign-in and server inbox setting." :
 			(updating ? "Refreshing notifications… " : offline ? "Showing saved notifications. Changes will send when connected. " : "") +
-			(visible.length ? `${visible.length} notifications shown.` : "No notifications in this filter."));
+			(visible.length ? `${visible.length} ${visible.length === 1 ? "notification" : "notifications"} shown.` : "No notifications in this filter."));
 		let position = 0;
 		for (const row of visible) {
 			const { session, item } = row, id = key(row);
