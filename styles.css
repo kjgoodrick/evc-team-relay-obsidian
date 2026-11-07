@@ -761,7 +761,12 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-timeline-marker-dialog label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 8px; }
 .relay-timeline-marker-dialog select { flex: 1 1 200px; min-width: 0; max-width: 100%; }
 .relay-timeline-marker-dialog button { margin: 4px; }
+.relay-timeline-marker-dialog input[type="text"] { flex: 1 1 200px; min-width: 0; max-width: 100%; }
+.relay-timeline-marker-dialog textarea { width: 100%; max-width: 100%; }
+.relay-timeline-marker-dialog fieldset { max-height: 260px; overflow: auto; }
+.relay-timeline-marker-recovery { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: 12px; margin-block: 12px; }
 .is-mobile .relay-timeline-marker-dialog select, .is-mobile .relay-timeline-marker-dialog button { min-height: 44px; }
+.is-mobile .relay-timeline-marker-dialog label, .is-mobile .relay-timeline-marker-dialog input[type="text"] { min-height: 44px; }
 .relay-inbox-view { overflow-y: auto; padding: var(--size-4-3); }
 .relay-inbox-toolbar, .relay-inbox-controls, .relay-inbox-pages { display: flex; gap: var(--size-4-2); flex-wrap: wrap; margin-block: var(--size-4-2); }
 .relay-inbox-item { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: var(--size-4-3); margin-block: var(--size-4-2); }

@@ -14,6 +14,8 @@ import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroup
 import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeWorkflow.ts";
 import { renderTimelineDiscussionMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
 import { TimelineMarkerPicker } from "../../src/collaboration/ui/TimelineMarkerPicker.ts";
+import { TimelineMarkerManager } from "../../src/collaboration/ui/TimelineMarkerManager.ts";
+import { parseTimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol.ts";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol.ts";
 
 const win = new Window();
@@ -224,6 +226,36 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 			for (let i = 0; i < 12; i++) await Promise.resolve(); picker.close();
 		}
 		assert.equal(capturedMarker.target.type, "timeline_marker"); assert.equal(capturedMarker.target.marker_id, uuid(60)); assert.ok(shownMarker);
+		// The management form uses the actual endpoint-selection bridge, then
+		// presents the durable command's result. HTTP and IDB recovery have their
+		// own real-stack fixtures; this port verifies the native source seam.
+		const { view_id: _markerView, markers: _markers, ...markerIdentity } = markerCatalog;
+		const markerDetail = { ...markerIdentity, marker: { id: uuid(60), revision: 1, active: true, content: sharedContent, placements: [markerCatalog.markers[0].placement] } };
+		let managementState, managementRequest;
+		Object.assign(rangeCommentContext.session, { online: true, permission: () => ({ read: true, comment: true, edit: true }),
+			transport: { timelineMarkers: async () => markerCatalog, timelineMarker: async () => markerDetail },
+			markerManagement: { state: async () => managementState, save: async (_scope, request) => {
+				managementRequest = request;
+				const receipt = parseTimelineMarkerReceipt({ ...markerIdentity, operation_id: request.operation_id, catalog_revision: 2,
+					marker: { ...markerDetail.marker, revision: 2, content: request.command.content } }, uuid(2), request);
+				managementState = { version: 1, scope_id: "synthetic-scope", status: "accepted", request, receipt }; return receipt;
+			} } });
+		const settleManagement = async () => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
+		const managementButton = label => [...document.querySelectorAll(".relay-timeline-marker-dialog button, .relay-timeline-range-dialog button")].find(button => button.textContent === label);
+		const manager = new TimelineMarkerManager(plugin.app, rangeCommentContext, () => surface.current(), () => {}); manager.open(); await settleManagement();
+		const managedChoice = document.querySelector('[aria-label="Shared marker"]'); managedChoice.value = uuid(60); managedChoice.dispatchEvent(new win.Event("change")); await settleManagement();
+		const shape = document.querySelector('[aria-label="Marker shape"]'); shape.value = "range"; shape.dispatchEvent(new win.Event("change"));
+		managementButton("Choose marker position").click(); await settleManagement(); managementButton("Select endpoints on timeline").click();
+		const managedRangeStatus = root.querySelector(".sabidurian-range-selection-status"); assert.ok(managedRangeStatus);
+		for (const key of ["Enter", "ArrowRight", "Enter"]) managedRangeStatus.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));
+		await settleManagement(); managementButton("Use position").click(); await settleManagement();
+		assert.equal(managementRequest, undefined); assert.equal(managementButton("Save marker").disabled, false);
+		managementButton("Save marker").click(); await settleManagement();
+		assert.equal(managementRequest.command.marker_id, uuid(60)); assert.equal(managementRequest.command.content.kind, "range");
+		assert.equal(managementRequest.command.content.range.kind, sequence ? "ordinal" : "calendar");
+		assert.deepEqual(managementRequest.command.placements, [{ view_id: uuid(4), axis_definition_id: uuid(40), axis_definition_revision: 1 }]);
+		assert.ok(document.body.textContent.includes("Marker save confirmed")); assert.equal(managementButton("Save marker").disabled, true);
+		manager.close(); assert.equal(document.querySelector(".relay-timeline-marker-dialog"), null); assert.deepEqual(writes, []);
 		const sharedMarks = document.createElement("div"); root.append(sharedMarks);
 		assert.equal(renderTimelineDiscussionMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(61), anchor: capturedMarker }], lanes: new Map(),
 			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks: sharedMarks, limit: 128, open: threads => assert.equal(threads[0].anchor.target.marker_id, uuid(60)) }), 1);

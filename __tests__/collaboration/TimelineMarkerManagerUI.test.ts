@@ -1,0 +1,167 @@
+/** @jest-environment jsdom */
+import type { App } from "obsidian";
+import { TimelineMarkerManager } from "../../src/collaboration/ui/TimelineMarkerManager";
+import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
+import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
+import type { TimelineMarkerCatalog } from "../../src/collaboration/TimelineMarkerProtocol";
+import type { TimelineMarkerManagementState } from "../../src/collaboration/TimelineMarkerManagement";
+import type { TimelineMarkerCommand, TimelineMarkerDetail, TimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol";
+import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import type { NativeTimelineSelection } from "../../src/bases/NativeBasesSurface";
+
+jest.mock("obsidian", () => ({ TFile: class {}, Notice: jest.fn(), Modal: class {
+	contentEl = document.createElement("div"); titleEl = document.createElement("h2");
+	onOpen() {} onClose() {} setTitle(title: string) { this.titleEl.textContent = title; }
+	open() { document.body.append(this.titleEl, this.contentEl); this.onOpen(); }
+	close() { this.onClose(); this.titleEl.remove(); this.contentEl.remove(); }
+} }));
+Object.assign(HTMLElement.prototype, { empty(this: HTMLElement) { this.replaceChildren(); } });
+const flush = async () => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
+const id = (n: number) => `71000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const scope = baseDiscussionScope(id(1), id(3));
+const range = { version: 1 as const, kind: "calendar" as const, start: "2026-11-07", end: "2026-11-07", time_zone: "America/Denver", start_inclusive: true, end_inclusive: true };
+const button = (name: string) => [...document.querySelectorAll("button")].find(button => button.textContent === name)!;
+function input(name: string, value: string | boolean) {
+	const field = document.querySelector<HTMLInputElement | HTMLSelectElement>(`[aria-label="${name}"]`)!;
+	if (typeof value === "boolean") (field as HTMLInputElement).checked = value; else field.value = value;
+	field.dispatchEvent(new Event("input")); field.dispatchEvent(new Event("change")); return field;
+}
+function confirmation(text: string) {
+	const label = [...document.querySelectorAll("label")].find(label => label.textContent?.includes(text))!;
+	const field = label.querySelector<HTMLInputElement>("input")!; field.checked = true; field.dispatchEvent(new Event("change"));
+}
+function fixture() {
+	const access = { current: true, read: true, edit: true, online: true, enabled: true };
+	const proof: TimelineAxisContext = { protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 2,
+		axis: { id: id(5), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "America/Denver" } } };
+	const placement = { view_id: id(3), active: true, axis_definition_id: id(5), axis_definition_revision: 2, axis: proof.axis.axis };
+	const content = { kind: "point" as const, label: "Launch", color: "#aabbcc", range };
+	const marker = { id: id(20), revision: 1, active: true, content, placement, target: { type: "timeline_marker" as const, marker_id: id(20), marker_revision: 1, content, axis_definition_id: id(5), axis_definition_revision: 2, axis: proof.axis.axis } };
+	const { axis: _axis, ...common } = proof;
+	const catalog: TimelineMarkerCatalog = { ...common, catalog_revision: 1, markers: [marker] };
+	const detail: TimelineMarkerDetail = { protocol_version: 1, entry_id: id(1), definition_id: id(2), generation: id(4), registry_revision: 2, catalog_revision: 1,
+		marker: { id: id(20), revision: 1, active: true, content, placements: [placement, { ...placement, view_id: id(30), axis_definition_id: id(31) }] } };
+	let recovery: TimelineMarkerManagementState | undefined;
+	const state = jest.fn(async () => recovery);
+	const accepted = (request: TimelineMarkerCommand): TimelineMarkerReceipt => ({ ...detail, operation_id: request.operation_id, catalog_revision: request.expected_catalog_revision + 1,
+		marker: { ...detail.marker, id: request.command.marker_id, revision: request.command.expected_marker_revision + 1, active: request.command.type !== "marker.archive" } });
+	const save = jest.fn(async (_scope: string, request: TimelineMarkerCommand) => { const receipt = accepted(request); recovery = { version: 1, scope_id: scope, request, status: "accepted", receipt }; return receipt; });
+	const retry = jest.fn(async () => { if (!recovery) throw new Error("Missing intent"); const receipt = accepted(recovery.request); recovery = { version: 1, scope_id: scope, request: recovery.request, status: "accepted", receipt }; return receipt; });
+	const acknowledge = jest.fn(async () => { recovery = undefined; return true; });
+	const readAxis = jest.fn(async () => proof), readCatalog = jest.fn(async () => catalog), readDetail = jest.fn(async () => detail), closed = jest.fn();
+	let select: ((value: NativeTimelineSelection) => void) | undefined, stopped: (() => void) | undefined;
+	const stop = jest.fn(() => stopped?.());
+	const native = { axis: proof.axis.axis, kinds: ["calendar", "instant", "historical"], effectiveTimeZone: "America/Denver", current: () => access.current };
+	const context = { current: () => access.current, entryId: scope, baseEntryId: id(1),
+		binding: { name: "Planning", type: "sabidurian-timeline", viewId: id(3), snapshot: { definition_id: id(2), generation: id(4), revision: 2,
+			views: [{ id: id(3), name: "Planning" }, { id: id(30), name: "Roadmap" }] } },
+		session: { get online() { return access.online; }, permission: () => ({ read: access.read, edit: access.edit, comment: true }), canAnchorBase: () => access.enabled, readTimelineAxis: readAxis,
+			transport: { timelineMarkers: readCatalog, timelineMarker: readDetail }, markerManagement: { state, save, retry, acknowledge } },
+		surface: { rangeContext: () => native, beginRange: jest.fn((_kind, _precision, callback, end) => { select = callback; stopped = end; return stop; }) },
+	} as unknown as BaseCommentContext;
+	const manager = new TimelineMarkerManager({} as App, context, () => true, closed);
+	return { access, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, manager, closed, stop, context,
+		setRecovery: (value: TimelineMarkerManagementState | undefined) => { recovery = value; },
+		pick: () => { stopped?.(); select?.({ context: native as NativeTimelineSelection["context"], draft: { ...range, end: "2026-11-09" }, current: () => access.current }); } };
+}
+afterEach(() => { document.body.replaceChildren(); jest.restoreAllMocks(); });
+async function loaded(f = fixture()) { f.manager.open(); await flush(); input("Shared marker", id(20)); await flush(); return f; }
+
+test("editing preserves every active saved-view placement and requires reviewing the result before another save", async () => {
+	const f = await loaded(); input("Marker label", "Revised launch"); expect(button("Refresh marker list").disabled).toBe(true);
+	confirmation("Archive this marker in every view"); expect(button("Archive marker").disabled).toBe(true);
+	button("Save marker").click(); await flush();
+	expect(f.save).toHaveBeenCalledTimes(1);
+	expect(f.save.mock.calls[0][1]).toMatchObject({ expected_catalog_revision: 1, command: { type: "marker.put", expected_marker_revision: 1, content: { label: "Revised launch" },
+		placements: [{ view_id: id(3), axis_definition_id: id(5) }, { view_id: id(30), axis_definition_id: id(31) }] } });
+	expect(button("Save marker").disabled).toBe(true); expect(button("Load current marker").disabled).toBe(false);
+	button("Load current marker").click(); await flush();
+	expect(f.acknowledge).toHaveBeenCalledWith(scope, f.save.mock.calls[0][1].operation_id);
+	expect(document.body.textContent).not.toContain("Marker save confirmed"); f.manager.close();
+});
+
+test("new milestone uses a single exact coordinate and returns from position editing without saving prematurely", async () => {
+	const f = fixture(); f.manager.open(); await flush(); button("New shared marker").click(); input("Marker label", "New launch");
+	button("Choose marker position").click(); await flush(); expect(document.querySelector(".relay-timeline-marker-dialog")).toBeNull();
+	expect(button("Select endpoints on timeline").hidden).toBe(true); input("Start date", "2026-12-01"); button("Use position").click(); await flush();
+	expect(f.save).not.toHaveBeenCalled(); expect(input("Marker label", "New launch").value).toBe("New launch");
+	button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ type: "marker.put", expected_marker_revision: 0, content: { kind: "point", range: { start: "2026-12-01", end: "2026-12-01", start_inclusive: true, end_inclusive: true } } });
+	expect(f.closed).not.toHaveBeenCalled(); f.manager.close(); expect(f.closed).toHaveBeenCalledTimes(1);
+});
+
+test("range endpoint selection returns to the marker draft and cancels renderer handlers on host close", async () => {
+	const f = await loaded(); input("Marker shape", "range"); button("Choose marker position").click(); await flush();
+	button("Select endpoints on timeline").click(); f.pick(); await flush(); button("Use position").click(); await flush();
+	button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ content: { kind: "range", range: { end: "2026-11-09" } } }); f.manager.close();
+	const second = await loaded(); input("Marker shape", "range"); button("Choose marker position").click(); await flush(); button("Select endpoints on timeline").click();
+	second.manager.close(); second.pick(); await flush(); expect(second.stop).toHaveBeenCalledTimes(1); expect(second.closed).toHaveBeenCalledTimes(1); expect(document.body.textContent).toBe("");
+});
+
+test("archive is an explicit all-view action and restoring requires selected placements", async () => {
+	const f = await loaded(); expect(button("Archive marker").disabled).toBe(true); confirmation("Archive this marker in every view"); button("Archive marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toEqual({ type: "marker.archive", marker_id: id(20), expected_marker_revision: 1 }); f.manager.close();
+	const archived = fixture(); archived.detail.marker.active = false; for (const p of archived.detail.marker.placements) p.active = false;
+	archived.catalog.markers[0].active = false;
+	await loaded(archived); expect(document.body.textContent).toContain("archived"); input("Place in Planning", false); expect(button("Restore marker").disabled).toBe(true);
+	input("Place in Roadmap", true); button("Restore marker").click(); await flush();
+	expect(archived.save.mock.calls[0][1].command).toMatchObject({ type: "marker.put", placements: [{ view_id: id(30) }] }); archived.manager.close();
+});
+
+test("uncertain save survives modal close and exposes exact retry even after creation is disabled", async () => {
+	const f = await loaded();
+	f.save.mockImplementationOnce(async (_scope, request) => { f.setRecovery({ version: 1, scope_id: scope, request, status: "pending", error: "network_error" }); throw new Error("Connection lost"); });
+	button("Save marker").click(); await flush(); expect(document.body.textContent).toContain("Marker save not confirmed"); expect(button("New shared marker").disabled).toBe(true);
+	f.manager.close(); f.access.enabled = false;
+	const reopened = new TimelineMarkerManager({} as App, f.context, () => true, () => {}); reopened.open(); await flush();
+	expect(button("Retry original save").disabled).toBe(false);
+	button("Retry original save").click(); await flush(); expect(f.retry).toHaveBeenCalledWith(scope); expect(document.body.textContent).toContain("Marker save confirmed"); reopened.close();
+});
+
+test("read-only and offline access keep recovery inspectable but cannot manage markers", async () => {
+	const f = await loaded(); f.access.edit = false; f.manager.validate(); await flush(); expect(button("Save marker").disabled).toBe(true); expect(button("New shared marker").disabled).toBe(true);
+	f.access.edit = true; f.access.online = false; f.manager.validate(); await flush(); expect(button("Save marker").disabled).toBe(true);
+	f.access.read = false; f.manager.validate(); expect(f.closed).toHaveBeenCalledTimes(1); expect(f.save).not.toHaveBeenCalled();
+});
+
+test("discarding a conflicting attempt requires review and preserves the saved request until acknowledgement", async () => {
+	const f = await loaded();
+	f.save.mockImplementationOnce(async (_scope, request) => { f.setRecovery({ version: 1, scope_id: scope, request, status: "rejected", error: "timeline_marker_changed" }); throw new Error("Marker changed"); });
+	input("Marker label", "Attempted edit"); button("Save marker").click(); await flush();
+	expect(button("Acknowledge and reload").disabled).toBe(true); expect(document.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain("Attempted edit");
+	confirmation("I have reviewed"); button("Acknowledge and reload").click(); await flush();
+	expect(f.acknowledge).toHaveBeenCalledTimes(1); expect(document.querySelector<HTMLInputElement>('[aria-label="Marker label"]')!.value).toBe("Launch"); f.manager.close();
+});
+
+test("closing during save-axis verification cannot start a management request", async () => {
+	const f = await loaded(); let finish!: (value: TimelineAxisContext) => void;
+	f.readAxis.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })); button("Save marker").click(); f.manager.close(); finish(f.proof); await flush();
+	expect(f.save).not.toHaveBeenCalled(); expect(f.closed).toHaveBeenCalledTimes(1); expect(document.body.textContent).toBe("");
+});
+
+test("changed catalog during detail loading requires refresh and cannot edit stale metadata", async () => {
+	const f = fixture(); f.detail.catalog_revision = 2; await loaded(f);
+	expect(document.body.textContent).toContain("Markers changed while loading"); expect(button("Save marker")).toBeUndefined(); expect(f.save).not.toHaveBeenCalled(); f.manager.close();
+});
+
+test("an older axis requires an explicit placement review and rebind before saving", async () => {
+	const f = fixture(); f.detail.marker.placements[0] = { ...f.detail.marker.placements[0], axis_definition_id: id(99), axis_definition_revision: 1 };
+	await loaded(f); expect(button("Save marker").disabled).toBe(true); expect(document.body.textContent).toContain("older axis");
+	button("Use current axis in this view").click(); expect(button("Save marker").disabled).toBe(false); button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ placements: expect.arrayContaining([{ view_id: id(3), axis_definition_id: id(5), axis_definition_revision: 2 }]) }); f.manager.close();
+});
+
+test("an unreadable recovery record prevents starting a replacement operation", async () => {
+	const f = fixture(); f.state.mockRejectedValue(new Error("Saved request needs repair")); f.manager.open(); await flush();
+	expect(button("New shared marker").disabled).toBe(true); expect(document.body.textContent).toContain("Saved request needs repair"); expect(f.readCatalog).not.toHaveBeenCalled(); expect(f.save).not.toHaveBeenCalled(); f.manager.close();
+});
+
+test("a shared recovery update arriving during an earlier local read is not lost", async () => {
+	const f = await loaded(); let finish!: (value: TimelineMarkerManagementState | undefined) => void;
+	f.state.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })); f.manager.validate();
+	const request: TimelineMarkerCommand = { operation_id: id(80), definition_id: id(2), generation: id(4), registry_revision: 2, expected_catalog_revision: 1,
+		command: { type: "marker.archive", marker_id: id(20), expected_marker_revision: 1 } };
+	f.setRecovery({ version: 1, scope_id: scope, request, status: "pending" }); f.manager.validate(); finish(undefined); await flush();
+	expect(document.body.textContent).toContain("Marker save not confirmed"); expect(button("Save marker").disabled).toBe(true); f.manager.close();
+});

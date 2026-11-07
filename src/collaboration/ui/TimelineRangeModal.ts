@@ -6,6 +6,7 @@ type Draft = Record<string, unknown>;
 export type TimelineRangeFormState = Record<string, string | boolean>;
 type Options = {
 	viewName: string; context: NativeTimelineContext; draft?: Draft; issue?: string; state?: TimelineRangeFormState;
+	title?: string; description?: string; acceptLabel?: string; point?: boolean;
 	lanes?: { id: string; label: string }[];
 	current(): boolean; save(range: TimelineRange, lane: string): Promise<boolean>;
 	pick(draft: Draft, precision: HistoricalPoint["precision"], state: TimelineRangeFormState): void; closed(): void;
@@ -27,15 +28,17 @@ export class TimelineRangeModal extends Modal {
 	private picking = false;
 	constructor(app: App, private options: Options) { super(app); }
 	onOpen(): void {
-		this.setTitle("Comment on a timeline range"); this.contentEl.classList.add("relay-timeline-range-dialog");
-		this.contentEl.createEl("p", { text: "Discussion view: " + this.options.viewName + ". Choose the entire view or a supported lane. Commenting does not change task dates." });
+		this.setTitle(this.options.title ?? "Comment on a timeline range"); this.contentEl.classList.add("relay-timeline-range-dialog");
+		this.contentEl.createEl("p", { text: this.options.description ?? "Discussion view: " + this.options.viewName + ". Choose the entire view or a supported lane. Commenting does not change task dates." });
 		this.kind = this.select(this.contentEl, "kind", "Range type", this.options.context.kinds.map(value => [value, kinds[value]]));
 		this.kind.value = this.options.context.kinds.includes(this.options.draft?.kind as TimelineRange["kind"]) ? String(this.options.draft!.kind) : this.options.context.kinds[0];
 		this.lane = this.select(this.contentEl, "lane", "Range scope", [["", "Entire saved view"], ...(this.options.lanes ?? []).map(lane => [lane.id, lane.label])]);
+		if (this.options.title) this.lane.parentElement!.hidden = true;
 		this.fields = this.contentEl.createDiv();
 		this.status = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
 		this.pickButton = this.contentEl.createEl("button", { text: "Select endpoints on timeline", attr: { type: "button" } });
-		this.accept = this.contentEl.createEl("button", { text: "Write comment", cls: "mod-cta", attr: { type: "button" } });
+		this.pickButton.hidden = this.options.point === true;
+		this.accept = this.contentEl.createEl("button", { text: this.options.acceptLabel ?? "Write comment", cls: "mod-cta", attr: { type: "button" } });
 		this.contentEl.createEl("button", { text: "Cancel", attr: { type: "button" } }).onclick = () => this.close();
 		this.kind.onchange = () => { this.render(); this.validate(); };
 		this.accept.onclick = () => { void this.save(); };
@@ -78,6 +81,7 @@ export class TimelineRangeModal extends Modal {
 		const kind = this.kind.value;
 		for (const endpoint of ["start", "end"] as const) {
 			const name = endpoint === "start" ? "Start" : "End", section = this.fields.createEl("fieldset"); section.createEl("legend", { text: name });
+			if (this.options.point && endpoint === "end") section.hidden = true;
 			if (kind === "historical") {
 				const point = object(seed?.[endpoint]) ? seed![endpoint] as Draft : {};
 				const precision = this.select(section, endpoint + "-precision", name + " precision", [["year", "Year"], ["month", "Month"], ["day", "Day"]]);
@@ -91,6 +95,7 @@ export class TimelineRangeModal extends Modal {
 			} else this.input(section, endpoint, name + (kind === "calendar" ? " date" : kind === "instant" ? " time with UTC offset" : " value"), seed?.[endpoint]);
 			const inclusive = this.input(section, endpoint + "-inclusive", "Include " + endpoint + (kind === "calendar" || kind === "historical" ? " period" : " point"), "", "checkbox");
 			inclusive.checked = seed?.[endpoint + "_inclusive"] !== false;
+			if (this.options.point) inclusive.parentElement!.hidden = true;
 		}
 		if (kind === "calendar" || kind === "instant") this.fields.createEl("p", { text: "Timezone: " + this.options.context.effectiveTimeZone + ". " +
 			(kind === "calendar" ? "Use YYYY-MM-DD. Included endpoints cover the whole day." : "Use YYYY-MM-DDTHH:mm:ss with Z or an explicit offset such as -06:00. Repeated daylight-saving times require an explicit offset.") });
@@ -112,9 +117,9 @@ export class TimelineRangeModal extends Modal {
 			return { precision, year: year > 0 ? this.value(endpoint + "-era") === "bce" ? 1 - year : year : NaN,
 				...(precision !== "year" ? { month: number("month") } : {}), ...(precision === "day" ? { day: number("day") } : {}) };
 		};
-		return { version: 1, kind, start: point("start"), end: point("end"),
-			start_inclusive: (this.controls.get("start-inclusive") as HTMLInputElement).checked,
-			end_inclusive: (this.controls.get("end-inclusive") as HTMLInputElement).checked,
+		return { version: 1, kind, start: point("start"), end: point(this.options.point ? "start" : "end"),
+			start_inclusive: this.options.point || (this.controls.get("start-inclusive") as HTMLInputElement).checked,
+			end_inclusive: this.options.point || (this.controls.get("end-inclusive") as HTMLInputElement).checked,
 			...(kind === "calendar" || kind === "instant" ? { time_zone: this.options.context.effectiveTimeZone } :
 				kind === "ordinal" ? { unit: "property-value" } : { calendar: "proleptic-gregorian", year_numbering: "astronomical" }) };
 	}

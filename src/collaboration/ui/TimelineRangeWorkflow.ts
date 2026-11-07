@@ -18,28 +18,32 @@ export class TimelineRangeWorkflow {
 	private native?: NativeTimelineContext;
 	private lanes = new Map<string, NativeBaseGroupHandle>();
 	constructor(private app: App, private context: BaseCommentContext, private active: () => boolean,
-		private save: (proof: TimelineAxisContext, range: TimelineRange, current: () => boolean, lane?: NativeBaseGroupHandle) => Promise<boolean>) {}
-	private current = () => !this.closed && this.active() && this.context.current() && this.context.session.permission(this.context.entryId)?.comment === true &&
-		this.context.session.canAnchorBase("timeline_range") && this.native?.current() === true;
+		private save: (proof: TimelineAxisContext, range: TimelineRange, current: () => boolean, lane?: NativeBaseGroupHandle) => Promise<boolean>,
+		private marker?: { draft?: TimelineRange; point: boolean; closed(): void }) {}
+	private current = () => !this.closed && this.active() && this.context.current() && this.native?.current() === true && (this.marker ?
+		this.context.session.online && this.context.session.permission(this.context.entryId)?.edit === true && this.context.session.canAnchorBase("timeline_marker") :
+		this.context.session.permission(this.context.entryId)?.comment === true && this.context.session.canAnchorBase("timeline_range"));
 	async open(): Promise<void> {
 		try {
 			this.native = this.context.surface.rangeContext();
-			if (!this.current()) return;
+			if (!this.current()) { this.close(); return; }
 			this.proof = await readNativeTimelineAxis(this.context, this.native);
 			const ambiguous = new Set<string>();
-			for (const handle of this.context.groups?.handles() ?? []) {
+			for (const handle of this.marker ? [] : this.context.groups?.handles() ?? []) {
 				if (!this.context.groups?.canCapture(handle)) continue;
 				const key = nativeGroupTargetKey(handle.target);
 				if (this.lanes.has(key)) { this.lanes.delete(key); ambiguous.add(key); }
 				if (!ambiguous.has(key)) this.lanes.set(key, handle);
 			}
-			if (this.current()) this.show();
-		} catch (error) { if (!this.closed && this.active()) new Notice(error instanceof Error ? error.message : "The timeline axis could not be verified."); }
+			if (this.current()) this.show(this.marker?.draft); else this.close();
+		} catch (error) { if (!this.closed && this.active()) new Notice(error instanceof Error ? error.message : "The timeline axis could not be verified."); this.close(); }
 	}
 	private show(draft?: Record<string, unknown>, issue?: string, selection?: NativeTimelineSelection, state?: TimelineRangeFormState): void {
 		if (this.closed || !this.native || !this.proof) return;
 		const serial = ++this.serial, current = () => serial === this.serial && this.current() && (!selection || selection.current());
 		const modal = new TimelineRangeModal(this.app, { viewName: this.context.binding.name, context: this.native, draft, issue, state, current,
+			...(this.marker ? { title: "Marker position", acceptLabel: "Use position", point: this.marker.point,
+				description: "Choose a position in " + this.context.binding.name + ". Review and save the marker afterward; task dates are unchanged." } : {}),
 			lanes: [...this.lanes].map(([id, handle]) => ({ id, label: handle.target.property.name + " · " + nativeGroupTargetLabel(handle.target) })),
 			save: (range: TimelineRange, laneId: string) => {
 				const lane = laneId ? this.lanes.get(laneId) : undefined;
@@ -72,5 +76,6 @@ export class TimelineRangeWorkflow {
 		if (this.closed) return; this.closed = true; this.serial++;
 		const stop = this.stop, modal = this.modal; this.stop = undefined; this.modal = undefined;
 		stop?.(); modal?.close();
+		this.marker?.closed();
 	}
 }

@@ -49,7 +49,7 @@ Existing anchors remain decodable when creation is disabled. An inactive
 placement may retain an old axis incompatible with the marker's latest content;
 its metadata remains readable but cannot become a new comment target.
 
-## Verification
+## Online management
 
 The session also exposes explicit online marker-management commands. Before a
 write, the client durably saves its exact operation, content, expected revisions
@@ -64,8 +64,49 @@ operation, lineage, counter advances, content and active placements. A late
 failure cannot overwrite a confirmed receipt. Terminal revision conflicts remain
 visible until acknowledged; a generation conflict means this intent cannot
 apply to the current generation, not proof that it never succeeded in an older
-generation. Pending intents cannot be dismissed. The user interface for this
-workflow, repair/export and management controls remains to be built.
+generation. Pending intents cannot be dismissed.
+
+The saved-view toolbar now exposes **Manage markers**, independently of the
+creation flag so an editor can recover a previous request after feature
+disablement. The dialog lists active, detached and archived associations in the
+current saved view. Editors create point/range markers, edit label/color/position,
+review every retained view placement, explicitly detach placements, archive across
+all views, and restore in selected views. Updating one view preserves the other
+selected placements. Older axes require explicit review/rebinding in their view;
+the dialog does not silently reinterpret coordinates. Duplicate view names retain
+an ID suffix. New associations outside the current/retained views still need the
+base-wide placement/matching workflow.
+
+Position editing reuses the exact coordinate form and, for ranges, the actual
+renderer endpoint-selection workflow. Returning to the management form does not
+save metadata until the editor chooses Save. Point positions use one explicitly
+entered coordinate; direct point picking on the renderer remains work. Closing
+the host cancels the child selection and guards late reads. Read-only/offline
+members can inspect retained results without gaining management permission.
+
+Unconfirmed results offer Retry original save and a selectable copy of the saved
+request/result. Confirmed saves offer Load current marker. Conflicting attempts
+retain their values until explicit review/acknowledgement; another window's
+recovery update cannot be lost behind an older local read. Unreadable recovery
+data blocks a replacement save. Broader repair/export and account-wide access to
+results after the original view becomes unavailable remain work.
+
+## Verification
+
+The management interface passes **2,478 plugin tests in 206 suites**, preview
+build/main types, changed-source lint (five existing warnings), whitespace checks
+and the frozen test-type gate (206 existing errors/45 signatures versus baseline
+207/46). The build retains 15 existing Svelte warnings. Twelve focused UI cases
+cover creation, preserving all active placements, point entry, renderer range
+selection, archive/restore, axis review, uncertain/rejected results, access loss,
+close/reopen, late callbacks and cross-window state reads.
+
+All eight source interoperability cases exercise the actual management form
+through the Time & Line range-selection bridge for both renderers/load orders
+and grouped/ungrouped views. The six actual HTTP tests additionally prove that
+an unavailable placement is a terminal conflict, its acknowledgement permits a
+valid restore, and no partial command consumed the marker/catalog revision.
+The Mac was checked and was locked, so no native acceptance is claimed.
 
 Focused tests exercise malformed/cross-scope catalogs, pagination and revision
 changes, point precision, offline reopen, account isolation, archive/detach/edit
@@ -111,8 +152,8 @@ desktop/mobile or physical keyboard/touch acceptance.
 
 Current-marker overlays independent of discussion presence, side-by-side
 current-versus-captured position UI, automatic metadata refresh/change delivery,
-online management UI and recovery controls, local marker promotion and explicit matching
-remain. The picker provides explicit refresh; it does not yet subscribe to live
+base-wide placement/matching, local marker promotion, direct point picking and
+broader recovery controls remain. The picker provides explicit refresh; it does not yet subscribe to live
 metadata changes. Overlapping overlay polish also remains. The Time & Line fork
 has not changed in this increment. Native desktop/mobile, accessibility, recovery
 UI and resource acceptance remain before enabling this feature for users.

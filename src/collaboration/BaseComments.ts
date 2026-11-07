@@ -286,6 +286,9 @@ export class BaseCommentPane {
 		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
 		if (rangeAvailable) this.button(this.toolbar, "Comment on range", () => { this.cancelAnnotation(); if (context.current()) this.host.chooseTimelineRange(context); });
 		if (markerAvailable) this.button(this.toolbar, "Shared markers", () => { this.cancelAnnotation(); if (context.current()) this.host.chooseTimelineMarker(context); });
+		if ((context.binding.type === "sabidurian-timeline" || context.binding.type === "sabidurian-sequence") && context.session.permission(context.entryId)?.read) {
+			this.button(this.toolbar, "Manage markers", () => { this.cancelAnnotation(); if (context.current()) this.host.manageTimelineMarkers(context); });
+		}
 		if (context.surface.annotationSupported && view && context.canComment(view.target)) {
 			this.button(this.toolbar, this.annotating ? "Cancel target selection" : "Select timeline target", () => this.toggleAnnotation());
 			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task, property badge, or lane header. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }

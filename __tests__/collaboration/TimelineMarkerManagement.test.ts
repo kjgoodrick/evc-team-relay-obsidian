@@ -134,7 +134,7 @@ test("malformed success stays recoverable rather than clearing intent", async ()
 	expect(await c.manager.state(scope)).toMatchObject({ status: "pending", error: "marker_save_unconfirmed" });
 });
 
-test.each(["stale_base_revision", "timeline_marker_catalog_changed", "timeline_marker_changed", "base_generation_changed", "operation_id_conflict"])("monotonic conflict %s requires acknowledgement before another intent", async code => {
+test.each(["stale_base_revision", "timeline_marker_catalog_changed", "timeline_marker_changed", "base_generation_changed", "operation_id_conflict", "timeline_axis_changed", "timeline_axis_unavailable", "base_view_unavailable"])("monotonic conflict %s requires acknowledgement before another intent", async code => {
 	const c = await client(); c.send.mockRejectedValueOnce(new DiscussionFailure("reject", code, 409));
 	await expect(c.manager.save(scope, command())).rejects.toMatchObject({ code });
 	expect(await c.manager.state(scope)).toMatchObject({ status: "rejected", error: code });

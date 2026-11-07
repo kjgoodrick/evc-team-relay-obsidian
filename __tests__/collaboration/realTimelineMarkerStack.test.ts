@@ -108,6 +108,16 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			expect((await transport.thread(scope, queued.payload.thread_id)).messages).toHaveLength(2);
 			await start(); expect(await session.baseDefinitionStatus(scope, captured)).toContain("archived");
 			await expect(session.captureTimelineMarker(scope, selected, markerId)).rejects.toThrow("changed");
+			// Placement failure cannot strand the editor behind an unrecoverable
+			// pending slot; acknowledgement permits a reviewed valid restore.
+			const current = await ownerTransport.timelineMarkers(scope, axis.view_id);
+			const restore = { ...put, operation_id: randomUUID(), expected_catalog_revision: current.catalog_revision,
+				command: { ...put.command, expected_marker_revision: 3 } };
+			await expect(ownerSession.markerManagement.save(scope, { ...restore, command: { ...restore.command,
+				placements: [{ ...restore.command.placements[0], axis_definition_id: randomUUID() }] } })).rejects.toMatchObject({ code: "timeline_axis_unavailable", status: 409 });
+			expect(await ownerSession.markerManagement.state(scope)).toMatchObject({ status: "rejected", error: "timeline_axis_unavailable" });
+			expect(await ownerSession.markerManagement.acknowledge(scope, restore.operation_id)).toBe(true);
+			expect((await ownerSession.markerManagement.save(scope, { ...restore, operation_id: randomUUID() })).marker).toMatchObject({ active: true, revision: 4 });
 		} finally { outbox?.stop(); await outbox?.settled(); await session.close(); await ownerSession.close(); }
 	}
 	expect((await content.read(f.markersEntry)).state).toEqual(saved.state);

@@ -6,7 +6,11 @@ import { parseTimelineMarkerCommand, parseTimelineMarkerReceipt, type TimelineMa
 
 // These conflicts cannot become valid later in the same generation: the
 // compared revisions only advance, and an operation ID cannot change intent.
-const finalConflicts = new Set(["stale_base_revision", "timeline_marker_catalog_changed", "timeline_marker_changed", "base_generation_changed", "operation_id_conflict"]);
+// View/axis failures are checked after the receipt and fixed registry revision.
+// Repair/reactivation advances that revision, so the old intent cannot later
+// become valid after acknowledgement in the same generation.
+const finalConflicts = new Set(["stale_base_revision", "timeline_marker_catalog_changed", "timeline_marker_changed", "base_generation_changed", "operation_id_conflict",
+	"timeline_axis_changed", "timeline_axis_unavailable", "base_view_unavailable"]);
 export type TimelineMarkerManagementState = { version: 1; scope_id: string; request: TimelineMarkerCommand } & (
 	{ status: "pending"; error?: string } | { status: "accepted"; receipt: TimelineMarkerReceipt } | { status: "rejected"; error: string }
 );

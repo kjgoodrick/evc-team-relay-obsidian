@@ -3,6 +3,7 @@ import type { TimelineAxisContext } from "./TimelineRangeProtocol";
 import { rangeLane, timelineTargetMatchesAxis, readNativeTimelineAxis, timelineAxisMatches } from "./NativeTimelineRanges";
 import { TimelineRangeWorkflow } from "./ui/TimelineRangeWorkflow";
 import { TimelineMarkerPicker } from "./ui/TimelineMarkerPicker";
+import { TimelineMarkerManager } from "./ui/TimelineMarkerManager";
 import { timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { NativeBaseGroupComments, nativeGroupTargetKey } from "./NativeBaseGroupComments";
 import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
@@ -65,6 +66,7 @@ export class DiscussionHost extends Component {
 	private baseAction = 0;
 	private rangeWorkflow?: TimelineRangeWorkflow;
 	private markerPicker?: TimelineMarkerPicker;
+	private markerManager?: TimelineMarkerManager;
 	private inboxAction = 0;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
@@ -117,7 +119,7 @@ export class DiscussionHost extends Component {
 		this.reconcile();
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-	private notify(): void { this.rangeWorkflow?.validate(); this.markerPicker?.validate(); for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
+	private notify(): void { this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
 	private key(serverUrl: string, accountId: string, shareId: string): string {
 		return JSON.stringify([serverUrl.replace(/\/+$/, ""), accountId, shareId]);
 	}
@@ -424,6 +426,7 @@ export class DiscussionHost extends Component {
 		} catch (error) { new Notice(error instanceof Error ? error.message : "The group selection could not be saved. Existing drafts are retained."); return false; }
 	}
 	chooseTimelineRange(context: BaseCommentContext): void {
+		this.markerManager?.close(); this.markerManager = undefined;
 		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.rangeWorkflow?.close();
 		const action = ++this.baseAction;
@@ -432,6 +435,7 @@ export class DiscussionHost extends Component {
 		this.rangeWorkflow = workflow; void workflow.open();
 	}
 	chooseTimelineMarker(context: BaseCommentContext, markerId?: string): void {
+		this.markerManager?.close(); this.markerManager = undefined;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined; this.markerPicker?.close();
 		const action = ++this.baseAction, active = () => !this.stopped && action === this.baseAction;
 		const picker = new TimelineMarkerPicker(this.plugin.app, context, active, {
@@ -447,6 +451,13 @@ export class DiscussionHost extends Component {
 			},
 		}, markerId, () => { if (this.markerPicker === picker) this.markerPicker = undefined; });
 		this.markerPicker = picker; picker.open();
+	}
+	manageTimelineMarkers(context: BaseCommentContext): void {
+		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined; this.markerPicker?.close(); this.markerPicker = undefined; this.markerManager?.close();
+		const action = ++this.baseAction;
+		const manager = new TimelineMarkerManager(this.plugin.app, context, () => !this.stopped && action === this.baseAction,
+			() => { if (this.markerManager === manager) this.markerManager = undefined; });
+		this.markerManager = manager; manager.open();
 	}
 	async commentTimelineMarker(context: BaseCommentContext, catalog: TimelineMarkerCatalog, markerId: string, alive: () => boolean): Promise<boolean> {
 		const action = this.baseAction;
@@ -766,6 +777,7 @@ export class DiscussionHost extends Component {
 		this.stopped = true;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
 		this.markerPicker?.close(); this.markerPicker = undefined;
+		this.markerManager?.close(); this.markerManager = undefined;
 		this.focus = undefined; this.editors.clear();
 		for (const slot of this.slots.values()) { slot.cancelled = true; void slot.session?.close(); }
 		for (const unsubscribe of this.folderListeners.values()) unsubscribe();
