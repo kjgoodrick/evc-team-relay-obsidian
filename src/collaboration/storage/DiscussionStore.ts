@@ -87,10 +87,10 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 19 fences workers that cannot decode or preserve exact marker
-		// revisions in drafts, cached discussions and queued comments.
+		// Version 20 fences workers that cannot preserve rich drafts, their edit
+		// base revisions or picture references retained for undo.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 19);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 20);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -349,7 +349,7 @@ export class DiscussionStore {
 	 */
 	async refreshDraftPictures(draftId: string, revision: number, replacements: { oldId: string; newId: string }[]): Promise<Draft> {
 		replacements = replacements.map(item => ({ ...item }));
-		if (!replacements.length || replacements.length > 10 || !Number.isSafeInteger(revision + 1) ||
+		if (!replacements.length || replacements.length > 100 || !Number.isSafeInteger(revision + 1) ||
 			new Set(replacements.map(item => item.oldId)).size !== replacements.length ||
 			new Set(replacements.map(item => item.newId)).size !== replacements.length ||
 			replacements.some(item => !isId(item.newId))) throw new Error("Invalid picture recovery");
@@ -362,7 +362,10 @@ export class DiscussionStore {
 				if (!ids.includes(oldId) || ids.includes(newId) || await request(sources.getKey(newId)) || await request(outbox.getKey(newId))) throw new Error("Picture identity was already used");
 			}
 			const map = new Map(replacements.map(item => [item.oldId, item.newId]));
-			draft.body.pictures = draft.body.pictures.map(block => isRecord(block) && map.has(String(block.picture_id)) ? { ...block, picture_id: map.get(String(block.picture_id))! } : block);
+			const remap = (block: Json): Json => isRecord(block) && block.type === "picture" && map.has(String(block.picture_id)) ? { ...block, picture_id: map.get(String(block.picture_id))! } as Json : block;
+			draft.body.pictures = draft.body.pictures.map(remap);
+			if (Array.isArray(draft.body.undoPictures)) draft.body.undoPictures = draft.body.undoPictures.map(remap);
+			if (isRecord(draft.body.rich) && Array.isArray(draft.body.rich.blocks)) draft.body.rich.blocks = draft.body.rich.blocks.map(remap);
 			draft.revision++;
 			const nextIds = pictureIds(draft.body, true);
 			let transferring = [...nextIds, ...map.keys()];

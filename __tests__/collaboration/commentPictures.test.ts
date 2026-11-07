@@ -5,7 +5,7 @@ import { DiscussionTransport, DiscussionFailure } from "../../src/collaboration/
 import { bodyFromText, parseBody, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { parsePictureMetadata, pictureHash, prepareLocalPicture, PICTURE_SOURCE_QUOTA, type PictureMetadata, type LocalPicture } from "../../src/collaboration/PictureProtocol";
 import { DiscussionStore, type Draft, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
-import { commentDraftBody, readCommentDraft } from "../../src/collaboration/ui/CommentDraft";
+import { commentDraftBody, editableCommentDraft, readCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -94,6 +94,40 @@ test("reference removal preserves another draft's original, then reclaims the la
 	expect(await store.removeDraft("second", 0)).toBe(true);
 	expect(await store.pictureSource(pid, entry)).toBeUndefined();
 	expect(await store.preference("pictureSourceBytes")).toBe(0);
+});
+
+test("rich undo references retain originals across removal and send only active pictures", async () => {
+	const second = await prepareLocalPicture(id(6), entry, bytes());
+	const rich = editableCommentDraft({ version: 1, blocks: [...bodyFromText("Before").blocks, block(), ...bodyFromText("After").blocks] }, () => "Member");
+	const body = { ...rich, undoPictures: [block(second.id)], editBaseRevision: 7 };
+	await store.saveDraft({ ...draft(), body: protocolJson(body) }, null, [source, second]);
+	expect(await store.preference("pictureSourceBytes")).toBe(source.size + second.size);
+	await store.enqueue({ ...command(), payload: { ...command().payload as object, body: protocolJson(commentDraftBody(body)) } }, 1, { id: "draft", revision: 0 });
+	expect(await store.pictureSource(pid, entry)).toBeDefined(); expect(await store.pictureSource(second.id, entry)).toBeUndefined();
+	expect((await store.getOperation(id(10)))?.dependsOn).toEqual([pid]); expect(await store.getOperation(second.id)).toBeUndefined();
+	expect(await store.preference("pictureSourceBytes")).toBe(source.size);
+});
+
+test("picture recovery atomically remaps rich positions and undo references without changing edit revision or target", async () => {
+	const second = await prepareLocalPicture(id(6), entry, bytes()), target = { version: 1, type: "note" };
+	const body = { ...editableCommentDraft({ version: 1, blocks: [...bodyFromText("Before").blocks, block(), ...bodyFromText("After").blocks] }, () => "Member"),
+		undoPictures: [block(second.id)], editBaseRevision: 7 };
+	await store.saveDraft({ ...draft(), body: protocolJson(body), target }, null, [source, second]);
+	const updated = await store.refreshDraftPictures("draft", 0, [{ oldId: pid, newId: id(60) }, { oldId: second.id, newId: id(61) }]);
+	expect(readCommentDraft(updated.body)).toMatchObject({ editBaseRevision: 7, pictures: [block(id(60))], undoPictures: [block(id(61))],
+		rich: { blocks: [...bodyFromText("Before").blocks, block(id(60)), ...bodyFromText("After").blocks] } });
+	expect(updated.target).toEqual(target); expect(await store.pictureSource(pid, entry)).toBeUndefined();
+	expect((await store.pictureSource(id(60), entry))?.bytes).toEqual(source.bytes);
+	expect((await store.pictureSource(id(61), entry))?.bytes).toEqual(second.bytes); expect(await store.preference("pictureSourceBytes")).toBe(source.size + second.size);
+	await expect(store.refreshDraftPictures("draft", 0, [{ oldId: id(60), newId: id(62) }])).rejects.toThrow();
+	expect(await store.pictureSource(id(62), entry)).toBeUndefined();
+});
+
+test("mismatched rich references roll back bytes and leave the previous draft intact", async () => {
+	await store.saveDraft({ ...draft(), body: "Original" }, null);
+	const body = editableCommentDraft({ version: 1, blocks: [block()] }, () => "Member");
+	await expect(store.saveDraft({ ...draft(1), body: protocolJson({ ...body, pictures: [] }) }, 0, [source])).rejects.toThrow("do not match");
+	expect((await store.getDraft("draft"))?.body).toBe("Original"); expect(await store.pictureSource(pid, entry)).toBeUndefined();
 });
 
 test("draft-to-outbox transfer inserts upload dependencies atomically and frees bytes only after message acceptance", async () => {

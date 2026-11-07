@@ -826,3 +826,24 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-comment-history-diff ins { text-decoration: underline; background: var(--text-selection); }
 .relay-comment-history-diff del { text-decoration: line-through; background: var(--background-modifier-error); }
 .is-mobile .relay-comment-history-controls button, .is-mobile .relay-comment-history-controls input { min-height: 44px; }
+.relay-comment-formatting { display: flex; flex-wrap: wrap; gap: 4px; margin-block: 8px; }
+.relay-comment-formatting button[aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }
+.relay-comment-rich .ProseMirror { position: relative; min-height: 6em; max-height: 50vh; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap; white-space: break-spaces; font-variant-ligatures: none; padding: 10px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--background-primary); }
+.relay-comment-rich .ProseMirror:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
+.relay-comment-rich .ProseMirror[contenteditable="false"] { background: var(--background-secondary); }
+.relay-comment-rich .ProseMirror p { margin-block: 0.4em; }
+.relay-comment-rich .ProseMirror pre { white-space: pre-wrap; background: var(--background-secondary); padding: 8px; }
+.relay-comment-rich .ProseMirror li { position: relative; }
+.relay-comment-rich .ProseMirror-hideselection *::selection { background: transparent; }
+.relay-comment-rich .ProseMirror-hideselection { caret-color: transparent; }
+.relay-comment-rich .ProseMirror-selectednode { outline: 2px solid var(--interactive-accent); }
+.relay-comment-rich img.ProseMirror-separator { display: inline; border: none; margin: 0; }
+.relay-comment-rich-picture { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); margin-block: 8px; padding: 8px; white-space: normal; }
+.relay-comment-rich-picture input { width: 100%; margin-block: 4px; }
+.relay-comment-link-editor, .relay-comment-code-language { padding-block: 8px; }
+.relay-comment-link-editor label, .relay-comment-code-language { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.relay-comment-link-editor input { flex: 1 1 200px; min-width: 0; }
+.relay-comment-link-editor button { margin: 4px; }
+.relay-comment-edit-review { border: 1px solid var(--background-modifier-border); padding: 10px; margin-block: 10px; }
+.relay-comment-rich [hidden] { display: none; }
+.is-mobile .relay-comment-rich button, .is-mobile .relay-comment-rich input { min-height: 44px; }

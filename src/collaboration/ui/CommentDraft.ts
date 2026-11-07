@@ -1,32 +1,28 @@
-import { isId, isRecord, parseBody, type InlineNode, type MessageBody } from "../DiscussionProtocol";
+import { isId, isRecord, isRevision, parseBody, type InlineNode, type MessageBody } from "../DiscussionProtocol";
 import { pictureIds, type PictureBlock } from "../PictureProtocol";
+import { readRichDraftBody, richCommentBody } from "./RichCommentModel";
+import { commentBodyText } from "./CommentBody";
 
 export type MentionSpan = { start: number; end: number; userId: string };
-export type CommentDraft = { text: string; mentions: MentionSpan[]; pictures?: PictureBlock[] };
+export type CommentDraft = { text: string; mentions: MentionSpan[]; pictures?: PictureBlock[]; rich?: MessageBody; undoPictures?: PictureBlock[]; editBaseRevision?: number };
 
-/** Only offer this editor when its round trip preserves the supported content.
- * Rich blocks/marks and interleaved pictures need the later rich editor.
- */
-export function editableCommentDraft(body: MessageBody, name: (id: string) => string): CommentDraft | undefined {
-	const draft: CommentDraft = { text: "", mentions: [], pictures: [] };
-	let paragraphs = 0;
-	for (const block of body.blocks) {
-		if (block.type === "picture") { draft.pictures!.push({ ...block }); continue; }
-		if (block.type !== "paragraph" || draft.pictures!.length) return undefined;
-		if (paragraphs++) draft.text += "\n\n";
-		for (const node of block.children) {
-			if (node.type === "text" && !node.marks?.length) draft.text += node.text;
-			else if (node.type === "mention") {
-				const start = draft.text.length; draft.text += "@" + name(node.user_id);
-				draft.mentions.push({ start, end: draft.text.length, userId: node.user_id });
-			} else return undefined;
-		}
-	}
-	return draft;
+/** Keep the full wire body. Text is only a selectable local recovery projection. */
+export function editableCommentDraft(body: MessageBody, name: (id: string) => string): CommentDraft {
+	const rich = readRichDraftBody(body);
+	return { text: commentBodyText(rich, name), mentions: [], pictures: rich.blocks.filter((block): block is PictureBlock => block.type === "picture"), rich };
 }
 
 export function readCommentDraft(value: unknown): CommentDraft {
 	if (typeof value === "string") return { text: value, mentions: [] };
+	if (isRecord(value) && value.editBaseRevision !== undefined && !isRevision(value.editBaseRevision)) throw new Error("Invalid saved edit revision");
+	const editBase = isRecord(value) && isRevision(value.editBaseRevision) ? { editBaseRevision: value.editBaseRevision } : {};
+	if (isRecord(value) && value.rich !== undefined) {
+		const rich = readRichDraftBody(value.rich); pictureIds(value, true);
+		if (typeof value.text !== "string" || !Array.isArray(value.mentions) || value.mentions.length) throw new Error("Invalid rich comment draft");
+		const pictures = rich.blocks.filter((block): block is PictureBlock => block.type === "picture");
+		return { text: value.text, mentions: [], pictures, rich, ...editBase,
+			...(Array.isArray(value.undoPictures) && value.undoPictures.length ? { undoPictures: value.undoPictures.map(p => ({ type: "picture" as const, picture_id: (p as PictureBlock).picture_id, alt: (p as PictureBlock).alt ?? "" })) } : {}) };
+	}
 	if (!isRecord(value) || typeof value.text !== "string" || !Array.isArray(value.mentions)) {
 		if (isRecord(value) && value.pictures !== undefined) throw new Error("Saved picture draft could not be read");
 		return { text: "", mentions: [] };
@@ -38,7 +34,7 @@ export function readCommentDraft(value: unknown): CommentDraft {
 	let end = 0;
 	pictureIds(value, true);
 	const pictures = (value.pictures as PictureBlock[] | undefined)?.map(picture => ({ type: "picture" as const, picture_id: picture.picture_id, alt: picture.alt ?? "" }));
-	return { text, mentions: mentions.filter(m => { if (m.start < end) return false; end = m.end; return true; }), ...(pictures?.length ? { pictures } : {}) };
+	return { text, mentions: mentions.filter(m => { if (m.start < end) return false; end = m.end; return true; }), ...(pictures?.length ? { pictures } : {}), ...editBase };
 }
 
 /** Maintain stable mention identities around ordinary textarea/IME edits. Editing
@@ -56,6 +52,7 @@ export function updateMentionSpans(before: string, after: string, spans: Mention
 
 export function commentDraftBody(draft: CommentDraft): MessageBody {
 	const children: InlineNode[] = [], parsed = readCommentDraft(draft), spans = parsed.mentions;
+	if (parsed.rich) return richCommentBody(parsed.rich);
 	const append = (text: string) => {
 		const points = [...text];
 		for (let i = 0; i < points.length; i += 8192) children.push({ type: "text", text: points.slice(i, i + 8192).join("") });

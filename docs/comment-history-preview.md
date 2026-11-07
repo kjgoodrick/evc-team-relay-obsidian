@@ -46,8 +46,10 @@ follows subsequent edits. Unchanged results keep their DOM and focus. A changed
 result preserves an active revision input and does not move focus from outside
 the history. Navigation disposes prior picture views and blob URLs.
 
-No service implementation, database migration, message schema or draft format
-changes. Rich composer/editing work remains separate and unfinished.
+This history increment did not change the service implementation, database,
+message schema or draft format. The subsequent
+[rich editor preview](rich-comment-editor-preview.md) adds structured authoring
+and editing; its native acceptance remains separate.
 
 ## Verification
 

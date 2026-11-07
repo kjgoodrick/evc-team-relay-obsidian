@@ -22,6 +22,8 @@ Object.assign(HTMLElement.prototype, {
 	appendText(this: HTMLElement, text: string) { this.append(document.createTextNode(text)); },
 });
 Object.assign(URL, { createObjectURL: jest.fn(() => "blob:private-picture"), revokeObjectURL: jest.fn() });
+// jsdom has no layout; ProseMirror uses Range geometry when Undo reveals a caret.
+Object.assign(Range.prototype, { getClientRects: () => [], getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }) });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const entry = id(3), identity = { serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "pictures-ui" };
 const bytes = (format: keyof typeof fixtures = "png") => new Uint8Array(Buffer.from(fixtures[format], "base64")).buffer;
@@ -77,6 +79,25 @@ test("offline picker persists bytes before showing pictures, survives reload and
 	} finally { composer.dispose(); store.close(); parent.remove(); }
 });
 
+test("rich attachment staging preserves its insertion point and keeps original bytes through Remove and Undo", async () => {
+	const { store, session, parent, make } = await setup(); let composer = make();
+	const button = (label: string) => [...parent.querySelectorAll("button")].find(b => b.textContent === label)!;
+	try {
+		await composer.flush(); composer.textarea.value = "BeforeAfter"; composer.textarea.dispatchEvent(new Event("input"));
+		composer.textarea.setSelectionRange(6, 6); button("Format comment").click(); await composer.flush();
+		await composer.addPictures([file()]);
+		const body = (await store.getDraft("draft"))!.body as { rich: { blocks: { type: string; picture_id?: string }[] } };
+		expect(body.rich.blocks.map(block => block.type)).toEqual(["paragraph", "picture", "paragraph"]);
+		const pictureId = body.rich.blocks[1].picture_id!;
+		expect((await store.pictureSource(pictureId, entry))?.bytes).toEqual(bytes());
+		button("Remove picture").click(); await composer.flush(); expect(await store.pictureSource(pictureId, entry)).toBeDefined();
+		button("Undo").click(); await composer.flush(); expect(parent.querySelectorAll("figure")).toHaveLength(1);
+		composer.dispose(); composer = make(); await composer.flush(); await composer.submit();
+		expect(session.queue.mock.calls[0][0].payload).toMatchObject({ body: body.rich });
+		expect(await store.getDraft("draft")).toBeUndefined(); expect(await store.pictureSource(pictureId, entry)).toBeDefined();
+	} finally { composer.dispose(); store.close(); parent.remove(); }
+});
+
 test("pasting an image preserves accompanying text; invalid picks do not lock or discard the saved draft", async () => {
 	const { store, parent, make } = await setup(), composer = make();
 	try {
@@ -104,13 +125,14 @@ test("a competing window wins without orphaning the losing picture or overwritin
 	} finally { composer.dispose(); store.close(); parent.remove(); }
 });
 
-test("picture edits preserve mentions and descriptions and refuse unsupported rich or interleaved content", () => {
+test("picture edits preserve mentions, descriptions and rich or interleaved content", () => {
 	const picture = { type: "picture" as const, picture_id: id(8), alt: "Diagram" };
 	const body = { version: 1 as const, blocks: [{ type: "paragraph" as const, children: [{ type: "mention" as const, user_id: id(1) }, { type: "text" as const, text: " see this" }] }, picture] };
 	const draft = editableCommentDraft(body, () => "Alice")!;
-	expect(draft.text).toBe("@Alice see this"); expect(commentDraftBody(draft)).toEqual(body);
-	expect(editableCommentDraft({ version: 1, blocks: [picture, body.blocks[0]] }, () => "Alice")).toBeUndefined();
-	expect(editableCommentDraft({ version: 1, blocks: [{ type: "code", text: "Keep this" }] }, () => "Alice")).toBeUndefined();
+	expect(draft.text).toBe("@Alice see this\n\n[Picture: Diagram]"); expect(commentDraftBody(draft)).toEqual(body);
+	for (const blocks of [[picture, body.blocks[0]], [{ type: "code" as const, text: "Keep this" }]]) {
+		const rich = { version: 1 as const, blocks }; expect(commentDraftBody(editableCommentDraft(rich, () => "Alice"))).toEqual(rich);
+	}
 });
 
 test("online-pending drafts keep picture controls locked until the exact send is resolved", async () => {

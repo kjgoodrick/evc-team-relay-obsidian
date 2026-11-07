@@ -7,6 +7,8 @@ import { DiscussionSync, messageKey, threadKey } from "../../src/collaboration/D
 import { DiscussionStore, type Json, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { protocolJson, type MessageBody } from "../../src/collaboration/DiscussionProtocol";
+import { EditorState } from "prosemirror-state";
+import { bodyToCommentDoc, commentDocBody, richCommentBody } from "../../src/collaboration/ui/RichCommentModel";
 
 const fixturePath = process.env.EVC_DISCUSSION_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -145,10 +147,17 @@ integration("rich history retains structure and removal history is limited to it
 		{ type: "code", text: "const safe = '<script>';", language: "ts" },
 	] });
 	try {
+		// Serialize an actual local editor transaction, then verify both the
+		// wire shape and the server's immutable revision/rejection behavior.
+		const state = EditorState.create({ doc: bodyToCommentDoc(rich("Before"), () => "reviewer") });
+		const edited = richCommentBody(commentDocBody(state.apply(state.tr.insertText("After", 1, 7)).doc));
+		expect(edited).toEqual(rich("After"));
 		await owner.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
 			type: "thread.create", thread_id: thread, message_id: message, anchor: { version: 1, type: "note" }, body: protocolJson(rich("Before")) } });
 		await owner.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "message.edit", dependsOn: [], payload: {
-			type: "message.edit", thread_id: thread, message_id: message, expected_revision: 1, body: protocolJson(rich("After")) } });
+			type: "message.edit", thread_id: thread, message_id: message, expected_revision: 1, body: protocolJson(edited) } });
+		await expect(owner.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "message.edit", dependsOn: [], payload: {
+			type: "message.edit", thread_id: thread, message_id: message, expected_revision: 1, body: protocolJson(rich("Stale overwrite")) } })).rejects.toMatchObject({ status: 409 });
 		for (const session of [authorSession, readerSession]) { await session.start(); stops.push(session.watch(fixture.entry, () => {})); await session.refresh(); }
 		expect(await readerSession.historyWindow(fixture.entry, thread, message)).toMatchObject({ latest: 2,
 			selected: { revision: 2, body: rich("After") }, previous: { revision: 1, body: rich("Before") } });

@@ -150,6 +150,23 @@ test("version-1 upgrade preserves drafts/outbox and adds scope cleanup without t
 	} finally { store.close(); other.close(); }
 });
 
+test("version-19 upgrade preserves existing work and fences clients that cannot preserve rich drafts", async () => {
+	const factory = new IDBFactory();
+	const opening = jest.spyOn(factory, "open").mockImplementationOnce(name => IDBFactory.prototype.open.call(factory, name, 19));
+	const old = await DiscussionStore.open(identity, factory); opening.mockRestore();
+	await old.saveDraft({ id: "legacy", scopeId: "note", revision: 0, body: "Saved before rich editing" });
+	await old.enqueue(command("before-upgrade"));
+	// Versionchange closes the old handle, allowing the upgrade without losing work.
+	const current = await DiscussionStore.open(identity, factory);
+	try {
+		expect((await current.getDraft("legacy"))?.body).toBe("Saved before rich editing");
+		expect(await current.getOperation("before-upgrade")).toBeDefined();
+		await expect(old.getDraft("legacy")).rejects.toThrow();
+		const name = "team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
+		await expect(new Promise((resolve, reject) => { const request = factory.open(name, 19); request.onsuccess = () => { request.result.close(); resolve(undefined); }; request.onerror = () => reject(request.error); })).rejects.toMatchObject({ name: "VersionError" });
+	} finally { current.close(); old.close(); }
+});
+
 test("selection drafts page within a note, preserve targets, and survive reopening the store", async () => {
 	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
 	const target = { version: 1, type: "text", generation: "original" };

@@ -66,10 +66,25 @@ export async function prepareLocalPicture(id: string, scopeId: string, bytes: Ar
 export function pictureIds(value: unknown, draft = false): string[] {
 	if (!isRecord(value)) return [];
 	const blocks = draft ? value.pictures : value.blocks;
-	if (blocks === undefined) return [];
+	if (blocks === undefined) {
+		if (draft && (value.rich !== undefined || value.undoPictures !== undefined)) throw new Error("Missing rich picture references");
+		return [];
+	}
 	if (!Array.isArray(blocks)) throw new Error("Invalid picture references");
 	const pictures = blocks.filter(block => isRecord(block) && block.type === "picture");
 	if (pictures.length > 10 || draft && pictures.length !== blocks.length || pictures.some(block =>
 		!isId(block.picture_id) || block.alt !== undefined && (typeof block.alt !== "string" || [...block.alt].length > 1024))) throw new Error("Invalid picture references");
+	if (draft && value.rich !== undefined) {
+		if (!isRecord(value.rich) || !Array.isArray(value.rich.blocks)) throw new Error("Invalid rich picture references");
+		const active = value.rich.blocks.filter(block => isRecord(block) && block.type === "picture");
+		if (JSON.stringify(active.map(block => [block.picture_id, block.alt ?? ""])) !== JSON.stringify(pictures.map(block => [block.picture_id, block.alt ?? ""]))) throw new Error("Rich picture references do not match the draft");
+		const retained = value.undoPictures ?? [];
+		if (!Array.isArray(retained) || retained.length > 100 || retained.some(block => !isRecord(block) || block.type !== "picture" || !isId(block.picture_id) ||
+			block.alt !== undefined && (typeof block.alt !== "string" || [...block.alt].length > 1024))) throw new Error("Invalid undo picture references");
+		const ids = [...new Set([...pictures, ...retained].map(block => block.picture_id as string))];
+		if (ids.length > 100) throw new Error("Picture undo history exceeds its limit");
+		return ids;
+	}
+	if (draft && value.undoPictures !== undefined) throw new Error("Unexpected undo picture references");
 	return [...new Set(pictures.map(block => block.picture_id as string))];
 }

@@ -50,14 +50,16 @@ class DeleteCommentModal extends AccountModal {
 
 class EditCommentModal extends AccountModal {
 	private composer?: CommentComposer;
+	private stopEditing?: () => void;
 	constructor(app: App, private session: DiscussionSession, private entryId: string, private threadId: string, private message: DiscussionMessage, private draft: CommentDraft) { super(app, session); }
 	onOpen(): void {
 		this.setTitle("Edit comment");
 		this.composer = new CommentComposer(this.contentEl, this.session, this.entryId, `edit:${this.entryId}:${this.message.id}`,
-			body => ({ type: "message.edit", payload: { type: "message.edit", thread_id: this.threadId, message_id: this.message.id,
-				expected_revision: this.message.revision, body: protocolJson(body) } }), "Comment", this.draft, () => this.close());
+			(body, _anchor, revision) => ({ type: "message.edit", payload: { type: "message.edit", thread_id: this.threadId, message_id: this.message.id,
+				expected_revision: revision ?? this.message.revision, body: protocolJson(body) } }), "Comment", { ...this.draft, editBaseRevision: this.message.revision }, () => this.close());
+		this.stopEditing = this.session.onChange(() => this.composer?.update());
 	}
-	onClose(): void { this.composer?.dispose(); super.onClose(); }
+	onClose(): void { this.stopEditing?.(); this.stopEditing = undefined; this.composer?.dispose(); super.onClose(); }
 }
 
 class ThreadCard {
