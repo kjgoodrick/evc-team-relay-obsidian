@@ -102,7 +102,7 @@ export class TimelineMarkerManager extends Modal {
 		const box = this.recoveryEl.createEl("section", { cls: "relay-timeline-marker-recovery", attr: { "aria-label": "Marker save result" } });
 		box.createEl("h3", { text: state.status === "pending" ? "Marker save not confirmed" : state.status === "accepted" ? "Marker save confirmed" : "Marker save needs review" });
 		const operation = state.request.command;
-		box.createEl("p", { text: operation.type === "marker.put" ? operation.content.label + " · " + timelineRangeLabel(operation.content.range) : "Archive marker in every view" });
+		box.createEl("p", { text: operation.type === "marker.put" ? operation.content.label + " · " + timelineRangeLabel(operation.content.range, operation.content.kind) : "Archive marker in every view" });
 		box.createEl("p", { text: state.status === "pending" ? "The original request is saved on this device. Retry it after reconnecting. Starting another save could duplicate an already accepted change, so this result must be recovered first." :
 			state.status === "accepted" ? "This request was accepted. The marker may have changed again since then. Acknowledge to load its current state." :
 			state.error === "base_generation_changed" ? "The base was restored or replaced. This request cannot apply to its current generation; it may have succeeded in the earlier one. Review the saved request before reloading." :
@@ -186,18 +186,19 @@ export class TimelineMarkerManager extends Modal {
 		const kind = this.form.createEl("label", { text: "Marker shape" }).createEl("select", { attr: { "aria-label": "Marker shape" } });
 		kind.createEl("option", { text: "Point / milestone", attr: { value: "point" } }); kind.createEl("option", { text: "Range", attr: { value: "range" } }); kind.value = draft.kind; this.fields.push(kind);
 		kind.onchange = () => { draft.kind = kind.value as Draft["kind"]; changed(); };
-		this.form.createEl("p", { text: draft.range ? timelineRangeLabel(draft.range) : "Choose a position before saving." });
+		this.form.createEl("p", { text: draft.range ? timelineRangeLabel(draft.range, draft.kind) : "Choose a position before saving." });
 		this.positionButton = this.button(this.form, "Choose marker position", () => this.choosePosition());
 		const placements = this.form.createEl("fieldset"); placements.createEl("legend", { text: "Place in saved views" });
 		if (this.detail?.marker.active && !draft.placements.some(item => item.view_id === this.context.binding.viewId)) placements.createEl("p", { text: "This marker is not currently placed in this view. Select this view below to add it." });
 		const choices = new Map((this.detail?.marker.placements ?? draft.placements).map(placement => [placement.view_id, placement]));
 		for (const placement of draft.placements) choices.set(placement.view_id, placement);
 		const current = this.currentPlacement(); if (current && !choices.has(current.view_id)) choices.set(current.view_id, current);
+		const placementList = placements.createDiv({ cls: "relay-marker-placement-list" });
 		for (const placement of choices.values()) {
 			const views = this.context.binding.snapshot.views ?? [];
 			const label = views.find(view => view.id === placement.view_id)?.name ?? (placement.view_id === this.context.binding.viewId ? this.context.binding.name : "Saved view " + placement.view_id.slice(-8));
 			const name = label + (views.filter(view => view.name === label).length > 1 ? " · " + placement.view_id.slice(-8) : "");
-			const checked = placements.createEl("label", { text: name + " · " + placement.axis.start_property.name + (placement.axis.time_zone ? " · " + placement.axis.time_zone : "") }).createEl("input", { attr: { type: "checkbox", "aria-label": "Place in " + name } });
+			const checked = placementList.createEl("label", { text: name + " · " + placement.axis.start_property.name + (placement.axis.time_zone ? " · " + placement.axis.time_zone : "") }).createEl("input", { attr: { type: "checkbox", "aria-label": "Place in " + name } });
 			checked.checked = draft.placements.some(item => item.view_id === placement.view_id); this.fields.push(checked);
 			checked.onchange = () => { draft.placements = draft.placements.filter(item => item.view_id !== placement.view_id); if (checked.checked) draft.placements.push({ ...placement, active: true }); changed(); };
 		}

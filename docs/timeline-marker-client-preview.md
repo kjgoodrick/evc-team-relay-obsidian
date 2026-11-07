@@ -216,8 +216,9 @@ catalogs, immutable anchors, offline recovery and surface presence. That fixture
 does not render this dialog. The Time & Line checkout remains unchanged at
 `6eedff2`. Logs use `/private/tmp/marker-comparison-*.log`.
 
-Native desktop/popout/mobile layout, keyboard/touch and accessibility acceptance
-of the comparison remains. No live vault or production service was changed.
+Native desktop comparison evidence follows below. Popout/mobile, physical touch
+and broader accessibility acceptance remain. No live vault or production service
+was changed.
 
 ## Base-wide marker placement
 
@@ -259,8 +260,51 @@ and Sequence/exact-decimal cases add a second saved view, preserve the original
 placement, and read the new association back without altering an existing
 discussion's captured target or the `.base` content. Its temporary server and
 database are removed afterward. Logs use `/private/tmp/marker-placement-*.log`.
-Native desktop/mobile placement acceptance remains; no live vault or production
-service was changed.
+Native desktop placement evidence follows below. Mobile and broader placement
+acceptance remain; no live vault or production service was changed.
+
+## Native desktop placement and comparison, November 7
+
+Obsidian 1.13.7 on macOS used the disposable
+`/private/tmp/evc-timeline-markers-native-20261107` vault, the actual local
+FastAPI/Rust services, plugin `90c6d23` plus the fixes below and Time & Line
+`6eedff2`. Manage markers listed a marker originating only in another saved
+Timeline view. Checking a Sequence view refused the incompatible coordinates
+without changing the form. Checking the current Timeline showed its axis for
+review; keyboard confirmation added that placement and moved focus to Save.
+Server readback confirmed both active placements at revision two. They survived
+a complete native reload; `.base` bytes remained unchanged.
+
+The first native pass exposed a scrolling fieldset that hid its own placement
+controls. Only the checkbox list now scrolls internally, keeping its legend,
+axis check and explicit confirmation visible. A second native pass verified the
+layout and point labels with one coordinate.
+
+The comparison displayed the captured November 7 revision beside the revised
+November 12 position and explained the changed label/position. Both navigation
+buttons moved the actual empty Timeline viewport to the selected position.
+Independent server readback confirmed the discussion's captured target stayed
+unchanged. After stopping the fixture services and reloading Obsidian, the same
+comparison opened from cache with the **Last saved catalog** label and both
+positions. The new fixture also displayed the server's explicit UTC timestamp
+at the correct local time.
+
+A connection drop before the session detected offline initially prevented
+comparison. A retry-classified discussion read can now use the saved thread,
+still checking its exact anchor/revision and current read access. Authentication,
+permission and pause failures cannot use this fallback. The comparison labels
+the saved-discussion fallback. Five regressions cover those paths and retargeting;
+the specific drop transition is automated evidence, while native offline reopen
+is verified. The failure class lives in a dependency-free module, retaining its
+transport re-export, so reading an error does not initialize host networking.
+
+The full plugin suite passes **3,167 tests / 248 suites**, with 22 opt-in tests /
+17 suites skipped. Build/main types, frozen test types, changed-source lint and
+all eight actual-source Time & Line interoperability cases pass. Logs use
+`/private/tmp/marker-native-fixes-*.log`; detailed native observations are in
+`/private/tmp/timeline-marker-native-evidence.json`. The temporary services are
+stopped and the original Knowledge Base window restored. This does not complete
+native Sequence, broader recovery, popout/mobile, touch or resource acceptance.
 
 ## Remaining work
 

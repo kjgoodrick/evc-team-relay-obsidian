@@ -828,7 +828,8 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-timeline-marker-dialog button { margin: 4px; }
 .relay-timeline-marker-dialog input[type="text"] { flex: 1 1 200px; min-width: 0; max-width: 100%; }
 .relay-timeline-marker-dialog textarea { width: 100%; max-width: 100%; }
-.relay-timeline-marker-dialog fieldset { max-height: 260px; overflow: auto; }
+.relay-timeline-marker-dialog fieldset { min-inline-size: 0; }
+.relay-marker-placement-list { max-height: 260px; overflow-y: auto; padding-block: 2px; }
 .relay-timeline-marker-recovery { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: 12px; margin-block: 12px; }
 .is-mobile .relay-timeline-marker-dialog select, .is-mobile .relay-timeline-marker-dialog button { min-height: 44px; }
 .is-mobile .relay-timeline-marker-dialog label, .is-mobile .relay-timeline-marker-dialog input[type="text"] { min-height: 44px; }

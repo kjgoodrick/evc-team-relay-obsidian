@@ -2,6 +2,7 @@
 import type { App } from "obsidian";
 import { TimelineMarkerComparisonModal } from "../../src/collaboration/ui/TimelineMarkerComparison";
 import type { AnchoredThread, DiscussionSession } from "../../src/collaboration/DiscussionSession";
+import { DiscussionFailure } from "../../src/collaboration/DiscussionFailure";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { timelineMarkerAnchor, type TimelineMarkerCatalog } from "../../src/collaboration/TimelineMarkerProtocol";
 import type { BaseAnchor, TimelineAxis } from "../../src/collaboration/DiscussionProtocol";
@@ -45,6 +46,26 @@ function fixture(range: TimelineRange = { version: 1, kind: "calendar", start: "
 		retarget() { thread = { ...thread, anchor_revision: 2 }; } };
 }
 afterEach(() => { document.body.replaceChildren(); jest.restoreAllMocks(); });
+
+test("a connection failure before the session detects offline uses the same saved target and labels the fallback", async () => {
+	const f = fixture(); f.access.fresh = false; f.linked.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+	f.modal.open(); await flush();
+	expect(document.body.textContent).toContain("Comparison loaded from the saved discussion");
+	expect(document.body.textContent).toContain("Last saved catalog");
+	click("Show captured position"); await flush(); expect(f.reveal.mock.calls[0][0]).toEqual(f.anchor); f.modal.close();
+});
+
+test.each(["reject", "authenticate", "pause"] as const)("a %s read failure cannot use the saved discussion as authority", async action => {
+	const f = fixture(); f.linked.mockRejectedValueOnce(new DiscussionFailure(action, "target_unavailable"));
+	f.modal.open(); await flush(); expect(f.cached).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled();
+	expect(document.body.textContent).toContain("could not be verified"); f.modal.close();
+});
+
+test("an offline fallback still rejects a retargeted saved discussion", async () => {
+	const f = fixture(); f.linked.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable")); f.retarget();
+	f.modal.open(); await flush(); expect(f.read).not.toHaveBeenCalled(); expect(buttons("Show captured position")).toHaveLength(0);
+	expect(document.body.textContent).toContain("target changed or is unavailable"); f.modal.close();
+});
 
 test("a reader compares changed marker content and navigates either immutable position without writes", async () => {
 	const f = fixture(), marker = f.catalog.markers[0];

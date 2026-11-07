@@ -1,5 +1,6 @@
 import { Modal, type App } from "obsidian";
 import type { DiscussionSession } from "../DiscussionSession";
+import { DiscussionFailure } from "../DiscussionFailure";
 import { parseAnchor, parseTimelineAxis, type BaseAnchor, type BaseTimelineMarkerTarget } from "../DiscussionProtocol";
 import { parseDiscussionScope } from "../DiscussionScope";
 import { timelineMarkerAnchor, type TimelineMarkerCatalog, type TimelineViewMarker } from "../TimelineMarkerProtocol";
@@ -102,7 +103,14 @@ export class TimelineMarkerComparisonModal extends Modal {
 		const serial = ++this.serial; this.busy = true; this.refreshButton.disabled = true;
 		this.content.empty(); this.status.setText("Checking the discussion and marker…");
 		try {
-			const discussion = await this.session.linkedThread(this.scopeId, this.threadId);
+			let discussion, savedDiscussion = false;
+			try { discussion = await this.session.linkedThread(this.scopeId, this.threadId); }
+			catch (error) {
+				if (!(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
+				if (!this.current() || serial !== this.serial) return;
+				const thread = await this.session.cachedThread(this.scopeId, this.threadId);
+				discussion = thread ? { thread } : undefined; savedDiscussion = true;
+			}
 			if (!this.current() || serial !== this.serial) return;
 			if (!discussion?.thread.anchor || discussion.thread.anchor_revision !== this.anchorRevision ||
 				JSON.stringify(discussion.thread.anchor) !== JSON.stringify(this.captured)) {
@@ -120,7 +128,7 @@ export class TimelineMarkerComparisonModal extends Modal {
 				throw new Error("The discussion target changed.");
 			}
 			this.render(catalog, this.session.verifiedTargetCatalog(catalog));
-			this.status.setText("Comparison loaded. The discussion target is unchanged.");
+			this.status.setText(savedDiscussion ? "Comparison loaded from the saved discussion. Reconnect and refresh to check for later changes." : "Comparison loaded. The discussion target is unchanged.");
 		} catch {
 			if (this.current() && serial === this.serial) { this.content.empty(); this.status.setText("The comparison could not be verified. Check access or reconnect, then refresh."); }
 		} finally {

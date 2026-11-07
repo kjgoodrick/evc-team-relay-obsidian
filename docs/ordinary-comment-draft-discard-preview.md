@@ -38,5 +38,22 @@ suites skipped**. A final target-transition guard follows that run; its send and
 discard regressions pass in the **110-case focused run**. Final build/main types,
 frozen test-type gate and changed-source lint pass. The build retains 15 existing
 warnings; test types remain 206 errors / 45 signatures versus the 207 / 46 baseline.
-No native discard result is claimed for this increment, and no live vault or
+No native discard result was claimed for that increment. No live vault or
 production service was changed.
+
+## Native desktop follow-up, November 7
+
+The user explicitly approved discarding the synthetic reply “Preserve this reply
+while target filters hide it” in `/private/tmp/evc-targets-native-20261107`.
+Obsidian 1.13.7 on macOS, with the fixture services stopped, displayed the exact
+retained reply and the final review. **Discard saved draft** cleared the editor
+and reported success. A full native reload and reopening the same reply composer
+left it empty with no Discard draft control. All three previously posted
+discussions, including the rich edited message, remained visible from cache.
+The earlier **Keep editing** check preserved the same draft.
+
+This check used the existing `076ffe3` preview build. Its local evidence is in
+`/private/tmp/target-status-native-evidence.json` and
+`/private/tmp/comment-rich-history-native-evidence.json`. The original Knowledge
+Base window was restored. Native mobile, multiwindow and picture-ownership
+acceptance remain; this result covers ordinary offline text-draft discard only.
