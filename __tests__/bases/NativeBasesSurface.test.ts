@@ -1,12 +1,13 @@
 /** @jest-environment jsdom */
 import { TFile } from "obsidian";
+import { StringValue, NumberValue, NullValue } from "../mocks/nativeBaseValues";
 import { webcrypto } from "node:crypto";
 import { TextEncoder } from "node:util";
 import { sha256Hex } from "../../src/contentDigest";
 import { NativeBasesSurface, baseConfigurationKey, nativeBaseProperty } from "../../src/bases/NativeBasesSurface";
 import type { BaseRegistrySnapshot } from "../../src/bases/BaseRegistryProtocol";
 
-jest.mock("obsidian", () => ({ TFile: class {}, parseYaml: (source: string) => JSON.parse(source) }));
+jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/nativeBaseValues"), parseYaml: (source: string) => JSON.parse(source) }));
 Object.assign(window, { TextEncoder });
 Object.defineProperty(window.crypto, "subtle", { configurable: true, value: webcrypto.subtle });
 const id = (n: number) => `20000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -246,4 +247,79 @@ describe("semantic target navigation", () => {
 			expect(jest.getTimerCount()).toBe(0);
 		} finally { request.mockRestore(); cancel.mockRestore(); jest.useRealTimers(); }
 	});
+});
+
+function groupedFixture(type: "table" | "cards" | "list" = "table") {
+ const f = fixture(type), property = { source: "note" as const, name: "status" };
+ Object.assign(f.config, { groupBy: { property: "note.status", direction: "ASC" } });
+ Object.assign(f.serial.views[0], { groupBy: { property: "note.status", direction: "ASC" } });
+ f.host.data = f.host.lastSavedData = JSON.stringify(f.serial);
+ const values: unknown[] = [new StringValue("1"), new NumberValue(1)];
+ f.entries.forEach((entry, i) => Object.assign(entry, { getValue: () => values[i] }));
+ const group = f.renderer.data.groupedData[0], model = f.renderer.groups[0];
+ const heading = node(f.container), child = node(heading); heading.className = "bases-group-heading";
+ Object.assign(model, { view: f.renderer, group, groupHeadingEl: heading, tableEl: node(f.container) });
+ if (type === "table") (model.tableEl as HTMLElement).appendChild(heading);
+ const surface = f.inspect()!;
+ return { ...f, values, group, model, heading, child, surface, property };
+}
+
+describe("typed native groups", () => {
+ test.each(["table", "cards", "list"] as const)("%s captures distinct typed values sharing a header, independently of representative/order", type => {
+  const f = groupedFixture(type), before = f.host.data;
+  const handles = f.surface.groupHit(f.child, () => null);
+  expect(handles).toHaveLength(2); expect(handles.every(h => h.ambiguous && h.current())).toBe(true);
+  expect(handles.map(h => h.target.value)).toEqual([{ type: "number", value: 1 }, { type: "text", value: "1" }]);
+  f.group.entries.reverse(); Object.assign(f.group, { key: NullValue.value });
+  expect(f.surface.groupHandles(() => null).map(h => h.target)).toEqual(handles.map(h => h.target));
+  expect(handles.every(h => h.current())).toBe(true);
+  expect(f.surface.hit(f.child)).toBeUndefined();
+  expect(f.host.data).toBe(before);
+ });
+ test("membership changes preserve a typed target while removing its last matching member invalidates capture", () => {
+  const f = groupedFixture(); f.values[1] = new StringValue("1");
+  const handle = f.surface.groupHandles(() => null)[0];
+  expect(handle.ambiguous).toBe(false);
+  f.group.entries.splice(1, 1); expect(handle.current()).toBe(true);
+  f.values[0] = new StringValue("Done"); expect(handle.current()).toBe(false);
+  expect(f.surface.revealGroup(handle.target, () => null, () => true)).toBe("hidden");
+ });
+ test("new ambiguity, recycled headings and replaced results invalidate previously captured handles", () => {
+  const f = groupedFixture(); f.values[1] = new StringValue("1");
+  const handle = f.surface.groupHandles(() => null)[0];
+  f.values[1] = new NumberValue(1); expect(handle.current()).toBe(false);
+  f.values[1] = new StringValue("1"); expect(handle.current()).toBe(true);
+  f.heading.remove(); expect(handle.current()).toBe(false);
+  (f.model.tableEl as HTMLElement).appendChild(f.heading);
+  f.renderer.data = { ...f.renderer.data }; expect(handle.current()).toBe(false);
+ });
+ test.each(["table", "cards", "list"] as const)("%s exact group navigation preserves filters, cells and source bytes", type => {
+  const f = groupedFixture(type), handle = f.surface.groupHandles(() => null)[0], before = f.host.data;
+  expect(f.surface.revealGroup(handle.target, () => null, () => true)).toBe("revealed");
+  expect(f.heading.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+  expect(f.surface.revealGroup(handle.target, () => null, () => false)).toBe("unavailable");
+  expect(f.surface.revealGroup({ ...handle.target, property: { source: "note", name: "other" } }, () => null, () => true)).toBe("unavailable");
+  expect(f.host.data).toBe(before); expect(f.renderer).not.toHaveProperty("activeCell");
+ });
+ test("unknown values, oversized memberships, mismatched model arrays and ungrouped views never invent a target", () => {
+  const f = groupedFixture();
+  f.values[0] = { toString: () => "Planned" }; expect(f.surface.groupHandles(() => null)).toEqual([]);
+  f.values[0] = new StringValue("Planned");
+  const old = f.group.entries; f.group.entries = Array(20001).fill(f.entries[0]);
+  expect(f.surface.groupHandles(() => null)).toEqual([]); f.group.entries = old;
+  f.renderer.groups = []; expect(f.surface.groupHandles(() => null)).toEqual([]);
+  expect(fixture().inspect()!.groupHandles(() => null)).toEqual([]);
+ });
+ test("a list group must refer to the same query group, not merely have a matching label", () => {
+  const f = groupedFixture("list"); f.model.group = { ...f.group };
+  expect(f.surface.groupHandles(() => null)).toEqual([]);
+ });
+ test("one typed value under multiple native headers remains ambiguous to navigation", () => {
+  const f = groupedFixture(), handle = f.surface.groupHandles(() => null)[0];
+  const group = { entries: [f.entries[1]] }, tableEl = node(f.container), heading = node(tableEl);
+  heading.className = "bases-group-heading";
+  f.renderer.data.groupedData.push(group); f.renderer.groups.push({ view: f.renderer, tableEl });
+  expect(f.surface.revealGroup(handle.target, () => null, () => true)).toBe("unavailable");
+  expect(f.heading.scrollIntoView).not.toHaveBeenCalled(); expect(heading.scrollIntoView).not.toHaveBeenCalled();
+ });
 });

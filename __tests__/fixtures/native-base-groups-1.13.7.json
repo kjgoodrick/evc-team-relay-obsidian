@@ -1,0 +1,607 @@
+{
+  "host": "Obsidian 1.13.7 / macOS",
+  "fixture": {
+    "notes": {
+      "B.md": "---\nstatus: Done\ndue: 2026-11-07\nprice: 2\nflag: false\n---\nB\n",
+      "F.md": "---\nstatus: 1\nprice: 3\n---\nF\n",
+      "G.md": "---\nstatus: [Planned, Done]\nprice: 4\n---\nG\n",
+      "C.md": "---\nprice: 1\n---\nC\n",
+      "H.md": "---\nstatus: \"[[A|Alias]]\"\nprice: 4\n---\nH\n",
+      "D.md": "---\nstatus: \"\"\ndue: 2026-11-06T15:30:00-07:00\nprice: 1\n---\nD\n",
+      "A.md": "---\nstatus: Planned\ndue: 2026-11-06\nprice: 1\nflag: true\n---\nA\n",
+      "E.md": "---\nstatus: \"1\"\ndue: 2026-11-06T22:30:00Z\nprice: 3\n---\nE\n"
+    },
+    "base": {
+      "filters": "file.inFolder(\"Team\") && file.ext == \"md\"",
+      "views": [
+        {
+          "type": "table",
+          "name": "Table",
+          "groupBy": {
+            "property": "status",
+            "direction": "ASC"
+          },
+          "order": [
+            "file.name",
+            "status",
+            "price"
+          ]
+        },
+        {
+          "type": "cards",
+          "name": "Cards",
+          "groupBy": {
+            "property": "status",
+            "direction": "ASC"
+          },
+          "order": [
+            "file.name",
+            "status",
+            "price"
+          ]
+        },
+        {
+          "type": "list",
+          "name": "List",
+          "groupBy": {
+            "property": "status",
+            "direction": "ASC"
+          },
+          "order": [
+            "file.name",
+            "status",
+            "price"
+          ]
+        },
+        {
+          "type": "table",
+          "name": "Dates",
+          "groupBy": {
+            "property": "due",
+            "direction": "ASC"
+          },
+          "order": [
+            "file.name",
+            "due"
+          ]
+        },
+        {
+          "type": "table",
+          "name": "Numbers",
+          "groupBy": {
+            "property": "price",
+            "direction": "ASC"
+          },
+          "order": [
+            "file.name",
+            "price"
+          ]
+        },
+        {
+          "type": "table",
+          "name": "Boolean",
+          "groupBy": {
+            "property": "flag",
+            "direction": "ASC"
+          },
+          "order": [
+            "file.name",
+            "flag"
+          ]
+        }
+      ]
+    }
+  },
+  "captures": {
+    "Table": {
+      "version": "1.13.7",
+      "type": "table",
+      "name": "Table",
+      "rows": [
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"link\",\"Team/A.md\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"number\",1]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"1\"]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Done\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Planned\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"list\",[[\"text\",\"Planned\"],[\"text\",\"Done\"]]]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"empty\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        }
+      ]
+    },
+    "Cards": {
+      "version": "1.13.7",
+      "type": "cards",
+      "name": "Cards",
+      "rows": [
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"link\",\"Team/A.md\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"number\",1]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"1\"]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Done\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Planned\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"list\",[[\"text\",\"Planned\"],[\"text\",\"Done\"]]]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"empty\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        }
+      ]
+    },
+    "List": {
+      "version": "1.13.7",
+      "type": "list",
+      "name": "List",
+      "rows": [
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"link\",\"Team/A.md\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"number\",1]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"1\"]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Done\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Planned\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"list\",[[\"text\",\"Planned\"],[\"text\",\"Done\"]]]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"empty\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        }
+      ]
+    },
+    "Dates": {
+      "version": "1.13.7",
+      "type": "table",
+      "name": "Dates",
+      "rows": [
+        {
+          "property": {
+            "source": "note",
+            "name": "due"
+          },
+          "value": "[\"date\",\"2026-11-06\"]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "due"
+          },
+          "value": "[\"instant\",\"2026-11-06T22:30:00.000Z\"]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "due"
+          },
+          "value": "[\"date\",\"2026-11-07\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "due"
+          },
+          "value": "[\"empty\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        }
+      ]
+    },
+    "TableFinal": {
+      "version": "1.13.7",
+      "type": "table",
+      "name": "Table",
+      "rows": [
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"link\",\"Team/A.md\",\"\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"number\",1]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"1\"]",
+          "ambiguous": true,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 2,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Done\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"text\",\"Planned\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"list\",[[\"text\",\"Planned\"],[\"text\",\"Done\"]]]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        },
+        {
+          "property": {
+            "source": "note",
+            "name": "status"
+          },
+          "value": "[\"empty\"]",
+          "ambiguous": false,
+          "current": true,
+          "heading": "bases-group-heading",
+          "hitCount": 1,
+          "notGeneric": true
+        }
+      ]
+    }
+  },
+  "reveals": {
+    "Cards": {
+      "name": "Cards",
+      "target": "[\"text\",\"Planned\"]",
+      "stillCurrent": false,
+      "result": "revealed"
+    },
+    "List": {
+      "name": "List",
+      "target": "[\"text\",\"Planned\"]",
+      "stillCurrent": false,
+      "result": "revealed"
+    },
+    "Table-membership": {
+      "name": "Table",
+      "target": "[\"text\",\"Planned\"]",
+      "stillCurrent": false,
+      "result": "revealed"
+    },
+    "Table-hidden": {
+      "name": "Table",
+      "target": "[\"text\",\"Planned\"]",
+      "stillCurrent": false,
+      "result": "hidden"
+    },
+    "Table": {
+      "name": "Table",
+      "target": "[\"text\",\"Planned\"]",
+      "stillCurrent": false,
+      "result": "revealed"
+    }
+  },
+  "limitations": [
+    "Probe-only native capture/navigation; not server-authorized group discussions.",
+    "Cards/list/date captures and membership navigation preceded the final shared work-budget guard. The final adapter was reloaded and table capture reverified; final focused checks cover the work-budget guard.",
+    "No mobile, native kanban or Time & Line acceptance."
+  ],
+  "cleanup": {
+    "vault_window_closed": true,
+    "probe_removed": true,
+    "source_bytes_restored": true,
+    "server_used": false
+  }
+}

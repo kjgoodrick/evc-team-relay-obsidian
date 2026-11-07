@@ -2,6 +2,7 @@ import { parseYaml, TFile } from "obsidian";
 import { sha256Hex } from "../contentDigest";
 import { isBaseDefinitionProperty, type BaseDefinitionProperty } from "../collaboration/DiscussionProtocol";
 import { parseBaseRegistry, type BaseRegistrySnapshot } from "./BaseRegistryProtocol";
+import { nativeBaseGroupValue, nativeBaseGroupValueKey, nativeGroupValueBudget, type NativeBaseGroupValue, type NativeGroupLinkResolver } from "./NativeBaseGroupValue";
 
 /** Private built-in renderer contract, observed in desktop Obsidian 1.13.7.
  * Unknown hosts/layouts return no adapter. No saved configuration is written.
@@ -50,6 +51,13 @@ export function nativeBaseProperty(value: unknown): BaseDefinitionProperty | und
 export type NativeBaseTarget = { type: "view" } | { type: "item"; file: TFile } |
 	{ type: "cell"; file: TFile; property: BaseDefinitionProperty } | { type: "property"; property: BaseDefinitionProperty };
 export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement; current(): boolean }
+export interface NativeBaseGroupTarget { type: "group"; property: BaseDefinitionProperty; value: NativeBaseGroupValue }
+export interface NativeBaseGroupHandle {
+	target: NativeBaseGroupTarget; element: HTMLElement;
+	/** One native header can represent several typed values. Capture must offer
+	 * the distinct choices instead of choosing whichever record was sorted first. */
+	ambiguous: boolean; current(): boolean;
+}
 export type NativeBaseReveal = "revealed" | "hidden" | "property-hidden" | "unavailable";
 export interface NativeBaseBinding {
 	snapshot: BaseRegistrySnapshot; viewId: string; name: string; type: string; current(): boolean;
@@ -196,6 +204,12 @@ export class NativeBasesSurface {
 		return output.length <= MAX_HANDLES ? output : [];
 	}
 	hit(node: Node): NativeBaseHandle | undefined {
+		// Group headings have their own typed capture API. A header that is not
+		// wired/supported must not silently become a whole-view discussion.
+		const grouped = this.groups(), models = list(this.renderer.groups, 256);
+		if (grouped && models?.length === grouped.length && grouped.some((group, index) => {
+			const model = models[index]; return object(model) && this.groupHeading(model, group)?.contains(node);
+		})) return;
 		// Unsupported third-party cells must not silently become row or view comments.
 		for (const row of this.rows() ?? []) {
 			if (!element(row.el) || !row.el.contains(node)) continue;
@@ -209,6 +223,88 @@ export class NativeBasesSurface {
 	private groups(): ObjectValue[] | undefined {
 		const data = this.renderer.data, groups = object(data) ? list(data.groupedData, 256) : undefined;
 		return groups?.every(group => object(group) && !!list(group.entries)) ? groups as ObjectValue[] : undefined;
+	}
+	private groupingProperty(): BaseDefinitionProperty | undefined {
+		return object(this.config.groupBy) ? nativeBaseProperty(this.config.groupBy.property) : undefined;
+	}
+	private groupHeading(model: ObjectValue, group: ObjectValue): HTMLElement | undefined {
+		if (model.view !== this.renderer) return;
+		if (this.type === "table") {
+			if (!element(model.tableEl) || !this.root.contains(model.tableEl)) return;
+			const headings = Array.from(model.tableEl.children).filter(child => child.classList.contains("bases-group-heading"));
+			return headings.length === 1 && element(headings[0]) ? headings[0] : undefined;
+		}
+		if (this.type === "list" && model.group !== group) return;
+		return element(model.groupHeadingEl) && model.groupHeadingEl.isConnected && this.root.contains(model.groupHeadingEl) ? model.groupHeadingEl : undefined;
+	}
+	private groupValues(group: ObjectValue, property: BaseDefinitionProperty, resolve: NativeGroupLinkResolver, budget = nativeGroupValueBudget()): Map<string, NativeBaseGroupValue> | undefined {
+		const entries = list(group.entries); if (!entries || entries.length === 0) return;
+		const values = new Map<string, NativeBaseGroupValue>();
+		for (const entry of entries) {
+			if (!object(entry) || !(entry.file instanceof TFile) || !callable(entry.getValue)) return;
+			const value = nativeBaseGroupValue(entry.getValue(property.source + "." + property.name), resolve, budget);
+			// Unsupported members cannot silently become a different representative
+			// target or a whole-view comment. The sidebar can explain this boundary.
+			if (!value) return;
+			values.set(nativeBaseGroupValueKey(value), value);
+			if (values.size > 256) return;
+		}
+		return values;
+	}
+	/** Explicit-action API until group capture/authorization is connected. It
+	 * neither exports member values nor treats local membership as authority. */
+	groupHandles(resolve: NativeGroupLinkResolver): NativeBaseGroupHandle[] {
+		try {
+			if (!this.current()) return [];
+			const property = this.groupingProperty(), groups = this.groups(), models = list(this.renderer.groups, 256);
+			if (!property || !groups || !models || groups.length !== models.length || !this.entries()) return [];
+			const handles: NativeBaseGroupHandle[] = [], budget = nativeGroupValueBudget();
+			for (let slot = 0; slot < groups.length; slot++) {
+				const group = groups[slot], model = models[slot]; if (!object(model)) return [];
+				const heading = this.groupHeading(model, group); if (!heading?.isConnected) continue;
+				const values = this.groupValues(group, property, resolve, budget);
+				if (budget.nodes < 0 || budget.characters < 0) return [];
+				if (!values) continue;
+				for (const [key, value] of [...values.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+					handles.push({ target: { type: "group", property, value }, element: heading, ambiguous: values.size > 1, current: () => {
+						try {
+							if (!this.current() || nativeBaseGroupValueKey(value) !== key || this.groups()?.[slot] !== group ||
+								list(this.renderer.groups, 256)?.[slot] !== model || this.groupHeading(model, group) !== heading || !heading.isConnected) return false;
+							const currentValues = this.groupValues(group, property, resolve);
+							return currentValues?.size === values.size && [...values.keys()].every(captured => currentValues.has(captured));
+						} catch { return false; }
+					} });
+				}
+				if (handles.length > MAX_HANDLES) return [];
+			}
+			return handles;
+		} catch { return []; }
+	}
+	groupHit(node: Node, resolve: NativeGroupLinkResolver): NativeBaseGroupHandle[] {
+		return this.groupHandles(resolve).filter(handle => handle.element.contains(node));
+	}
+	/** Headers are mounted for all three verified built-in layouts, including
+	 * offscreen groups. Scrolling never expands a lane or changes saved filters. */
+	revealGroup(target: NativeBaseGroupTarget, resolve: NativeGroupLinkResolver, authorized: () => boolean): NativeBaseReveal {
+		try {
+			if (!authorized() || !this.current()) return "unavailable";
+			const property = this.groupingProperty();
+			if (!property || !propertyEqual(property, target.property)) return "unavailable";
+			const key = nativeBaseGroupValueKey(target.value), groups = this.groups(); if (!groups || !this.entries()) return "unavailable";
+			let exists = false; const budget = nativeGroupValueBudget();
+			for (const group of groups) {
+				const values = this.groupValues(group, property, resolve, budget); if (!values) return "unavailable";
+				if (values.has(key)) exists = true;
+			}
+			if (!exists) return "hidden";
+			// Loose equality is not transitive (for example date-only vs instants),
+			// so the same typed value may occur under two different native headers.
+			// Keep the target but refuse to guess which header to reveal.
+			const matches = this.groupHandles(resolve).filter(handle => nativeBaseGroupValueKey(handle.target.value) === key);
+			if (matches.length !== 1 || !matches[0].current() || !authorized() || !this.current()) return "unavailable";
+			matches[0].element.scrollIntoView({ block: "nearest", inline: "nearest" });
+			return "revealed";
+		} catch { return "unavailable"; }
 	}
 	private entries(): Set<unknown> | undefined {
 		const groups = this.groups(), entries = new Set<unknown>(); if (!groups) return;
