@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
 import { parseRetryAfterMs, RelayHttpError } from "../../relayRequestErrors";
 import { isRecord } from "../DiscussionProtocol";
-import { exactFields, locationId, parseLocationTarget, parseNoteLocation, publicSessionId, type LocationEvent, type LocationTarget, type NoteLocation } from "./LocationProtocol";
+import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 
 export type LocationChannelStatus = "idle" | "connecting" | "ready" | "reconnecting" | "unsupported" | "authentication" | "unavailable";
 export type LocationIdentity = Readonly<{ serverUrl: string; accountId: string; loginSessionId: string; instanceId: string }>;
@@ -13,6 +13,9 @@ type Options = {
 	status?: (status: LocationChannelStatus) => void;
 	location?: (event: LocationEvent) => void;
 	followStopped?: () => void;
+	/** Enable only when the host has adapters for the extended location model. */
+	surfaceLocations?: boolean;
+	roster?: (event: SurfaceRosterEvent) => void;
 	fetcher?: (url: string, init: PlatformRequestInit) => Promise<Response>;
 	socket?: (url: string) => WebSocket;
 	random?: () => number;
@@ -30,7 +33,12 @@ export class LocationChannel {
 	private active = false;
 	private version = 0;
 	private shareId?: string;
-	private desired: NoteLocation | null = null;
+	private desired: SurfaceLocation | null = null;
+	private protocolVersion: 1 | 2 = 1;
+	private rosterSupported = false;
+	private desiredWatch: NonNoteLocation | null = null;
+	private watching?: { id: string; scope: NonNoteLocation };
+	private sentWatch?: string;
 	private sent?: string;
 	private ws?: WebSocket;
 	private subscription?: string;
@@ -55,16 +63,18 @@ export class LocationChannel {
 		this.makeSocket = options.socket ?? (url => new WebSocket(url));
 	}
 	get ready(): boolean { return this.active && this.status === "ready"; }
+	get supportsSurfaceLocations(): boolean { return this.ready && this.protocolVersion === 2; }
+	get supportsSurfaceRoster(): boolean { return this.supportsSurfaceLocations && this.rosterSupported; }
 	/** The caller supplies a currently authorized foreground share for discovery. */
-	start(shareId: string, location: NoteLocation | null): void {
+	start(shareId: string, location: SurfaceLocation | null): void {
 		if (!locationId(shareId)) throw new Error("Invalid location context");
 		this.shareId = shareId;
 		this.publish(location);
 		if (this.active) return;
 		this.active = true; this.attempts = 0; void this.connect();
 	}
-	publish(location: NoteLocation | null): void {
-		const next = location === null ? null : parseNoteLocation(location);
+	publish(location: SurfaceLocation | null): void {
+		const next = location === null ? null : this.options.surfaceLocations ? parseSurfaceLocation(location) : parseNoteLocation(location);
 		if (JSON.stringify(this.desired) === JSON.stringify(next)) return;
 		this.desired = next;
 		if (this.publishTimer !== undefined) window.clearTimeout(this.publishTimer);
@@ -73,13 +83,26 @@ export class LocationChannel {
 		if (next === null) this.flushPresence();
 		else this.publishTimer = window.setTimeout(() => { this.publishTimer = undefined; this.flushPresence(); }, 120);
 	}
-	follow(target: LocationTarget, from: NoteLocation): string | undefined {
-		const person = parseLocationTarget(target), source = parseNoteLocation(from);
-		if (!this.active || this.status !== "ready") return;
+	follow(target: LocationTarget, from: SurfaceLocation): string | undefined {
+		const person = parseLocationTarget(target), source = this.options.surfaceLocations ? parseSurfaceLocation(from) : parseNoteLocation(from);
+		if (!this.active || this.status !== "ready" || source.kind !== "note" && this.protocolVersion !== 2) return;
 		this.unfollow();
 		const id = this.subscription = uuid();
 		if (!this.send({ type: "follow", subscription_id: id, target: person, from: source })) return;
 		return id;
+	}
+	/** Observe one authorized foreground non-note context. Observation does not
+	 * publish this user's presence and is retained across transport reconnects. */
+	watch(location: NonNoteLocation | null): void {
+		const next = location === null ? null : parseSurfaceLocation(location);
+		if (next && (!this.options.surfaceLocations || next.kind === "note")) throw new Error("Unsupported presence scope");
+		if (JSON.stringify(next) === JSON.stringify(this.desiredWatch)) return;
+		this.desiredWatch = next as NonNoteLocation | null;
+		const previous = this.watching; this.watching = undefined;
+		this.emitRoster(null, "unavailable");
+		if (previous && this.ready) this.send({ type: "unwatch", subscription_id: previous.id });
+		this.sentWatch = undefined;
+		this.flushWatch();
 	}
 	unfollow(): void {
 		const id = this.subscription; this.subscription = undefined;
@@ -87,6 +110,7 @@ export class LocationChannel {
 	}
 	/** Explicit retry or an authentication lifecycle event, never ordinary cursor updates. */
 	retry(): void {
+		if (this.ready && this.desiredWatch && !this.watching) { this.sentWatch = undefined; this.flushWatch(); return; }
 		if (!this.active || this.status === "connecting" || this.status === "ready") return;
 		if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
 		this.retryTimer = undefined; this.attempts = 0; void this.connect();
@@ -97,7 +121,7 @@ export class LocationChannel {
 	}
 	stop(): void {
 		this.active = false; this.version++;
-		this.drop(); this.desired = null; this.shareId = undefined; this.setStatus("idle");
+		this.drop(); this.desired = null; this.desiredWatch = null; this.shareId = undefined; this.setStatus("idle");
 	}
 	private setStatus(status: LocationChannelStatus): void {
 		if (this.status === status) return;
@@ -111,6 +135,8 @@ export class LocationChannel {
 		// Native HTTP may finish independently; generation checks fence every late
 		// credential, response and callback. Do not retain timers or a live socket.
 		this.renewing = false; this.sent = undefined;
+		this.watching = undefined; this.sentWatch = undefined; this.protocolVersion = 1; this.rosterSupported = false;
+		this.emitRoster(null, "unavailable");
 		const ws = this.ws; this.ws = undefined;
 		if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; try { ws.close(); } catch { /* Already closed. */ } }
 		if (this.subscription) { this.subscription = undefined; try { this.options.followStopped?.(); } catch { /* Isolate UI. */ } }
@@ -173,12 +199,18 @@ export class LocationChannel {
 			const enabled = capability.features.presence_locations_preview;
 			if (enabled === false || enabled === undefined) throw new ChannelFailure("unsupported");
 			if (enabled !== true) throw new ChannelFailure("unavailable");
+			if (this.options.surfaceLocations) {
+				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview;
+				if (extended !== undefined && typeof extended !== "boolean" || roster !== undefined && typeof roster !== "boolean" || roster === true && extended !== true) throw new ChannelFailure("unavailable");
+				this.protocolVersion = extended === true ? 2 : 1;
+				this.rosterSupported = roster === true;
+			}
 			const ticket = await this.ticket(version);
 			if (!this.current(version)) return;
 			const url = new URL(this.identity.serverUrl + "/v1/collaboration/events"); url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 			const ws = this.ws = this.makeSocket(url.toString());
 			this.deadline = window.setTimeout(() => { if (this.current(version)) this.fail(); }, 10_000);
-			ws.onopen = () => { if (this.current(version)) this.send({ type: "authenticate", ticket, instance_id: this.identity.instanceId }); };
+			ws.onopen = () => { if (this.current(version)) this.send({ type: "authenticate", ticket, instance_id: this.identity.instanceId, ...(this.protocolVersion === 2 ? { protocol_version: 2 } : {}) }); };
 			ws.onmessage = event => { if (this.current(version)) this.receive(event.data); };
 			ws.onerror = () => { if (this.current(version)) this.fail(); };
 			ws.onclose = event => { if (this.current(version)) this.fail(event.code === 4400 ? "unavailable" : event.code === 4403 ? "authentication" : "reconnecting", event.code === 4429 ? 30_000 : 0); };
@@ -192,19 +224,32 @@ export class LocationChannel {
 	}
 	private flushPresence(): void {
 		if (this.status !== "ready") return;
-		const encoded = JSON.stringify(this.desired);
-		if (encoded !== this.sent && this.send({ type: "presence", location: this.desired })) this.sent = encoded;
+		const location = this.protocolVersion === 1 && this.desired?.kind !== "note" ? null : this.desired;
+		const encoded = JSON.stringify(location);
+		if (encoded !== this.sent && this.send({ type: "presence", location })) this.sent = encoded;
+	}
+	private emitRoster(scope: NonNoteLocation | null, status: SurfaceRosterEvent["status"], peers: SurfaceRosterEvent["peers"] = []): void {
+		try { this.options.roster?.({ scope, status, peers }); } catch { /* Isolate UI. */ }
+	}
+	private flushWatch(): void {
+		if (!this.supportsSurfaceRoster || !this.desiredWatch || this.sentWatch === JSON.stringify(this.desiredWatch)) return;
+		const scope = this.desiredWatch, id = uuid(); this.watching = { id, scope };
+		if (this.send({ type: "watch", subscription_id: id, location: scope })) this.sentWatch = JSON.stringify(scope);
 	}
 	private receive(raw: unknown): void {
 		try {
-			if (typeof raw !== "string" || raw.length > 4096 || new TextEncoder().encode(raw).length > 4096) throw new Error();
+			const limit = this.rosterSupported ? 192 * 1024 : 4096;
+			if (typeof raw !== "string" || raw.length > limit) throw new Error();
+			const bytes = new TextEncoder().encode(raw).length;
+			if (bytes > limit) throw new Error();
 			const value: unknown = JSON.parse(raw);
-			if (!isRecord(value)) throw new Error();
+			if (!isRecord(value) || value.type !== "roster" && bytes > 4096) throw new Error();
 			if (value.type === "ready") {
 				if (this.status !== "connecting" || !exactFields(value, ["type", "protocol_version", "session_id", "instance_id", "expires_at"]) ||
-					value.protocol_version !== 1 || value.instance_id !== this.identity.instanceId || !publicSessionId(value.session_id) || !expiry(value.expires_at)) throw new Error();
+					value.protocol_version !== this.protocolVersion || value.instance_id !== this.identity.instanceId || !publicSessionId(value.session_id) || !expiry(value.expires_at)) throw new Error();
 				if (this.deadline !== undefined) window.clearTimeout(this.deadline); this.deadline = undefined;
 				this.lastReceived = Date.now(); this.attempts = 0; this.setStatus("ready"); this.flushPresence();
+				this.flushWatch();
 				if (!this.ready) return;
 				this.armRefresh(value.expires_at); this.beat();
 			} else {
@@ -218,10 +263,20 @@ export class LocationChannel {
 					const available = value.status === "available";
 					if (!locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
 						!exactFields(value, available ? ["type", "subscription_id", "status", "location"] : ["type", "subscription_id", "status"])) throw new Error();
-					const location = available ? parseNoteLocation(value.location) : null;
+					const location = available ? (this.protocolVersion === 2 ? parseSurfaceLocation(value.location) : parseNoteLocation(value.location)) : null;
 					if (value.subscription_id === this.subscription) {
 						if (!available) this.subscription = undefined;
 						try { this.options.location?.({ subscriptionId: value.subscription_id, location }); } catch { /* Isolate UI. */ }
+					}
+				} else if (value.type === "roster") {
+					const available = value.status === "available";
+					if (!this.supportsSurfaceRoster || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
+						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
+					const peers = available ? parseSurfacePeers(value.peers) : [];
+					if (this.watching?.id === value.subscription_id) {
+						const scope = this.watching.scope;
+						if (!available) this.watching = undefined;
+						this.emitRoster(scope, available ? "available" : "unavailable", peers);
 					}
 				} else throw new Error();
 				this.lastReceived = Date.now();

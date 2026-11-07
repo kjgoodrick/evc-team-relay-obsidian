@@ -3,7 +3,7 @@ import * as Y from "yjs";
 import { v4 as uuidv4 } from "uuid";
 import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
 import { LocationHost } from "./LocationHost";
-import { sameNote, type LocationEvent, type NoteLocation } from "./LocationProtocol";
+import { sameNote, type NoteLocationEvent, type NoteLocation } from "./LocationProtocol";
 import type { AuthSession } from "../../AuthSession";
 import { DocumentViewBinding, type ViewBindingRegistry } from "../../ViewBindings";
 import type { SettingsScope } from "../../SettingsPersistence";
@@ -341,7 +341,7 @@ export class PresenceController extends Component {
 		const cross = this.crossFollow, doc = this.candidate?.boundDocument;
 		return !!cross && !!doc && cross.location.entry_id === doc.entityGuid && cross.location.share_id === doc.vaultShare.entityGuid;
 	}
-	private remoteLocation(event: LocationEvent): void {
+	private remoteLocation(event: NoteLocationEvent): void {
 		const cross = this.crossFollow;
 		if (!cross || event.subscriptionId !== cross.subscriptionId) return;
 		if (!event.location) { this.stopFollowing("Location unavailable."); return; }

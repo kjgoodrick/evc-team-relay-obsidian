@@ -5,11 +5,11 @@ import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
 import type { SettingsScope } from "../../SettingsPersistence";
 import type { ShareRegistry, VaultShare } from "../../VaultShare";
 import { LocationChannel, type LocationChannelStatus, type LocationIdentity } from "./LocationChannel";
-import { locationId, type LocationEvent, type NoteLocation } from "./LocationProtocol";
+import { locationId, type NoteLocationEvent, type NoteLocation } from "./LocationProtocol";
 import type { PresencePeer } from "./PresencePeers";
 
 type Context = { key: string; serverId: string; identity: LocationIdentity; location: NoteLocation };
-type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void };
+type Callbacks = { changed: () => void; location: (event: NoteLocationEvent) => void; stopped: () => void };
 
 /** Maps the authorized inventory to one ephemeral foreground connection. Never
  * creates entries, retrieves background note contents, or guesses a path. */
@@ -85,7 +85,10 @@ export class LocationHost extends Component {
 						if (!current()) return;
 						const accessToken = await this.auth.getAuthProviderForServer(context.serverId)?.getValidToken();
 						return current() && accessToken ? { accountId: context.identity.accountId, accessToken } : undefined;
-					}, status: () => { if (!this.closed) this.callbacks.changed(); }, location: this.callbacks.location, followStopped: this.callbacks.stopped,
+					}, status: () => { if (!this.closed) this.callbacks.changed(); }, location: event => {
+						if (event.location === null || event.location.kind === "note") this.callbacks.location({ subscriptionId: event.subscriptionId, location: event.location });
+						else this.callbacks.stopped();
+					}, followStopped: this.callbacks.stopped,
 				});
 			} catch { return; }
 		}
