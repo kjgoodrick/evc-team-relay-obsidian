@@ -81,6 +81,8 @@ export type ThreadStateRead = { thread: ThreadSummary; anchor?: DiscussionAnchor
 export type ThreadList = { threads: ThreadSummary[]; has_more: boolean; next_after: number; view_id?: string; scanned_through?: number };
 export type HistoryPage = { revisions: { revision: number; body: MessageBody | null; actor_id: string | null; created_at: string; reason: string | null }[];
 	has_more: boolean; next_after: number };
+export type HistoryRevision = HistoryPage["revisions"][number];
+export type HistoryWindow = { latest: number; selected: HistoryRevision; previous?: HistoryRevision };
 export type DiscussionEvent = { kind: string; sequence: number; data: {
 	operation_id: string; scope_id: string; thread_id: string; actor_id: string | null; sequence: number;
 	state: "open" | "resolved"; state_revision: number; removed: boolean; changed: boolean;

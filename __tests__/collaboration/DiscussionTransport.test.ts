@@ -14,6 +14,20 @@ const result = () => ({ operation_id: id(3), scope_id: id(7), thread_id: id(5), 
 	state: "open", state_revision: 1, message_revision: 1, message_deleted: false, changed: true, removed: false });
 const reply = (status: number, body: unknown, headers?: HeadersInit) => new Response(JSON.stringify(body), { status, headers });
 
+test("history uses bounded revision windows and rejects oversized or unordered pages", async () => {
+	const revisions = [4, 5].map(revision => ({ revision, body: null, actor_id: id(1), created_at: "2026-11-07T00:00:00Z", reason: null }));
+	const fetcher = jest.fn().mockResolvedValue(reply(200, { revisions, has_more: false, next_after: 5 }));
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	expect((await transport.history(id(4), id(5), id(6), 3, 2)).revisions).toEqual(revisions);
+	expect(fetcher.mock.calls[0][0]).toContain("/history?after=3&limit=2");
+	fetcher.mockResolvedValue(reply(200, { revisions, has_more: false, next_after: 5 }));
+	await expect(transport.history(id(4), id(5), id(6), 3, 1)).rejects.toMatchObject({ code: "invalid_read_response" });
+	fetcher.mockResolvedValue(reply(200, { revisions: [...revisions].reverse(), has_more: false, next_after: 4 }));
+	await expect(transport.history(id(4), id(5), id(6), 3, 2)).rejects.toMatchObject({ code: "invalid_read_response" });
+	for (const limit of [0, 101, 0.5, NaN]) await expect(transport.history(id(4), id(5), id(6), 0, limit)).rejects.toBeInstanceOf(DiscussionFailure);
+	expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
 test("sends stable entry identity, refreshable same-account token, and sensitive diagnostics option", async () => {
 	const fetcher = jest.fn().mockResolvedValue(reply(200, { ...result(), ignored: "not persisted" }));
 	const transport = new DiscussionTransport(identity, credentials, fetcher);

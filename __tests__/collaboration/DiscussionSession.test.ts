@@ -2,7 +2,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionFailure, type DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
-import { bodyFromText, protocolJson, type MessageRead } from "../../src/collaboration/DiscussionProtocol";
+import { bodyFromText, protocolJson, type MessageRead, type HistoryPage } from "../../src/collaboration/DiscussionProtocol";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
@@ -44,6 +44,94 @@ async function linkedFixture() {
 		thread: jest.fn().mockResolvedValue({ thread: read.thread, anchor: read.anchor, messages: [], has_more: false, next_after: 0 }) });
 	return { ...f, transport, read };
 }
+
+function historyPage(): HistoryPage {
+	return { revisions: [1, 2].map(revision => ({ revision, body: bodyFromText("Revision " + revision), actor_id: id(1),
+		created_at: "2026-11-07T00:00:00Z", reason: null })), has_more: false, next_after: 2 };
+}
+test("history reads only the selected pair, verifies the current target and does not persist revisions", async () => {
+	const f = await linkedFixture(), page = historyPage();
+	const history = jest.fn().mockResolvedValue(page); Object.assign(f.transport, { history });
+	try {
+		expect(await f.session.historyWindow(entry, id(5), id(6))).toEqual({ latest: 2, selected: page.revisions[1], previous: page.revisions[0] });
+		expect(history).toHaveBeenLastCalledWith(entry, id(5), id(6), 0, 2);
+		history.mockResolvedValue({ revisions: [page.revisions[0]], has_more: true, next_after: 1 });
+		expect(await f.session.historyWindow(entry, id(5), id(6), 1)).toEqual({ latest: 2, selected: page.revisions[0] });
+		expect(history).toHaveBeenLastCalledWith(entry, id(5), id(6), 0, 1);
+		expect(await f.store.orderedEntities(entry, "message:", 0, 50)).toEqual([]);
+		f.session.setForeground(false);
+		await expect(f.session.historyWindow(entry, id(5), id(6))).rejects.toThrow("Reconnect");
+		expect(history).toHaveBeenCalledTimes(2);
+	} finally { await f.close(); }
+});
+
+test.each(["generation", "permission", "close", "removed", "deleted", "newer_message"])("late history cannot expose revisions after %s", async change => {
+	const f = await linkedFixture(); let release!: (value: HistoryPage) => void, entered!: () => void;
+	const waiting = new Promise<void>(resolve => { entered = resolve; });
+	Object.assign(f.transport, { history: jest.fn().mockImplementation(() => new Promise(resolve => { release = resolve; entered(); })) });
+	try {
+		const reading = f.session.historyWindow(entry, id(5), id(6)); const rejected = expect(reading).rejects.toThrow(); await waiting;
+		let closing: Promise<void> | undefined;
+		if (change === "generation") await f.store.clearRemoteScope(entry);
+		if (change === "permission") { f.transport.permissions.mockResolvedValue({ read: false, comment: false, edit: false, moderate: false }); await f.session.refresh(); }
+		if (change === "close") closing = f.session.close();
+		if (["removed", "deleted", "newer_message"].includes(change)) {
+			const checkpoint = await f.store.checkpoint(entry);
+			await f.store.cacheRemoteRead(entry, checkpoint.generation, [
+				{ id: "thread:" + id(5), revision: 900, value: { ...f.read.thread, removed: change === "removed" } },
+				{ id: `message:${id(5)}:${id(6)}`, revision: 900, value: { ...f.read.message, author_id: id(9),
+					revision: change === "newer_message" ? 3 : 2, deleted: change === "deleted" } },
+			]);
+		}
+		release(historyPage()); await rejected; if (closing) await closing;
+	} finally { await f.close(); }
+});
+
+test("history rejects missing predecessors and propagates authentication loss without broadening access", async () => {
+	const f = await linkedFixture(), history = jest.fn().mockResolvedValue({ revisions: [historyPage().revisions[1]], next_after: 2, has_more: false });
+	Object.assign(f.transport, { history });
+	try {
+		await expect(f.session.historyWindow(entry, id(5), id(6))).rejects.toThrow("unavailable");
+		history.mockRejectedValue(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await expect(f.session.historyWindow(entry, id(5), id(6))).rejects.toBeInstanceOf(DiscussionFailure);
+		expect(f.session.status).toBe("authentication_required");
+	} finally { await f.close(); }
+});
+
+test("authentication loss stops workers and cannot be undone by older sync/capability replies or an offline refresh", async () => {
+	const f = await linkedFixture();
+	let finishSync!: (value: { events: never[]; cursor: string; has_more: boolean }) => void, syncEntered!: () => void;
+	let finishStart!: (value: { discussions: boolean }) => void, startEntered!: () => void;
+	const syncing = new Promise<void>(resolve => { syncEntered = resolve; }), initializing = new Promise<void>(resolve => { startEntered = resolve; });
+	f.transport.changes.mockImplementationOnce(() => new Promise(resolve => { finishSync = resolve; syncEntered(); }));
+	try {
+		await f.session.refresh(); await syncing;
+		f.transport.capabilities.mockImplementationOnce(() => new Promise(resolve => { finishStart = resolve; startEntered(); }));
+		const starting = f.session.start(); await initializing;
+		const failure = new DiscussionFailure("authenticate", "session_revoked", 401);
+		f.transport.message.mockRejectedValue(failure);
+		await expect(f.session.linkedThread(entry, id(5), id(6))).rejects.toBe(failure);
+		finishSync({ events: [], cursor: "late", has_more: false }); finishStart({ discussions: true }); await starting;
+		expect(f.session.status).toBe("authentication_required"); expect(f.session.canQueue).toBe(false);
+		expect(f.session.syncStatus(entry)).toBe("stopped"); expect(f.session.outbox.status).toBe("stopped");
+		f.transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("retry", "offline"));
+		await f.session.start(); expect(f.session.status).toBe("authentication_required");
+		await f.session.refresh(); expect(f.session.status).toBe("ready"); expect(f.session.canQueue).toBe(true);
+	} finally { finishSync?.({ events: [], cursor: "late", has_more: false }); finishStart?.({ discussions: true }); await f.close(); }
+});
+
+test("history started before authentication loss stays invalid after successful reauthentication", async () => {
+	const f = await linkedFixture(); let finish!: (value: HistoryPage) => void, entered!: () => void;
+	const waiting = new Promise<void>(resolve => { entered = resolve; });
+	Object.assign(f.transport, { history: jest.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; entered(); })) });
+	try {
+		const reading = f.session.historyWindow(entry, id(5), id(6)); const rejected = expect(reading).rejects.toThrow(); await waiting;
+		f.transport.message.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await expect(f.session.linkedThread(entry, id(5), id(6))).rejects.toBeInstanceOf(DiscussionFailure);
+		await f.session.refresh(); expect(f.session.online).toBe(true);
+		finish(historyPage()); await rejected;
+	} finally { finish?.(historyPage()); await f.close(); }
+});
 
 test("direct older-message read works without inbox capability and caches without advancing the event cursor", async () => {
 	const f = await linkedFixture();

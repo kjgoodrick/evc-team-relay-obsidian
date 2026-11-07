@@ -5,6 +5,8 @@ import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport
 import { DiscussionOutbox } from "../../src/collaboration/DiscussionOutbox";
 import { DiscussionSync, messageKey, threadKey } from "../../src/collaboration/DiscussionSync";
 import { DiscussionStore, type Json, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
+import { protocolJson, type MessageBody } from "../../src/collaboration/DiscussionProtocol";
 
 const fixturePath = process.env.EVC_DISCUSSION_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -26,6 +28,8 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 	const transport = new DiscussionTransport(identity, async () => ({ accountId: fixture.reviewer, accessToken: fixture.token }), fetcher);
 	const worker = new DiscussionOutbox(store, transport, "integration-worker", undefined, () => time, () => 0.5);
 	const incoming = new DiscussionSync(store, transport, fixture.entry);
+	let historySession: DiscussionSession | undefined;
+	let stopHistory: (() => void) | undefined;
 	const body = (text: string) => ({ version: 1, blocks: [{ type: "paragraph", children: [{ type: "text", text }] }] });
 	const thread = randomUUID(), message = randomUUID(), root = randomUUID();
 	const enqueue = (type: QueuedCommand["type"], payload: Json, dependsOn: string[] = [], operationId = randomUUID()) =>
@@ -76,6 +80,11 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 			revision: 2, body: body("Revised"), reactions: [{ emoji: "heart", count: 1, mine: true }],
 		});
 		expect((await transport.history(fixture.entry, thread, message)).revisions.map(r => r.revision)).toEqual([1, 2]);
+		historySession = new DiscussionSession(await DiscussionStore.open({ ...identity, vaultId: "synthetic-history" }, new IDBFactory()), transport);
+		await historySession.start(); stopHistory = historySession.watch(fixture.entry, () => {}); await historySession.refresh();
+		const latestHistory = await historySession.historyWindow(fixture.entry, thread, message);
+		expect(latestHistory).toMatchObject({ latest: 2, selected: { revision: 2, body: body("Revised") }, previous: { revision: 1, body: body("First") } });
+		expect(await historySession.historyWindow(fixture.entry, thread, message, 1)).toMatchObject({ latest: 2, selected: { revision: 1 } });
 		expect((await transport.threads(fixture.entry)).threads).toHaveLength(1);
 		expect((await transport.state(fixture.entry, thread)).thread.state).toBe("open");
 		incoming.stop(); await incoming.settled();
@@ -114,5 +123,39 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		expect((await store.entity(fixture.entry, threadKey(thread)))?.value).toMatchObject({ removed: true });
 		expect(await store.entity(fixture.entry, messageKey(thread, message))).toBeUndefined();
 		expect((await store.getOperation(denied.operationId))?.payload).toMatchObject({ body: body("Keep my draft") });
-	} finally { worker.stop(); incoming.stop(); await Promise.all([worker.settled(), incoming.settled()]); store.close(); }
+		await expect(historySession.historyWindow(fixture.entry, thread, message)).rejects.toMatchObject({ status: 404 });
+	} finally { stopHistory?.(); await historySession?.close(); worker.stop(); incoming.stop(); await Promise.all([worker.settled(), incoming.settled()]); store.close(); }
+}, 30_000);
+
+integration("rich history retains structure and removal history is limited to its author or moderators", async () => {
+	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string };
+	if (new URL(fixture.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const identity = { serverId: fixture.base, accountId: fixture.owner, shareId: fixture.share, vaultId: "history-owner" };
+	const owner = new DiscussionTransport(identity, async () => ({ accountId: fixture.owner, accessToken: fixture.ownerToken }), fetch);
+	const readerIdentity = { ...identity, accountId: fixture.reviewer, vaultId: "history-reader" };
+	const reader = new DiscussionTransport(readerIdentity, async () => ({ accountId: fixture.reviewer, accessToken: fixture.token }), fetch);
+	const authorSession = new DiscussionSession(await DiscussionStore.open(identity, new IDBFactory()), owner);
+	const readerSession = new DiscussionSession(await DiscussionStore.open(readerIdentity, new IDBFactory()), reader);
+	const stops: (() => void)[] = [];
+	const thread = randomUUID(), message = randomUUID();
+	const rich = (text: string): MessageBody => ({ version: 1, blocks: [
+		{ type: "paragraph", children: [{ type: "text", text, marks: ["bold", "italic"] }, { type: "mention", user_id: fixture.reviewer },
+			{ type: "link", url: "https://example.test/review", children: [{ type: "text", text: "Reference", marks: ["strike"] }] }] },
+		{ type: "list", ordered: true, items: [{ type: "paragraph", children: [{ type: "text", text: "Item", marks: ["code"] }] }] },
+		{ type: "code", text: "const safe = '<script>';", language: "ts" },
+	] });
+	try {
+		await owner.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
+			type: "thread.create", thread_id: thread, message_id: message, anchor: { version: 1, type: "note" }, body: protocolJson(rich("Before")) } });
+		await owner.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "message.edit", dependsOn: [], payload: {
+			type: "message.edit", thread_id: thread, message_id: message, expected_revision: 1, body: protocolJson(rich("After")) } });
+		for (const session of [authorSession, readerSession]) { await session.start(); stops.push(session.watch(fixture.entry, () => {})); await session.refresh(); }
+		expect(await readerSession.historyWindow(fixture.entry, thread, message)).toMatchObject({ latest: 2,
+			selected: { revision: 2, body: rich("After") }, previous: { revision: 1, body: rich("Before") } });
+		await owner.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
+			type: "message.delete", thread_id: thread, message_id: message, expected_revision: 2, reason: "Synthetic removal" } });
+		await expect(readerSession.historyWindow(fixture.entry, thread, message)).rejects.toMatchObject({ status: 404 });
+		expect(await authorSession.historyWindow(fixture.entry, thread, message)).toMatchObject({ latest: 3,
+			selected: { revision: 3, body: null, reason: "Synthetic removal" }, previous: { revision: 2, body: rich("After") } });
+	} finally { stops.forEach(stop => stop()); await Promise.all([authorSession.close(), readerSession.close()]); }
 }, 30_000);

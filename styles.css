@@ -815,3 +815,14 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-inbox-item p { margin-block: var(--size-4-2); color: var(--text-muted); font-size: var(--font-ui-small); overflow-wrap: anywhere; }
 .relay-inbox-controls button, .relay-inbox-pages button { min-height: 2.5em; }
 .relay-inbox-pending { border-block-start: 1px solid var(--background-modifier-border); }
+.relay-comment-history-controls, .relay-comment-history-jump { display: flex; flex-wrap: wrap; gap: var(--size-4-2); align-items: center; margin-block: var(--size-4-2); }
+.relay-comment-history-jump label { display: flex; gap: var(--size-4-2); align-items: center; }
+.relay-comment-history-jump input { width: 7em; }
+.relay-comment-history-revisions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18em), 1fr)); gap: var(--size-4-3); }
+.relay-comment-history-revisions article { min-width: 0; padding: var(--size-4-3); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); overflow-wrap: anywhere; }
+.relay-comment-history-revisions pre { overflow: auto; }
+.relay-comment-history-revisions p, .relay-comment-history-revisions li, .relay-comment-history-diff-text { white-space: pre-wrap; }
+.relay-comment-history-diff-text { overflow-wrap: anywhere; padding: var(--size-4-3); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.relay-comment-history-diff ins { text-decoration: underline; background: var(--text-selection); }
+.relay-comment-history-diff del { text-decoration: line-through; background: var(--background-modifier-error); }
+.is-mobile .relay-comment-history-controls button, .is-mobile .relay-comment-history-controls input { min-height: 44px; }

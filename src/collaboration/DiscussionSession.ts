@@ -2,6 +2,7 @@ import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRa
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { TimelineMarkerManagement } from "./TimelineMarkerManagement";
 import { parseTimelineMarkerVersion, type TimelineMarkerVersion } from "./DiscussionProtocol";
+import type { HistoryWindow } from "./DiscussionProtocol";
 import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
@@ -63,6 +64,7 @@ export class DiscussionSession {
 	private onlineFlights = new Set<Promise<unknown>>();
 	private channel?: BroadcastChannel;
 	private statusValue: SessionStatus = "starting";
+	private authenticationEpoch = 0;
 	private enabled = false;
 	private textEnabled = false;
 	private blocksEnabled = false;
@@ -87,8 +89,8 @@ export class DiscussionSession {
 		this.inbox = new DiscussionInbox(store, transport, broadcast => { if (broadcast) this.channel?.postMessage("inbox"); this.notify(); });
 		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled), uuid(), status => {
 			if (this.closed) return;
-			if (status === "authentication_required") this.statusValue = "authentication_required";
-			if (status === "authentication_required") void this.inbox.configure(this.inboxEnabled, "blocked", this.foreground).catch(() => {});
+			if (status === "authentication_required") { this.requireAuthentication(); return; }
+			if (this.statusValue === "authentication_required") return;
 			if (status === "protocol_error" || status === "storage_error") this.statusValue = "error";
 			if (status === "idle") { this.invalidate(); this.broadcast(); }
 			this.notify();
@@ -113,17 +115,18 @@ export class DiscussionSession {
 	async search(input: DiscussionSearchRequest): Promise<DiscussionSearchPage> {
 		const request = searchRequest(input);
 		if (!this.canSearch) throw new Error("Connect to a server with comment search enabled.");
+		const authenticationEpoch = this.authenticationEpoch;
 		return this.trackLocal((async () => {
 			try {
 				const page = await this.transport.search(request);
-				if (!this.canSearch) throw new Error("Search access changed. Search again after connecting.");
+				if (!this.canSearch || authenticationEpoch !== this.authenticationEpoch) throw new Error("Search access changed. Search again after connecting.");
 				return { ...page, items: page.items.filter(item => {
 					const entry = this.entries.get(searchItemScope(item));
 					return !entry?.unavailable && entry?.permission?.read !== false;
 				}) };
 			} catch (error) {
 				if (!this.closed && error instanceof DiscussionFailure && error.action === "authenticate") {
-					this.statusValue = "authentication_required"; this.notify();
+					this.requireAuthentication();
 				}
 				throw error;
 			}
@@ -165,6 +168,13 @@ export class DiscussionSession {
 			try { listener(); } catch { /* Rendering does not affect delivery. */ }
 		}
 	}
+	private requireAuthentication(): void {
+		if (this.closed) return;
+		this.authenticationEpoch++; this.statusValue = "authentication_required";
+		this.outbox.stop(); for (const entry of this.entries.values()) entry.sync.stop();
+		void this.inbox.configure(this.inboxEnabled, "blocked", this.foreground).catch(() => {});
+		this.notify();
+	}
 	private broadcast(): void {
 		// A wake in another window can end in idle with no work; do not echo it.
 		if (Date.now() - this.lastPublish > 1000) { this.lastPublish = Date.now(); this.channel?.postMessage("changed"); }
@@ -180,6 +190,8 @@ export class DiscussionSession {
 		return this.startFlight;
 	}
 	private async initialize(): Promise<void> {
+		const authenticationEpoch = this.authenticationEpoch;
+		const requiredAuthentication = this.statusValue === "authentication_required";
 		try {
 			const cached = await this.store.preference("enabled");
 			if (this.closed) return;
@@ -196,9 +208,9 @@ export class DiscussionSession {
 			this.baseRecordTypes = Array.isArray(recordTypes) ? BASE_RECORD_TYPES.filter(kind => recordTypes.includes(kind)) : ["markdown"];
 			const fileGroupProperties = await this.store.preference("baseFileGroupProperties");
 			this.baseFileGroupProperties = Array.isArray(fileGroupProperties) ? BASE_FILE_GROUP_PROPERTIES.filter(name => fileGroupProperties.includes(name)) : [];
-			if (this.closed) return;
+			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
 			const capability = await this.transport.capabilities();
-			if (this.closed) return;
+			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
 			this.enabled = capability.discussions;
 			this.textEnabled = capability.textAnchors === true;
 			this.blocksEnabled = capability.blockAnchors === true;
@@ -221,12 +233,12 @@ export class DiscussionSession {
 			await this.store.setPreference("baseTargetKinds", protocolJson(this.baseKinds));
 			await this.store.setPreference("baseRecordTypes", protocolJson(this.baseRecordTypes));
 			await this.store.setPreference("baseFileGroupProperties", protocolJson(this.baseFileGroupProperties));
-			if (this.closed) return;
+			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
-			if (this.closed) return;
-			this.statusValue = error instanceof DiscussionFailure ? error.action === "retry" ? "offline" :
-				error.action === "authenticate" ? "authentication_required" : "unavailable" : "error";
+			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
+			if (error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+			else if (!requiredAuthentication) this.statusValue = error instanceof DiscussionFailure ? error.action === "retry" ? "offline" : "unavailable" : "error";
 		}
 		if (this.closed) return;
 		await this.inbox.configure(this.enabled && this.inboxEnabled, this.statusValue === "ready" ? "online" : this.statusValue === "offline" ? "offline" : "blocked", this.foreground).catch(() => {});
@@ -274,8 +286,8 @@ export class DiscussionSession {
 		const entry = this.entries.get(id);
 		if (entry && status === "unavailable") { entry.unavailable = true; entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined; }
 		if (status === "unavailable") void this.inbox.forgetScope(id).catch(() => {});
-		if (status === "authentication_required") this.statusValue = "authentication_required";
-		if (status === "authentication_required") void this.inbox.configure(this.inboxEnabled, "blocked", this.foreground).catch(() => {});
+		if (status === "authentication_required") { this.requireAuthentication(); return; }
+		if (this.statusValue === "authentication_required") return;
 		if (status === "protocol_error" || status === "storage_error") this.statusValue = "error";
 		if (status === "offline") this.statusValue = "offline";
 		if (status === "current") {
@@ -310,7 +322,7 @@ export class DiscussionSession {
 		this.notify();
 	}
 	private refreshPermission(id: string, entry: Entry): Promise<void> {
-		if (this.closed || !this.foreground || entry.listeners.size === 0) return Promise.resolve();
+		if (this.closed || !this.foreground || this.statusValue === "authentication_required" || entry.listeners.size === 0) return Promise.resolve();
 		if (entry.permissionFlight) return entry.permissionFlight;
 		entry.permissionFlight = (async () => {
 			try {
@@ -361,7 +373,7 @@ export class DiscussionSession {
 					entry.permission = undefined; entry.unavailable = true; entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id);
 					await this.inbox.forgetScope(id);
 				} else if (error instanceof DiscussionFailure && error.action === "authenticate") {
-					this.statusValue = "authentication_required"; await this.inbox.configure(this.inboxEnabled, "blocked", this.foreground);
+					this.requireAuthentication();
 				}
 			} finally {
 				entry.permissionChecked = Date.now(); entry.permissionFlight = undefined;
@@ -409,12 +421,46 @@ export class DiscussionSession {
 		const row = await this.store.entity(scopeId, messageKey(threadId, messageId));
 		return !this.closed && this.permission(scopeId)?.read && row ? parseMessage(row.value) : undefined;
 	}
+	/** History stays in the open view only. Fetch a selected revision and its
+	 * predecessor, after checking the current message and original saved view. */
+	async historyWindow(scopeId: string, threadId: string, messageId: string, selected?: number): Promise<HistoryWindow> {
+		if (!parseDiscussionScope(scopeId) || !isId(threadId) || !isId(messageId) ||
+			selected !== undefined && (!Number.isSafeInteger(selected) || selected < 1)) throw new Error("Invalid history target.");
+		return this.trackLocal((async () => {
+			const generation = this.knownDocumentGeneration(scopeId);
+			const authenticationEpoch = this.authenticationEpoch;
+			const current = () => authenticationEpoch === this.authenticationEpoch && this.online && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+			if (!current()) throw new Error("Reconnect with read access to view comment history.");
+			const checkpoint = await this.store.checkpoint(scopeId);
+			try {
+				if (!current()) throw new Error("History access changed.");
+				const head = await this.transport.message(scopeId, threadId, messageId);
+				if (!current() || head.thread.removed) throw new Error("History access changed.");
+				const revision = Math.min(selected ?? head.message.revision, head.message.revision);
+				const page = await this.transport.history(scopeId, threadId, messageId, Math.max(0, revision - 2), revision === 1 ? 1 : 2);
+				const [thread, message] = await Promise.all([
+					this.store.entity(scopeId, threadKey(threadId)), this.store.entity(scopeId, messageKey(threadId, messageId))]);
+				const epoch = await this.store.checkpoint(scopeId);
+				if (!current() || epoch.generation !== checkpoint.generation || isRecord(thread?.value) && thread.value.removed ||
+					isRecord(message?.value) && (typeof message.value.revision === "number" && message.value.revision > head.message.revision ||
+						message.value.deleted && message.value.author_id !== this.identity.accountId && !this.permission(scopeId)?.moderate)) throw new Error("History changed. Refresh to check access.");
+				const chosen = page.revisions.find(item => item.revision === revision);
+				const previous = page.revisions.find(item => item.revision === revision - 1);
+				if (!chosen || revision > 1 && !previous) throw new Error("The requested revision is unavailable.");
+				return { latest: head.message.revision, selected: chosen, ...(previous ? { previous } : {}) };
+			} catch (error) {
+				if (!this.closed && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				throw error;
+			}
+		})());
+	}
 	/** One authorized read can address an older reply without replaying a long
 	 * thread. Cache commits are fenced by the scope generation, as for sync. */
 	async linkedThread(scopeId: string, threadId: string, messageId?: string): Promise<{ thread: AnchoredThread; message?: DiscussionMessage } | undefined> {
 		if (!parseDiscussionScope(scopeId) || !isId(threadId) || messageId !== undefined && !isId(messageId)) throw new Error("Invalid discussion target.");
 		return this.trackLocal((async () => {
-			const current = () => !this.closed && !["authentication_required", "unavailable"].includes(this.statusValue) && this.permission(scopeId)?.read === true;
+			const authenticationEpoch = this.authenticationEpoch;
+			const current = () => authenticationEpoch === this.authenticationEpoch && !this.closed && !["authentication_required", "unavailable"].includes(this.statusValue) && this.permission(scopeId)?.read === true;
 			if (!current()) return;
 			let hasMessage = !this.online;
 			if (this.online) {
@@ -431,7 +477,7 @@ export class DiscussionSession {
 					else { const page = await this.transport.thread(scopeId, threadId); thread = { ...page.thread, anchor: page.anchor }; messages = page.messages; }
 				} catch (error) {
 					if (error instanceof DiscussionFailure && (error.action === "authenticate" || [403, 404].includes(error.status))) {
-						if (error.action === "authenticate") { this.statusValue = "authentication_required"; this.notify(); }
+						if (error.action === "authenticate") this.requireAuthentication();
 						await this.store.clearRemoteScope(scopeId); await this.inbox.forgetScope(scopeId);
 					}
 					throw error;

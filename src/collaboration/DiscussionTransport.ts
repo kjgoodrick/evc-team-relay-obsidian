@@ -382,9 +382,9 @@ export class DiscussionTransport implements DiscussionSender {
 		if (!scope) throw new DiscussionFailure("reject", "invalid_local_target");
 		return `/shares/${this.identity.shareId}/entries/${scope.entryId}`;
 	}
-	private page(after: number): string {
-		if (!isSequence(after)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return `?after=${after}&limit=50`;
+	private page(after: number, limit = 50): string {
+		if (!isSequence(after) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DiscussionFailure("reject", "invalid_local_target");
+		return `?after=${after}&limit=${limit}`;
 	}
 	private parse<T>(value: unknown, parser: (value: unknown) => T): T {
 		try { return parser(value); } catch { throw new DiscussionFailure("pause", "invalid_read_response"); }
@@ -429,9 +429,14 @@ export class DiscussionTransport implements DiscussionSender {
 		this.viewQuery(viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => this.scoped(parseThreadState(v, threadId), entryId, v, viewId));
 	}
-	async history(entryId: string, threadId: string, messageId: string, after = 0) {
+	async history(entryId: string, threadId: string, messageId: string, after = 0, limit = 50) {
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
-		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}/history` + this.page(after)), v => parseHistory(v, after));
+		const query = this.page(after, limit);
+		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/messages/${messageId}/history` + query), v => {
+			const page = parseHistory(v, after);
+			if (page.revisions.length > limit) throw new Error("Invalid history page size");
+			return page;
+		});
 	}
 	async changes(entryId: string, cursor?: string, viewId?: string) {
 		viewId = this.scopeView(entryId, viewId);

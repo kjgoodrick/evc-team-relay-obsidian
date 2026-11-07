@@ -13,6 +13,7 @@ import { CommentPicture } from "./CommentPicture";
 import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
 import { copyToClipboard } from "../../utils/clipboard";
 import { DiscussionSearchPanel } from "./DiscussionSearchPanel";
+import { CommentHistoryModal } from "./CommentHistory";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 
@@ -22,30 +23,6 @@ class AccountModal extends Modal {
 		super(app); this.stopWatching = session.onChange(() => { if (session.status === "closed") this.close(); });
 	}
 	onClose(): void { this.stopWatching(); this.contentEl.empty(); }
-}
-
-class HistoryModal extends AccountModal {
-	private closed = false;
-	private after = 0;
-	private pictures: CommentPicture[] = [];
-	constructor(app: App, private session: DiscussionSession, private entryId: string, private threadId: string, private messageId: string) { super(app, session); }
-	onOpen(): void { this.setTitle("Comment history"); void this.more(); }
-	private async more(): Promise<void> {
-		try {
-			const page = await this.session.transport.history(this.entryId, this.threadId, this.messageId, this.after);
-			if (this.closed || this.session.status === "closed") return;
-			for (const revision of page.revisions) {
-				const article = this.contentEl.createEl("article", { cls: "relay-comment-history" });
-				article.createEl("h3", { text: `Revision ${revision.revision} · ${new Date(revision.created_at).toLocaleString()}` });
-				renderCommentBody(article, revision.body, id => this.session.displayName(this.entryId, id),
-					(parent, picture) => this.pictures.push(new CommentPicture(parent, this.session, this.entryId, picture)));
-				if (revision.reason) article.createEl("p", { text: revision.reason });
-			}
-			this.after = page.next_after;
-			if (page.has_more) { const more = this.contentEl.createEl("button", { text: "Load more history" }); more.onclick = () => { more.remove(); void this.more(); }; }
-		} catch { if (!this.closed) this.contentEl.createEl("p", { text: "History could not be loaded. Reconnect or check access to this note.", attr: { role: "alert" } }); }
-	}
-	onClose(): void { this.closed = true; this.pictures.forEach(p => p.dispose()); this.pictures = []; super.onClose(); }
 }
 
 class DeleteCommentModal extends AccountModal {
@@ -233,7 +210,9 @@ class ThreadCard {
 			};
 		}
 		if (!message.deleted || message.author_id === this.session.identity.accountId || permission?.moderate) {
-			const history = actions.createEl("button", { text: "History" }); history.onclick = () => new HistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();
+			const history = actions.createEl("button", { text: "History" }); history.disabled = !this.session.online;
+			history.title = this.session.online ? "Compare comment revisions" : "Reconnect to view comment history";
+			history.onclick = () => new CommentHistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();
 		}
 		if (!message.deleted && permission?.comment) {
 			const draft = message.body ? editableCommentDraft(message.body, id => this.session.displayName(this.entryId, id)) : undefined;
