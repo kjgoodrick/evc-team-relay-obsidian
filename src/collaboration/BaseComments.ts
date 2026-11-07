@@ -163,6 +163,7 @@ export class BaseCommentPane {
 	private flight?: Promise<void>;
 	private attemptedBinding = 0;
 	private presence?: { session: DiscussionSession; entryId: string; signature: string };
+	private capture?: object;
 	constructor(private host: DiscussionHost, private view: FileView, private integrations?: NativeBasesIntegrations,
 		private targetsChanged?: (session: DiscussionSession, entryId: string) => void) {
 		const root = view.contentEl, doc = root.ownerDocument; this.win = doc.defaultView ?? window;
@@ -223,6 +224,7 @@ export class BaseCommentPane {
 		finally { this.checking = false; }
 	}
 	private detach(): void {
+		this.capture = undefined;
 		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.unavailableGroup = false;
 		this.groupTargets.clear(); this.rangeAxis = undefined; this.sharedMarkers = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
@@ -349,9 +351,25 @@ export class BaseCommentPane {
 			await new Promise<void>(resolve => this.win.setTimeout(resolve, 50));
 		}
 	}
-	private button(parent: HTMLElement, text: string, action: () => void): HTMLButtonElement {
+	private button(parent: HTMLElement, text: string, action: () => void, capture = false): HTMLButtonElement {
 		const button = parent.ownerDocument.createElement("button"); button.type = "button"; button.textContent = text; button.setAttribute("aria-label", text);
-		button.addEventListener("click", event => { event.stopPropagation(); action(); }); parent.append(button); return button;
+		if (capture) { button.dataset.capture = "true"; button.disabled = !!this.capture; }
+		button.addEventListener("click", event => { event.stopPropagation(); if (!capture || !this.capture) action(); }); parent.append(button); return button;
+	}
+	private updateCaptureState(): void {
+		for (const button of Array.from(this.toolbar.querySelectorAll<HTMLButtonElement>("button[data-capture]"))) button.disabled = !!this.capture;
+		let status = this.toolbar.querySelector<HTMLElement>("[data-capture-state]");
+		if (!this.capture) { status?.remove(); return; }
+		if (!status) { status = this.toolbar.ownerDocument.createElement("span"); status.dataset.captureState = "true"; status.setAttribute("role", "status"); status.textContent = "Preparing comment…"; this.toolbar.append(status); }
+	}
+	private startCapture(work: () => Promise<boolean>): void {
+		if (this.capture || !this.context?.current()) return;
+		const capture = {}; this.capture = capture; this.updateCaptureState();
+		void (async () => {
+			try { await work(); }
+			catch { if (this.capture === capture) new Notice("The comment selection could not be prepared. Existing drafts are retained."); }
+			finally { if (this.capture === capture) { this.capture = undefined; this.updateCaptureState(); } }
+		})();
 	}
 	private renderTools(): void {
 		const context = this.context;
@@ -384,9 +402,10 @@ export class BaseCommentPane {
 			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task, property badge, or lane header. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
 		}
 		if (this.unavailableGroup) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "This lane is unavailable for commenting. Its grouping or source value is unsupported."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
-		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups));
-		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => { void this.host.commentBaseHandle(context, target); });
-		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => { void this.host.commentBaseHandle(context, selected, item); });
+		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups), true);
+		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => this.startCapture(() => this.host.commentBaseHandle(context, target)), true);
+		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => this.startCapture(() => this.host.commentBaseHandle(context, selected, item)), true);
+		this.updateCaptureState();
 		if (focused) Array.from(this.toolbar.querySelectorAll("button")).find(button => button.getAttribute("aria-label") === focused)?.focus({ preventScroll: true });
 	}
 	private cancelAnnotation(): void { const stop = this.annotationStop; this.annotationStop = undefined; this.annotating = false; stop?.(); }
@@ -407,21 +426,22 @@ export class BaseCommentPane {
 		this.renderTools();
 	}
 	private commentGroup(handles: NativeBaseGroupHandle[]): void {
-		const context = this.context; if (!context?.current() || !context.groups) return;
+		const context = this.context; if (this.capture || !context?.current() || !context.groups) return;
 		const valid = handles.filter(handle => context.groups!.canCapture(handle));
-		if (valid.length === 1) { void this.host.commentBaseGroupHandle(context, valid[0]); return; }
+		if (valid.length === 1) { this.startCapture(() => this.host.commentBaseGroupHandle(context, valid[0])); return; }
 		if (!valid.length) { new Notice("This group is unavailable or unsupported. The original selection is retained."); return; }
 		const menu = new Menu();
 		for (const handle of valid) menu.addItem(item => item.setTitle(nativeGroupTargetLabel(handle.target)).onClick(() => {
-			if (context.current() && handle.current()) void this.host.commentBaseGroupHandle(context, handle);
+			if (context.current() && handle.current()) this.startCapture(() => this.host.commentBaseGroupHandle(context, handle));
 		}));
 		const rect = this.toolbar.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom });
 	}
 	comment(): void {
+		if (this.capture) return;
 		if (this.chosenGroups.length) { this.commentGroup(this.chosenGroups); return; }
 		const context = this.context, selected = this.chosen;
 		if (!context?.current() || !selected?.current() || !context.canComment(selected.target)) { new Notice("Select a supported shared Bases cell or record first."); return; }
-		void this.host.commentBaseHandle(context, selected);
+		this.startCapture(() => this.host.commentBaseHandle(context, selected));
 	}
 	private renderMarkers(): void {
 		const active = this.marks.ownerDocument.activeElement as HTMLElement | null;

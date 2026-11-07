@@ -74,7 +74,7 @@ test("inline cell and record controls preserve exact semantic targets and marker
 		await settle(); expect(f.host.baseCommentContext).toHaveBeenCalledTimes(1);
 		f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
 		expect(f.buttons().map(button => button.textContent)).toEqual(["Comments · Work", "Comment on cell · note.status", "Comment on record"]);
-		f.buttons()[1].click(); expect(f.host.commentBaseHandle).toHaveBeenLastCalledWith(f.contexts[0], f.cellHandle);
+		f.buttons()[1].click(); expect(f.host.commentBaseHandle).toHaveBeenLastCalledWith(f.contexts[0], f.cellHandle); await settle();
 		f.buttons()[2].click(); expect(f.host.commentBaseHandle).toHaveBeenLastCalledWith(f.contexts[0], f.cellHandle, { type: "item", file: f.cellHandle.target.file });
 		f.root.querySelector<HTMLButtonElement>(".relay-base-comment-marker")!.click(); expect(f.host.openBaseThread).toHaveBeenCalledWith(f.contexts[0], id(7));
 		f.buttons()[0].click(); expect(f.host.openBaseView).toHaveBeenCalledWith(f.contexts[0]);
@@ -470,4 +470,28 @@ test("cell evidence requires its exact live handle; a row fallback, duplicate or
 		f.surface.handles.mockReturnValue([recycled]); expect(present()).toEqual(new Set());
 		f.surface.handles.mockReturnValue([f.cellHandle]); expect(present()).toEqual(new Set([id(7)]));
 	} finally { f.close(); }
+});
+
+test("a pending capture announces progress immediately, fences repeat clicks and shortcuts, and restores its live controls", async () => {
+	const f = fixture(); let finish!: () => void;
+	try {
+		await settle(); f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		f.host.commentBaseHandle.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+		const selected = f.buttons()[1]; selected.click();
+		expect(f.root.querySelector('[data-capture-state][role="status"]')?.textContent).toBe("Preparing comment…");
+		expect(selected.disabled).toBe(true); expect(f.buttons()[0].disabled).toBe(false);
+		selected.click(); f.pane.comment(); expect(f.host.commentBaseHandle).toHaveBeenCalledTimes(1);
+		f.root.dispatchEvent(new Event("scroll")); await settle(); expect(f.buttons()[1]).toBe(selected);
+		finish(); await settle(); expect(selected.disabled).toBe(false); expect(f.root.querySelector("[data-capture-state]")).toBeNull();
+	} finally { finish?.(); f.close(); }
+});
+
+test("a late capture completion cannot restore controls after its pane closes", async () => {
+	const f = fixture(); let finish!: () => void;
+	try {
+		await settle(); f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		f.host.commentBaseHandle.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+		f.buttons()[1].click(); f.pane.close(); finish(); await settle();
+		expect(f.root.querySelector(".relay-bases-comment-tools")).toBeNull();
+	} finally { finish?.(); f.close(); }
 });

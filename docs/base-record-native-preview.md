@@ -43,6 +43,15 @@ stopped and the original Obsidian window restored.
 
 ## Scope
 
+A subsequent capture-feedback increment immediately announces “Preparing
+comment…” for cell, record and group capture, disables competing capture buttons
+and ignores repeated capture shortcuts until completion. Controls remain stable
+through scrolling and late completion cannot revive a closed pane. Its 36 pane
+tests, preview build and existing test-type gate pass; changed-source lint has
+no errors. This is automated evidence, not an additional native acceptance run.
+It exposes the existing bounded preparation wait; it does not shorten network
+timeouts or change authorization.
+
 Native formula-cell, reviewer-authoring, multiwindow, mobile, accessibility and
 resource acceptance remain. The automated checkpoint covers rebuilt record
 identity, denied/missing records, duplicate/recycled handles, stale catalog
