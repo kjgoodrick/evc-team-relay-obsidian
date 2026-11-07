@@ -87,10 +87,10 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 18 fences workers that cannot preserve a range composed with
-		// pending lane evidence through verification, delivery and recovery.
+		// Version 19 fences workers that cannot decode or preserve exact marker
+		// revisions in drafts, cached discussions and queued comments.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 18);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 19);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -576,6 +576,7 @@ export class DiscussionStore {
 			await request(tx.objectStore("preferences").delete("permission:" + scopeId));
 			await request(tx.objectStore("preferences").delete("people:" + scopeId));
 			await request(tx.objectStore("preferences").delete("documentGeneration:" + scopeId));
+			await request(tx.objectStore("preferences").delete("timelineMarkers:" + scopeId));
 			const inbox = await request(tx.objectStore("preferences").get(INBOX_KEY));
 			if (inbox !== undefined) {
 				try {

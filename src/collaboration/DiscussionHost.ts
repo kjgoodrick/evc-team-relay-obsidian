@@ -374,7 +374,7 @@ export class DiscussionHost extends Component {
 				native: anchor => {
 					if (!authorized() || anchor.definition_id !== binding.snapshot.definition_id || anchor.view_id !== binding.viewId || anchor.generation !== binding.snapshot.generation || anchor.registry_revision > binding.snapshot.revision) return;
 					const target = anchor.target; if (target.type === "view" || target.type === "property") return target;
-					if (target.type === "summary" || target.type === "group" || target.type === "timeline_range") return;
+					if (target.type === "summary" || target.type === "group" || target.type === "timeline_range" || target.type === "timeline_marker") return;
 					if (target.type === "formula" || target.type === "formula_cell") {
 						const definition = formulas.get(target.property.name);
 						if (!definition || definition.id !== target.definition_id || definition.revision !== target.definition_revision) return;
@@ -647,6 +647,7 @@ export class DiscussionHost extends Component {
 		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
 		if (target.type === "group") return "Group: " + target.property.name + " · " + baseGroupValueLabel(target.value);
 		if (target.type === "timeline_range") return timelineRangeLabel(target.range) + (target.lane ? " · lane: " + target.lane.property.name + " · " + baseGroupValueLabel(target.lane.value) : "");
+		if (target.type === "timeline_marker") return "Marker: " + target.content.label + " · " + timelineRangeLabel(target.content.range);
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });
@@ -666,7 +667,7 @@ export class DiscussionHost extends Component {
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;
 				if (anchor.target.type !== "summary" && await this.baseComments?.reveal(session, entryId, anchor)) return;
-				if ("definition_id" in anchor.target) {
+				if ("definition_id" in anchor.target || anchor.target.type === "timeline_marker") {
 					const status = await session.baseDefinitionStatus(entryId, anchor);
 					if (available()) new Notice(this.targetLabel(session, entryId, anchor) + ". " + status + " The original target is retained; its exact location cannot be shown in this view.", 10000);
 					return;

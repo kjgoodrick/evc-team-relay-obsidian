@@ -5,6 +5,7 @@ import { BLOCK_KINDS, type BlockStructure } from "./anchors/blocks";
 import type { ImageAsset, ImageBasis, ImageGeometry } from "./anchors/imageGeometry";
 import { parseBaseGroupValue, type BaseGroupValue } from "./BaseGroupValue";
 import { parseTimelineRange, parseTimelineTimeZone, type TimelineRange } from "./TimelineRange";
+import { parseTimelineMarkerContent, type TimelineMarkerContent } from "./TimelineMarkerContent";
 
 export const isId = (value: unknown): value is string => typeof value === "string" &&
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -39,7 +40,7 @@ export type WireTextAnchor = { version: 1; type: "text"; document_id: string; ge
 export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
 export type ImageFileAnchor = { version: 1; type: "image_file"; generation: string; asset: Extract<ImageAsset, { kind: "managed" }>;
 	basis: ImageBasis; geometry: ImageGeometry };
-export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell", "group", "timeline_range"] as const;
+export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell", "group", "timeline_range", "timeline_marker"] as const;
 export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
 export const BASE_RECORD_TYPES = ["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as const;
 export type BaseRecordType = typeof BASE_RECORD_TYPES[number];
@@ -64,8 +65,10 @@ export type TimelineAxis = { version: 1; renderer: "sabidurian-timeline" | "sabi
 	start_property: BaseDefinitionProperty; end_property: BaseDefinitionProperty | null; time_zone: string | null };
 export type BaseTimelineRangeTarget = { type: "timeline_range"; axis_definition_id: string; axis_definition_revision: number;
 	axis: TimelineAxis; range: TimelineRange; lane?: Extract<BaseDefinedTarget, { type: "group" }> };
+export type BaseTimelineMarkerTarget = { type: "timeline_marker"; marker_id: string; marker_revision: number;
+	axis_definition_id: string; axis_definition_revision: number; axis: TimelineAxis; content: TimelineMarkerContent };
 export type BaseTarget = { type: "view" } | { type: "item"; record_id: string; record_generation: string } |
-	{ type: "cell"; record_id: string; record_generation: string; property: BaseProperty } | { type: "property"; property: BaseProperty } | BaseDefinedTarget | BaseTimelineRangeTarget;
+	{ type: "cell"; record_id: string; record_generation: string; property: BaseProperty } | { type: "property"; property: BaseProperty } | BaseDefinedTarget | BaseTimelineRangeTarget | BaseTimelineMarkerTarget;
 export type BaseAnchor = { version: 1; type: "base"; definition_id: string; view_id: string; generation: string;
 	registry_revision: number; target: BaseTarget };
 export type BaseTargetContext = { protocol_version: 1; entry_id: string; definition_id: string; view_id: string;
@@ -205,6 +208,16 @@ function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 	if (target.type === "view") {
 		requireValue(Object.keys(target).length === 1);
 		parsed = { type: "view" };
+	} else if (target.type === "timeline_marker") {
+		requireValue(isId(target.marker_id) && isRevision(target.marker_revision) && isId(target.axis_definition_id) &&
+			isRevision(target.axis_definition_revision) && target.axis_definition_revision <= value.registry_revision &&
+			Object.keys(target).length === 7 && Object.keys(target).every(key =>
+				["type", "marker_id", "marker_revision", "axis_definition_id", "axis_definition_revision", "axis", "content"].includes(key)));
+		const axis = parseTimelineAxis(target.axis), content = parseTimelineMarkerContent(target.content), range = content.range;
+		requireValue((axis.renderer === "sabidurian-sequence") === (range.kind === "ordinal"));
+		requireValue(!("time_zone" in range) || axis.time_zone === null || axis.time_zone === range.time_zone);
+		parsed = { type: "timeline_marker", marker_id: target.marker_id, marker_revision: target.marker_revision,
+			axis_definition_id: target.axis_definition_id, axis_definition_revision: target.axis_definition_revision, axis, content };
 	} else if (target.type === "timeline_range") {
 		requireValue(isId(target.axis_definition_id) && isRevision(target.axis_definition_revision) && target.axis_definition_revision <= value.registry_revision &&
 			Object.keys(target).every(key => ["type", "axis_definition_id", "axis_definition_revision", "axis", "range", "lane"].includes(key)));

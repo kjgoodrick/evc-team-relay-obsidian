@@ -60,7 +60,7 @@ test("filtered changes require matching view evidence and preserve empty advanci
 });
 
 test("transport negotiates supported targets, requests context and refuses cross-view or cross-entry reads", async () => {
-	const fetcher = jest.fn().mockImplementation(async () => reply({ protocol_version: 1, features: { discussion_commands: true, discussion_bases: true, discussion_base_definition_catalog: true, discussion_base_groups: true },
+	const fetcher = jest.fn().mockImplementation(async () => reply({ protocol_version: 1, features: { discussion_commands: true, discussion_bases: true, discussion_base_definition_catalog: true, discussion_base_groups: true, discussion_timeline_markers: true },
 		discussion_base_targets: [...BASE_TARGET_KINDS, "future_target"] }));
 	const transport = new DiscussionTransport(identity, credential, fetcher);
 	expect((await transport.capabilities()).baseTargets).toEqual(BASE_TARGET_KINDS);

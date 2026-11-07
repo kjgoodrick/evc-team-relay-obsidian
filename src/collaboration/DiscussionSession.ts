@@ -1,4 +1,5 @@
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
+import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
@@ -16,7 +17,7 @@ import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type Discussion
 import { BASE_TARGET_KINDS, isId, isRecord, parseAnchor, parseBaseTargetContext, sourceAnchor, parseMessage, parseThread, protocolJson, type BaseAnchor, type BaseProperty, type BaseTargetContext, type BaseTargetKind, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 import { BASE_RECORD_TYPES, isBaseRecordType, type BaseRecordType } from "./DiscussionProtocol";
-import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity } from "./storage/DiscussionStore";
+import { DiscussionStore, type Draft, type OutboxOperation, type QueuedCommand, type StoreIdentity, type PreferenceVerification } from "./storage/DiscussionStore";
 import { parseBaseDefinitionCatalog, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 
 export type SessionStatus = "starting" | "ready" | "offline" | "unavailable" | "authentication_required" | "error" | "closed";
@@ -63,6 +64,7 @@ export class DiscussionSession {
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
 	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
 	private timelineAxisFlights = new Map<string, Promise<TimelineAxisContext>>();
+	private timelineMarkerFlights = new Map<string, Promise<TimelineMarkerCatalog>>();
 	private baseRecordTypes: BaseRecordType[] = [];
 	private lastPublish = 0;
 
@@ -666,6 +668,60 @@ export class DiscussionSession {
 		})()).finally(() => { if (this.timelineAxisFlights.get(scopeId) === flight) this.timelineAxisFlights.delete(scopeId); });
 		this.timelineAxisFlights.set(scopeId, flight); return flight;
 	}
+	readTimelineMarkers(scopeId: string): Promise<TimelineMarkerCatalog> {
+		const existing = this.timelineMarkerFlights.get(scopeId); if (existing) return existing;
+		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId), key = "timelineMarkers:" + scopeId;
+		const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const flight = this.trackLocal((async () => {
+			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
+			const parse = (value: unknown) => parseTimelineMarkerCatalog(value, scope.entryId, scope.viewId!);
+			let proof: PreferenceVerification | undefined;
+			try {
+				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				const catalog = parse(await this.transport.timelineMarkers(scopeId, scope.viewId));
+				if (!current() || catalog.generation !== generation) throw new Error("Saved view changed during marker verification.");
+				const context = await this.cachedBaseContext(scopeId);
+				if (!current() || context?.generation === generation && (context.definition_id !== catalog.definition_id || context.registry_revision > catalog.registry_revision)) {
+					throw new Error("Saved marker verification is stale. Refresh this view.");
+				}
+				let previous: TimelineMarkerCatalog | undefined; try { previous = parse(proof.previous); } catch { /* No prior verified catalog. */ }
+				if (previous?.generation === generation && (previous.definition_id !== catalog.definition_id || previous.registry_revision > catalog.registry_revision ||
+					previous.catalog_revision > catalog.catalog_revision)) throw new Error("Saved marker verification is stale.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved marker verification changed. Try again.");
+				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
+				return catalog;
+			} catch (error) {
+				if (proof && !this.closed && (!(error instanceof DiscussionFailure) || error.action !== "retry")) await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
+				let catalog: TimelineMarkerCatalog | undefined; try { catalog = parse(await this.store.preference(key)); } catch { /* Never authorize capture from incomplete metadata. */ }
+				const context = await this.cachedBaseContext(scopeId);
+				if (!current() || !catalog || catalog.generation !== generation || context?.generation === generation &&
+					(context.definition_id !== catalog.definition_id || context.registry_revision > catalog.registry_revision)) throw new Error("Connect to verify this view’s markers before using them offline.");
+				return catalog;
+			}
+		})()).finally(() => { if (this.timelineMarkerFlights.get(scopeId) === flight) this.timelineMarkerFlights.delete(scopeId); });
+		this.timelineMarkerFlights.set(scopeId, flight); return flight;
+	}
+	async captureTimelineMarker(scopeId: string, selected: TimelineMarkerCatalog, markerId: string): Promise<BaseAnchor> {
+		const scope = parseDiscussionScope(scopeId);
+		if (!scope?.viewId || !this.canAnchorBase("timeline_marker") || !this.permission(scopeId)?.comment) throw new Error("Open this saved view with comment permission first.");
+		// Copy before awaiting so a repaint cannot replace the user's selection.
+		const selection = parseTimelineMarkerCatalog(selected, scope.entryId, scope.viewId), chosen = selection.markers.find(item => item.id === markerId);
+		if (!chosen?.active || !chosen.placement.active) throw new Error("Choose an active marker in this saved view.");
+		const binding = await this.readBaseContext(scopeId), axis = await this.readTimelineAxis(scopeId), catalog = await this.readTimelineMarkers(scopeId);
+		const marker = catalog.markers.find(item => item.id === markerId);
+		if (this.closed || !this.canAnchorBase("timeline_marker") || !this.permission(scopeId)?.comment || !marker?.active || !marker.placement.active ||
+			selection.definition_id !== catalog.definition_id || selection.generation !== catalog.generation ||
+			binding.definition_id !== catalog.definition_id || binding.generation !== catalog.generation || binding.registry_revision !== catalog.registry_revision ||
+			axis.definition_id !== catalog.definition_id || axis.generation !== catalog.generation || axis.registry_revision !== catalog.registry_revision ||
+			axis.axis.id !== marker.target.axis_definition_id || axis.axis.revision !== marker.target.axis_definition_revision ||
+			JSON.stringify(axis.axis.axis) !== JSON.stringify(marker.target.axis) || JSON.stringify(chosen.target) !== JSON.stringify(marker.target)) {
+			throw new Error("The marker or its timeline axis changed. Select it again; your draft is retained.");
+		}
+		if ("time_zone" in marker.content.range) validateTimelineTimeZone(marker.content.range.time_zone);
+		return timelineMarkerAnchor(catalog, marker);
+	}
 	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor?: BaseAnchor): Promise<BaseAnchor>;
 	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor: PendingBaseGroupAnchor): Promise<PendingBaseGroupAnchor>;
 	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor?: BaseAnchor | PendingBaseGroupAnchor): Promise<BaseAnchor | PendingBaseGroupAnchor> {
@@ -698,6 +754,17 @@ export class DiscussionSession {
 		return anchor;
 	}
 	async baseDefinitionStatus(scopeId: string, anchor: BaseAnchor): Promise<string> {
+		if (anchor.target.type === "timeline_marker") {
+			try {
+				const catalog = await this.readTimelineMarkers(scopeId), target = anchor.target;
+				if (catalog.definition_id !== anchor.definition_id || catalog.generation !== anchor.generation || catalog.view_id !== anchor.view_id) return "This marker belongs to an earlier saved-view identity. The captured marker and discussion are retained.";
+				const marker = catalog.markers.find(item => item.id === target.marker_id);
+				if (!marker) return "This marker is absent from the latest verified catalog. The captured marker and discussion are retained.";
+				if (!marker.active || !marker.placement.active) return "This marker was archived or removed from the view in the latest verified catalog. The captured marker and discussion are retained.";
+				if (JSON.stringify(marker.target) !== JSON.stringify(target)) return "This marker changed since capture. The discussion retains its original label and position.";
+				return this.statusValue === "ready" ? "Matches the latest verified marker revision." : "Matches the last verified marker revision. Reconnect to check for changes.";
+			} catch { return "The current marker could not be verified. The captured marker and discussion are retained."; }
+		}
 		if (anchor.target.type === "timeline_range") {
 			try {
 				const context = await this.readTimelineAxis(scopeId), target = anchor.target;

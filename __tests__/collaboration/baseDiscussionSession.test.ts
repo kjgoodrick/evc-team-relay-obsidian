@@ -5,6 +5,7 @@ import { DiscussionFailure, DiscussionTransport, queuedEnvelope } from "../../sr
 import { baseDiscussionScope, parseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import { parseTimelineMarkerCatalog } from "../../src/collaboration/TimelineMarkerProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -283,5 +284,95 @@ test("axis changes and authoritative denials cannot be replaced by an old cached
 		await expect(session.readTimelineAxis(scope)).rejects.toMatchObject({ code: "target_unavailable" });
 		transport.timelineAxis.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
 		await expect(session.readTimelineAxis(scope)).rejects.toThrow("Connect to verify");
+	} finally { await session.close(); }
+});
+
+function markerCatalog() {
+	const { axis, ...context } = rangeContext(), content = { kind: "range", label: "Release", color: "#123abc", range: ordinalRange };
+	return parseTimelineMarkerCatalog({ ...context, catalog_revision: 1, markers: [{ id: id(61), revision: 1, active: true, content,
+		placement: { view_id: id(4), active: true, axis_definition_id: axis.id, axis_definition_revision: 1, axis: axis.axis },
+		target: { type: "timeline_marker", marker_id: id(61), marker_revision: 1, content, axis_definition_id: axis.id, axis_definition_revision: 1, axis: axis.axis } }] }, id(3), id(4));
+}
+function markerRemote() {
+	const transport = { ...rangeRemote(), timelineMarkers: jest.fn().mockImplementation(async () => markerCatalog()) };
+	transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "timeline_range", "timeline_marker"], baseRecordTypes: ["markdown"] });
+	return transport;
+}
+test("verified marker selections remain exact through offline restart, draft consumption and queued delivery", async () => {
+	const factory = new IDBFactory(), transport = markerRemote(); let store = await DiscussionStore.open(identity, factory);
+	let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const selected = await session.readTimelineMarkers(scope), captured = await session.captureTimelineMarker(scope, selected, id(61));
+		expect(captured.target).toMatchObject({ type: "timeline_marker", marker_id: id(61), marker_revision: 1 });
+		session.setForeground(false); await session.outbox.settled();
+		await store.saveDraft({ id: "marker", scopeId: scope, revision: 1, body: "Kept", target: protocolJson(captured) });
+		await session.close(); store = await DiscussionStore.open(identity, factory);
+		for (const method of [transport.capabilities, transport.permissions, transport.baseTargetContext, transport.timelineAxis, transport.timelineMarkers, transport.changes, transport.send]) method.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); session.setForeground(false); await session.outbox.settled();
+		expect(await session.captureTimelineMarker(scope, selected, id(61))).toEqual(captured);
+		await session.queue(op(scope, captured), { id: "marker", revision: 1 });
+		expect(await store.getDraft("marker")).toBeUndefined();
+		expect(JSON.parse(queuedEnvelope(identity.shareId, (await store.pending(scope))[0])).command.anchor).toEqual(captured);
+		await expect(session.captureTimelineMarker(other, selected, id(61))).rejects.toThrow();
+		const isolated = await DiscussionStore.open({ ...identity, accountId: id(99) }, factory);
+		try { expect(await isolated.preference("timelineMarkers:" + scope)).toBeUndefined(); expect(await isolated.pending(scope)).toEqual([]); } finally { isolated.close(); }
+	} finally { await session.close(); }
+});
+
+test.each(["edit", "archive", "detach", "axis"])("new marker capture refuses %s without changing saved drafts or historical targets", async change => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = markerRemote(), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const selected = await session.readTimelineMarkers(scope), anchor = await session.captureTimelineMarker(scope, selected, id(61));
+		await store.saveDraft({ id: "marker", scopeId: scope, revision: 1, body: "Original", target: protocolJson(anchor) });
+		const newer = markerCatalog(), marker = newer.markers[0]; newer.catalog_revision = 2; marker.revision = 2; marker.target.marker_revision = 2;
+		if (change === "edit") { marker.content.label = "Moved"; marker.target.content.label = "Moved"; }
+		if (change === "archive") marker.active = false;
+		if (change === "detach") marker.placement.active = false;
+		if (change === "axis") transport.timelineAxis.mockResolvedValue({ ...rangeContext(), registry_revision: 2, axis: { ...rangeContext().axis, revision: 2 } });
+		transport.timelineMarkers.mockResolvedValue(newer);
+		await expect(session.captureTimelineMarker(scope, selected, id(61))).rejects.toThrow("changed");
+		expect((await store.getDraft("marker"))?.target).toEqual(anchor);
+		expect(await session.baseDefinitionStatus(scope, anchor)).toContain(change === "archive" || change === "detach" ? "archived" : "changed");
+		expect(anchor.target).toMatchObject({ marker_revision: 1, content: { label: "Release" } });
+	} finally { await session.close(); }
+});
+
+test("marker cache cannot mask denial or malformed responses and never grants a reader comment access", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = markerRemote(), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const selected = await session.readTimelineMarkers(scope);
+		transport.timelineMarkers.mockRejectedValue(new DiscussionFailure("reject", "target_unavailable", 404));
+		await expect(session.readTimelineMarkers(scope)).rejects.toMatchObject({ code: "target_unavailable" });
+		transport.timelineMarkers.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		await expect(session.readTimelineMarkers(scope)).rejects.toThrow("Connect to verify");
+		transport.timelineMarkers.mockResolvedValue(markerCatalog()); await session.readTimelineMarkers(scope);
+		transport.timelineMarkers.mockResolvedValue({ ...markerCatalog(), generation: "malformed" });
+		await expect(session.readTimelineMarkers(scope)).rejects.toThrow();
+		transport.timelineMarkers.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		await expect(session.readTimelineMarkers(scope)).rejects.toThrow("Connect to verify");
+		transport.timelineMarkers.mockResolvedValue(markerCatalog()); await session.readTimelineMarkers(scope);
+		transport.timelineMarkers.mockResolvedValue({ ...markerCatalog(), generation: id(99) });
+		await expect(session.readTimelineMarkers(scope)).rejects.toThrow("changed during marker verification");
+		transport.timelineMarkers.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		await expect(session.readTimelineMarkers(scope)).rejects.toThrow("Connect to verify");
+		transport.permissions.mockResolvedValue({ read: true, comment: false, edit: false, moderate: false }); await session.refresh();
+		await expect(session.captureTimelineMarker(scope, selected, id(61))).rejects.toThrow("comment permission");
+	} finally { await session.close(); }
+});
+
+test("a response arriving after remote-cache revocation cannot repopulate marker proof", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = markerRemote(), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		let complete!: (value: ReturnType<typeof markerCatalog>) => void;
+		transport.timelineMarkers.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+		const flight = session.readTimelineMarkers(scope);
+		await until(() => !!complete); await store.clearRemoteScope(scope); complete(markerCatalog());
+		await expect(flight).rejects.toThrow("verification changed");
+		expect(await store.preference("timelineMarkers:" + scope)).toBeUndefined();
 	} finally { await session.close(); }
 });

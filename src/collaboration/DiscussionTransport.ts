@@ -6,6 +6,7 @@ import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, so
 import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { parseTimelineAxisContext } from "./TimelineRangeProtocol";
+import { parseTimelineMarkerCatalog, parseTimelineMarkerPage, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
 
@@ -39,6 +40,8 @@ for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subsc
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
 for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "timeline_axis_changed", "unsupported_timeline_time_zone"]) errorCodes.add(code);
+for (const code of ["timeline_markers_disabled", "timeline_marker_catalog_changed", "timeline_marker_changed", "timeline_marker_unavailable",
+	"timeline_marker_limit", "timeline_marker_placement_limit", "invalid_marker_placement", "base_editor_required"]) errorCodes.add(code);
 for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
 for (const code of ["base_groups_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
 	"base_group_limit", "base_group_witness_limit", "base_group_identity_conflict", "operation_conflict"]) errorCodes.add(code);
@@ -179,13 +182,14 @@ export class DiscussionTransport implements DiscussionSender {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_timeline_markers"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
 		let baseRecordTypes: BaseRecordType[] = [];
 		const definitionCatalog = value.features.discussion_base_definition_catalog === true;
 		const groupCapture = value.features.discussion_base_groups === true;
+		const markerCapture = value.features.discussion_timeline_markers === true;
 		let baseFileGroupProperties: string[] | undefined;
 		const fileGroups = value.discussion_base_file_group_properties;
 		if (fileGroups !== undefined) {
@@ -199,7 +203,7 @@ export class DiscussionTransport implements DiscussionSender {
 				new Set(value.discussion_base_targets).size !== value.discussion_base_targets.length) throw new DiscussionFailure("pause", "invalid_read_response");
 			baseTargets = BASE_TARGET_KINDS.filter(kind => (value.discussion_base_targets as unknown[]).includes(kind) &&
 				(!["formula", "summary", "formula_cell", "group"].includes(kind) || definitionCatalog) &&
-				(kind !== "group" || groupCapture));
+				(kind !== "group" || groupCapture) && (kind !== "timeline_marker" || markerCapture));
 			const records = value.discussion_base_record_types;
 			// The initial Bases protocol only accepted Markdown records.
 			if (records === undefined) baseRecordTypes = ["markdown"];
@@ -301,6 +305,25 @@ export class DiscussionTransport implements DiscussionSender {
 		return this.parse(await this.request(this.scopePath(entryId) + "/bases/timeline-axis", JSON.stringify({ view_id: viewId,
 			...(expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) })),
 			value => parseTimelineAxisContext(value, parseDiscussionScope(entryId)!.entryId, viewId));
+	}
+	async timelineMarkers(scopeId: string, viewId: string): Promise<TimelineMarkerCatalog> {
+		if (!isId(viewId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		this.scopeView(scopeId, viewId);
+		const entryId = parseDiscussionScope(scopeId)!.entryId;
+		let result: TimelineMarkerCatalog | undefined, after: string | undefined;
+		for (let count = 0; count < 6; count++) {
+			const value = await this.request(this.scopePath(scopeId) + "/bases/timeline-markers/catalog", JSON.stringify({ view_id: viewId,
+				include_archived: true, ...(result ? { expected_revision: result.catalog_revision, after } : {}) }), { responseLimit: 256 * 1024 });
+			const page = this.parse(value, item => parseTimelineMarkerPage(item, entryId, viewId, after));
+			if (result && (result.definition_id !== page.definition_id || result.generation !== page.generation ||
+				result.registry_revision !== page.registry_revision || result.catalog_revision !== page.catalog_revision)) throw new DiscussionFailure("pause", "invalid_read_response");
+			if (!result) result = parseTimelineMarkerCatalog(page, entryId, viewId);
+			else result.markers.push(...page.markers);
+			if (result.markers.length > 256) throw new DiscussionFailure("pause", "invalid_read_response");
+			if (!page.has_more) return result;
+			after = page.next_after!;
+		}
+		throw new DiscussionFailure("pause", "invalid_read_response");
 	}
 	async captureBaseGroup(entryId: string, request: BaseGroupCapture) {
 		let copy: BaseGroupCapture;
