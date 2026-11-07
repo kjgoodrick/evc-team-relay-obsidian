@@ -150,7 +150,7 @@ export class LocationHost extends Component {
 		const path = folder.toVirtualPath(file.path), record = folder.folderIndex.recordFor(path), index = folder._liveProvider.managedIndex;
 		const permissions = folder.crdtDoc.getMap<{ owner: boolean; permissions: Record<string, string> }>("managed_base_v1").get("snapshot");
 		if (!record || !locationId(record.id) || (record.type !== "markdown" && record.type !== "image" && record.type !== "file") || !index?.registered(path, record.id) || index.isBlocked(path, record.id) || !permissions || !permissions.owner && !["read", "write"].includes(permissions.permissions[path])) return;
-		return { id: record.id, type: record.type };
+		return { id: record.id, type: record.type, path };
 	}
 	private baseRecordFile(context: Context | undefined, id: string): TFile | undefined {
 		if (!context) return;
@@ -255,6 +255,9 @@ export class LocationHost extends Component {
 					current: () => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder && this.channel?.supportsBaseStates === true,
 					publishing: () => this.visible, local: file => this.baseRecord(this.context, file), file: id => this.baseRecordFile(this.context, id),
 					read: id => this.channel!.readBaseRecordContext(context.folder.entityGuid, id), publish: state => this.channel?.publishBaseState(this.visible ? state : null),
+					groups: { supported: () => this.channel?.supportsBaseTargetsV2 === true,
+						resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
+						fileAtPath: path => this.plugin.app.vault.getFileByPath(path) },
 				},
 			});
 			this.base.refresh();

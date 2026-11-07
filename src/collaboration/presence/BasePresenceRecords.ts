@@ -1,7 +1,7 @@
 import type { TFile } from "obsidian";
 import type { BaseRecordContext } from "./BasePositionProtocol";
 
-export type BaseLocalRecord = Readonly<{ id: string; type: BaseRecordContext["type"] }>;
+export type BaseLocalRecord = Readonly<{ id: string; type: BaseRecordContext["type"]; path?: string }>;
 type Entry = { file: TFile; path: string; local: BaseLocalRecord; context?: BaseRecordContext; requested: Set<string>;
 	promise: Promise<BaseRecordContext | undefined>; finish(value?: BaseRecordContext): void; started: boolean; done: boolean };
 type Options = { current(): boolean; local(file: TFile): BaseLocalRecord | undefined; read(id: string): Promise<BaseRecordContext>; changed(): void };

@@ -401,9 +401,10 @@ positions. A Bases watch requests `base_target_version: 2` alongside
 and viewport slots. Missing capability or watch version retains version one:
 unsupported positions become null, while cell/record/header positions remain.
 State is cleared on disconnect and is never replayed. This checkpoint implements
-transport and authorization; native capture, overlays and Jump/Follow for these
-new targets are still pending. The existing native cell/record/header path is
-unchanged; it does not guess a record position for a group or range.
+transport and authorization. Native group/lane capture, overlays and Jump/Follow
+are now connected as described below; native timeline-range positions remain
+pending. The existing cell/record/header path does not guess a record position
+for an unavailable group or range.
 
 A group target contains `type: "group"`, its grouping `property`, a selected
 `record_id`/`record_generation`, `value_sha256`, and up to eight additional
@@ -417,7 +418,7 @@ values, local paths, formulas and result sets are absent from the message.
 The hash is a matching hint, not a server attestation of membership. Native wiring
 must derive it from a canonical typed value using managed identities, check that
 the selected authorized record is a current member, and refuse ambiguous matches.
-The planned digest is SHA-256 of UTF-8 canonical JSON for
+The native digest is SHA-256 of UTF-8 canonical JSON for
 `[1, share_id, entry_id, generation, definition_id, view_id, registry_revision,
 property.source, property.name, value]`; `value` uses the existing BaseGroupValue
 codec, sorted object keys, normalized negative zero and managed link identities.
@@ -445,3 +446,46 @@ linked-input revocation, changed axis/grouping, pending-send fencing and full-ro
 snapshot bounds. The actual Python service/TypeScript client fixture exchanges a
 group and lane range without roster churn. These are automated transport checks,
 not native desktop/mobile acceptance.
+
+## Native member-backed groups and lanes (November 7)
+
+The foreground Bases host now captures pointers on verified native group headers,
+projects authenticated peer pointers and supports exact group Jump/Follow. When
+no visible record provides a viewport position, it uses the nearest visible group
+header. Table, cards and list adapters and the existing Time & Line Timeline/
+Sequence bridge supply the handles. Navigation uses the native group reveal
+operation followed by exact-point nested scrolling; it changes neither saved
+configuration nor group expansion. Time & Line navigation locks still apply.
+
+`BasePresenceGroups` requires a single unambiguous typed header and a currently
+readable member. Hashes and record generations are reused across movement and
+repainting. File inventory values are verified against the local file and
+normalized to share-relative paths. Linked files and unresolved-link source
+records must all have verified current lineage. Native input trees are copied
+before asynchronous work. Scope, member, generation, value, source-path or linked
+permission changes prevent projection; visually identical values of different
+types never become interchangeable. A stale hash is not an authorization proof.
+
+Two hash jobs may run concurrently and at most 128 entries are retained in memory,
+using the existing two-request/256-entry record metadata cache. Capture tries at
+most eight authorized candidate members and never reads note contents or opens
+providers. Only negotiated clients attempt the extension. Hidden observers may
+receive markers without publishing. Cancelled navigation returns immediately
+while an independent metadata/hash request may finish; late results cannot scroll
+or restore state after cancellation, access loss, scope change or unload. Closing
+releases queued work and cache waiters. No group data is persisted by presence.
+
+Validation: **2,784 plugin tests in 221 suites**, preview build/main types,
+changed-source/test lint and the frozen test-type gate pass. The existing 15 build
+warnings and 206 known test-type errors/45 signatures remain. Focused tests use
+real native adapters with simulated table/cards/list layout and the real Time &
+Line bridge client with simulated Timeline/Sequence SVG headers. They cover typed
+matching, duplicate/merged headers, cross-mount paths, linked-input denial,
+reused hashes, bounded hashing, delayed cancellation, exact navigation, hidden
+observation and cleanup. No new server code was required; preceding transport
+and authorization evidence remains applicable.
+
+Actual desktop/mobile acceptance remains unavailable while the Mac is locked.
+Native date-range capture/overlays/navigation, formula and dependency-bearing
+metadata groups, empty/repeated/merged-group interaction, broader keyboard
+support and resource/accessibility measurements remain required release work.
