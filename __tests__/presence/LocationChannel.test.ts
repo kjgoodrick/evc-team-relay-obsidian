@@ -1,5 +1,6 @@
 import { LocationChannel, type LocationIdentity } from "../../src/collaboration/presence/LocationChannel";
 import type { NoteLocation, ImageLocation, BaseLocation } from "../../src/collaboration/presence/LocationProtocol";
+import type { BasePresenceState } from "../../src/collaboration/presence/BasePositionProtocol";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const identity: LocationIdentity = { serverUrl: "https://relay.example", accountId: id(1), loginSessionId: id(2), instanceId: id(3) };
@@ -29,18 +30,19 @@ class Socket {
 	ready(expiresIn = 3600, protocolVersion = 1) { this.message({ type: "ready", protocol_version: protocolVersion, session_id: "b".repeat(32), instance_id: id(3), expires_at: Math.floor(Date.now() / 1000) + expiresIn }); }
 	disconnect(code = 1006) { this.readyState = 3; this.onclose?.call(this as unknown as WebSocket, { code } as CloseEvent); }
 }
-function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false, bases = serverSupports) {
+function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false, bases = serverSupports, baseMovement = false) {
 	const sockets: Socket[] = [], status = jest.fn(), location = jest.fn(), followStopped = jest.fn(), roster = jest.fn();
-	const imageStates = jest.fn(), imageEmbeds = jest.fn();
+	const imageStates = jest.fn(), imageEmbeds = jest.fn(), baseStates = jest.fn();
 	let counter = 0;
 	const fetcher = jest.fn(async (url: string) => url.includes("/capabilities?") ? response({ protocol_version: 1, features: { presence_locations_preview: true,
-		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds, presence_base_context_preview: bases } : {}) } }) :
+		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds, presence_base_context_preview: bases, presence_base_states_preview: baseMovement } : {}) } }) :
 		response({ protocol_version: 1, ticket: "ticket_" + String(++counter).padStart(32, "0"), expires_in: 30, socket_path: "/v1/collaboration/events" }));
 	const options = { credential: jest.fn(credentials), fetcher, status, location, followStopped, roster, surfaceLocations, random: () => 0.5,
 		imageStates: movement ? imageStates : undefined, imageEmbeds: embeds ? imageEmbeds : undefined,
+		baseStates: baseMovement ? baseStates : undefined,
 		socket: (url: string) => { const socket = new Socket(url); sockets.push(socket); return socket as unknown as WebSocket; } };
 	const channel = new LocationChannel(identity, options);
-	return { channel, options, sockets, fetcher, status, location, followStopped, roster, serverSupports, imageStates, imageEmbeds };
+	return { channel, options, sockets, fetcher, status, location, followStopped, roster, serverSupports, imageStates, imageEmbeds, baseStates };
 }
 const flush = () => jest.advanceTimersByTimeAsync(0);
 async function ready(f: ReturnType<typeof fixture>, expiresIn = 3600) {
@@ -459,4 +461,72 @@ test.each([false, true])("embed capability is required, including on extended se
         expect(f.channel.supportsEmbeddedImages).toBe(false);
         expect(socket.frames.some(frame => frame.type === "watch_embeds" || frame.type === "image_embed")).toBe(false);
     } finally { f.channel.stop(); }
+});
+
+const baseState = (x = 0.5): BasePresenceState => ({ version: 1, pointer: { target: { type: "cell", record_id: id(40), record_generation: id(41), property: { source: "note", name: "status" } }, offset: { x, y: 0.5 } }, viewport: null });
+
+test("Bases movement coalesces, clears on privacy/surface changes and never replays after reconnect", async () => {
+	const f = fixture(true, true, false, false, true, true);
+	try {
+		const socket = await ready(f); f.channel.publish(base());
+		for (let x = 0; x <= 1000; x++) f.channel.publishBaseState(baseState(x / 1000));
+		expect(socket.frames.filter(value => value.type === "base_state")).toHaveLength(0);
+		await jest.advanceTimersByTimeAsync(125);
+		expect(socket.frames.slice(-2)).toEqual([{ type: "presence", location: base() }, { type: "base_state", location: base(), state: baseState(1) }]);
+		f.channel.publishBaseState(null); expect(socket.frames.at(-1)).toMatchObject({ type: "base_state", state: null });
+		f.channel.publishBaseState(baseState()); f.channel.publish(null); await jest.advanceTimersByTimeAsync(125);
+		expect(socket.frames.at(-1)).toEqual({ type: "presence", location: null });
+		f.channel.publish(base()); f.channel.publishBaseState(baseState()); await jest.advanceTimersByTimeAsync(125);
+		socket.disconnect(); await jest.advanceTimersByTimeAsync(1000); const next = f.sockets.at(-1)!; next.open(); next.ready(3600, 2);
+		expect(next.frames.some(frame => frame.type === "base_state")).toBe(false);
+		f.channel.publish(picture()); await jest.advanceTimersByTimeAsync(125); expect(next.frames.at(-1)).toEqual({ type: "presence", location: picture() });
+	} finally { f.channel.stop(); }
+	expect(jest.getTimerCount()).toBe(0);
+});
+
+test("Bases positions have an independent callback, keep roster controls stable and ignore old saved-view subscriptions", async () => {
+	const f = fixture(true, true, false, false, true, true);
+	try {
+		const socket = await ready(f); f.channel.watch(base()); const watch = socket.frames.at(-1)!;
+		expect(watch).toMatchObject({ type: "watch", base_states: true }); expect(watch).not.toHaveProperty("image_states");
+		const frame = { type: "base_states", subscription_id: watch.subscription_id, status: "available", peers: [{ target, state: baseState() }] };
+		const count = f.roster.mock.calls.length; socket.message(frame);
+		expect(f.baseStates).toHaveBeenLastCalledWith({ scope: base(), status: "available", peers: frame.peers }); expect(f.roster.mock.calls).toHaveLength(count);
+		f.channel.watch(base(13)); expect(f.baseStates).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
+		const calls = f.baseStates.mock.calls.length; socket.message(frame); expect(f.baseStates.mock.calls).toHaveLength(calls);
+		const current = socket.frames.at(-1)!; socket.message({ type: "base_states", subscription_id: current.subscription_id, status: "unavailable" });
+		expect(f.roster).toHaveBeenLastCalledWith({ scope: base(13), status: "unavailable", peers: [] });
+	} finally { f.channel.stop(); }
+});
+
+test.each([false, true])("Bases record lookup and movement require negotiation (extended %s)", async extended => {
+	const f = fixture(true, extended);
+	try {
+		const socket = await ready(f); f.channel.publish(base()); f.channel.publishBaseState(baseState()); f.channel.watch(base());
+		await jest.advanceTimersByTimeAsync(125); expect(socket.frames.some(value => value.type === "base_state" || value.base_states)).toBe(false);
+		await expect(f.channel.readBaseRecordContext(id(5), id(40))).rejects.toThrow(); expect(f.fetcher).toHaveBeenCalledTimes(2);
+	} finally { f.channel.stop(); }
+});
+
+test("Bases record lineage lookup uses session credentials and fences delayed responses after stop", async () => {
+	const f = fixture(true, true, false, false, true, true), context = { protocol_version: 1, share_id: id(5), entry_id: id(40), generation: id(41), type: "markdown" };
+	try {
+		await ready(f); f.fetcher.mockResolvedValueOnce(response(context));
+		expect(await f.channel.readBaseRecordContext(id(5), id(40))).toEqual(context);
+		expect(f.fetcher).toHaveBeenLastCalledWith(`https://relay.example/v1/collaboration/base-record-context?share_id=${id(5)}&entry_id=${id(40)}`, expect.objectContaining({ sensitive: true, method: "GET", headers: { Authorization: expect.stringMatching(/^Bearer /) } }));
+		let complete!: (value: Response) => void; f.fetcher.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+		const pending = f.channel.readBaseRecordContext(id(5), id(40)); const rejection = expect(pending).rejects.toThrow(); await flush(); f.channel.stop(); complete(response(context)); await rejection;
+	} finally { f.channel.stop(); }
+	expect(jest.getTimerCount()).toBe(0);
+});
+
+test.each(["unsolicited", "wrong-surface", "duplicate", "values", "extra"])("rejects invalid Bases frames: %s", async failure => {
+	const f = fixture(true, true, false, false, true, failure !== "unsolicited");
+	try {
+		const socket = await ready(f); f.channel.watch(failure === "wrong-surface" ? picture() : base());
+		const watch = socket.frames.at(-1)!, peer = { target, state: baseState() };
+		const peers = failure === "duplicate" ? [peer, peer] : failure === "values" ? [{ ...peer, state: { ...baseState(), value: "private" } }] : [peer];
+		socket.message({ type: "base_states", subscription_id: watch.subscription_id, status: "available", peers, ...(failure === "extra" ? { path: "private" } : {}) });
+		expect(f.channel.status).toBe("unavailable");
+	} finally { f.channel.stop(); }
 });

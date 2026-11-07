@@ -34,7 +34,8 @@ external URLs, computed results and not-yet-supported subtargets. Image movement
 uses a separate typed message rather than changing the room descriptor.
 Revisions must be positive safe integers. Embedded-image occurrences now have
 a separate typed transport and source-anchor foundation below. Fine-grained
-Bases/timeline state still needs typed extensions and authorization.
+Bases cells/records/headers now have a separate typed stream and record-specific
+authorization below. Groups/lanes/ranges and native movement wiring remain.
 
 ## Read-only saved-view context
 
@@ -308,3 +309,44 @@ replay. The host/geometry tests simulate native layout; they are **not** an
 Obsidian desktop/mobile acceptance run. Native pointer/touch/crop/zoom behavior,
 visible split panes, full syntax/format/large-file support and resource/latency
 measurements remain required. The latest computer-use check found the Mac locked.
+
+## Bases cell, record and header position stream
+
+The transport negotiates `presence_base_states_preview` independently, requiring
+version-two surface locations, roster and read-only Base context support.
+`BasePositionProtocol.ts` strictly validates and freezes `BasePresenceState`:
+`{version: 1, pointer, viewport}`, with each position null or `{target, offset}`.
+`offset` is a normalized `{x,y}` within a locally verified target. Record items
+and cells carry record ID/generation; cells and property headers carry namespace
+and name. Names are bounded to 128 code points/256 UTF-8 bytes. Extra values,
+paths, client names, malformed geometry, unsupported targets and duplicate peer
+identities reject. Formula names carry no evaluated results.
+
+`readBaseRecordContext(shareId, entryId)` uses normal session credentials and a
+read-only lookup of current record lineage/type, independent of discussions.
+It does not create missing IDs, and late results after stop/reconnect are fenced.
+The future native capture host must cache/bound these reads and verify its local
+record binding rather than requesting metadata for every pointer movement.
+
+`publishBaseState(state)` uses the existing location socket and movement timer.
+It sends only after the exact visible Base publication, coalesces ordinary
+movement to 125 ms, clears immediately and drops stale state across surface
+changes, hiding, disconnect or unload. Reconnect does not replay positions.
+A host providing `baseStates` receives separate `{scope, status, peers}` events;
+its Base watches request `base_states: true`. Geometry does not call the roster
+callback. Stale subscriptions cannot repopulate another saved view. A target's
+identity is the authenticated roster tuple, not anything supplied in its state.
+
+The server separately checks both parties' access to the Base and referenced
+records. A denied record suppresses all precise-state metadata while preserving
+an otherwise authorized saved-view roster. Changed target/generation/property
+invalidates delayed permission results and socket writes; offset-only movement
+coalesces without starving authorization. Actual HTTP/WebSocket checks cover
+cell delivery, explicit/hidden clearing and idle record revocation while the
+Base remains observable. Unit checks cover Unicode bounds, malformed frames,
+capability negotiation, coalescing, stale callbacks and reconnect cleanup.
+
+This is the transport foundation. `BasePresenceSurface` still publishes only
+the saved view: precise native capture, remote overlays and Jump/Follow wiring
+remain next. Group/lane/range schemas, native desktop/mobile acceptance and
+performance/battery measurements remain part of the full feature scope.

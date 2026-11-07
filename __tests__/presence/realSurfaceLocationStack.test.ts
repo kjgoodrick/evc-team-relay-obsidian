@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { decodeJwt } from "jose";
 import { LocationChannel } from "../../src/collaboration/presence/LocationChannel";
 import { basePresenceLocation } from "../../src/collaboration/presence/BasePresenceProtocol";
+import type { BasePresenceState, BaseStatesEvent } from "../../src/collaboration/presence/BasePositionProtocol";
 import type { NoteLocation, BaseLocation, ImageLocation, LocationEvent, SurfaceLocation, SurfaceRosterEvent, ImageStatesEvent } from "../../src/collaboration/presence/LocationProtocol";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
@@ -22,12 +23,13 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 	const { image, views, note } = f.presence;
 	function participant(token: string, instanceId: string) {
 		const claims = decodeJwt(token), events: LocationEvent[] = [], rosters: SurfaceRosterEvent[] = [], positions: ImageStatesEvent[] = [], opened: WebSocket[] = [];
-		const embeds: EmbeddedImagesEvent[] = [];
+		const embeds: EmbeddedImagesEvent[] = [], basePositions: BaseStatesEvent[] = [];
 		let acknowledgments = 0, refreshes = 0;
 		const channel = new LocationChannel({ serverUrl: f.base, accountId: claims.sub!, loginSessionId: claims.session_id as string, instanceId }, {
 			surfaceLocations: true, credential: async () => ({ accountId: claims.sub!, accessToken: token }),
 			location: event => events.push(event), roster: event => rosters.push(event),
 			imageStates: event => positions.push(event), imageEmbeds: event => embeds.push(event),
+			baseStates: event => basePositions.push(event),
 			socket: url => {
 				const socket = new WebSocket(url), send = socket.send.bind(socket); sockets.push(socket); opened.push(socket);
 				expect(new URL(url).search).toBe("");
@@ -37,7 +39,7 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 			},
 		});
 		channels.push(channel);
-		return { channel, events, rosters, positions, embeds, opened, refreshes: () => refreshes, publish: async (location: SurfaceLocation | null) => {
+		return { channel, events, rosters, positions, embeds, basePositions, opened, refreshes: () => refreshes, publish: async (location: SurfaceLocation | null) => {
 			const previous = acknowledgments; channel.publish(location); await until(() => acknowledgments > previous, "processed publication");
 		} };
 	}
@@ -74,9 +76,23 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 		expect(viewer.rosters.at(-1)!.peers).toEqual([]);
 		await publisher.publish(views[1]);
 		await until(() => viewer.rosters.at(-1)?.peers.length === 1, "saved view arrival");
+		expect(viewer.channel.supportsBaseStates).toBe(true);
+		const record = await viewer.channel.readBaseRecordContext(note.share_id, note.entry_id);
+		expect(record).toEqual({ protocol_version: 1, share_id: note.share_id, entry_id: note.entry_id, generation: expect.any(String), type: "markdown" });
+		const baseState: BasePresenceState = { version: 1, pointer: { target: { type: "cell", record_id: record.entry_id, record_generation: record.generation, property: { source: "note", name: "status" } }, offset: { x: 0.25, y: 0.5 } }, viewport: null };
+		const baseRosterCount = viewer.rosters.length;
+		publisher.channel.publishBaseState(baseState);
+		await until(() => viewer.basePositions.at(-1)?.peers.length === 1, "record cell position");
+		expect(viewer.basePositions.at(-1)!.peers).toEqual([{ target, state: baseState }]);
+		expect(viewer.rosters).toHaveLength(baseRosterCount);
+		publisher.channel.publishBaseState(null);
+		await until(() => viewer.basePositions.at(-1)?.peers.length === 0, "record position explicitly cleared");
+		publisher.channel.publishBaseState(baseState);
+		await until(() => viewer.basePositions.at(-1)?.peers.length === 1, "record position restored");
 		publisher.channel.credentialsChanged(); await until(() => publisher.refreshes() === 1, "same-socket renewal");
 		await publisher.publish(null);
 		await until(() => viewer.events.at(-1)?.location === null && viewer.rosters.at(-1)?.peers.length === 0, "hidden publisher");
+		await until(() => viewer.basePositions.at(-1)?.peers.length === 0, "hidden record position");
 		const eventCount = viewer.events.length;
 		await publisher.publish(views[1]); await until(() => viewer.rosters.at(-1)?.peers.length === 1, "visible publisher returns");
 		expect(viewer.events).toHaveLength(eventCount);
@@ -127,6 +143,17 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
         await until(() => viewer.embeds.at(-1)?.status === "available" && viewer.embeds.at(-1)?.peers.length === 0, "managed embed denied without ending note observation");
         expect(JSON.stringify(viewer.embeds)).not.toContain("Presence.png");
         doc.destroy();
+		await publisher.publish(views[1]); viewer.channel.watch(views[1]);
+		await until(() => viewer.rosters.at(-1)?.peers.length === 1, "Base before record revocation");
+		publisher.channel.publishBaseState(baseState);
+		await until(() => viewer.basePositions.at(-1)?.peers.length === 1, "Base cell before revocation");
+		const deniedRecord = await fetch(`${f.base}/v1/managed/shares/${image.share_id}/rules`, { method: "PUT", headers: { Authorization: "Bearer " + f.ownerToken, "Content-Type": "application/json" },
+			body: JSON.stringify([{ user_id: f.reviewer, path: "", recursive: true, permission: "read" }, { user_id: f.reviewer, path: "Presence.png", recursive: false, permission: "none" }, { user_id: f.reviewer, path: "Presence.md", recursive: false, permission: "none" }]) });
+		expect(deniedRecord.status).toBe(200);
+		await until(() => viewer.basePositions.at(-1)?.status === "available" && viewer.basePositions.at(-1)?.peers.length === 0, "idle record revocation retains Base observation");
+		expect(viewer.rosters.at(-1)?.peers).toHaveLength(1);
+		await expect(viewer.channel.readBaseRecordContext(note.share_id, note.entry_id)).rejects.toThrow();
+		expect(JSON.stringify(viewer.basePositions)).not.toContain("Presence.md");
 	} finally {
 		channels.forEach(channel => channel.stop());
 		await until(() => sockets.every(socket => socket.readyState === 3), "socket cleanup");
