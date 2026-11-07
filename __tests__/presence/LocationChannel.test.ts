@@ -31,7 +31,7 @@ function fixture(surfaceLocations = false, serverSupports = surfaceLocations) {
 	const sockets: Socket[] = [], status = jest.fn(), location = jest.fn(), followStopped = jest.fn(), roster = jest.fn();
 	let counter = 0;
 	const fetcher = jest.fn(async (url: string) => url.includes("/capabilities?") ? response({ protocol_version: 1, features: { presence_locations_preview: true,
-		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true } : {}) } }) :
+		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true } : {}) } }) :
 		response({ protocol_version: 1, ticket: "ticket_" + String(++counter).padStart(32, "0"), expires_in: 30, socket_path: "/v1/collaboration/events" }));
 	const options = { credential: jest.fn(credentials), fetcher, status, location, followStopped, roster, surfaceLocations, random: () => 0.5,
 		socket: (url: string) => { const socket = new Socket(url); sockets.push(socket); return socket as unknown as WebSocket; } };
@@ -45,6 +45,46 @@ async function ready(f: ReturnType<typeof fixture>, expiresIn = 3600) {
 }
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
+
+test("image context uses the session credential and returns only the requested current image", async () => {
+	const f = fixture(true);
+	try {
+		await ready(f); f.fetcher.mockResolvedValueOnce(response({ protocol_version: 1, location: picture() }));
+		expect(f.channel.supportsImageContext).toBe(true);
+		expect(await f.channel.readImageLocation(id(5), id(8))).toEqual(picture());
+		expect(f.fetcher).toHaveBeenLastCalledWith("https://relay.example/v1/collaboration/image-location?share_id=" + id(5) + "&entry_id=" + id(8), expect.objectContaining({ sensitive: true, headers: { Authorization: expect.stringMatching(/^Bearer /) } }));
+	} finally { f.channel.stop(); }
+});
+
+test.each([
+	{ protocol_version: 1, location: picture(9) },
+	{ protocol_version: 1, location: { ...picture(), share_id: id(99) } },
+	{ protocol_version: 1, location: note() },
+	{ protocol_version: 2, location: picture() },
+	{ protocol_version: 1, location: picture(), path: "private" },
+	{ protocol_version: 1, location: { ...picture(), content_sha256: "bad" } },
+])("image context rejects wrong identity, protocol or extra fields: %j", async value => {
+	const f = fixture(true);
+	try { await ready(f); f.fetcher.mockResolvedValueOnce(response(value)); await expect(f.channel.readImageLocation(id(5), id(8))).rejects.toThrow(); }
+	finally { f.channel.stop(); }
+});
+
+test("image context is unavailable on a legacy server without making another request", async () => {
+	const f = fixture(true, false);
+	try { await ready(f); await expect(f.channel.readImageLocation(id(5), id(8))).rejects.toThrow(); expect(f.fetcher).toHaveBeenCalledTimes(2); }
+	finally { f.channel.stop(); }
+});
+
+test.each(["disconnect", "stop"])("image context ignores an HTTP response after %s", async action => {
+	const f = fixture(true);
+	try {
+		const socket = await ready(f); let finish!: (value: Response) => void;
+		f.fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		const result = f.channel.readImageLocation(id(5), id(8)); const rejected = expect(result).rejects.toThrow();
+		await flush(); if (action === "stop") f.channel.stop(); else socket.disconnect();
+		finish(response({ protocol_version: 1, location: picture() })); await rejected;
+	} finally { f.channel.stop(); }
+});
 
 test("uses sensitive HTTP, a fixed socket URL, and first-frame ticket authentication; coalesces publication", async () => {
 	const f = fixture();

@@ -42,6 +42,8 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 		viewer.channel.watch(image); viewer.channel.start(image.share_id, null);
 		await until(() => viewer.rosters.at(-1)?.peers.length === 1, "image roster");
 		expect(publisher.channel.supportsSurfaceLocations).toBe(true); expect(viewer.channel.supportsSurfaceRoster).toBe(true);
+		expect(viewer.channel.supportsImageContext).toBe(true);
+		expect(await viewer.channel.readImageLocation(image.share_id, image.entry_id)).toEqual(image);
 		const target = viewer.rosters.at(-1)!.peers[0].target;
 		expect(viewer.rosters.at(-1)!.peers[0].name).toBe("owner");
 		publisher.channel.watch(image);
@@ -73,6 +75,7 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 			body: JSON.stringify([{ user_id: f.reviewer, path: "", recursive: true, permission: "read" }, { user_id: f.reviewer, path: "Presence.png", recursive: false, permission: "none" }]) });
 		expect(revoked.status).toBe(200);
 		await until(() => viewer.rosters.at(-1)?.status === "unavailable" && viewer.events.at(-1)?.location === null, "idle read revocation");
+		await expect(viewer.channel.readImageLocation(image.share_id, image.entry_id)).rejects.toThrow();
 		expect(JSON.stringify(viewer.rosters)).not.toContain("Presence.png");
 	} finally {
 		channels.forEach(channel => channel.stop());

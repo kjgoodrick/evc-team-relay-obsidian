@@ -1,6 +1,7 @@
 /** @jest-environment jsdom */
 /* eslint-disable @typescript-eslint/no-require-imports -- Jest's hoisted host mocks require their dependencies inside the factory. */
-import { MarkdownView, type Plugin, type TFile, type WorkspaceLeaf } from "obsidian";
+import { FileView, MarkdownView, type Plugin, type TFile, type WorkspaceLeaf } from "obsidian";
+import { createHash, webcrypto } from "node:crypto";
 import type { AuthSession } from "../../src/AuthSession";
 import { Account } from "../../src/Account";
 import { ProviderBacked } from "../../src/ProviderBacked";
@@ -24,7 +25,7 @@ jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 
 jest.mock("jose", () => {
 	const { TextEncoder, TextDecoder } = require("node:util");
-	Object.assign(globalThis, { TextEncoder, TextDecoder });
+	Object.assign(window, { TextEncoder, TextDecoder });
 	return jest.requireActual("jose");
 });
 
@@ -36,16 +37,17 @@ jest.mock("obsidian", () => {
 		addChild(child: { onload(): void; unload(): void }) { child.onload(); this.register(() => child.unload()); return child; }
 		unload() { (this as unknown as { onunload(): void }).onunload(); this.stops.splice(0).forEach(stop => stop()); }
 	}
+	class FileView {}
 	return { ...jest.requireActual("obsidian"), Component,
 		MarkdownRenderChild: class extends Component { constructor(readonly containerEl: HTMLElement) { super(); } },
 		editorInfoField: require("@codemirror/state").StateField.define({ create: () => ({}), update: (value: unknown) => value }),
-		MarkdownView: class {}, setIcon: () => {}, Setting: class {},
+		FileView, MarkdownView: class extends FileView {}, setIcon: () => {}, Setting: class {},
 	};
 });
 jest.mock("../../src/ViewBindings", () => ({ DocumentViewBinding: class {} }));
 Object.assign(HTMLElement.prototype, { setText(this: HTMLElement, text: string) { this.textContent = text; } });
 
-function fixture(crossNote = false) {
+function fixture(crossNote = false, withImage = false) {
 	const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 	const token = Buffer.from('{"alg":"HS256"}').toString("base64url") + "." + Buffer.from(JSON.stringify({ sub: id(10), session_id: id(11), exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url") + ".synthetic";
 	let account: Account | undefined = new Account(crossNote ? id(10) : "member", "Member", "member@example.com", "", crossNote ? token : "");
@@ -72,22 +74,37 @@ function fixture(crossNote = false) {
 		doc._liveProvider.wsconnected = true;
 		return { doc, view, binding, text, mode: (value: string) => { mode = value; } };
 	});
-	let active: MarkdownView | null = notes[0].view;
+	const bytes = new TextEncoder().encode("image-presence-fixture"), imageHash = createHash("sha256").update(bytes).digest("hex");
+	const oldSubtle = Object.getOwnPropertyDescriptor(crypto, "subtle");
+	if (withImage) Object.defineProperty(crypto, "subtle", { value: webcrypto.subtle, configurable: true });
+	// eslint-disable-next-line obsidianmd/no-tfile-tfolder-cast -- Synthetic native file metadata for the host fixture.
+	const imageFile = { path: "Picture.png", extension: "png", stat: { mtime: 1, size: bytes.byteLength } } as TFile;
+	const imageRoot = document.createElement("div"), imageElement = imageRoot.appendChild(document.createElement("img"));
+	imageElement.src = "app://local/Picture.png";
+	Object.defineProperties(imageElement, { complete: { value: true, configurable: true }, naturalWidth: { value: 800, configurable: true }, naturalHeight: { value: 500, configurable: true } });
+	imageElement.scrollIntoView = jest.fn();
+	if (withImage) document.body.append(imageRoot);
+	const imageView = Object.assign(Object.create(FileView.prototype), { file: imageFile, containerEl: imageRoot, contentEl: imageRoot,
+		addAction: (_icon: string, _title: string, onClick: () => void) => { const button = imageRoot.appendChild(document.createElement("button")); button.onclick = onClick; return button; },
+	}) as FileView;
+	const imageRecord = { id: id(20), type: "image", hash: imageHash };
+	const imageLocation = { kind: "image" as const, share_id: id(3), entry_id: id(20), generation: id(21), content_sha256: imageHash };
+	let active: FileView | null = notes[0].view;
 	const folderDoc = new Y.Doc();
 	folderDoc.getMap("managed_base_v1").set("snapshot", { owner: true, permissions: {} });
 	const folder = { entityGuid: id(3), config: { onpremServerId: "server" }, wantsConnection: true, isRecoveringStructure: false, crdtDoc: folderDoc,
 		toVirtualPath: (path: string) => path, absolutePath: (path: string) => path,
-		_liveProvider: { managedIndex: { registered: (path: string, entry: string) => notes.some(note => note.view.file?.path === path && note.doc.entityGuid === entry), isBlocked: () => false } },
-		folderIndex: { on: () => () => {}, recordFor: (path: string) => { const note = notes.find(note => note.view.file?.path === path); return note && { id: note.doc.entityGuid, type: "markdown" }; },
-			eachRecord: (callback: (record: { id: string; type: string }, path: string) => void) => notes.forEach(note => callback({ id: note.doc.entityGuid, type: "markdown" }, note.view.file!.path)) } };
+		_liveProvider: { managedIndex: { registered: (path: string, entry: string) => withImage && path === imageFile.path && entry === imageRecord.id || notes.some(note => note.view.file?.path === path && note.doc.entityGuid === entry), isBlocked: () => false } },
+		folderIndex: { on: () => () => {}, recordFor: (path: string) => { if (withImage && path === imageFile.path) return imageRecord; const note = notes.find(note => note.view.file?.path === path); return note && { id: note.doc.entityGuid, type: "markdown" }; },
+			eachRecord: (callback: (record: { id: string; type: string }, path: string) => void) => { notes.forEach(note => callback({ id: note.doc.entityGuid, type: "markdown" }, note.view.file!.path)); if (withImage) callback(imageRecord, imageFile.path); } } };
 	if (crossNote) for (const note of notes) Object.assign(note.binding.boundDocument, { vaultShare: folder });
 	const events = new Map<string, Set<() => void>>();
-	const workspace = { getActiveViewOfType: () => active, on: (name: string, fn: () => void) => {
+	const workspace = { getActiveViewOfType: (type: typeof FileView | typeof MarkdownView) => active && (active instanceof type || type === FileView && active instanceof MarkdownView) ? active : null, on: (name: string, fn: () => void) => {
 		const listeners = events.get(name) ?? new Set(); listeners.add(fn); events.set(name, listeners);
 		return () => listeners.delete(fn);
 	} };
 	const registry = { trackedViews: notes.map(note => note.binding), isShutDown: false,
-		shareRegistry: { toArray: () => [folder], on: () => () => {}, shareFor: (path: string) => notes.find(note => note.view.file?.path === path && !path.startsWith("Private/"))?.binding.boundDocument.vaultShare },
+		shareRegistry: { toArray: () => [folder], on: () => () => {}, shareFor: (path: string) => withImage && path === imageFile.path ? folder : notes.find(note => note.view.file?.path === path && !path.startsWith("Private/"))?.binding.boundDocument.vaultShare },
 		onViewsChanged: (fn: () => void) => { viewListeners.add(fn); return () => viewListeners.delete(fn); } };
 	let preferences = { visible: true };
 	const settingListeners = new Set<(value: PresenceSettings) => void>();
@@ -96,15 +113,18 @@ function fixture(crossNote = false) {
 	}, mutateValue: async (fn: (value: PresenceSettings) => PresenceSettings) => { preferences = fn(preferences); settingListeners.forEach(listener => listener(preferences)); } };
 	const focus = jest.spyOn(document, "hasFocus").mockReturnValue(true), hidden = jest.spyOn(document, "hidden", "get").mockReturnValue(false);
 	let deleted = false;
-	const vault = { on: workspace.on, getFileByPath: (path: string) => deleted ? null : notes.find(note => note.view.file?.path === path)?.view.file };
+	const vault = { on: workspace.on, getFileByPath: (path: string) => deleted ? null : withImage && path === imageFile.path ? imageFile : notes.find(note => note.view.file?.path === path)?.view.file,
+		getResourcePath: () => "app://local/Picture.png", readBinary: jest.fn(async () => bytes.buffer) };
+	Object.assign(imageView, { app: { vault } });
 	const extensions: Extension[] = [];
-	const select = (view: MarkdownView | null) => { active = view; events.get("active-leaf-change")?.forEach(fn => fn()); };
+	const select = (view: FileView | null) => { active = view; events.get("active-leaf-change")?.forEach(fn => fn()); };
 	const openFile = jest.fn(async (file: TFile) => {
-		const note = notes.find(note => note.view.file === file)!;
-		note.view.leaf = notes[0].view.leaf; note.view.leaf.view = note.view;
-		select(note.view);
+		const view = file === imageFile ? imageView : notes.find(note => note.view.file === file)!.view;
+		view.leaf = active?.leaf ?? notes[0].view.leaf; view.leaf.view = view;
+		select(view);
 	});
 	for (const note of notes) note.view.leaf = { view: note.view, openFile, getViewState: () => ({ type: "markdown", state: { mode: note.view.getMode(), source: true } }) } as unknown as WorkspaceLeaf;
+	imageView.leaf = { view: imageView, openFile, getViewState: () => ({ type: "image", state: {} }) } as unknown as WorkspaceLeaf;
 	const serverSettings = { readValue: () => ({ enabled: true, servers: [{ id: "server", controlPlaneUrl: "https://relay.example" }] }), subscribe: () => () => {} };
 	const controller = new PresenceController({ app: { workspace, vault }, addCommand: jest.fn(), registerMarkdownPostProcessor: jest.fn(), registerEditorExtension: (extension: Extension) => extensions.push(extension) } as unknown as Plugin,
 		registry as unknown as ViewBindingRegistry, auth, settings as unknown as SettingsScope<PresenceSettings>, crossNote ? serverSettings as unknown as SettingsScope<RelayOnPremSettings> : undefined);
@@ -116,9 +136,10 @@ function fixture(crossNote = false) {
 		return { editor, stop };
 	});
 	return { controller, notes, editors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select,
+		image: { file: imageFile, view: imageView, element: imageElement, record: imageRecord, location: imageLocation }, vault,
 		logout: () => { account = undefined; authListeners.forEach(fn => fn()); },
 		fileEvent: (event: "rename" | "delete") => { if (event === "delete") deleted = true; events.get(event)?.forEach(fn => fn()); },
-		close: () => { controller.unload(); editors.forEach(({ editor, stop }) => { stop(); editor.destroy(); }); notes.forEach(({ doc, view }) => { doc.dismantle(); doc.crdtDoc.destroy(); view.containerEl.remove(); }); folderDoc.destroy(); focus.mockRestore(); hidden.mockRestore(); },
+		close: () => { controller.unload(); editors.forEach(({ editor, stop }) => { stop(); editor.destroy(); }); notes.forEach(({ doc, view }) => { doc.dismantle(); doc.crdtDoc.destroy(); view.containerEl.remove(); }); imageRoot.remove(); if (withImage) { if (oldSubtle) Object.defineProperty(crypto, "subtle", oldSubtle); else Reflect.deleteProperty(crypto, "subtle"); } folderDoc.destroy(); focus.mockRestore(); hidden.mockRestore(); },
 	};
 }
 
@@ -168,7 +189,7 @@ test("inactive Reading panes retain an observer across disconnect and remove it 
 	} finally { stop(); f.close(); }
 });
 
-async function settled() { await new Promise(resolve => setTimeout(resolve, 240)); }
+async function settled() { await new Promise(resolve => window.setTimeout(resolve, 240)); }
 function remotePeer(f: ReturnType<typeof fixture>, index = 0) {
 	const doc = new Y.Doc(), awareness = new Awareness(doc), target = f.notes[index].doc._liveProvider.awareness;
 	const position = (at: number) => Y.createRelativePositionFromTypeIndex(f.notes[index].text, at);
@@ -267,7 +288,7 @@ test("status and explicit retry reflect the active provider; unload removes stat
 	} finally { f.close(); }
 });
 
-function crossNetwork() {
+function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>) {
 	const sockets: ReturnType<typeof makeSocket>[] = [];
 	function makeSocket() {
 		const socket = { readyState: 0, bufferedAmount: 0, onopen: null as WebSocket["onopen"], onmessage: null as WebSocket["onmessage"],
@@ -276,18 +297,22 @@ function crossNetwork() {
 			message: (value: unknown) => socket.onmessage?.call(socket as unknown as WebSocket, { data: JSON.stringify(value) } as MessageEvent),
 			ready: () => {
 				socket.readyState = 1; socket.onopen?.call(socket as unknown as WebSocket, new Event("open"));
-				socket.message({ type: "ready", protocol_version: 1, instance_id: socket.frames[0].instance_id, session_id: "b".repeat(32), expires_at: Math.floor(Date.now() / 1000) + 3600 });
+				socket.message({ type: "ready", protocol_version: surfaces ? 2 : 1, instance_id: socket.frames[0].instance_id, session_id: "b".repeat(32), expires_at: Math.floor(Date.now() / 1000) + 3600 });
 			},
 			location: (f: ReturnType<typeof fixture>, index?: number) => {
 				const subscription = socket.frames.filter(frame => frame.type === "follow").at(-1)!.subscription_id;
 				socket.message({ type: "location", subscription_id: subscription, status: index === undefined ? "unavailable" : "available",
 					...(index === undefined ? {} : { location: { kind: "note", share_id: f.folder.entityGuid, entry_id: f.notes[index].doc.entityGuid, surface: "reading" } }) });
 			},
+			imageLocation: (f: ReturnType<typeof fixture>) => socket.message({ type: "location", subscription_id: socket.frames.filter(frame => frame.type === "follow").at(-1)!.subscription_id, status: "available", location: f.image.location }),
+			roster: (available = true) => socket.message({ type: "roster", subscription_id: socket.frames.filter(frame => frame.type === "watch").at(-1)!.subscription_id,
+				status: available ? "available" : "unavailable", ...(available ? { peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, name: "Peer" }] } : {}) }),
 		};
 		return socket;
 	}
 	jest.mocked(platformFetch).mockImplementation(async url => ({ status: 200, ok: true, text: async () => JSON.stringify(String(url).includes("/capabilities?") ?
-		{ protocol_version: 1, features: { presence_locations_preview: true } } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
+		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true } : {}) } } :
+		String(url).includes("/image-location?") ? { protocol_version: 1, location: await imageContext?.() } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
 	const mock = jest.spyOn(window, "WebSocket").mockImplementation(url => {
 		expect(String(url)).toBe("wss://relay.example/v1/collaboration/events");
 		const socket = makeSocket(); sockets.push(socket); return socket as unknown as WebSocket;
@@ -296,7 +321,7 @@ function crossNetwork() {
 }
 async function until(check: () => boolean) {
 	const deadline = Date.now() + 3000;
-	while (!check()) { if (Date.now() > deadline) throw new Error("Presence condition not reached"); await new Promise(resolve => setTimeout(resolve, 20)); }
+	while (!check()) { if (Date.now() > deadline) throw new Error("Presence condition not reached"); await new Promise(resolve => window.setTimeout(resolve, 20)); }
 }
 
 test("cross-note follow survives old-room departure, opens the authorized entry and resumes semantic following", async () => {
@@ -339,4 +364,87 @@ test.each(["manual", "unavailable", "permission", "privacy", "background"])("cro
 		expect(f.controller.following).toBeUndefined();
 		socket.location(f, 1); await settled(); expect(f.openFile).not.toHaveBeenCalled();
 	} finally { remote.close(); f.close(); network.close(); }
+});
+
+test("verified image presence uses the same socket, supports hidden observation and clears on blur", async () => {
+	const network = crossNetwork(true, () => f.image.location), f = fixture(true, true);
+	try {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+		f.select(f.image.view);
+		await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster();
+		await until(() => (socket.frames.filter(frame => frame.type === "presence").at(-1)?.location as { kind?: string })?.kind === "image");
+		expect(f.controller.status).toBe("ready"); expect(f.controller.surfaceName).toBe("image");
+		expect(f.controller.peers.map(peer => peer.surface)).toEqual(["image"]);
+		expect(f.notes.every(note => note.doc._liveProvider.awareness.getLocalState() === null)).toBe(true);
+		expect(f.vault.readBinary).toHaveBeenCalledTimes(1);
+		expect(await f.controller.navigate(f.controller.peers[0].key, false)).toBe(true);
+		expect(f.image.element.scrollIntoView).toHaveBeenCalledTimes(1);
+		await f.controller.setVisible(false); expect(f.controller.peers).toHaveLength(1);
+		expect(socket.frames.filter(frame => frame.type === "presence").at(-1)).toEqual({ type: "presence", location: null });
+		expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+		f.image.view.contentEl.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+		expect(f.controller.following).toBeUndefined(); expect(f.controller.peers).toHaveLength(1);
+		f.focus.mockReturnValue(false); window.dispatchEvent(new Event("blur"));
+		expect(f.controller.peers).toEqual([]); expect(socket.readyState).toBe(3);
+		socket.roster(); expect(f.controller.peers).toEqual([]); expect(network.sockets).toHaveLength(1);
+	} finally { f.close(); network.close(); }
+});
+
+test("Follow crosses note to image to note without another socket or changing local text selection", async () => {
+	const network = crossNetwork(true, () => f.image.location), f = fixture(true, true);
+	const first = remotePeer(f); let second: ReturnType<typeof remotePeer> | undefined;
+	try {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+		await until(() => f.controller.peers.length === 1);
+		expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+		const before = f.editors.map(item => item.editor.state.selection.toJSON());
+		first.send(); socket.imageLocation(f);
+		await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster();
+		await until(() => jest.mocked(f.image.element.scrollIntoView).mock.calls.length > 0);
+		expect(f.controller.following?.surface).toBe("image"); expect(f.openFile).toHaveBeenCalledWith(f.image.file, { active: true, state: undefined });
+		second = remotePeer(f, 1); socket.location(f, 1);
+		const dispatch = jest.spyOn(f.editors[1].editor, "dispatch");
+		await until(() => f.openFile.mock.calls.length === 2 && dispatch.mock.calls.length > 0);
+		expect(f.controller.following?.surface).toBe("editor"); expect(network.sockets).toHaveLength(1);
+		expect(f.editors.map(item => item.editor.state.selection.toJSON())).toEqual(before);
+		expect(f.notes.map(note => note.text.toString())).toEqual(["alpha beta", "alpha beta"]);
+	} finally { first.close(); second?.close(); f.close(); network.close(); }
+});
+
+test.each(["revoked", "local-bytes", "server-version"])("image presence withdraws %s and requires a verified retry", async failure => {
+	let badVersion = failure === "server-version";
+	const network = crossNetwork(true, () => badVersion ? { ...f.image.location, content_sha256: "b".repeat(64) } : f.image.location), f = fixture(true, true);
+	try {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(f.image.view);
+		if (failure !== "server-version") {
+			await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster();
+			expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+			if (failure === "revoked") socket.roster(false);
+			else { f.image.file.stat.mtime++; f.vault.readBinary.mockResolvedValueOnce(new Uint8Array([1, 2, 3]).buffer); f.controller.refresh(); }
+		}
+		await until(() => f.controller.status === "unavailable");
+		expect(f.controller.peers).toEqual([]); expect(f.controller.canRetry).toBe(true);
+		expect(socket.frames.filter(frame => frame.type === "presence").at(-1)).toEqual({ type: "presence", location: null });
+		if (failure === "revoked") expect(f.controller.following).toBeUndefined();
+		const count = jest.mocked(platformFetch).mock.calls.length;
+		for (let i = 0; i < 10; i++) f.controller.refresh(); await settled();
+		expect(jest.mocked(platformFetch).mock.calls).toHaveLength(count);
+		badVersion = false;
+		// Repairing bytes also changes the file revision; verification correctly
+		// keeps the digest of unchanged bytes instead of re-reading on every retry.
+		if (failure === "local-bytes") f.image.file.stat.mtime++;
+		f.controller.retry(); await until(() => f.controller.status === "ready"); socket.roster();
+		expect(f.controller.peers).toHaveLength(1);
+	} finally { f.close(); network.close(); }
+});
+
+test("an image context response after logout cannot publish or restore participants", async () => {
+	let finish!: (value: unknown) => void;
+	const network = crossNetwork(true, () => new Promise(resolve => { finish = resolve; })), f = fixture(true, true);
+	try {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(f.image.view);
+		await until(() => !!finish); f.logout(); finish(f.image.location); await settled();
+		expect(f.controller.peers).toEqual([]); expect(socket.readyState).toBe(3);
+		expect(socket.frames.some(frame => frame.type === "watch")).toBe(false);
+	} finally { f.close(); network.close(); }
 });

@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
 import { parseRetryAfterMs, RelayHttpError } from "../../relayRequestErrors";
 import { isRecord } from "../DiscussionProtocol";
-import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
+import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type ImageLocation, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 
 export type LocationChannelStatus = "idle" | "connecting" | "ready" | "reconnecting" | "unsupported" | "authentication" | "unavailable";
 export type LocationIdentity = Readonly<{ serverUrl: string; accountId: string; loginSessionId: string; instanceId: string }>;
@@ -36,6 +36,7 @@ export class LocationChannel {
 	private desired: SurfaceLocation | null = null;
 	private protocolVersion: 1 | 2 = 1;
 	private rosterSupported = false;
+	private imageContextSupported = false;
 	private desiredWatch: NonNoteLocation | null = null;
 	private watching?: { id: string; scope: NonNoteLocation };
 	private sentWatch?: string;
@@ -65,6 +66,15 @@ export class LocationChannel {
 	get ready(): boolean { return this.active && this.status === "ready"; }
 	get supportsSurfaceLocations(): boolean { return this.ready && this.protocolVersion === 2; }
 	get supportsSurfaceRoster(): boolean { return this.supportsSurfaceLocations && this.rosterSupported; }
+	get supportsImageContext(): boolean { return this.supportsSurfaceLocations && this.imageContextSupported; }
+	async readImageLocation(shareId: string, entryId: string): Promise<ImageLocation> {
+		if (!this.supportsImageContext || !locationId(shareId) || !locationId(entryId)) throw new Error("Image presence unavailable");
+		const version = this.version, value = await this.request(`/image-location?share_id=${shareId}&entry_id=${entryId}`, version);
+		if (!this.current(version) || !this.ready || !isRecord(value) || !exactFields(value, ["protocol_version", "location"]) || value.protocol_version !== 1) throw new Error("Image presence unavailable");
+		const location = parseSurfaceLocation(value.location);
+		if (location.kind !== "image" || location.share_id !== shareId || location.entry_id !== entryId) throw new Error("Invalid image location");
+		return location;
+	}
 	/** The caller supplies a currently authorized foreground share for discovery. */
 	start(shareId: string, location: SurfaceLocation | null): void {
 		if (!locationId(shareId)) throw new Error("Invalid location context");
@@ -135,7 +145,7 @@ export class LocationChannel {
 		// Native HTTP may finish independently; generation checks fence every late
 		// credential, response and callback. Do not retain timers or a live socket.
 		this.renewing = false; this.sent = undefined;
-		this.watching = undefined; this.sentWatch = undefined; this.protocolVersion = 1; this.rosterSupported = false;
+		this.watching = undefined; this.sentWatch = undefined; this.protocolVersion = 1; this.rosterSupported = false; this.imageContextSupported = false;
 		this.emitRoster(null, "unavailable");
 		const ws = this.ws; this.ws = undefined;
 		if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; try { ws.close(); } catch { /* Already closed. */ } }
@@ -200,10 +210,11 @@ export class LocationChannel {
 			if (enabled === false || enabled === undefined) throw new ChannelFailure("unsupported");
 			if (enabled !== true) throw new ChannelFailure("unavailable");
 			if (this.options.surfaceLocations) {
-				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview;
-				if (extended !== undefined && typeof extended !== "boolean" || roster !== undefined && typeof roster !== "boolean" || roster === true && extended !== true) throw new ChannelFailure("unavailable");
+				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview;
+				if ([extended, roster, image].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true) && extended !== true) throw new ChannelFailure("unavailable");
 				this.protocolVersion = extended === true ? 2 : 1;
 				this.rosterSupported = roster === true;
+				this.imageContextSupported = image === true;
 			}
 			const ticket = await this.ticket(version);
 			if (!this.current(version)) return;

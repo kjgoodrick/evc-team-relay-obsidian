@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { safeAvatarUrl } from "../../presenceAvatar";
 import type { NotePresenceSurface } from "./PresenceSettings";
+import type { NonNoteLocation } from "./LocationProtocol";
 
 export type PresenceRange = { anchor: Y.RelativePosition; head: Y.RelativePosition };
 export type PresenceLocation = { viewport?: Y.RelativePosition | null; selection?: PresenceRange | null };
@@ -10,6 +11,9 @@ export type PresencePeer = PresenceLocation & {
 	avatarUrl?: string; surface: NotePresenceSurface; cursor?: PresenceRange | null;
 	instanceId?: string;
 };
+export type SurfacePresencePeer = { key: string; userId: string; sessionId: string; instanceId: string; name: string; surface: "image" | "base"; location: NonNoteLocation };
+export type ActivePresencePeer = PresencePeer | SurfacePresencePeer;
+export const isNotePeer = (peer: ActivePresencePeer): peer is PresencePeer => peer.surface === "editor" || peer.surface === "reading";
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const integer = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
 export function presencePosition(value: unknown): value is Y.RelativePosition {

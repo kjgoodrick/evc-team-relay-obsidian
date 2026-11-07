@@ -1,5 +1,5 @@
 import type { PresenceController } from "./PresenceController";
-import type { PresencePeer } from "./PresencePeers";
+import type { ActivePresencePeer } from "./PresencePeers";
 import { presenceColorForUser } from "../../presenceColor";
 
 /** Keyed rows retain keyboard focus through cursor movement and peer arrivals. */
@@ -10,7 +10,8 @@ export class PresenceRoster {
 		this.empty = root.createEl("p", { text: "No other visible participants in this note." });
 	}
 	update(): void {
-		const grouped = new Map<string, PresencePeer[]>();
+		this.empty.setText(`No other visible participants in this ${this.controller.surfaceName ?? "note"}.`);
+		const grouped = new Map<string, ActivePresencePeer[]>();
 		for (const peer of this.controller.peers) { const peers = grouped.get(peer.userId) ?? []; peers.push(peer); grouped.set(peer.userId, peers); }
 		this.empty.style.display = grouped.size ? "none" : "";
 		for (const [id, group] of this.groups) if (!grouped.has(id)) { group.root.remove(); this.groups.delete(id); }
@@ -32,7 +33,7 @@ export class PresenceRoster {
 					follow.onclick = () => { void this.controller.navigate(peer.key, true).then(ok => { if (ok) this.close(); }); };
 					row = { root, label, jump, follow }; group.rows.set(peer.key, row);
 				}
-				const label = `Session ${index + 1} · ${peer.surface === "reading" ? "Reading" : "Editing"}`;
+				const label = `Session ${index + 1} · ${peer.surface === "image" ? "Viewing image" : peer.surface === "base" ? "Viewing Bases" : peer.surface === "reading" ? "Reading" : "Editing"}`;
 				row.label.setText(label + (this.controller.canLocate(peer) ? "" : " · Location unavailable"));
 				row.jump.setAttribute("aria-label", `Jump to ${peer.name}, ${label}`);
 				row.follow.setAttribute("aria-label", `Follow ${peer.name}, ${label}`);
