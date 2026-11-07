@@ -63,7 +63,7 @@ function fixture() {
 	const listeners = new Set<() => void>();
 	let select: ((value: NativeTimelineSelection) => void) | undefined, stopped: (() => void) | undefined;
 	const stop = jest.fn(() => stopped?.());
-	const native = { axis: proof.axis.axis, kinds: ["calendar", "instant", "historical"], effectiveTimeZone: "America/Denver", current: () => access.current };
+	const native = { axis: proof.axis.axis, kinds: ["calendar", "instant", "historical"], pointSelection: false, effectiveTimeZone: "America/Denver", current: () => access.current };
 	const context = { current: () => access.current, entryId: scope, baseEntryId: id(1),
 		binding: { name: "Planning", type: "sabidurian-timeline", viewId: id(3), snapshot: { definition_id: id(2), generation: id(4), revision: 2,
 			views: [{ id: id(3), name: "Planning", type: "sabidurian-timeline" }, { id: id(30), name: "Roadmap", type: "sabidurian-timeline" },
@@ -75,9 +75,9 @@ function fixture() {
 		surface: { localMarkers: () => [local], rangeContext: () => native, beginRange: jest.fn((_kind, _precision, callback, end) => { select = callback; stopped = end; return stop; }) },
 	} as unknown as BaseCommentContext;
 	const manager = new TimelineMarkerManager({} as App, context, () => true, closed);
-	return { access, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners, local, readPreference, comparePreference,
+	return { access, native, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners, local, readPreference, comparePreference,
 		setRecovery: (value: TimelineMarkerManagementState | undefined) => { recovery = value; },
-		pick: () => { stopped?.(); select?.({ context: native as NativeTimelineSelection["context"], draft: { ...range, end: "2026-11-09" }, current: () => access.current }); } };
+		pick: (point = false) => { stopped?.(); select?.({ context: native as NativeTimelineSelection["context"], draft: { ...range, end: point ? range.start : "2026-11-09" }, current: () => access.current }); } };
 }
 afterEach(() => { document.body.replaceChildren(); jest.restoreAllMocks(); });
 async function loaded(f = fixture()) { f.manager.open(); await flush(); input("Shared marker", id(20)); await flush(); return f; }
@@ -162,7 +162,7 @@ test("editing preserves every active saved-view placement and requires reviewing
 test("new milestone uses a single exact coordinate and returns from position editing without saving prematurely", async () => {
 	const f = fixture(); f.manager.open(); await flush(); button("New shared marker").click(); input("Marker label", "New launch");
 	button("Choose marker position").click(); await flush(); expect(document.querySelector(".relay-timeline-marker-dialog")).toBeNull();
-	expect(button("Select endpoints on timeline").hidden).toBe(true); input("Start date", "2026-12-01"); button("Use position").click(); await flush();
+	expect(button("Select position on timeline").hidden).toBe(true); input("Start date", "2026-12-01"); button("Use position").click(); await flush();
 	expect(f.save).not.toHaveBeenCalled(); expect(input("Marker label", "New launch").value).toBe("New launch");
 	button("Save marker").click(); await flush();
 	expect(f.save.mock.calls[0][1].command).toMatchObject({ type: "marker.put", expected_marker_revision: 0, content: { kind: "point", range: { start: "2026-12-01", end: "2026-12-01", start_inclusive: true, end_inclusive: true } } });
@@ -176,6 +176,18 @@ test("range endpoint selection returns to the marker draft and cancels renderer 
 	expect(f.save.mock.calls[0][1].command).toMatchObject({ content: { kind: "range", range: { end: "2026-11-09" } } }); f.manager.close();
 	const second = await loaded(); input("Marker shape", "range"); button("Choose marker position").click(); await flush(); button("Select endpoints on timeline").click();
 	second.manager.close(); second.pick(); await flush(); expect(second.stop).toHaveBeenCalledTimes(1); expect(second.closed).toHaveBeenCalledTimes(1); expect(document.body.textContent).toBe("");
+});
+
+test("direct milestone selection remains a reviewed draft until the separate marker save", async () => {
+	const f = fixture(); f.native.pointSelection = true; await loaded(f);
+	button("Choose marker position").click(); await flush();
+	expect(button("Select position on timeline").hidden).toBe(false); button("Select position on timeline").click();
+	expect(f.context.surface.beginRange).toHaveBeenCalledWith("calendar", "day", expect.any(Function), expect.any(Function), true);
+	f.pick(true); await flush(); expect(f.save).not.toHaveBeenCalled();
+	expect(input("Start date", range.start).value).toBe(range.start);
+	button("Use position").click(); await flush(); expect(f.save).not.toHaveBeenCalled();
+	button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ content: { kind: "point", range } }); f.manager.close();
 });
 
 test("archive is an explicit all-view action and restoring requires selected placements", async () => {

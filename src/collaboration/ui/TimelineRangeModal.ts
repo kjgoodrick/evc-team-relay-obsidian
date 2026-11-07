@@ -36,14 +36,14 @@ export class TimelineRangeModal extends Modal {
 		if (this.options.title) this.lane.parentElement!.hidden = true;
 		this.fields = this.contentEl.createDiv();
 		this.status = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
-		this.pickButton = this.contentEl.createEl("button", { text: "Select endpoints on timeline", attr: { type: "button" } });
-		this.pickButton.hidden = this.options.point === true;
+		this.pickButton = this.contentEl.createEl("button", { text: this.options.point ? "Select position on timeline" : "Select endpoints on timeline", attr: { type: "button" } });
+		this.pickButton.hidden = this.options.point === true && this.options.context.pointSelection !== true;
 		this.accept = this.contentEl.createEl("button", { text: this.options.acceptLabel ?? "Write comment", cls: "mod-cta", attr: { type: "button" } });
 		this.contentEl.createEl("button", { text: "Cancel", attr: { type: "button" } }).onclick = () => this.close();
 		this.kind.onchange = () => { this.render(); this.validate(); };
 		this.accept.onclick = () => { void this.save(); };
 		this.pickButton.onclick = () => {
-			if (this.saving || !this.options.current()) { this.validate(); return; }
+			if (this.saving || !this.options.current() || this.pickButton.hidden) { this.validate(); return; }
 			const draft = this.draft(), precision = this.value("start-precision") as HistoricalPoint["precision"] || "day";
 			const state = Object.fromEntries([...this.controls].map(([key, field]) => [key, field instanceof this.contentEl.ownerDocument.defaultView!.HTMLInputElement && field.type === "checkbox" ? field.checked : field.value]));
 			this.picking = true; this.close(); this.options.pick(draft, precision, state);

@@ -12,7 +12,7 @@ export interface RemoteTimelineRanges {
 	rangePresence?(point?: { clientX: number; clientY: number }): unknown;
 	rangePresenceGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): unknown;
 	revealRangePresence?(range: TimelineRange, axis: TimelineAxis, offset: Readonly<{ x: number; y: number }>, group?: unknown): unknown;
-	beginRange?(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: unknown) => void, stopped: () => void): unknown;
+	beginRange?(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: unknown) => void, stopped: () => void, point?: boolean): unknown;
 }
 interface Lifecycle {
 	cancel(): void;
@@ -58,7 +58,7 @@ export function timelineRangeBridge(source: RemoteTimelineRanges, renderer: stri
 			!rawKinds.every(kind => allowed.includes(kind))) return;
 		const kinds = Object.freeze([...rawKinds]) as readonly TimelineRange["kind"][], key = JSON.stringify(axis), kindKey = JSON.stringify(kinds);
 		Object.freeze(axis.start_property); if (axis.end_property) Object.freeze(axis.end_property); Object.freeze(axis);
-		return { axis, effectiveTimeZone: zone, kinds, current: () => {
+		return { axis, effectiveTimeZone: zone, kinds, pointSelection: source.capabilities.includes("range-points"), current: () => {
 			try { return supported() && (value.current as () => unknown).call(value) === true &&
 				JSON.stringify(parseTimelineAxis(value.axis)) === key && value.effectiveTimeZone === zone && JSON.stringify(value.kinds) === kindKey; }
 			catch { return false; }
@@ -129,9 +129,10 @@ export function timelineRangeBridge(source: RemoteTimelineRanges, renderer: stri
 				return ["revealed", "hidden", "unavailable", "busy", "ambiguous"].includes(String(result)) ? result as NativeBaseReveal : "unavailable";
 			} catch { return "unavailable"; }
 		},
-		beginRange: (kind, precision, select, stopped) => {
+		beginRange: (kind, precision, select, stopped, point = false) => {
 			const initial = rangeContext();
-			if (!initial?.kinds.includes(kind) || !["year", "month", "day"].includes(precision) || !canNavigate()) return;
+			const modeCurrent = () => !point || source.capabilities.includes("range-points");
+			if (typeof point !== "boolean" || !initial?.kinds.includes(kind) || !modeCurrent() || !["year", "month", "day"].includes(precision) || !canNavigate()) return;
 			lifecycle.cancel();
 			let ended = false, cancelled = false, delivered = false, remote = () => {};
 			const done = () => { if (ended) return; ended = true; lifecycle.retire(stop); stopped(); };
@@ -139,18 +140,19 @@ export function timelineRangeBridge(source: RemoteTimelineRanges, renderer: stri
 			try {
 				const result = source.beginRange!(kind, precision, value => {
 					try {
-						if (cancelled || delivered || !initial.current() || !canNavigate() || !object(value) || typeof value.current !== "function") return;
+						if (cancelled || delivered || !initial.current() || !modeCurrent() || !canNavigate() || !object(value) || typeof value.current !== "function") return;
 						const selected = context(value.context);
 						if (!selected?.current() || JSON.stringify(selected.axis) !== JSON.stringify(initial.axis) ||
 							selected.effectiveTimeZone !== initial.effectiveTimeZone || !selected.kinds.includes(kind)) return;
 						const draft = value.draft === undefined ? undefined : copyDraft(value.draft), issue = value.issue;
 						if (draft && (draft.kind !== kind || draft.version !== 1) || issue !== undefined && (typeof issue !== "string" || issue.length > 1024) || !draft && !issue) return;
-						const live = () => { try { return initial.current() && selected.current() && (value.current as () => unknown).call(value) === true; } catch { return false; } };
+						if (point && draft && (draft.start === undefined || JSON.stringify(draft.start) !== JSON.stringify(draft.end) || draft.start_inclusive !== true || draft.end_inclusive !== true)) return;
+						const live = () => { try { return initial.current() && modeCurrent() && selected.current() && (value.current as () => unknown).call(value) === true; } catch { return false; } };
 						if (!live()) return;
 						const selection: NativeTimelineSelection = { context: selected, draft, issue: issue as string | undefined, current: live };
 						delivered = true; select(selection);
 					} catch { /* Unsupported local callback cannot create a target. */ }
-				}, done);
+				}, done, point);
 				if (typeof result !== "function") { cancelled = true; done(); return; }
 				remote = result as () => void;
 				if (ended) { remote(); return; }

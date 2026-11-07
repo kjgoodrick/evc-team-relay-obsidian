@@ -67,7 +67,7 @@ export class TimelineRangeWorkflow {
 			void Promise.resolve().then(() => {
 				if (!this.closed && serial === this.serial && !delivered) this.show(draft, "Selection cancelled. Your entered endpoints are retained.", undefined, state);
 			});
-		});
+		}, this.marker?.point === true);
 		if (!stop) { if (!ended) this.show(draft, "Selection is unavailable. Close the task inspector or enter endpoints here.", undefined, state); }
 		else if (!ended) this.stop = stop;
 	}

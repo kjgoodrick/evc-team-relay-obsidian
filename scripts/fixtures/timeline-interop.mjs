@@ -177,6 +177,15 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 			assert.equal(root.querySelector(".sabidurian-range-selection-status"), null); assert.deepEqual(writes, []); assert.equal(host.data, source);
 		} finally { motion.close(); viewport.scrollLeft = 0; viewport.scrollTop = 0; }
 		let selectedRange, rangeStops = 0;
+		assert.equal(surface.rangeContext().pointSelection, true);
+		let selectedPoint, pointStops = 0;
+		assert.ok(surface.beginRange(sequence ? "ordinal" : "calendar", "day", value => { selectedPoint = value; }, () => pointStops++, true));
+		const pointStatus = root.querySelector(".sabidurian-range-selection-status");
+		pointStatus.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+		assert.equal(pointStops, 1); assert.ok(selectedPoint?.current());
+		assert.deepEqual(selectedPoint.draft.start, selectedPoint.draft.end);
+		assert.equal(selectedPoint.draft.start_inclusive, true); assert.equal(selectedPoint.draft.end_inclusive, true);
+		assert.equal(host.data, source); assert.deepEqual(writes, []);
 		assert.ok(surface.beginRange(sequence ? "ordinal" : "calendar", "day", value => { selectedRange = value; }, () => rangeStops++));
 		const status = root.querySelector(".sabidurian-range-selection-status"); assert.ok(status);
 		for (const key of ["Enter", "ArrowRight", "Enter"]) status.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));

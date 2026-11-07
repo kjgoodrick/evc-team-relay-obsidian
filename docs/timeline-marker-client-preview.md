@@ -90,12 +90,13 @@ all views, and restore in selected views. Updating one view preserves the other
 selected placements. Older axes require explicit review/rebinding in their view;
 the dialog does not silently reinterpret coordinates. Duplicate view names retain
 an ID suffix. Additional saved views can now be checked and explicitly added;
-local marker promotion/matching remains separate work.
+local marker promotion/matching is described below.
 
-Position editing reuses the exact coordinate form and, for ranges, the actual
-renderer endpoint-selection workflow. Returning to the management form does not
-save metadata until the editor chooses Save. Point positions use one explicitly
-entered coordinate; direct point picking on the renderer remains work. Closing
+Position editing reuses the exact coordinate form and the actual renderer
+selection workflow. Returning to the management form does not save metadata
+until the editor chooses Save. Point positions use one explicitly entered
+coordinate or one click/tap/keyboard choice when the provider advertises
+`range-points`. Older providers keep manual point entry. Closing
 the host cancels the child selection and guards late reads. Read-only/offline
 members can inspect retained results without gaining management permission.
 
@@ -308,12 +309,52 @@ native Sequence, broader recovery, popout/mobile, touch or resource acceptance.
 
 ## Remaining work
 
-Direct point picking and broader recovery controls remain. The picker and management form still use explicit refresh so
+Broader recovery controls remain. The picker and management form still use explicit refresh so
 an in-progress selection/edit is never silently replaced; the timeline overlays
 refresh automatically through active discussion polling. Overlapping overlay
 polish and native layout/resource measurements remain. The Time & Line fork
-has not changed in this increment. Native desktop/mobile, accessibility, recovery
+now supports direct point picking. Native desktop/mobile, accessibility, recovery
 UI and resource acceptance remain before enabling this feature for users.
+
+## Direct point selection
+
+Providers advertising `range-points` offer **Select position on timeline** in
+the milestone position form. One click/tap or Enter/Space chooses a closed
+calendar, instant, historical or Sequence coordinate. Historical precision and
+ambiguous-time issues retain the existing explicit review. Returning to the form
+and then choosing **Use position** still does not write shared data; **Save marker**
+is separate. Both point and range selection now include a visible **Cancel
+selection** button. Mouse drags consume their compatibility click before delivery;
+touch pan/pinch keep their defaults and do not select a point.
+
+The optional capability is checked before invoking the provider and while
+accepting callbacks. Unsupported providers retain manual point entry. The
+boundary refuses unequal/open point endpoints and guards capability withdrawal,
+cancellation, stale axes, permissions and unload. No network API or schema changes
+are needed, and selection adds no network traffic.
+
+Verification on November 7:
+
+- **3,204 plugin tests / 249 suites** pass (22 tests / 17 suites skipped),
+  including 108 focused selection/marker checks. Build/main types, frozen test
+  types and changed-source lint pass. The frozen test baseline remains 206
+  errors / 45 signatures, below its permitted baseline.
+- **265 Time & Line tests**, typecheck/build/package and all eight actual-source
+  interoperability cases pass. Checks cover click, tap, keyboard, drag,
+  pan/pinch, cancellation, semantic kinds, capability negotiation and unload.
+- Native Obsidian 1.13.7 in `/private/tmp/evc-point-markers-native-20261107`
+  verifies Timeline click and keyboard selection, visible cancellation, reviewed
+  save, and persistence after a full reload. Sequence click selects `2.3`, saves
+  the exact closed ordinal coordinate in Sequence only and survives reload.
+- Loopback API readback proves no premature save, one marker per explicit save,
+  unchanged seeded marker revisions and unchanged `.base` bytes. Evidence is
+  `/private/tmp/point-marker-native-evidence.json`; logs use
+  `/private/tmp/point-marker-*.log`. Services are stopped and the original
+  Knowledge Base window restored.
+
+These native checks used empty Timeline/Sequence views. Populated/overlapping
+targets, physical touch/mobile, popout and broader accessibility/resource
+acceptance remain. No live vault or production service was changed.
 
 ## Local marker promotion and explicit matching
 

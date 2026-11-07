@@ -68,7 +68,7 @@ export interface NativeBaseGroupLocation {
 	group: unknown; element: HTMLElement | SVGElement; current(): boolean; reveal(): NativeBaseReveal;
 }
 export interface NativeTimelineContext {
-	axis: TimelineAxis; effectiveTimeZone: string | null; kinds: readonly TimelineRange["kind"][]; current(): boolean;
+	axis: TimelineAxis; effectiveTimeZone: string | null; kinds: readonly TimelineRange["kind"][]; pointSelection?: boolean; current(): boolean;
 }
 export interface NativeTimelineSelection {
 	context: NativeTimelineContext; draft?: Record<string, unknown>; issue?: string; current(): boolean;
@@ -92,7 +92,7 @@ export interface NativeBasesExtension {
 	rangePresence?(point?: { clientX: number; clientY: number }): NativeTimelinePresence | undefined;
 	rangePresenceGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): NativeTimelineGeometry | undefined;
 	revealRangePresence?(range: TimelineRange, axis: TimelineAxis, offset: Readonly<{ x: number; y: number }>, group?: unknown): NativeBaseReveal;
-	beginRange?(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: NativeTimelineSelection) => void, stopped: () => void): (() => void) | undefined;
+	beginRange?(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: NativeTimelineSelection) => void, stopped: () => void, point?: boolean): (() => void) | undefined;
 	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void, group?: (location: NativeBaseGroupLocation) => void): (() => void) | undefined;
 }
 export interface NativeBasesIntegrations {
@@ -276,11 +276,11 @@ export class NativeBasesSurface {
 		if (groupElement && groups.length !== 1) return "unavailable";
 		return this.external?.revealRange?.(range, axis, groups[0]?.group) ?? "unavailable";
 	}
-	beginRange(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: NativeTimelineSelection) => void, stopped: () => void): (() => void) | undefined {
-		if (!this.current()) return;
+	beginRange(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: NativeTimelineSelection) => void, stopped: () => void, point = false): (() => void) | undefined {
+		if (!this.current() || point && this.rangeContext()?.pointSelection !== true) return;
 		return this.external?.beginRange?.(kind, precision, value => { if (this.current() && value.current()) {
 			select({ ...value, context: { ...value.context, current: () => this.current() && value.context.current() }, current: () => this.current() && value.current() });
-		} }, stopped);
+		} }, stopped, point);
 	}
 	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void, group?: (location: NativeBaseGroupLocation) => void): (() => void) | undefined {
 		if (!this.current()) return;

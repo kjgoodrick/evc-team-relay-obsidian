@@ -102,6 +102,30 @@ test("a bounded incomplete instant draft is retained for explicit offset confirm
 	expect(select).toHaveBeenCalledWith(expect.objectContaining({ issue: "Enter an explicit UTC offset." }));
 });
 
+test("point selection requires negotiation and preserves single closed coordinates", () => {
+	const f = fixture(), select = jest.fn();
+	expect(f.adapter.rangeContext!()?.pointSelection).toBe(false);
+	expect(f.adapter.beginRange!("calendar", "day", select, jest.fn(), true)).toBeUndefined();
+	expect(f.source.beginRange).not.toHaveBeenCalled(); f.source.capabilities.push("range-points");
+	expect(f.adapter.rangeContext!()?.pointSelection).toBe(true);
+	f.adapter.beginRange!("calendar", "day", select, jest.fn(), true);
+	expect(f.source.beginRange).toHaveBeenCalledWith("calendar", "day", expect.any(Function), expect.any(Function), true);
+	f.choose(f.selection()); expect(select).not.toHaveBeenCalled();
+	const value = f.selection(); value.draft.end = value.draft.start; value.draft.end_inclusive = false;
+	f.choose(value); expect(select).not.toHaveBeenCalled(); value.draft.end_inclusive = true;
+	f.finish(); f.choose(value); expect(select).toHaveBeenCalledTimes(1);
+	expect(select.mock.calls[0][0].current()).toBe(true); f.source.capabilities = ["ranges"];
+	expect(select.mock.calls[0][0].current()).toBe(false);
+});
+
+test("capability withdrawal and cancellation fence late point selections", () => {
+	const f = fixture(), select = jest.fn(); f.source.capabilities.push("range-points");
+	f.adapter.beginRange!("calendar", "day", select, jest.fn(), true);
+	const value = f.selection(); value.draft.end = value.draft.start;
+	f.source.capabilities = ["ranges"]; f.choose(value); expect(select).not.toHaveBeenCalled();
+	f.cancel(); f.source.capabilities.push("range-points"); f.choose(value); expect(select).not.toHaveBeenCalled();
+});
+
 test.each(["cyclic", "oversized", "wrong-kind", "other-axis", "stale-context"])("rejects %s selection callbacks", reason => {
 	const f = fixture(), select = jest.fn(), value: Record<string, unknown> = f.selection();
 	if (reason === "cyclic") (value.draft as Record<string, unknown>).start = value.draft;
