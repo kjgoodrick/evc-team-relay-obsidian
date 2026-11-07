@@ -85,6 +85,20 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 		await until(() => viewer.basePositions.at(-1)?.peers.length === 1, "record cell position");
 		expect(viewer.basePositions.at(-1)!.peers).toEqual([{ target, state: baseState }]);
 		expect(viewer.rosters).toHaveLength(baseRosterCount);
+		expect(viewer.channel.supportsBaseTargetsV2).toBe(true);
+		const group = { type: "group" as const, record_id: record.entry_id, record_generation: record.generation,
+			property: { source: "note" as const, name: "status" }, value_sha256: "a".repeat(64), references: [] };
+		const groupState: BasePresenceState = { version: 2, pointer: { target: group, offset: { x: 0.25, y: 0.5 } }, viewport: baseState.pointer };
+		publisher.channel.publishBaseState(groupState);
+		await until(() => viewer.basePositions.at(-1)?.peers[0]?.state.pointer?.target.type === "group", "group position");
+		expect(viewer.basePositions.at(-1)!.peers[0].state).toEqual(groupState);
+		const rangeState: BasePresenceState = { version: 2, pointer: { target: { type: "timeline_range",
+			axis: { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "America/Denver" },
+			range: { version: 1, kind: "calendar", start: "2026-11-01", end: "2026-11-07", start_inclusive: true, end_inclusive: true, time_zone: "America/Denver" }, lane: group }, offset: { x: 0.4, y: 0.5 } }, viewport: baseState.pointer };
+		publisher.channel.publishBaseState(rangeState);
+		await until(() => viewer.basePositions.at(-1)?.peers[0]?.state.pointer?.target.type === "timeline_range", "lane range position");
+		expect(viewer.basePositions.at(-1)!.peers[0].state).toEqual(rangeState);
+		expect(viewer.rosters).toHaveLength(baseRosterCount);
 		publisher.channel.publishBaseState(null);
 		await until(() => viewer.basePositions.at(-1)?.peers.length === 0, "record position explicitly cleared");
 		publisher.channel.publishBaseState(baseState);

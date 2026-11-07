@@ -132,6 +132,7 @@ export class BasePresenceMotion {
 		catch { this.options.publish(null); }
 	}
 	private nativeTarget(target: BasePresenceTarget, files: readonly TFile[]): NativeBaseTarget | undefined {
+		if (target.type === "group" || target.type === "timeline_range") return;
 		if (target.type === "property") return { type: "property", property: target.property };
 		const matches = files.filter(file => this.options.local(file)?.id === target.record_id); if (matches.length !== 1) return;
 		const file = matches[0], context = this.records.get(file, target.record_generation);
@@ -179,6 +180,7 @@ export class BasePresenceMotion {
 		let recordCurrent = () => true;
 		const current = () => version === this.navigation && authorized() && recordCurrent() && !!initial && this.snapshot()?.surface === initial.surface && initial.surface.canNavigate();
 		if (!position || !initial || !current()) return false;
+		if (position.target.type === "group" || position.target.type === "timeline_range") return false;
 		let target: NativeBaseTarget;
 		if (position.target.type === "property") target = position.target;
 		else {

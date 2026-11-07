@@ -392,3 +392,56 @@ recycled/duplicate targets, coalescing, bounded requests, hidden observation and
 cleanup. This is **not native Obsidian desktop/mobile acceptance**. Group/lane/
 range targets, broader keyboard/accessibility behavior, repeated-target context,
 physical touch and resource/latency measurements remain required.
+
+## Extended Bases targets (transport preview, November 7)
+
+`presence_base_targets_v2_preview` independently negotiates group and timeline-range
+positions. A Bases watch requests `base_target_version: 2` alongside
+`base_states: true`. Publishers use a version-two state with the existing pointer
+and viewport slots. Missing capability or watch version retains version one:
+unsupported positions become null, while cell/record/header positions remain.
+State is cleared on disconnect and is never replayed. This checkpoint implements
+transport and authorization; native capture, overlays and Jump/Follow for these
+new targets are still pending. The existing native cell/record/header path is
+unchanged; it does not guess a record position for a group or range.
+
+A group target contains `type: "group"`, its grouping `property`, a selected
+`record_id`/`record_generation`, `value_sha256`, and up to eight additional
+`references` with record identity/generation. Both users must currently read every
+referenced input. The grouping must match the current saved view. The initial
+adapters permit note properties and inventory-backed file properties (name,
+basename, fullname, extension, path, folder, file); formula and dependency-bearing
+file groups require the remaining computed-input authorization work. Labels,
+values, local paths, formulas and result sets are absent from the message.
+
+The hash is a matching hint, not a server attestation of membership. Native wiring
+must derive it from a canonical typed value using managed identities, check that
+the selected authorized record is a current member, and refuse ambiguous matches.
+The planned digest is SHA-256 of UTF-8 canonical JSON for
+`[1, share_id, entry_id, generation, definition_id, view_id, registry_revision,
+property.source, property.name, value]`; `value` uses the existing BaseGroupValue
+codec, sorted object keys, normalized negative zero and managed link identities.
+Inventory paths must be canonical share paths, never local mount prefixes.
+References must include every linked input, sorted by ID, excluding the selected
+member; unsupported or over-budget values must not silently drop dependencies.
+The digest does not make low-entropy values secret, so record authorization is
+required even though labels and values are omitted.
+
+`timeline_range` carries the existing typed `axis` and `range` codecs, plus a
+nullable group `lane`. Calendar, instant, historical and ordinal coordinates
+retain their timezone/precision semantics. Server checks compare the saved axis
+without evaluating formulas. A lane must pass the same group checks. Range or
+lane changes invalidate pending authorization/navigation; offsets alone remain
+replaceable movement. A null lane means an explicitly view-wide range.
+
+Each canonical state is bounded to 3,072 UTF-8 bytes inside the existing 4 KiB
+input frame. Version-two Bases snapshots alone allow 512 KiB for at most 127
+peers; legacy snapshots and other streams retain 192 KiB. Nested targets are
+copied and frozen. Existing rate limits, movement coalescing and bounded sockets
+apply; no extra socket, durable row or comment permission is introduced.
+
+Validation includes strict codecs, negotiation/downgrade, reconnect clearing,
+linked-input revocation, changed axis/grouping, pending-send fencing and full-room
+snapshot bounds. The actual Python service/TypeScript client fixture exchanges a
+group and lane range without roster churn. These are automated transport checks,
+not native desktop/mobile acceptance.

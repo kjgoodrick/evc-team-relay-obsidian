@@ -1,12 +1,13 @@
 import { isRecord } from "../DiscussionProtocol";
 import { exactFields, locationId, parseLocationTarget, type BaseLocation, type ImagePoint, type LocationTarget } from "./LocationProtocol";
+import { parsePresenceGroup, parsePresenceRange, type BasePresenceGroup, type BasePresenceRange } from "./BaseExtendedTargets";
 
 export type BasePresenceProperty = Readonly<{ source: "note" | "file" | "formula"; name: string }>;
 export type BasePresenceTarget = Readonly<{ type: "item"; record_id: string; record_generation: string }> |
 	Readonly<{ type: "cell"; record_id: string; record_generation: string; property: BasePresenceProperty }> |
-	Readonly<{ type: "property"; property: BasePresenceProperty }>;
+	Readonly<{ type: "property"; property: BasePresenceProperty }> | BasePresenceGroup | BasePresenceRange;
 export type BasePosition = Readonly<{ target: BasePresenceTarget; offset: ImagePoint }>;
-export type BasePresenceState = Readonly<{ version: 1; pointer: BasePosition | null; viewport: BasePosition | null }>;
+export type BasePresenceState = Readonly<{ version: 1 | 2; pointer: BasePosition | null; viewport: BasePosition | null }>;
 export type BasePeerState = Readonly<{ target: LocationTarget; state: BasePresenceState }>;
 export type BaseStatesEvent = Readonly<{ scope: BaseLocation | null; status: "available" | "unavailable"; peers: readonly BasePeerState[] }>;
 export type BaseRecordContext = Readonly<{ protocol_version: 1; share_id: string; entry_id: string; generation: string; type: "markdown" | "image" | "file" }>;
@@ -23,6 +24,8 @@ function property(value: unknown): BasePresenceProperty {
 }
 function target(value: unknown): BasePresenceTarget {
 	requireValue(isRecord(value));
+	if (value.type === "group") return parsePresenceGroup(value, property);
+	if (value.type === "timeline_range") return parsePresenceRange(value, property);
 	if (value.type === "property") {
 		requireValue(exactFields(value, ["type", "property"]));
 		return Object.freeze({ type: "property", property: property(value.property) });
@@ -41,8 +44,18 @@ function position(value: unknown): BasePosition | null {
 }
 /** Cell values, paths, selection contents and client identity are never accepted. */
 export function parseBaseState(value: unknown): BasePresenceState {
-	requireValue(isRecord(value) && exactFields(value, ["version", "pointer", "viewport"]) && value.version === 1);
-	return Object.freeze({ version: 1, pointer: position(value.pointer), viewport: position(value.viewport) });
+	requireValue(isRecord(value) && exactFields(value, ["version", "pointer", "viewport"]) && (value.version === 1 || value.version === 2));
+	const result = Object.freeze({ version: value.version, pointer: position(value.pointer), viewport: position(value.viewport) });
+	requireValue((result.version === 2 || [result.pointer, result.viewport].every(item => !item || !["group", "timeline_range"].includes(item.target.type))) &&
+		new TextEncoder().encode(JSON.stringify(result)).length <= 3072);
+	return result;
+}
+/** Older receivers retain supported positions; an unknown target never becomes
+ * an approximate record position or breaks their entire presence connection. */
+export function baseStateForVersion(state: BasePresenceState, version: 1 | 2): BasePresenceState {
+	if (version === 2) return state;
+	const supported = (position: BasePosition | null) => position && !["group", "timeline_range"].includes(position.target.type) ? position : null;
+	return Object.freeze({ version: 1, pointer: supported(state.pointer), viewport: supported(state.viewport) });
 }
 export function parseBasePeers(value: unknown): readonly BasePeerState[] {
 	requireValue(Array.isArray(value) && value.length <= 127);

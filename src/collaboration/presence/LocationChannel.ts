@@ -4,7 +4,7 @@ import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
 import { parseRetryAfterMs, RelayHttpError } from "../../relayRequestErrors";
 import { isRecord } from "../DiscussionProtocol";
 import { parseBasePresenceContext, type BasePresenceContext } from "./BasePresenceProtocol";
-import { parseBaseState, parseBasePeers, parseBaseRecordContext, type BaseRecordContext, type BasePresenceState, type BaseStatesEvent } from "./BasePositionProtocol";
+import { baseStateForVersion, parseBaseState, parseBasePeers, parseBaseRecordContext, type BaseRecordContext, type BasePresenceState, type BaseStatesEvent } from "./BasePositionProtocol";
 import { parseEmbeddedImage, parseEmbeddedPeers, type EmbeddedImage, type EmbeddedImagesEvent } from "./EmbeddedImageProtocol";
 import { parseImageState, parseImagePeers, type ImagePresenceState, type ImageStatesEvent } from "./LocationProtocol";
 import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type ImageLocation, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
@@ -46,6 +46,7 @@ export class LocationChannel {
 	private imageContextSupported = false;
 	private baseContextSupported = false;
 	private baseStatesSupported = false;
+	private baseTargetsV2Supported = false;
 	private desiredBaseState: BasePresenceState | null = null;
 	private imageStatesSupported = false;
 	private embedsSupported = false;
@@ -86,6 +87,7 @@ export class LocationChannel {
 	get supportsImageContext(): boolean { return this.supportsSurfaceLocations && this.imageContextSupported; }
 	get supportsBaseContext(): boolean { return this.supportsSurfaceLocations && this.baseContextSupported; }
 	get supportsBaseStates(): boolean { return this.supportsSurfaceRoster && this.supportsBaseContext && this.baseStatesSupported; }
+	get supportsBaseTargetsV2(): boolean { return this.supportsBaseStates && this.baseTargetsV2Supported; }
 	get supportsImageStates(): boolean { return this.supportsSurfaceRoster && this.imageStatesSupported; }
 	get supportsEmbeddedImages(): boolean { return this.supportsSurfaceLocations && this.embedsSupported; }
 	publishBaseState(state: BasePresenceState | null): void {
@@ -211,7 +213,7 @@ export class LocationChannel {
 	private drop(): void {
 		for (const timer of [this.retryTimer, this.heartbeat, this.refreshTimer, this.deadline, this.publishTimer, this.imageTimer]) if (timer !== undefined) window.clearTimeout(timer);
 		this.imageTimer = undefined; this.desiredImageState = null; this.desiredEmbed = null; this.sentImageState = undefined; this.imageStatesSupported = false; this.embedsSupported = false; this.lastImageSent = 0;
-		this.desiredBaseState = null; this.baseStatesSupported = false;
+		this.desiredBaseState = null; this.baseStatesSupported = false; this.baseTargetsV2Supported = false;
 		this.retryTimer = this.heartbeat = this.refreshTimer = this.deadline = this.publishTimer = undefined;
 		for (const cancel of this.requests) cancel(); this.requests.clear();
 		// Native HTTP may finish independently; generation checks fence every late
@@ -284,12 +286,15 @@ export class LocationChannel {
 			if (this.options.surfaceLocations) {
 				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview, states = capability.features.presence_image_states_preview, embeds = capability.features.presence_embedded_images_preview;
 				const base = capability.features.presence_base_context_preview, baseStates = capability.features.presence_base_states_preview;
+				const baseTargets = capability.features.presence_base_targets_v2_preview;
+				if (baseTargets !== undefined && typeof baseTargets !== "boolean" || baseTargets === true && baseStates !== true) throw new ChannelFailure("unavailable");
 				if ([extended, roster, image, states, embeds, base, baseStates].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true || embeds === true || base === true || baseStates === true) && extended !== true || (states === true || baseStates === true) && roster !== true || baseStates === true && base !== true) throw new ChannelFailure("unavailable");
 				this.protocolVersion = extended === true ? 2 : 1;
 				this.rosterSupported = roster === true;
 				this.imageContextSupported = image === true;
 				this.baseContextSupported = base === true;
 				this.baseStatesSupported = baseStates === true;
+				this.baseTargetsV2Supported = baseTargets === true;
 				this.imageStatesSupported = states === true;
 				this.embedsSupported = embeds === true;
 			}
@@ -319,7 +324,9 @@ export class LocationChannel {
 	}
 	private flushImageState(): void {
 		if (this.sent !== JSON.stringify(this.desired) || !(this.supportsImageStates && this.desired?.kind === "image" || this.supportsEmbeddedImages && this.desired?.kind === "note" || this.supportsBaseStates && this.desired?.kind === "base")) return;
-		const embedded = this.desired?.kind === "note", base = this.desired?.kind === "base", state = embedded ? this.desiredEmbed : base ? this.desiredBaseState : this.desiredImageState;
+		const embedded = this.desired?.kind === "note", base = this.desired?.kind === "base";
+		const baseState = this.desiredBaseState && baseStateForVersion(this.desiredBaseState, this.supportsBaseTargetsV2 ? 2 : 1);
+		const state = embedded ? this.desiredEmbed : base ? baseState : this.desiredImageState;
 		const encoded = JSON.stringify(state);
 		// A new publication starts with no state on the server.
 		if (this.sentImageState === undefined && state === null) { this.sentImageState = encoded; return; }
@@ -342,15 +349,16 @@ export class LocationChannel {
 		if (!this.desiredWatch || this.sentWatch === JSON.stringify(this.desiredWatch)) return;
 		if (this.desiredWatch.kind === "note" ? !this.supportsEmbeddedImages || !this.options.imageEmbeds : !this.supportsSurfaceRoster) return;
 		const scope = this.desiredWatch, id = uuid(); this.watching = { id, scope };
-		if (this.send({ type: scope.kind === "note" ? "watch_embeds" : "watch", subscription_id: id, location: scope, ...(scope.kind === "image" && this.supportsImageStates && this.options.imageStates ? { image_states: true } : {}), ...(scope.kind === "base" && this.supportsBaseStates && this.options.baseStates ? { base_states: true } : {}) })) this.sentWatch = JSON.stringify(scope);
+		if (this.send({ type: scope.kind === "note" ? "watch_embeds" : "watch", subscription_id: id, location: scope, ...(scope.kind === "image" && this.supportsImageStates && this.options.imageStates ? { image_states: true } : {}), ...(scope.kind === "base" && this.supportsBaseStates && this.options.baseStates ? { base_states: true, ...(this.supportsBaseTargetsV2 ? { base_target_version: 2 } : {}) } : {}) })) this.sentWatch = JSON.stringify(scope);
 	}
 	private receive(raw: unknown): void {
 		try {
-			const limit = this.rosterSupported || this.embedsSupported ? 192 * 1024 : 4096;
+			const limit = this.supportsBaseTargetsV2 ? 512 * 1024 : this.rosterSupported || this.embedsSupported ? 192 * 1024 : 4096;
 			if (typeof raw !== "string" || raw.length > limit) throw new Error();
 			const bytes = new TextEncoder().encode(raw).length;
 			if (bytes > limit) throw new Error();
 			const value: unknown = JSON.parse(raw);
+			if (isRecord(value) && value.type !== "base_states" && bytes > 192 * 1024) throw new Error();
 			if (!isRecord(value) || !["roster", "image_states", "image_embeds", "base_states"].includes(String(value.type)) && bytes > 4096) throw new Error();
 			if (value.type === "ready") {
 				if (this.status !== "connecting" || !exactFields(value, ["type", "protocol_version", "session_id", "instance_id", "expires_at"]) ||
@@ -391,6 +399,7 @@ export class LocationChannel {
 					if (!this.supportsBaseStates || !this.options.baseStates || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
 						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
 					const peers = available ? parseBasePeers(value.peers) : [];
+					if (!this.supportsBaseTargetsV2 && peers.some(peer => peer.state.version === 2)) throw new Error();
 					if (this.watching?.id === value.subscription_id) {
 						const scope = this.watching.scope; if (scope.kind !== "base") throw new Error();
 						if (!available) { this.watching = undefined; this.emitRoster(scope, "unavailable"); }
