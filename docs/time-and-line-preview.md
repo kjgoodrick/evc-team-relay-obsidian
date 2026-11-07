@@ -20,7 +20,11 @@ the complete desktop/mobile collaboration release.
   IDs retain their note/file/formula namespace. No comment data is written into
   the `.base` or task Markdown files.
 - The toolbar offers **Select timeline target**. A subsequent task/badge click or
-  tap selects a comment target. Scheduling gestures are intercepted during this
+  tap selects a comment target. Fork **`1cf48f3`** also opens a labelled native
+  picker for currently rendered items, property badges and lanes. Arrow/type-ahead
+  selection and Enter or the Comment button reach the same typed capture path.
+  Empty/missing/ambiguous choices never fall back to another target. The picker
+  preserves external focus and closes on renderer replacement. Scheduling gestures are intercepted during this
   explicit mode; touch panning retains its native default behavior. Cancel,
   Escape, backgrounding, permission loss, rebinding or unload release the mode.
   Physical touch acceptance remains required.
@@ -42,6 +46,15 @@ the complete desktop/mobile collaboration release.
   file-metadata properties still await dependency/authorization support.
 
 ## Ownership and lifecycle
+
+The keyboard checkpoint passes **246 fork regressions**, TypeScript/build and
+deterministic packaging, plus all eight source interoperability cases with both
+load orders/view types. The source fixture now selects formula cells and grouped
+lanes through the actual native-select/Enter path. Query replacement invalidates
+old rendered handles before repaint; verified lock-only updates retain the
+Timeline canvas. Plugin runtime is unchanged from the earlier 2,401-test
+checkpoint. These are synthetic-host checks; native keyboard/screen-reader/touch
+acceptance and navigation to unrendered targets remain.
 
 The optional `ranges` extension now connects the fork's local range context,
 selection, geometry and navigation to `NativeBasesSurface`. It requires all four

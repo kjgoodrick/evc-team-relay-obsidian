@@ -84,6 +84,14 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		assert.ok(surface.beginAnnotation(handle => { selected = handle; }, () => stopped++));
 		cell.element.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
 		assert.equal(stopped, 1); assert.equal(selected.target.file, files[0]); assert.equal(selected.target.property.source, "formula");
+		selected = undefined;
+		assert.ok(surface.beginAnnotation(handle => { selected = handle; }, () => stopped++));
+		const keyboardPicker = root.querySelector(".sabidurian-annotation-picker select"); assert.ok(keyboardPicker);
+		const keyboardProperty = [...keyboardPicker.options].find(option => option.textContent === `Property: ${files[0].path} — formula.total`); assert.ok(keyboardProperty);
+		keyboardPicker.value = keyboardProperty.value; keyboardPicker.dispatchEvent(new win.Event("change", { bubbles: true }));
+		keyboardPicker.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+		assert.equal(stopped, 2); assert.equal(selected.target.file, files[0]); assert.deepEqual(selected.target.property, { source: "formula", name: "total" });
+		assert.equal(root.querySelector(".sabidurian-annotation-picker"), null);
 		assert.equal(await surface.reveal(cell.target, () => true), "revealed");
 		const modal = new TaskInspector(plugin.app, files[0], { start: "start", end: "end", label: "title", dependencies: "blocked-by", zone: "UTC" }, plugin.history, false, () => {}, () => {});
 		modal.open(); modal.contentEl.querySelector("input").value = "2026-11-26T08:05:00";
@@ -97,6 +105,13 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 			lane.element.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
 			assert.equal(selectedLane.group, view.data.groupedData[0]); assert.equal(surface.revealGroup(lane.target, () => null, () => true), "revealed");
 			assert.equal(surface.revealGroup(lane.target, () => null, () => false), "unavailable");
+			selectedLane = undefined;
+			surface.beginAnnotation(() => assert.fail("keyboard lane became item"), () => {}, location => { selectedLane = location; });
+			const lanePicker = root.querySelector(".sabidurian-annotation-picker select"); assert.ok(lanePicker);
+			lanePicker.value = [...lanePicker.options].find(option => option.textContent.startsWith("Lane:")).value;
+			lanePicker.dispatchEvent(new win.Event("change", { bubbles: true }));
+			lanePicker.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+			assert.equal(selectedLane.group, view.data.groupedData[0]);
 			// Exercise real source/witness capture through the shared group adapter.
 			// The session is a controlled port; server acceptance is a separate fixture.
 			const doc = new Y.Doc({ gc: false }), text = doc.getText("contents"); text.insert(0, "---\nstatus: Ready\n---\nSynthetic task");
