@@ -571,6 +571,31 @@ test.each([false, true].flatMap(withLane => ["success", "revoked", "changed-axis
 	} finally { s.close(); }
 });
 
+test("native summary footers use saved definition identity, support capture, and refuse changed placement", async () => {
+	const s = await nativeBaseFixture(), saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+	try {
+		const property = { source: "note" as const, name: "score" }, summary = "Sum";
+		const catalog = await s.session.readBaseDefinitions();
+		s.session.readBaseDefinitions.mockResolvedValue({ ...catalog, targets: [{ id: id(10), kind: "summary", revision: 1, fingerprint: "a".repeat(64), property, summary }] });
+		s.handle.target = { type: "summary", property, summary };
+		const anchor: BaseAnchor = { ...await s.session.captureBaseTarget(), target: { type: "summary", definition_id: id(10), definition_revision: 1, property, summary } };
+		s.session.captureBaseTarget.mockResolvedValue(anchor);
+		const context = (await s.context())!;
+		expect(context.selection(s.handle.target)).toEqual({ type: "summary", definitionId: id(10), definitionRevision: 1 });
+		expect(context.selection({ ...s.handle.target, property: { name: "score", source: "note" } })).toBeDefined();
+		expect(context.selection({ ...s.handle.target, summary: "Average" })).toBeUndefined();
+		expect(context.native(anchor)).toEqual(s.handle.target);
+		expect(await s.host.commentBaseHandle(context, s.handle)).toBe(true);
+		expect(saved).toHaveBeenCalledWith(expect.objectContaining({ anchor }));
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(true);
+		if (anchor.target.type !== "summary") throw new Error("fixture");
+		expect(context.native({ ...anchor, target: { ...anchor.target, summary: "Average" } })).toBeUndefined();
+		expect(context.native({ ...anchor, target: { ...anchor.target, definition_revision: 2 } })).toBeUndefined();
+		s.readOnly(); expect(context.canComment(s.handle.target)).toBe(false); expect(context.native(anchor)).toEqual(s.handle.target);
+		s.revoke(); expect(context.native(anchor)).toBeUndefined(); context.release();
+	} finally { s.close(); }
+});
+
 test("native formula cells and headers capture catalogue identities and refuse changed-definition placement", async () => {
 	const s = await nativeBaseFixture(), saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
 	try {

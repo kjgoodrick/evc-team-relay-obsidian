@@ -95,6 +95,7 @@ export class BasePresenceMotion {
 		if (!this.closed && this.captureTimer === undefined) this.captureTimer = this.win.setTimeout(() => { this.captureTimer = undefined; this.capture(); }, 125);
 	}
 	private wireTarget(target: NativeBaseTarget): BasePresenceTarget | undefined {
+		if (target.type === "summary") return;
 		if (target.type === "view") return;
 		if (target.type === "property") return { type: "property", property: target.property };
 		const record = this.records.get(target.file); if (!record || target.type === "cell" && target.property.source === "note" && record.type !== "markdown") return;

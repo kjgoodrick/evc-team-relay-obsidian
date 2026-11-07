@@ -436,9 +436,14 @@ export class DiscussionHost extends Component {
 			if (!authorized()) return;
 			if (catalog?.definition_id !== binding.snapshot.definition_id || catalog?.generation !== binding.snapshot.generation || catalog?.registry_revision !== binding.snapshot.revision) catalog = undefined;
 			const formulas = new Map(catalog?.targets.filter(item => item.kind === "formula").map(item => [item.property.name, item]));
+			const summaries = new Map(catalog?.targets.filter(item => item.kind === "summary").map(item => [JSON.stringify([item.property.source, item.property.name]), item]));
 			const selection = (target: NativeBaseTarget): BaseTargetSelection | undefined => {
 				if (!authorized()) return;
 				if (target.type === "view") return target;
+				if (target.type === "summary") {
+					const definition = summaries.get(JSON.stringify([target.property.source, target.property.name]));
+					return definition?.summary === target.summary ? { type: "summary", definitionId: definition.id, definitionRevision: definition.revision } : undefined;
+				}
 				if (target.type === "property" || target.type === "cell") {
 					const property = target.property;
 					if (property.source === "formula") {
@@ -513,7 +518,12 @@ export class DiscussionHost extends Component {
 				native: anchor => {
 					if (!authorized() || anchor.definition_id !== binding.snapshot.definition_id || anchor.view_id !== binding.viewId || anchor.generation !== binding.snapshot.generation || anchor.registry_revision > binding.snapshot.revision) return;
 					const target = anchor.target; if (target.type === "view" || target.type === "property") return target;
-					if (target.type === "summary" || target.type === "group" || target.type === "timeline_range" || target.type === "timeline_marker") return;
+					if (target.type === "summary") {
+						const definition = summaries.get(JSON.stringify([target.property.source, target.property.name]));
+						return definition?.id === target.definition_id && definition.revision === target.definition_revision && definition.summary === target.summary ?
+							{ type: "summary", property: target.property, summary: target.summary } : undefined;
+					}
+					if (target.type === "group" || target.type === "timeline_range" || target.type === "timeline_marker") return;
 					if (target.type === "formula" || target.type === "formula_cell") {
 						const definition = formulas.get(target.property.name);
 						if (!definition || definition.id !== target.definition_id || definition.revision !== target.definition_revision) return;
@@ -995,7 +1005,7 @@ export class DiscussionHost extends Component {
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;
-				if (anchor.target.type !== "summary" && await this.baseComments?.reveal(session, entryId, anchor, available)) return;
+				if (await this.baseComments?.reveal(session, entryId, anchor, available)) return;
 				if ("definition_id" in anchor.target || anchor.target.type === "timeline_marker") {
 					const status = await session.baseDefinitionStatus(entryId, anchor);
 					if (available()) new Notice(this.targetLabel(session, entryId, anchor) + ". " + status + " The original target is retained; its exact location cannot be shown in this view.", 10000);

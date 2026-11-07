@@ -41,7 +41,7 @@ function fixture() {
 	const anchor: BaseAnchor = { version: 1, type: "base", definition_id: id(3), view_id: id(2), generation: id(4), registry_revision: 1,
 		target: { type: "cell", record_id: id(5), record_generation: id(6), property: { source: "note", name: "status" } } };
 	const thread = { id: id(7), author_id: id(8), activity_sequence: 1, state: "open", anchor };
-	const surface = { file, type: "table", current: () => valid, hit: (node: Node) => node === cell ? cellHandle : node === row ? itemHandle : undefined,
+	const surface = { file, type: "table", current: () => valid, containsTargetArea: (node: Node) => row.contains(node), hit: (node: Node) => node === cell ? cellHandle : node === row ? itemHandle : undefined,
 		handles: jest.fn(() => mounted ? [viewHandle, itemHandle, cellHandle] : [viewHandle, itemHandle]), viewport: () => root,
 		reveal: jest.fn(async (_target: NativeBaseTarget, current: () => boolean) => current() ? "revealed" : "unavailable") };
 	const session = { anchorThreads: jest.fn().mockResolvedValue([thread]), displayName: () => "Reviewer" };
@@ -469,6 +469,32 @@ test("cell evidence requires its exact live handle; a row fallback, duplicate or
 		const recycled = { ...f.cellHandle, target: { ...target, file: { ...target.file } } };
 		f.surface.handles.mockReturnValue([recycled]); expect(present()).toEqual(new Set());
 		f.surface.handles.mockReturnValue([f.cellHandle]); expect(present()).toEqual(new Set([id(7)]));
+	} finally { f.close(); }
+});
+
+test("summary footer controls capture the definition, render its marker, and never substitute a view target", async () => {
+	const f = fixture();
+	try {
+		await settle();
+		const target: NativeBaseTarget = { type: "summary", property: { source: "note", name: "score" }, summary: "Sum" };
+		const handle = { target, element: f.cell, current: () => true }, context = f.contexts[0];
+		context.selection = value => value.type === "summary" ? { type: "summary", definitionId: id(10), definitionRevision: 1 } : undefined;
+		context.native = () => target;
+		Object.assign(f.surface, { hit: () => handle, handles: jest.fn(() => [handle]) });
+		f.session.anchorThreads.mockResolvedValue([{ id: id(7), author_id: id(8), activity_sequence: 1, state: "open", anchor: { ...f.anchor,
+			target: { type: "summary", definition_id: id(10), definition_revision: 1, property: target.property, summary: "Sum" } } }]);
+		f.pane.invalidate(true); await settle(); f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		expect(f.buttons().map(button => button.textContent)).toEqual(["Comments · Work", "Comment on summary · note.score · Sum"]);
+		f.buttons()[1].click(); expect(f.host.commentBaseHandle).toHaveBeenCalledWith(context, handle); await settle();
+		const marker = f.root.querySelector<HTMLButtonElement>(".relay-base-comment-marker")!;
+		expect(marker).not.toBeNull(); marker.click(); expect(f.host.openBaseThread).toHaveBeenCalledWith(context, id(7));
+		Object.assign(f.surface, { handles: jest.fn(() => [handle, { ...handle }]) }); f.pane.invalidate(false); await settle();
+		expect(f.root.querySelector(".relay-base-comment-marker")).toBeNull();
+		Object.assign(f.surface, { hit: () => undefined }); f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		expect(f.buttons().map(button => button.textContent)).toEqual(["Comments · Work"]);
+		expect(f.root.textContent).toContain("Select a supported comment target.");
+		const chrome = document.createElement("button"); f.root.append(chrome); chrome.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		expect(f.root.textContent).not.toContain("Select a supported comment target.");
 	} finally { f.close(); }
 });
 

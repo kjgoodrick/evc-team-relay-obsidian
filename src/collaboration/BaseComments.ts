@@ -18,7 +18,7 @@ import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
 const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type === "group" ? "group · " + nativeGroupTargetLabel(target) : target.type === "view" ? "view" : target.type === "property" ? "property header · " + target.property.source + "." + target.property.name :
-	target.type === "cell" ? "cell · " + target.property.source + "." + target.property.name : "record";
+	target.type === "summary" ? "summary · " + target.property.source + "." + target.property.name + " · " + target.summary : target.type === "cell" ? "cell · " + target.property.source + "." + target.property.name : "record";
 
 export class BaseComments extends Component {
 	private panes = new Map<FileView, BaseCommentPane>();
@@ -164,6 +164,7 @@ export class BaseCommentPane {
 	private attemptedBinding = 0;
 	private presence?: { session: DiscussionSession; entryId: string; signature: string };
 	private capture?: object;
+	private unavailableTarget = false;
 	constructor(private host: DiscussionHost, private view: FileView, private integrations?: NativeBasesIntegrations,
 		private targetsChanged?: (session: DiscussionSession, entryId: string) => void) {
 		const root = view.contentEl, doc = root.ownerDocument; this.win = doc.defaultView ?? window;
@@ -187,6 +188,7 @@ export class BaseCommentPane {
 			if (this.context?.surface.annotationSupported && event.type === "pointerdown") { this.action++; return; }
 			this.action++; this.unavailableGroup = false; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
 			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node, event as PointerEvent);
+			this.unavailableTarget = !this.chosen && !this.chosenGroups.length && this.context?.surface.containsTargetArea(node) === true;
 			if (event.type === "pointerdown" && (this.chosen || this.chosenGroups.length)) focusFromPointer = node;
 			this.renderTools();
 		};
@@ -225,6 +227,7 @@ export class BaseCommentPane {
 	}
 	private detach(): void {
 		this.capture = undefined;
+		this.unavailableTarget = false;
 		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.unavailableGroup = false;
 		this.groupTargets.clear(); this.rangeAxis = undefined; this.sharedMarkers = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
@@ -378,13 +381,13 @@ export class BaseCommentPane {
 		const view = context.surface.handles().find(handle => handle.target.type === "view");
 		if (this.annotating && (!view || !context.canComment(view.target))) this.cancelAnnotation();
 		const selectedGroups = this.chosenGroups.filter(handle => context.groups?.canCapture(handle));
-		const target = selected ?? (this.chosenGroups.length || this.unavailableGroup ? undefined : view);
+		const target = selected ?? (this.chosen || this.chosenGroups.length || this.unavailableGroup || this.unavailableTarget ? undefined : view);
 		const selection = target && context.canComment(target.target) ? context.selection(target.target) : undefined;
 		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
 		const commentRecord = !!item && context.canComment(item);
 		const rangeAvailable = !!context.surface.rangeContext?.()?.current() && context.session.canAnchorBase("timeline_range") && context.session.permission(context.entryId)?.comment === true;
 		const markerAvailable = !!context.surface.rangeContext?.()?.current() && context.session.canAnchorBase("timeline_marker") && context.session.permission(context.entryId)?.read === true;
-		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup, rangeAvailable, markerAvailable]);
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup, this.unavailableTarget, rangeAvailable, markerAvailable]);
 		// Preserve live buttons through scroll, polling and unrelated thread updates.
 		// A new handle/context must still replace callbacks, even for the same label.
 		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
@@ -402,6 +405,7 @@ export class BaseCommentPane {
 			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task, property badge, or lane header. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
 		}
 		if (this.unavailableGroup) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "This lane is unavailable for commenting. Its grouping or source value is unsupported."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
+		if (this.unavailableTarget) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Select a supported comment target."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
 		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups), true);
 		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => this.startCapture(() => this.host.commentBaseHandle(context, target)), true);
 		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => this.startCapture(() => this.host.commentBaseHandle(context, selected, item)), true);
@@ -448,7 +452,14 @@ export class BaseCommentPane {
 		const focused = active && this.marks.contains(active) ? active.dataset.baseMarker : undefined;
 		this.marks.replaceChildren(); const context = this.context; if (!context?.current()) { this.updateMarkerTargets(new Set()); return; }
 		const handles = context.surface.handles(), byKey = new Map<string, NativeBaseHandle | NativeBaseGroupHandle>();
-		for (const handle of handles) { const selection = context.selection(handle.target); if (selection) byKey.set(baseSelectionKey(selection), handle); }
+		const ambiguousTargets = new Set<string>();
+		for (const handle of handles) {
+			if (!handle.current()) continue;
+			const selection = context.selection(handle.target); if (!selection) continue;
+			const key = baseSelectionKey(selection);
+			if (byKey.has(key)) { byKey.delete(key); ambiguousTargets.add(key); }
+			if (!ambiguousTargets.has(key)) byKey.set(key, handle);
+		}
 		const ambiguousGroups = new Set<string>();
 		for (const handle of context.groups?.handles() ?? []) {
 			const key = nativeGroupTargetKey(handle.target);

@@ -52,7 +52,8 @@ export function nativeBaseProperty(value: unknown): BaseDefinitionProperty | und
 }
 
 export type NativeBaseTarget = { type: "view" } | { type: "item"; file: TFile } |
-	{ type: "cell"; file: TFile; property: BaseDefinitionProperty } | { type: "property"; property: BaseDefinitionProperty };
+	{ type: "cell"; file: TFile; property: BaseDefinitionProperty } | { type: "property"; property: BaseDefinitionProperty } |
+	{ type: "summary"; property: BaseDefinitionProperty; summary: string };
 export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement | SVGElement; current(): boolean }
 export interface NativeBaseGroupTarget { type: "group"; property: BaseDefinitionProperty; value: NativeBaseGroupValue }
 export interface NativeBaseGroupHandle {
@@ -110,7 +111,8 @@ export interface NativeBasePresenceBinding {
 function propertyEqual(a: BaseDefinitionProperty, b: BaseDefinitionProperty): boolean { return a.source === b.source && a.name === b.name; }
 function sameTarget(a: NativeBaseTarget, b: NativeBaseTarget): boolean {
 	return a.type === b.type && (!("file" in a) || "file" in b && a.file === b.file) &&
-		(!("property" in a) || "property" in b && propertyEqual(a.property, b.property));
+		(!("property" in a) || "property" in b && propertyEqual(a.property, b.property)) &&
+		(a.type !== "summary" || b.type === "summary" && a.summary === b.summary);
 }
 
 export class NativeBasesSurface {
@@ -344,13 +346,54 @@ export class NativeBasesSurface {
 				add({ type: "property", property }, cell.el, () => this.renderer.header === header && cell.view === this.renderer && cell.prop === prop && list(header.cells, 256)?.includes(cell) === true);
 			}
 		}
+		// Only the whole-view footer represents a summary definition. A group's
+		// summary row has a different scope. Never read/evaluate aggregate values.
+		if (this.type === "table" && object(this.renderer.footerSummary)) {
+			const footer = this.renderer.footerSummary, cells = list(footer.cells, 256), data = this.renderer.data;
+			if (footer.view === this.renderer && footer.location === "footer" && element(footer.el) && cells && object(data) && list(data.data)) {
+				for (const cell of cells) {
+					if (!object(cell)) continue;
+					const prop = cell.prop, property = nativeBaseProperty(prop), summary = this.summaryKey(prop), footerEl = footer.el, cellEl = cell.el;
+					if (!property || !summary || !element(cell.el) || !footer.el.contains(cell.el)) continue;
+					const live = () => this.renderer.footerSummary === footer && footer.view === this.renderer && footer.location === "footer" &&
+						cell.view === this.renderer && cell.prop === prop && cell.renderedKey === summary && cell.renderedPlaceholder === false &&
+						cell.entries === data.data && this.summaryKey(prop) === summary && list(footer.cells, 256)?.includes(cell) === true &&
+						footer.el === footerEl && cell.el === cellEl && element(footer.el) && element(cell.el) && footer.el.contains(cell.el);
+					if (live()) add({ type: "summary", property, summary }, cell.el, live);
+				}
+			}
+		}
 		return output.length <= MAX_HANDLES ? output : [];
+	}
+	private summaryKey(prop: unknown): string | undefined {
+		if (typeof prop !== "string" || !object(this.config.summaries) || !Object.prototype.hasOwnProperty.call(this.config.summaries, prop)) return;
+		const value = this.config.summaries[prop];
+		return typeof value === "string" && value.length > 0 && value.length <= 256 && !Array.from(value).some(char => {
+			const point = char.codePointAt(0)!; return point < 32 || point >= 0xd800 && point <= 0xdfff;
+		}) ? value : undefined;
+	}
+	/** Native toolbar chrome is not a failed target selection. Content, headers
+	 * and summaries may contain unsupported targets and must not become a view. */
+	containsTargetArea(node: Node): boolean {
+		if (!this.current() || this.external) return false;
+		return [this.renderer.containerEl, object(this.renderer.header) ? this.renderer.header.el : undefined,
+			object(this.renderer.footerSummary) ? this.renderer.footerSummary.el : undefined].some(root => element(root) && root.contains(node));
 	}
 	hit(node: Node, point?: { clientX: number; clientY: number }): NativeBaseHandle | undefined {
 		if (!this.current()) return;
 		if (this.external) {
 			const handle = this.external.hit(node, point);
 			return handle ? { ...handle, current: () => this.current() && handle.current() } : undefined;
+		}
+		if (this.type === "table") {
+			// Unassigned, stale or group-specific summaries cannot silently become
+			// whole-view discussions. Match the exact footer model, never its text.
+			const footer = this.renderer.footerSummary;
+			if (object(footer) && element(footer.el) && footer.el.contains(node)) {
+				const matches = this.handles().filter(handle => handle.target.type === "summary" && handle.element.contains(node) && handle.current());
+				return matches.length === 1 ? matches[0] : undefined;
+			}
+			if (list(this.renderer.groups, 256)?.some(group => object(group) && object(group.summaryRow) && element(group.summaryRow.el) && group.summaryRow.el.contains(node))) return;
 		}
 		// Group headings have their own typed capture API. A header that is not
 		// wired/supported must not silently become a whole-view discussion.
@@ -555,6 +598,19 @@ export class NativeBasesSurface {
 			timer = window.setTimeout(finish, 100);
 		});
 	}
+	private summaryLeft(property: BaseDefinitionProperty): number | undefined {
+		const data = this.renderer.data, columns = this.renderer.columnInfo, minimum = this.renderer.minColWidth, maximum = this.renderer.maxColWidth;
+		const properties = object(data) ? list(data.properties, 256) : undefined;
+		if (!properties || !object(columns) || !finite(minimum) || !finite(maximum) || maximum < minimum) return;
+		let left = 0;
+		for (const prop of properties) {
+			if (prop === property.source + "." + property.name) return left;
+			const column = typeof prop === "string" ? columns[prop] : undefined;
+			if (!object(column) || !callable(column.getWidth)) return;
+			const width = column.getWidth(minimum, maximum); if (!finite(width) || width < minimum || width > maximum) return;
+			left += width;
+		}
+	}
 	async reveal(target: NativeBaseTarget, authorized: () => boolean, frame = () => this.nextFrame()): Promise<NativeBaseReveal> {
 		const current = () => authorized() && this.current();
 		let restore: (() => void) | undefined;
@@ -565,11 +621,21 @@ export class NativeBasesSurface {
 			const groups = this.groups(); if (!groups) return "unavailable";
 			if ("file" in target && !groups.some(group => (group.entries as unknown[]).some(entry => object(entry) && entry.file === target.file))) return "hidden";
 			if ("property" in target && !this.propertyDisplayed(target.property)) return "property-hidden";
-			let handle = this.handles().find(item => sameTarget(item.target, target));
+			const matching = () => this.handles().filter(item => sameTarget(item.target, target) && item.current());
+			let matches = matching(); if (matches.length > 1) return "ambiguous";
+			let handle = matches[0];
 			if (!handle && target.type === "property") return "property-hidden";
 			const scroll = this.scrollElement(); if (!scroll) return "unavailable";
 			const before = { top: scroll.scrollTop, left: scroll.scrollLeft };
 			restore = () => { if (current()) { scroll.scrollTop = before.top; scroll.scrollLeft = before.left; } };
+			if (!handle && target.type === "summary") {
+				const left = this.summaryLeft(target.property);
+				if (left !== undefined && callable(this.renderer.updateVirtualDisplay)) {
+					scroll.scrollLeft = left; this.renderer.updateVirtualDisplay(true); await frame();
+					if (!current()) return "unavailable";
+					matches = matching(); if (matches.length > 1) { restore(); return "ambiguous"; } handle = matches[0];
+				}
+			}
 			for (let attempt = 0; !handle && attempt < 3 && "file" in target; attempt++) {
 				if (!current()) return "unavailable";
 				const position = this.position(target.file, target.type === "cell" ? target.property : undefined);
@@ -577,7 +643,7 @@ export class NativeBasesSurface {
 				scroll.scrollTop = position.top; if (position.left !== undefined) scroll.scrollLeft = position.left;
 				this.renderer.updateVirtualDisplay(true); await frame();
 				if (!current()) return "unavailable";
-				handle = this.handles().find(item => sameTarget(item.target, target));
+				matches = matching(); if (matches.length > 1) { restore(); return "ambiguous"; } handle = matches[0];
 			}
 			if (!handle || !handle.current()) {
 				restore();

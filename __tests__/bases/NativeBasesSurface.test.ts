@@ -136,6 +136,69 @@ describe("native Bases identity boundary", () => {
 	});
 });
 
+describe("whole-view summary definition footer", () => {
+	function summaryFixture() {
+		const f = fixture();
+		Object.assign(f.serial.views[0], { summaries: { "note.status": "Unique" } });
+		Object.assign(f.config, { summaries: { "note.status": "Unique" } });
+		f.host.data = f.host.lastSavedData = JSON.stringify(f.serial);
+		Object.assign(f.renderer.data, { data: f.entries });
+		const footer = { view: f.renderer, location: "footer", el: node(f.scroll), cells: [] as Record<string, unknown>[] };
+		const cell = { view: f.renderer, prop: "note.status", el: node(footer.el), entries: f.entries, renderedKey: "Unique", renderedPlaceholder: false };
+		Object.defineProperty(cell, "renderedValue", { get() { throw new Error("Aggregate output must not be read"); } });
+		footer.cells = [cell]; Object.assign(f.renderer, { footerSummary: footer, minColWidth: 100, maxColWidth: 600,
+			columnInfo: { "file.name": { getWidth: () => 150 }, "note.status": { getWidth: () => 120 } } });
+		return { ...f, footer, cell, target: { type: "summary" as const, property: { source: "note" as const, name: "status" }, summary: "Unique" } };
+	}
+	test("captures and reveals the exact footer definition without reading aggregate output", async () => {
+		const f = summaryFixture(), surface = f.inspect()!, original = f.host.data;
+		const handle = surface.hit(f.cell.el)!;
+		expect(handle.target).toEqual(f.target); expect(handle.current()).toBe(true);
+		expect(surface.containsTargetArea(f.cell.el)).toBe(true); expect(surface.containsTargetArea(node(f.root))).toBe(false);
+		expect(await surface.reveal(f.target, () => true)).toBe("revealed");
+		expect(f.cell.el.scrollIntoView).toHaveBeenCalled(); expect(f.host.data).toBe(original);
+	});
+	test.each(["property", "key", "placeholder", "entries", "owner", "location", "model", "element", "detached"])("rejects a stale %s without falling back to a whole-view target", change => {
+		const f = summaryFixture(), surface = f.inspect()!, handle = surface.hit(f.cell.el)!;
+		if (change === "property") f.cell.prop = "note.other";
+		if (change === "key") f.cell.renderedKey = "Sum";
+		if (change === "placeholder") f.cell.renderedPlaceholder = true;
+		if (change === "entries") f.cell.entries = [];
+		if (change === "owner") f.cell.view = {} as typeof f.renderer;
+		if (change === "location") f.footer.location = "group";
+		if (change === "model") f.footer.cells = [];
+		if (change === "element") f.cell.el = node(f.footer.el);
+		if (change === "detached") f.cell.el.remove();
+		expect(handle.current()).toBe(false); expect(surface.hit(handle.element)).toBeUndefined();
+	});
+	test("group summary rows and unassigned placeholders remain distinct from view discussions", () => {
+		const f = summaryFixture(), groupCell = node(f.container), surface = f.inspect()!;
+		Object.assign(f.renderer.groups[0], { summaryRow: { el: groupCell } });
+		expect(surface.hit(groupCell)).toBeUndefined();
+		f.cell.prop = "file.name"; f.cell.renderedPlaceholder = true;
+		expect(surface.hit(f.cell.el)).toBeUndefined();
+	});
+	test("summary navigation mounts a horizontally virtualized footer without scrolling to a record", async () => {
+		const f = summaryFixture(), surface = f.inspect()!; f.cell.el.remove(); f.scroll.scrollTop = 37;
+		f.renderer.updateVirtualDisplay.mockImplementation(() => { f.footer.el.append(f.cell.el); });
+		expect(await surface.reveal(f.target, () => true, async () => {})).toBe("revealed");
+		expect(f.scroll.scrollLeft).toBe(150); expect(f.scroll.scrollTop).toBe(37); expect(f.renderer.getCellRect).not.toHaveBeenCalled();
+	});
+	test("failed footer mounting restores the previous viewport and hidden properties retain their target", async () => {
+		const f = summaryFixture(), surface = f.inspect()!; f.cell.el.remove(); f.scroll.scrollLeft = 12; f.scroll.scrollTop = 37;
+		expect(await surface.reveal(f.target, () => true, async () => {})).toBe("unavailable");
+		expect([f.scroll.scrollLeft, f.scroll.scrollTop]).toEqual([12, 37]);
+		f.renderer.data.properties = ["file.name"];
+		expect(await surface.reveal(f.target, () => true)).toBe("property-hidden");
+	});
+	test("duplicate footer handles are ambiguous and a definition change invalidates capture", async () => {
+		const f = summaryFixture(), surface = f.inspect()!; f.footer.cells.push({ ...f.cell, el: node(f.footer.el) });
+		expect(await surface.reveal(f.target, () => true)).toBe("ambiguous");
+		Object.assign(f.serial.views[0], { summaries: { "note.status": "Filled" } });
+		expect(surface.current()).toBe(false); expect(surface.hit(f.cell.el)).toBeUndefined();
+	});
+});
+
 describe("Time & Line saved-view integration", () => {
 	function timeline(type: "sabidurian-timeline" | "sabidurian-sequence" = "sabidurian-timeline") {
 		const f = fixture(type), badge = document.createElementNS("http://www.w3.org/2000/svg", "g"); f.container.append(badge);

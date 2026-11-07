@@ -139,7 +139,7 @@ export class TimelineBridgeClient implements NativeBasesIntegrations {
 					if (!current()) return "unavailable";
 					if (!this.canNavigate(root.ownerDocument)) return "busy";
 					if (target.type === "view") return "revealed";
-					if (target.type === "property") return "property-hidden";
+					if (target.type === "property" || target.type === "summary") return "property-hidden";
 					const value = source.reveal(target.type === "item" ? target : { type: "cell", file: target.file, property: target.property.source + "." + target.property.name });
 					return ["revealed", "hidden", "property-hidden", "unavailable", "busy", "ambiguous"].includes(String(value)) ? value as NativeBaseReveal : "unavailable";
 				} catch { return "unavailable"; }
