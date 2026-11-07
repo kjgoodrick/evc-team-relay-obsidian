@@ -138,9 +138,11 @@ types: offline capture from verified axis context, queued delivery, accepted
 response loss, cache reopen and retained targets after relay restart. Exact
 Sequence values remain decimal strings; dense positions never become identities.
 
-This checkpoint does **not** connect the renderer's range gestures or geometry.
-Range selection, markers, reveal, precision/offset controls, new unverified offline
-lane composition and native acceptance remain. Reading an existing range must
+At the protocol checkpoint the renderer was not connected. The later optional
+range API described above adds gesture, geometry and in-axis reveal consumption.
+The range toolbar/confirmation, durable capture hookup, saved markers, discussion
+navigation, new unverified offline lane composition and native acceptance remain.
+Reading an existing range must
 retain its original axis/zone/precision even when the current renderer cannot
 project it. See the server's `docs/timeline-range-preview.md` for the wire contract
 and authorization rules.
