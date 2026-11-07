@@ -20,6 +20,7 @@ import { bodyFromText, protocolJson, type BaseAnchor } from "../../src/collabora
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import type { BaseGroupCapture } from "../../src/collaboration/BaseGroupProtocol";
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
+import { parseTimelineRange } from "../../src/collaboration/TimelineRange";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 Object.assign(globalThis, { IDBKeyRange });
@@ -32,6 +33,7 @@ async function until(check: () => boolean, label: string) {
 run("actual group capture verifies delete-only dependencies, exact recovery, source permissions and relay restart", async () => {
 	const viewType = process.env.EVC_BASE_GROUP_VIEW_TYPE ?? "table";
 	expect(["table", "sabidurian-timeline", "sabidurian-sequence"]).toContain(viewType);
+	const axisOptions = viewType === "sabidurian-sequence" ? { orderProp: "note.order" } : viewType === "sabidurian-timeline" ? { startDateProp: "note.start", timeZone: "America/Denver" } : {};
 	const f = JSON.parse(readFileSync(process.env.EVC_BASE_GROUP_FIXTURE!, "utf8"));
 	for (const url of [f.base, f.relay]) expect(new URL(url).hostname).toBe("127.0.0.1");
 	const identity = { serverId: f.base, accountId: f.bobId, shareId: f.share };
@@ -55,7 +57,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 	try {
 		const state = await content.read(f.baseEntry);
 		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: state.state, bytes: new TextEncoder().encode(JSON.stringify({
-			views: [{ name: "Groups", type: viewType, groupBy: { property: "status", direction: "ASC" } }],
+			views: [{ name: "Groups", type: viewType, ...axisOptions, groupBy: { property: "status", direction: "ASC" } }],
 		})).buffer as ArrayBuffer });
 		const saved = await content.read(f.baseEntry), snapshot = await registry.inspect(f.baseEntry, saved.state.record.hash!, saved.state.generation!);
 		const view = snapshot.views[0].id!, scope = baseDiscussionScope(f.baseEntry, view);
@@ -152,11 +154,49 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect((await transport.thread(scope, accepted.thread_id)).anchor).toEqual(intentAnchor);
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_id: f.secret }))
 			.rejects.toMatchObject({ action: "reject", code: "target_unavailable", status: 404 });
+		let rangeThread: string | undefined, rangeAnchor: BaseAnchor | undefined;
+		if (viewType !== "table") {
+			let offline = false;
+			const rangeTransport = new DiscussionTransport(identity, credential, async (...args) => {
+				if (offline) throw new Error("Synthetic offline client");
+				return fetch(...args);
+			});
+			captureSession = new DiscussionSession(store, rangeTransport); await captureSession.start(); captureSession.watch(scope, () => {}, "base");
+			await captureSession.refresh(); captureSession.setForeground(false); await captureSession.outbox.settled();
+			const axis = await captureSession.readTimelineAxis(scope);
+			const fixtures = JSON.parse(readFileSync(join(__dirname, "../fixtures/timeline-ranges-v1.json"), "utf8"));
+			const range = parseTimelineRange(fixtures.valid.find((item: { input: { kind: string } }) => item.input.kind === (viewType === "sabidurian-sequence" ? "ordinal" : "instant")).input);
+			offline = true; await captureSession.refresh();
+			rangeAnchor = await captureSession.captureTimelineRange(scope, axis, range, intentAnchor);
+			const rangeOperation = operation(rangeAnchor);
+			await store.saveDraft({ id: "range", scopeId: scope, revision: 1, body: "Offline range", target: protocolJson(rangeAnchor) });
+			await captureSession.queue(rangeOperation, { id: "range", revision: 1 }); await captureSession.close(); captureSession = undefined;
+			store = await DiscussionStore.open(storeIdentity, factory);
+			expect(await store.getDraft("range")).toBeUndefined();
+			let loseRangeResponse = true;
+			const lossyRange = new DiscussionTransport(identity, credential, async (url, options) => {
+				const response = await fetch(url, options);
+				if (loseRangeResponse && response.ok && String(url).endsWith("/commands")) {
+					loseRangeResponse = false; await response.text(); throw new Error("Lost accepted range response");
+				}
+				return response;
+			});
+			const firstClaim = (await store.claimNext("range-first"))!;
+			await expect(new DiscussionDelivery(store, lossyRange).send(firstClaim)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
+			await store.fail(rangeOperation.operationId, firstClaim.lease!, "network_unavailable", 0);
+			store.close(); store = await DiscussionStore.open(storeIdentity, factory);
+			const retry = (await store.claimNext("range-reopened"))!, result = await new DiscussionDelivery(store, lossyRange).send(retry);
+			if (!("thread_id" in result)) throw new Error("Expected range acceptance");
+			rangeThread = result.thread_id; await store.accept(rangeOperation.operationId, protocolJson(result));
+			expect(await transport.send(rangeOperation)).toEqual(result);
+			expect((await transport.thread(scope, rangeThread)).anchor).toEqual(rangeAnchor);
+		}
 		for (const provider of providers) provider.destroy();
 		writeFileSync(join(f.restartDir, "restart-request"), "restart");
 		await until(() => existsSync(join(f.restartDir, "restart-done")), "relay restarts");
 		const restored = await peer(f.bobToken, "read");
 		expect(restored.text.toString()).toBe(owner.text.toString());
+		if (rangeThread) expect((await transport.thread(scope, rangeThread)).anchor).toEqual(rangeAnchor);
 		const fresh = await transport.captureBaseGroup(scope, request(restored.doc, "Done"));
 		expect(fresh.target).toEqual(captured.target);
 		expect((await transport.send(operation(fresh))).message_revision).toBe(1);
@@ -168,7 +208,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		// two-phase delivery with response loss and a reopened cache.
 		const beforeFile = await content.read(f.baseEntry);
 		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: beforeFile.state, bytes: new TextEncoder().encode(JSON.stringify({
-			views: [{ name: "Groups", type: viewType, groupBy: { property: "file.ext", direction: "ASC" } }],
+			views: [{ name: "Groups", type: viewType, ...axisOptions, groupBy: { property: "file.ext", direction: "ASC" } }],
 		})).buffer as ArrayBuffer });
 		const fileState = await content.read(f.baseEntry), fileSnapshot = await registry.inspect(f.baseEntry, fileState.state.record.hash!, fileState.state.generation!);
 		const fileView = fileSnapshot.views[0].id!, fileScope = baseDiscussionScope(f.baseEntry, fileView);

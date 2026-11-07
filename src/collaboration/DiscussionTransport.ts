@@ -5,6 +5,7 @@ import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictur
 import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type BaseRecordType, type DiscussionAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
+import { parseTimelineAxisContext } from "./TimelineRangeProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
 
@@ -37,6 +38,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
+for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "timeline_axis_changed", "unsupported_timeline_time_zone"]) errorCodes.add(code);
 for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
 for (const code of ["base_groups_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
 	"base_group_limit", "base_group_witness_limit", "base_group_identity_conflict", "operation_conflict"]) errorCodes.add(code);
@@ -68,7 +70,7 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "base") {
 		try { const anchor = parseAnchor(payload.anchor);
 			if (scope.viewId !== undefined && (anchor.type !== "base" || anchor.view_id !== scope.viewId)) throw new Error("Wrong saved view");
-			if (anchor.type === "base" && anchor.target.type === "group") limit = 256 * 1024;
+			if (anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
 		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
 	}
 	if (op.type === "thread.create" && scope.viewId !== undefined && (!object(payload.anchor) || payload.anchor.type !== "base")) throw new DiscussionFailure("reject", "invalid_local_anchor");
@@ -292,6 +294,13 @@ export class DiscussionTransport implements DiscussionSender {
 			after = page.next_after!;
 		}
 		throw new DiscussionFailure("pause", "invalid_read_response");
+	}
+	async timelineAxis(entryId: string, viewId: string, expectedRevision?: number) {
+		if (!isId(viewId) || expectedRevision !== undefined && !positive(expectedRevision)) throw new DiscussionFailure("reject", "invalid_local_target");
+		this.scopeView(entryId, viewId);
+		return this.parse(await this.request(this.scopePath(entryId) + "/bases/timeline-axis", JSON.stringify({ view_id: viewId,
+			...(expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) })),
+			value => parseTimelineAxisContext(value, parseDiscussionScope(entryId)!.entryId, viewId));
 	}
 	async captureBaseGroup(entryId: string, request: BaseGroupCapture) {
 		let copy: BaseGroupCapture;

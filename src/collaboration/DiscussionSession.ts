@@ -1,3 +1,5 @@
+import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
+import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
@@ -60,6 +62,7 @@ export class DiscussionSession {
 	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
 	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
+	private timelineAxisFlights = new Map<string, Promise<TimelineAxisContext>>();
 	private baseRecordTypes: BaseRecordType[] = [];
 	private lastPublish = 0;
 
@@ -615,7 +618,73 @@ export class DiscussionSession {
 		})()).finally(() => { if (this.baseDefinitionFlights.get(scopeId) === flight) this.baseDefinitionFlights.delete(scopeId); });
 		this.baseDefinitionFlights.set(scopeId, flight); return flight;
 	}
+	readTimelineAxis(scopeId: string): Promise<TimelineAxisContext> {
+		const existing = this.timelineAxisFlights.get(scopeId); if (existing) return existing;
+		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
+		const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const key = "timelineAxis:" + scopeId;
+		const flight = this.trackLocal((async () => {
+			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
+			const parse = (value: unknown) => parseTimelineAxisContext(value, scope.entryId, scope.viewId!);
+			try {
+				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				let catalog: TimelineAxisContext;
+				try { catalog = await this.transport.timelineAxis(scopeId, scope.viewId); }
+				catch (error) {
+					if (!this.closed && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+					throw error;
+				}
+				if (!current() || catalog.generation !== generation) throw new Error("Saved view changed during verification.");
+				const context = await this.cachedBaseContext(scopeId);
+				if (!current() || context?.generation === catalog.generation && context.registry_revision > catalog.registry_revision) throw new Error("Saved axis verification is stale. Refresh the timeline axis.");
+				let previous: TimelineAxisContext | undefined; try { previous = parse(proof.previous); } catch { /* No prior proof. */ }
+				if (previous?.generation === catalog.generation && previous.registry_revision > catalog.registry_revision) throw new Error("Saved axis verification is stale.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved axis verification changed. Try again.");
+				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
+				return catalog;
+			} catch (error) {
+				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
+				let catalog: TimelineAxisContext | undefined;
+				try { catalog = parse(await this.store.preference(key)); } catch { /* An incomplete axis context cannot authorize offline capture. */ }
+				const context = await this.cachedBaseContext(scopeId);
+				if (!current() || !catalog || catalog.generation !== generation || context?.generation === generation && context.registry_revision > catalog.registry_revision) {
+					throw new Error("Connect to verify this view’s timeline axis before using it offline.");
+				}
+				return catalog;
+			}
+		})()).finally(() => { if (this.timelineAxisFlights.get(scopeId) === flight) this.timelineAxisFlights.delete(scopeId); });
+		this.timelineAxisFlights.set(scopeId, flight); return flight;
+	}
+	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor?: BaseAnchor): Promise<BaseAnchor> {
+		const scope = parseDiscussionScope(scopeId);
+		if (!scope?.viewId || !this.canAnchorBase("timeline_range") || !this.permission(scopeId)?.comment) throw new Error("Open this saved view with comment permission first.");
+		const selection = parseTimelineAxisContext(selected, scope.entryId, scope.viewId), range = parseTimelineRange(input);
+		if ("time_zone" in range) validateTimelineTimeZone(range.time_zone);
+		const lane = laneAnchor === undefined ? undefined : parseAnchor(laneAnchor);
+		if (lane && (lane.type !== "base" || lane.target.type !== "group" || lane.definition_id !== selection.definition_id ||
+			lane.view_id !== selection.view_id || lane.generation !== selection.generation)) throw new Error("The lane does not belong to this saved view.");
+		const binding = await this.readBaseContext(scopeId);
+		const context = await this.readTimelineAxis(scopeId);
+		if (this.closed || !this.canAnchorBase("timeline_range") || !this.permission(scopeId)?.comment ||
+			binding.definition_id !== context.definition_id || binding.generation !== context.generation || binding.registry_revision !== context.registry_revision ||
+			context.definition_id !== selection.definition_id || context.generation !== selection.generation ||
+			context.axis.id !== selection.axis.id || context.axis.revision !== selection.axis.revision ||
+			context.axis.fingerprint !== selection.axis.fingerprint) throw new Error("The timeline axis changed. Select the range again; your draft is retained.");
+		return parseAnchor({ version: 1, type: "base", definition_id: context.definition_id, view_id: context.view_id,
+			generation: context.generation, registry_revision: context.registry_revision, target: { type: "timeline_range",
+				axis_definition_id: context.axis.id, axis_definition_revision: context.axis.revision, axis: context.axis.axis, range,
+				...(lane?.type === "base" ? { lane: lane.target } : {}) } }) as BaseAnchor;
+	}
 	async baseDefinitionStatus(scopeId: string, anchor: BaseAnchor): Promise<string> {
+		if (anchor.target.type === "timeline_range") {
+			try {
+				const context = await this.readTimelineAxis(scopeId), target = anchor.target;
+				if (context.definition_id !== anchor.definition_id || context.generation !== anchor.generation || context.view_id !== anchor.view_id ||
+					context.axis.id !== target.axis_definition_id || context.axis.revision !== target.axis_definition_revision) return "The timeline axis has changed. The original range and discussion are retained.";
+				return this.statusValue === "ready" ? "Matches the latest verified timeline axis." : "Matches the last verified timeline axis. Reconnect to check for changes.";
+			} catch { return "The current timeline axis could not be verified. The original range and discussion are retained."; }
+		}
 		if (anchor.target.type !== "formula" && anchor.target.type !== "summary" && anchor.target.type !== "formula_cell" && anchor.target.type !== "group") return "";
 		try {
 			const catalog = await this.readBaseDefinitions(scopeId), target = anchor.target;

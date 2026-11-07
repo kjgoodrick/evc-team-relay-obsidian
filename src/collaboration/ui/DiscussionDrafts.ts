@@ -1,3 +1,4 @@
+import { timelineRangeLabel } from "../TimelineRange";
 import { parseLocalDiscussionAnchor, type LocalDiscussionAnchor } from "../LocalDiscussionAnchor";
 import { v4 as uuid } from "uuid";
 import { BASE_TARGET_KINDS, protocolJson } from "../DiscussionProtocol";
@@ -116,7 +117,7 @@ export class DiscussionDrafts {
 			} else if (anchor.type === "image") { prefix = "Image " + (anchor.geometry.type === "whole" ? "discussion" : anchor.geometry.type); label = anchor.occurrence.context.quote.slice(0, 80); }
 			else if (anchor.type === "image_file") { prefix = "Image file"; label = anchor.geometry.type === "whole" ? "Whole image" : anchor.geometry.type === "pin" ? "Pin" : "Region"; }
 			else if (anchor.type === "base_group_pending") { prefix = "Group"; label = this.targetLabel?.(anchor) ?? anchor.property.name + " (verification pending)"; }
-			else if (anchor.type === "base") { prefix = "Saved view"; label = this.targetLabel?.(anchor) ?? (anchor.target.type === "view" ? "Entire view" : anchor.target.type === "item" ? "Record" : anchor.target.property.name); }
+			else if (anchor.type === "base") { prefix = "Saved view"; label = this.targetLabel?.(anchor) ?? (anchor.target.type === "view" ? "Entire view" : anchor.target.type === "item" ? "Record" : anchor.target.type === "timeline_range" ? timelineRangeLabel(anchor.target.range) : anchor.target.property.name); }
 			} catch { /* Keep damaged drafts discoverable. */ }
 			options.push([draft.id, prefix + ": " + label]);
 		}

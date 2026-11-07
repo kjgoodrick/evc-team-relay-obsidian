@@ -1,4 +1,5 @@
 /** Renderer-independent, view-scoped targets. This module never uses DOM positions. */
+import { parseTimelineRange, timelineRangeKey, type TimelineRange } from "../TimelineRange";
 export interface BaseViewIdentity { baseId: string; viewId: string }
 export interface PropertyIdentity { source: "note" | "file" | "formula"; id: string }
 export type GroupValue =
@@ -24,6 +25,8 @@ export type BaseTarget = BaseViewIdentity & (
 	| { type: "timeline-milestone"; milestoneId: string; recordId?: string }
 	| { type: "timeline-range"; start: TimelinePoint; end: TimelinePoint;
 		startInclusive: boolean; endInclusive: boolean; timeZone: string; lane?: GroupIdentity }
+	| { type: "timeline-range"; range: TimelineRange; axisDefinitionId: string;
+		axisDefinitionRevision: number; lane?: GroupIdentity }
 );
 
 function id(value: string): string {
@@ -98,6 +101,11 @@ export function baseTargetKey(target: BaseTarget): string {
 		case "timeline-milestone":
 			key = ["milestone", id(target.milestoneId), target.recordId ? id(target.recordId) : null]; break;
 		case "timeline-range": {
+			if ("range" in target) {
+				if (!Number.isSafeInteger(target.axisDefinitionRevision) || target.axisDefinitionRevision < 1) throw new Error("Invalid timeline axis revision");
+				key = ["range-v1", id(target.axisDefinitionId), target.axisDefinitionRevision, timelineRangeKey(parseTimelineRange(target.range)), target.lane ? groupKey(target.lane) : null];
+				break;
+			}
 			if (target.start.type !== target.end.type || typeof target.startInclusive !== "boolean" ||
 				typeof target.endInclusive !== "boolean") throw new Error("Invalid timeline interval");
 			const start = pointKey(target.start), end = pointKey(target.end);

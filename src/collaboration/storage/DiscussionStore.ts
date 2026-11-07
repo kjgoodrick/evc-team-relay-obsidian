@@ -88,7 +88,9 @@ export class DiscussionStore {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
 		// Version 16 fences workers that cannot clear inbox references on access loss.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 16);
+		// Range targets require a reader that understands their axis and lane proof.
+		// Preserve all stores while fencing older workers from rewriting this data.
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 17);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {

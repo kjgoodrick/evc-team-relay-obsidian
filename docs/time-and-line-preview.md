@@ -105,3 +105,25 @@ target selection/accessibility; popouts and physical touch; resource/battery
 measurements; native authorization, offline delivery and recovery against actual
 services. Unsupported targets retain discussions in the sidebar rather than
 inventing a location or changing their identity.
+
+## Durable range protocol and session checkpoint
+
+Calendar, explicit-offset instant, historical and exact ordinal range values now
+have shared client/server codecs. The server derives saved-view axis identities
+and revisions, persists range discussions and validates optional lane witnesses.
+The client discovers/caches the axis, captures explicit intervals, labels retained
+targets, preserves drafts and uses the normal offline queue. Cache version 17
+fences older writers while retaining existing stores. The server flag
+`COLLABORATION_BASES_TIMELINE_RANGES_ENABLED` remains off by default.
+
+The actual-service fixture above now also checks lane-bound ranges for both view
+types: offline capture from verified axis context, queued delivery, accepted
+response loss, cache reopen and retained targets after relay restart. Exact
+Sequence values remain decimal strings; dense positions never become identities.
+
+This checkpoint does **not** connect the renderer's range gestures or geometry.
+Range selection, markers, reveal, precision/offset controls, new unverified offline
+lane composition and native acceptance remain. Reading an existing range must
+retain its original axis/zone/precision even when the current renderer cannot
+project it. See the server's `docs/timeline-range-preview.md` for the wire contract
+and authorization rules.

@@ -241,3 +241,47 @@ test.each([8, 9, 10, 11, 12, 13])("schema upgrade from %i preserves earlier work
 	await expect(new Promise((resolve, reject) => { const open = factory.open(name, version); open.onsuccess = () => { open.result.close(); resolve(undefined); }; open.onerror = () => reject(open.error); }))
 		.rejects.toMatchObject({ name: "VersionError" });
 });
+
+const rangeContext = () => ({ protocol_version: 1 as const, entry_id: id(3), view_id: id(4), definition_id: id(6), generation: id(7), registry_revision: 1,
+	axis: { id: id(60), kind: "axis" as const, revision: 1, fingerprint: "a".repeat(64), axis: { version: 1 as const, renderer: "sabidurian-sequence" as const,
+		start_property: { source: "note" as const, name: "order" }, end_property: null, time_zone: null } } });
+const ordinalRange = { version: 1 as const, kind: "ordinal" as const, start: "1", end: "5", start_inclusive: true, end_inclusive: false, unit: "property-value" as const };
+function rangeRemote() {
+	const transport = { ...remote(), timelineAxis: jest.fn().mockResolvedValue(rangeContext()) };
+	transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "timeline_range"], baseRecordTypes: ["markdown"] });
+	return transport;
+}
+
+test("range capture uses verified axis identity, retains offline drafts and queues after reopen", async () => {
+	const factory = new IDBFactory(), transport = rangeRemote(); let store = await DiscussionStore.open(identity, factory);
+	let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const selected = await session.readTimelineAxis(scope), captured = await session.captureTimelineRange(scope, selected, ordinalRange);
+		session.setForeground(false); await session.outbox.settled();
+		await store.saveDraft({ id: "range", scopeId: scope, revision: 1, body: "Kept", target: protocolJson(captured) });
+		await session.close(); store = await DiscussionStore.open(identity, factory);
+		for (const method of [transport.capabilities, transport.permissions, transport.baseTargetContext, transport.timelineAxis, transport.changes, transport.send]) method.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); session.setForeground(false); await session.outbox.settled();
+		expect(await session.captureTimelineRange(scope, selected, ordinalRange)).toEqual(captured);
+		await session.queue(op(scope, captured), { id: "range", revision: 1 });
+		expect(await store.getDraft("range")).toBeUndefined(); expect(await store.pending(scope)).toHaveLength(1);
+	} finally { await session.close(); }
+});
+
+test("axis changes and authoritative denials cannot be replaced by an old cached range context", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = rangeRemote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const selected = await session.readTimelineAxis(scope);
+		transport.baseTargetContext.mockImplementation(async () => ({ ...rangeContext(), registry_revision: 2 }));
+		transport.timelineAxis.mockResolvedValue({ ...rangeContext(), registry_revision: 2, axis: { ...rangeContext().axis, revision: 2 } });
+		await expect(session.captureTimelineRange(scope, selected, ordinalRange)).rejects.toThrow("axis changed");
+		transport.timelineAxis.mockRejectedValue(new DiscussionFailure("reject", "target_unavailable", 404));
+		await expect(session.readTimelineAxis(scope)).rejects.toMatchObject({ code: "target_unavailable" });
+		transport.timelineAxis.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		await expect(session.readTimelineAxis(scope)).rejects.toThrow("Connect to verify");
+	} finally { await session.close(); }
+});

@@ -4,6 +4,7 @@ import { decodeBoundedBase64, type TextAnchor } from "./anchors/text";
 import { BLOCK_KINDS, type BlockStructure } from "./anchors/blocks";
 import type { ImageAsset, ImageBasis, ImageGeometry } from "./anchors/imageGeometry";
 import { parseBaseGroupValue, type BaseGroupValue } from "./BaseGroupValue";
+import { parseTimelineRange, parseTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 
 export const isId = (value: unknown): value is string => typeof value === "string" &&
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -38,7 +39,7 @@ export type WireTextAnchor = { version: 1; type: "text"; document_id: string; ge
 export type ImageAnchor = { version: 1; type: "image"; occurrence: WireTextAnchor; asset: ImageAsset; basis: ImageBasis; geometry: ImageGeometry };
 export type ImageFileAnchor = { version: 1; type: "image_file"; generation: string; asset: Extract<ImageAsset, { kind: "managed" }>;
 	basis: ImageBasis; geometry: ImageGeometry };
-export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell", "group"] as const;
+export const BASE_TARGET_KINDS = ["view", "item", "cell", "property", "formula", "summary", "formula_cell", "group", "timeline_range"] as const;
 export type BaseTargetKind = typeof BASE_TARGET_KINDS[number];
 export const BASE_RECORD_TYPES = ["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as const;
 export type BaseRecordType = typeof BASE_RECORD_TYPES[number];
@@ -59,8 +60,12 @@ export function isBaseProperty(value: unknown): value is BaseProperty {
 		(value.source === "note" || value.source === "file") && typeof value.name === "string" && text(value.name, 256) &&
 		![...value.name].some(char => char.charCodeAt(0) < 32 || char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff);
 }
+export type TimelineAxis = { version: 1; renderer: "sabidurian-timeline" | "sabidurian-sequence";
+	start_property: BaseDefinitionProperty; end_property: BaseDefinitionProperty | null; time_zone: string | null };
+export type BaseTimelineRangeTarget = { type: "timeline_range"; axis_definition_id: string; axis_definition_revision: number;
+	axis: TimelineAxis; range: TimelineRange; lane?: Extract<BaseDefinedTarget, { type: "group" }> };
 export type BaseTarget = { type: "view" } | { type: "item"; record_id: string; record_generation: string } |
-	{ type: "cell"; record_id: string; record_generation: string; property: BaseProperty } | { type: "property"; property: BaseProperty } | BaseDefinedTarget;
+	{ type: "cell"; record_id: string; record_generation: string; property: BaseProperty } | { type: "property"; property: BaseProperty } | BaseDefinedTarget | BaseTimelineRangeTarget;
 export type BaseAnchor = { version: 1; type: "base"; definition_id: string; view_id: string; generation: string;
 	registry_revision: number; target: BaseTarget };
 export type BaseTargetContext = { protocol_version: 1; entry_id: string; definition_id: string; view_id: string;
@@ -181,6 +186,16 @@ export function parseAnchor(value: unknown): DiscussionAnchor {
 		selected_length: value.selected_length, context: { quote: context.quote as string, prefix: context.prefix as string,
 			suffix: context.suffix as string, truncated: context.truncated as boolean }, ...(structure ? { structure } : {}) };
 }
+export function parseTimelineAxis(value: unknown): TimelineAxis {
+	requireValue(isRecord(value) && value.version === 1 && (value.renderer === "sabidurian-timeline" || value.renderer === "sabidurian-sequence") &&
+		Object.keys(value).length === 5 && Object.keys(value).every(key => ["version", "renderer", "start_property", "end_property", "time_zone"].includes(key)) &&
+		isBaseDefinitionProperty(value.start_property) && (value.end_property === null || isBaseDefinitionProperty(value.end_property)));
+	const time_zone = value.time_zone === null ? null : parseTimelineTimeZone(value.time_zone);
+	requireValue(value.renderer !== "sabidurian-sequence" || time_zone === null);
+	return { version: 1, renderer: value.renderer, start_property: { ...value.start_property },
+		end_property: value.end_property === null ? null : { ...value.end_property }, time_zone };
+}
+
 function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 	requireValue(isId(value.definition_id) && isId(value.view_id) && isId(value.generation) && isRevision(value.registry_revision));
 	requireValue(Object.keys(value).every(key => ["version", "type", "definition_id", "view_id", "generation", "registry_revision", "target", "entry_id"].includes(key)));
@@ -190,6 +205,19 @@ function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {
 	if (target.type === "view") {
 		requireValue(Object.keys(target).length === 1);
 		parsed = { type: "view" };
+	} else if (target.type === "timeline_range") {
+		requireValue(isId(target.axis_definition_id) && isRevision(target.axis_definition_revision) && target.axis_definition_revision <= value.registry_revision &&
+			Object.keys(target).every(key => ["type", "axis_definition_id", "axis_definition_revision", "axis", "range", "lane"].includes(key)));
+		const axis = parseTimelineAxis(target.axis), range = parseTimelineRange(target.range);
+		requireValue((axis.renderer === "sabidurian-sequence") === (range.kind === "ordinal"));
+		requireValue(!("time_zone" in range) || axis.time_zone === null || axis.time_zone === range.time_zone);
+		let lane: BaseTimelineRangeTarget["lane"];
+		if (target.lane != null) {
+			requireValue(isRecord(target.lane) && target.lane.type === "group");
+			lane = parseBaseAnchor({ ...value, target: target.lane }).target as typeof lane;
+		}
+		parsed = { type: "timeline_range", axis_definition_id: target.axis_definition_id, axis_definition_revision: target.axis_definition_revision,
+			axis, range, ...(lane ? { lane } : {}) };
 	} else if (target.type === "formula" || target.type === "summary" || target.type === "formula_cell" || target.type === "group") {
 		requireValue(isId(target.definition_id) && isRevision(target.definition_revision) && target.definition_revision <= value.registry_revision &&
 			isBaseDefinitionProperty(target.property) && Object.keys(target).every(key =>

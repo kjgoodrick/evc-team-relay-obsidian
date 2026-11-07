@@ -1,3 +1,4 @@
+import { timelineRangeLabel } from "../TimelineRange";
 import { parseLocalDiscussionAnchor, type LocalDiscussionAnchor } from "../LocalDiscussionAnchor";
 import { v4 as uuid } from "uuid";
 import { sourceAnchor, protocolJson, type MessageBody } from "../DiscussionProtocol";
@@ -165,7 +166,7 @@ export class CommentComposer {
 		this.renderPictures();
 		const label = (this.target && this.targetLabel?.(this.target)) ?? (this.target?.type === "base_group_pending" ? "Group: " + this.target.property.name + " (verification pending)" : this.target?.type === "image_file" ? "Image file: " + (this.target.geometry.type === "whole" ? "whole image" : this.target.geometry.type) : this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
 			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : this.target?.type === "base" ?
-			(this.target.target.type === "view" ? "Entire saved view" : this.target.target.type === "item" ? "Record in this view" :
+			(this.target.target.type === "view" ? "Entire saved view" : this.target.target.type === "item" ? "Record in this view" : this.target.target.type === "timeline_range" ? timelineRangeLabel(this.target.target.range) :
 				(this.target.target.type === "formula_cell" ? "Formula cell: " : this.target.target.type === "cell" ? "Cell: " : this.target.target.type === "formula" ? "Formula definition: " : this.target.target.type === "summary" ? "Summary: " : this.target.target.type === "group" ? "Group: " : "Property header: ") + this.target.target.property.name) : "");
 		if (this.targetEl.dataset.target !== label) {
 			this.targetEl.dataset.target = label; this.targetEl.empty();
