@@ -32,6 +32,9 @@ run("real Bases discussions preserve offline targets, saved-view isolation, exac
 	};
 	const snapshot = await publish("Table"), [view, cards] = snapshot.views.map(v => v.id!);
 	const captured = await transport.baseTargetContext(f.discussionEntry, view, f.record);
+	const missingRecord = randomUUID();
+	expect((await transport.baseRecordContexts(baseDiscussionScope(f.discussionEntry, view), view, [f.record, missingRecord])).records).toEqual(
+		[{ record_id: f.record, record_generation: captured.record_generation! }, { record_id: missingRecord, record_generation: null }].sort((a, b) => a.record_id.localeCompare(b.record_id)));
 	expect((await transport.capabilities()).baseTargets).toEqual(["view", "item", "cell", "property", "formula", "summary", "formula_cell", "timeline_range", "timeline_marker"]);
 	expect(await transport.permissions(f.discussionEntry)).toEqual({ read: true, comment: true, edit: false, moderate: false });
 	const anchor: BaseAnchor = { version: 1, type: "base", definition_id: captured.definition_id, view_id: view,
@@ -70,6 +73,7 @@ run("real Bases discussions preserve offline targets, saved-view isolation, exac
 		const original = await (await fetch(rulesUrl, { headers: auth })).json();
 		const denied = [...original, { user_id: f.reviewer, path: "Record.md", recursive: false, permission: "none" }];
 		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(denied) })).status).toBe(200);
+		expect((await transport.baseRecordContexts(baseDiscussionScope(f.discussionEntry, view), view, [f.record])).records).toEqual([{ record_id: f.record, record_generation: null }]);
 		await expect(transport.send(first)).rejects.toMatchObject({ status: 404, code: "target_unavailable" });
 		await expect(transport.thread(f.discussionEntry, accepted.thread_id)).rejects.toMatchObject({ status: 404 });
 		await expect(transport.changes(f.discussionEntry, cursor, view)).rejects.toMatchObject({ code: "snapshot_required" });
@@ -124,6 +128,8 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		const cell = await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.imageRecord, property: { source: "file", name: "size" } });
 		const wholeView = await session.captureBaseTarget(cardsScope, { type: "view" });
 		const navigationProof = await session.readBaseContext(tableScope, f.imageRecord);
+		const recordProof = await session.readBaseRecordContexts(tableScope, [f.imageRecord]);
+		expect(recordProof.records).toEqual([{ record_id: f.imageRecord, record_generation: navigationProof.record_generation }]);
 		session.setForeground(false); await session.outbox.settled();
 		for (const [scopeId, anchor] of [[tableScope, cell], [cardsScope, wholeView]] as const) {
 			await store.saveDraft({ id: "selection:" + scopeId + ":saved", scopeId, revision: 1, body: "Keep this draft", target: protocolJson(anchor) });
@@ -134,6 +140,7 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		await session.start(); watch(); await session.refresh();
 		expect(session.status).toBe("offline");
 		expect(await session.readBaseContext(tableScope, f.imageRecord)).toEqual(navigationProof);
+		expect(await session.readBaseRecordContexts(tableScope, [f.imageRecord])).toEqual(recordProof);
 		expect(session.canAnchorBaseRecord("image")).toBe(true);
 		expect(await session.captureBaseTarget(tableScope, { type: "cell", recordId: f.imageRecord, property: { source: "file", name: "size" } })).toEqual(cell);
 		expect((await store.selectionDrafts(tableScope)).drafts.map(d => d.target)).toEqual([cell]);
@@ -156,6 +163,7 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		expect((await session.local(cardsScope)).threads.map(t => t.id)).toEqual([second.payload.thread_id]);
 		await expect(session.captureBaseTarget(tableScope, { type: "item", recordId: f.imageRecord })).rejects.toMatchObject({ status: 404 });
 		await expect(session.readBaseContext(tableScope, f.imageRecord)).rejects.toMatchObject({ status: 404 });
+		expect((await session.readBaseRecordContexts(tableScope, [f.imageRecord])).records).toEqual([{ record_id: f.imageRecord, record_generation: null }]);
 		expect((await store.selectionDrafts(tableScope)).drafts).toHaveLength(1);
 		expect((await fetch(rulesUrl, { method: "PUT", headers: auth, body: JSON.stringify(original) })).status).toBe(200);
 		changedRules = false; await session.refresh();
@@ -197,6 +205,7 @@ run("real saved-view sessions retain separate offline work and refresh authorize
 		await expect(transport.send(first)).rejects.toMatchObject({ status: 404 });
 		await expect(transport.send(operation(tableScope, cell))).rejects.toMatchObject({ code: "anchor_generation_mismatch" });
 		const fresh = await transport.baseTargetContext(tableScope, view, f.imageRecord);
+		expect((await session.readBaseRecordContexts(tableScope, [f.imageRecord])).records).toEqual([{ record_id: f.imageRecord, record_generation: fresh.record_generation }]);
 		expect(fresh.record_generation).not.toBe(cell.target.type === "cell" ? cell.target.record_generation : undefined);
 		await batch(conversion);
 		expect((await transport.baseTargetContext(tableScope, view, f.imageRecord)).record_generation).toBe(fresh.record_generation);

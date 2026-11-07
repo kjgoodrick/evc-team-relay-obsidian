@@ -1,4 +1,5 @@
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
+import { baseRecordIds, parseBaseRecordContexts, type BaseRecordContexts } from "./BaseRecordContexts";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { TimelineMarkerManagement } from "./TimelineMarkerManagement";
 import { parseTimelineMarkerVersion, type TimelineMarkerVersion } from "./DiscussionProtocol";
@@ -86,6 +87,7 @@ export class DiscussionSession {
 	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
 	private verifiedTargetCatalogs = new WeakMap<object, { epoch: number; at: number }>();
+	private baseRecordFlights = new Map<string, Promise<BaseRecordContexts>>();
 	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
 	private timelineAxisFlights = new Map<string, Promise<TimelineAxisContext>>();
 	private timelineMarkerFlights = new Map<string, Promise<TimelineMarkerCatalog>>();
@@ -775,6 +777,44 @@ export class DiscussionSession {
 	}
 	/** Complete, account-scoped catalogue. Pagination commits as one proof; stale
 	 * successes/denials and resets cannot overwrite another window's newer proof. */
+	/** One bounded identity batch per loaded page. Only the latest batch per view
+	 * is retained; unavailable identities are never cached as deletion evidence. */
+	readBaseRecordContexts(scopeId: string, recordIds: readonly string[]): Promise<BaseRecordContexts> {
+		const ids = baseRecordIds(recordIds), flightKey = JSON.stringify([scopeId, ids]);
+		const existing = this.baseRecordFlights.get(flightKey); if (existing) return existing;
+		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId), epoch = this.authenticationEpoch;
+		const current = () => !this.closed && epoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue) &&
+			!!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const key = "baseRecords:" + scopeId;
+		const flight = this.trackLocal((async () => {
+			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
+			const parse = (value: unknown) => parseBaseRecordContexts(value, scope.entryId, scope.viewId!, ids);
+			try {
+				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				if (!current()) throw new Error("Record access changed during verification.");
+				let records: BaseRecordContexts;
+				try { records = await this.transport.baseRecordContexts(scopeId, scope.viewId, ids); }
+				catch (error) {
+					if (current() && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null, current);
+					throw error;
+				}
+				if (!current() || records.generation !== generation || records.registry_revision < this.baseRegistryRevision(scopeId)) throw new Error("Saved view changed during verification.");
+				let previous: BaseTargetContext | undefined; try { previous = parseBaseTargetContext(proof.previous, scope.entryId, scope.viewId); } catch { /* No prior identity proof. */ }
+				if (previous?.generation === generation && previous.registry_revision > records.registry_revision) throw new Error("Record verification is stale.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(records), current) || !current()) throw new Error("Record verification changed. Try again.");
+				this.observeBaseRevision(scopeId, records.generation, records.registry_revision);
+				this.verifiedTargetCatalogs.set(records, { epoch, at: Date.now() }); return records;
+			} catch (error) {
+				if (epoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
+				const records = parse(await this.store.preference(key));
+				if (!current() || records.generation !== generation || records.registry_revision < this.baseRegistryRevision(scopeId)) throw new Error("Reconnect to verify these record identities.");
+				return records;
+			}
+		})()).finally(() => { if (this.baseRecordFlights.get(flightKey) === flight) this.baseRecordFlights.delete(flightKey); });
+		this.baseRecordFlights.set(flightKey, flight); return flight;
+	}
 	readBaseDefinitions(scopeId: string): Promise<BaseDefinitionCatalog> {
 		const existing = this.baseDefinitionFlights.get(scopeId); if (existing) return existing;
 		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);

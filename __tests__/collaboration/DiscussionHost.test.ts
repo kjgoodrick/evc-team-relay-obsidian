@@ -825,14 +825,34 @@ test("group status combines one page catalog with current native evidence and re
 		target: { type: "group", definition_id: id(8), definition_revision: 1, property, value: { type: "text", value: "Ready" }, group_id: id(9), witness_id: id(10) } };
 	const threads = [11, 12].map(n => ({ id: id(n), anchor }) as AnchoredThread);
 	let notify!: () => void; const stop = jest.fn(), listener = jest.fn();
-	const bases = { presentGroups: jest.fn(() => new Set([id(11)])), watchTargetStatus: jest.fn((_session, _scope, callback) => { notify = callback; return stop; }) };
+	const bases = { presentTargets: jest.fn(() => new Set([id(11)])), watchTargetStatus: jest.fn((_session, _scope, callback) => { notify = callback; return stop; }) };
 	Object.assign(f.host, { baseComments: bases });
 	try {
 		const release = f.host.watchTargetStatus(session, scope, listener);
 		expect(bases.watchTargetStatus).toHaveBeenCalledWith(session, scope, expect.any(Function));
 		const result = await f.host.targetStatuses(session, scope, threads, () => true);
 		expect(result.get(id(11))?.state).toBe("attached"); expect(result.get(id(12))?.state).toBe("unknown");
-		expect(session.readBaseDefinitions).toHaveBeenCalledTimes(1); expect(bases.presentGroups).toHaveBeenCalledTimes(1);
+		expect(session.readBaseDefinitions).toHaveBeenCalledTimes(1); expect(bases.presentTargets).toHaveBeenCalledTimes(1);
 		notify(); expect(listener).toHaveBeenCalledTimes(1); release(); notify(); expect(listener).toHaveBeenCalledTimes(1); expect(stop).toHaveBeenCalledTimes(1);
+	} finally { f.close(); }
+});
+
+test("record status batches repeated cells once and rejects an older record batch after a newer view revision", async () => {
+	const f = fixture(); Object.assign(f.plugin.app.workspace, { getLeavesOfType: () => [] });
+	const scope = baseDiscussionScope(id(3), id(4)), generation = id(6);
+	const definitions = { protocol_version: 1, entry_id: id(3), view_id: id(4), definition_id: id(5), generation, registry_revision: 2, computed_values: false, targets: [] };
+	const records = { ...definitions, records: [{ record_id: id(8), record_generation: id(9) }] };
+	let revision = 2;
+	const session = { status: "ready", permission: () => ({ read: true }), knownDocumentGeneration: () => generation, baseRegistryRevision: () => revision,
+		readBaseDefinitions: jest.fn().mockResolvedValue(definitions), readBaseRecordContexts: jest.fn().mockResolvedValue(records), verifiedTargetCatalog: () => true } as unknown as DiscussionSession;
+	const anchor: BaseAnchor = { version: 1, type: "base", generation, view_id: id(4), definition_id: id(5), registry_revision: 2,
+		target: { type: "cell", record_id: id(8), record_generation: id(9), property: { source: "note", name: "status" } } };
+	const threads = [11, 12].map(n => ({ id: id(n), anchor }) as AnchoredThread);
+	Object.assign(f.host, { baseComments: { presentTargets: () => new Set([id(11)]) } });
+	try {
+		const result = await f.host.targetStatuses(session, scope, threads, () => true);
+		expect(result.get(id(11))?.state).toBe("attached"); expect(result.get(id(12))?.state).toBe("unknown");
+		expect(session.readBaseRecordContexts).toHaveBeenCalledTimes(1); expect(session.readBaseRecordContexts).toHaveBeenCalledWith(scope, [id(8)]);
+		revision = 3; expect((await f.host.targetStatuses(session, scope, threads, () => true)).get(id(11))?.state).toBe("waiting");
 	} finally { f.close(); }
 });

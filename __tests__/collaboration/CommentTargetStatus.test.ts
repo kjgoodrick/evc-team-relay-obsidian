@@ -75,3 +75,25 @@ test("positive local group presence supplements matching definitions but never o
 	expect(baseTargetStatus(anchor, { ...evidence, definitions: { ...definitions, targets: [{ ...definitions.targets[0], revision: 3 }] } }).state).toBe("changed");
 	expect(baseTargetStatus(anchor, { ...evidence, definitions: { ...definitions, targets: [] } }).state).toBe("unanchored");
 });
+
+test("record identity and exact native cell presence remain separate from visibility and definition checks", () => {
+	const record = { record_id: id(8), record_generation: id(9) };
+	const records = { ...base, protocol_version: 1 as const, entry_id: entryId, records: [record] };
+	const evidence = { generation, definitions: catalog, records, online: true, recordsOnline: true, targetPresent: true };
+	const item: BaseAnchor = { ...base, target: { type: "item", ...record } };
+	const cell: BaseAnchor = { ...base, target: { type: "cell", ...record, property: { source: "note", name: "Status" } } };
+	expect(baseTargetStatus(item, { ...evidence, targetPresent: false }).state).toBe("attached");
+	expect(baseTargetStatus(item, { ...evidence, recordsOnline: false }).message).toContain("last verified");
+	expect(baseTargetStatus(cell, evidence).state).toBe("attached");
+	expect(baseTargetStatus(cell, { ...evidence, targetPresent: false }).state).toBe("unknown");
+	expect(baseTargetStatus(cell, { ...evidence, records: undefined }).state).toBe("unknown");
+	expect(baseTargetStatus(cell, { ...evidence, records: { ...records, records: [{ ...record, record_generation: null }] } }).state).toBe("unknown");
+	expect(baseTargetStatus(cell, { ...evidence, records: { ...records, records: [{ ...record, record_generation: id(99) }] } }).state).toBe("changed");
+	const formula: BaseAnchor = { ...base, target: { type: "formula_cell", ...record, definition_id: id(5), definition_revision: 2, property: { source: "formula", name: "Score" } } };
+	expect(baseTargetStatus(formula, evidence).state).toBe("attached");
+	expect(baseTargetStatus(formula, { ...evidence, definitions: { ...catalog, registry_revision: 3 } }).state).toBe("waiting");
+	expect(baseTargetStatus(formula, { ...evidence, definitions: { ...catalog, targets: [] } }).state).toBe("unanchored");
+	const header: BaseAnchor = { ...base, target: { type: "property", property: { source: "note", name: "Status" } } };
+	expect(baseTargetStatus(header, evidence).state).toBe("attached");
+	expect(baseTargetStatus(header, { ...evidence, targetPresent: false }).state).toBe("unknown");
+});

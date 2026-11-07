@@ -53,15 +53,28 @@ export function imageFileTargetStatus(anchor: Extract<DiscussionAnchor, { type: 
 	return imageAssetChanged(anchor.asset, asset) ? status("changed", "The recorded image file version changed. Review its target.") : status("attached", "The image file matches its recorded version.");
 }
 
-export interface BaseTargetEvidence { generation?: string; definitions?: BaseDefinitionCatalog; axis?: TimelineAxisContext; markers?: TimelineMarkerCatalog; online: boolean; groupPresent?: boolean }
+export interface BaseTargetEvidence { generation?: string; definitions?: BaseDefinitionCatalog; axis?: TimelineAxisContext; markers?: TimelineMarkerCatalog;
+	records?: import("./BaseRecordContexts").BaseRecordContexts; recordsOnline?: boolean; online: boolean; groupPresent?: boolean; targetPresent?: boolean }
 export function baseTargetStatus(anchor: BaseAnchor, evidence: BaseTargetEvidence): CommentTargetStatus {
 	if (!evidence.generation) return status("waiting", "Waiting for this saved view's synchronized identity.");
 	if (anchor.generation !== evidence.generation) return status("changed", "The saved-view identity changed. The original target is retained.");
 	const target = anchor.target;
-	const context = target.type === "timeline_marker" ? evidence.markers : target.type === "timeline_range" ? evidence.axis : evidence.definitions;
+	const context = target.type === "timeline_marker" ? evidence.markers : target.type === "timeline_range" ? evidence.axis :
+		target.type === "item" || target.type === "cell" ? evidence.records ?? evidence.definitions : evidence.definitions;
 	if (!context) return uncheckedTarget("This target's current identity or definition has not been verified. It may also be hidden by the view's filters or layout.");
 	if (context.generation !== anchor.generation || context.definition_id !== anchor.definition_id || context.view_id !== anchor.view_id) return status("changed", "This discussion belongs to an earlier saved-view identity.");
 	if (context.registry_revision < anchor.registry_revision) return status("waiting", "Waiting for the saved-view revision used by this target.");
+	const recordStatus = () => {
+		if (!("record_id" in target)) return;
+		const proof = evidence.records;
+		if (!proof || proof.definition_id !== anchor.definition_id || proof.view_id !== anchor.view_id || proof.generation !== anchor.generation) {
+			return uncheckedTarget("This record's identity has not been verified for the saved view.");
+		}
+		if (proof.registry_revision < Math.max(anchor.registry_revision, context.registry_revision)) return status("waiting", "Waiting for record identities from the current saved-view revision.");
+		const record = proof.records.find(record => record.record_id === target.record_id);
+		if (!record?.record_generation) return uncheckedTarget("The record's current identity is unavailable. This does not establish that it was deleted.");
+		if (record.record_generation !== target.record_generation) return status("changed", "The record was replaced or rebuilt after capture. The original target is retained.");
+	};
 	if (target.type === "timeline_marker") {
 		const marker = evidence.markers?.markers.find(item => item.id === target.marker_id);
 		if (!marker) return evidence.online ? status("unanchored", "The marker is absent from the latest verified catalog.") : uncheckedTarget("The marker is absent from the cached catalog. Reconnect to verify it.");
@@ -80,8 +93,18 @@ export function baseTargetStatus(anchor: BaseAnchor, evidence: BaseTargetEvidenc
 		if (!found) return evidence.online ? status("unanchored", "This definition is absent from the latest verified saved view.") : uncheckedTarget("This definition is absent from the cached view. Reconnect to verify it.");
 		if (found.revision !== target.definition_revision) return status("changed", "The target definition changed after this discussion was created.");
 		if (target.type === "group" && evidence.groupPresent) return status("attached", "The saved definition matches and the captured group is present in the current local saved view.");
+		if (target.type === "formula_cell") {
+			const issue = recordStatus(); if (issue) return issue;
+			if (evidence.targetPresent) return status("attached", "The formula definition and verified record identity match the cell in the current local saved view.");
+		}
 		if (target.type === "formula_cell" || target.type === "group") return uncheckedTarget("The saved definition matches. Its record or group still needs verification; view filters alone do not detach it.");
 		return status("attached", evidence.online ? "Matches the latest verified definition." : "Matches the last verified definition. Reconnect to check for changes.");
 	}
+	if (target.type === "item" || target.type === "cell") {
+		const issue = recordStatus(); if (issue) return issue;
+		if (target.type === "item") return status("attached", evidence.recordsOnline ? "The record identity matches this saved-view target, including when its row is hidden." : "Matches the last verified record identity. Reconnect to check for changes.");
+		if (evidence.targetPresent) return status("attached", "The verified record identity matches the cell in the current local saved view.");
+	}
+	if (target.type === "property" && evidence.targetPresent) return status("attached", "The property header is present in the current local saved view.");
 	return target.type === "view" ? status("attached", "Attached to this saved view.") : uncheckedTarget("This target retains its saved-view identity. A hidden record or property is not evidence of a detached discussion.");
 }

@@ -67,10 +67,10 @@ export class BaseComments extends Component {
 		const watched = { session, entryId, listener }; this.targetListeners.add(watched);
 		return () => this.targetListeners.delete(watched);
 	}
-	presentGroups(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Set<string> {
+	presentTargets(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Set<string> {
 		const found = new Set<string>();
 		if (!this.stopped && threads.length <= 100) for (const pane of this.panes.values()) {
-			for (const id of pane.presentGroups(session, entryId, threads)) found.add(id);
+			for (const id of pane.presentTargets(session, entryId, threads)) found.add(id);
 		}
 		return found;
 	}
@@ -227,26 +227,45 @@ export class BaseCommentPane {
 		this.groupTargets.clear(); this.rangeAxis = undefined; this.sharedMarkers = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
 		this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true;
-		this.publishGroupPresence();
+		this.publishTargetPresence();
 	}
 	/** Positive local evidence only. Absence can mean filtering or virtualization.
 	 * One native handle snapshot serves a page; no new captures or server reads. */
-	presentGroups(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Set<string> {
+	presentTargets(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Set<string> {
 		const result = new Set<string>(), context = this.context;
-		if (!this.visible() || !context?.current() || context.session !== session || context.entryId !== entryId || !context.groups) return result;
+		if (!this.visible() || !context?.current() || context.session !== session || context.entryId !== entryId) return result;
 		const cached = new Map(this.threads.map(thread => [thread.id, thread.anchor]));
 		const candidates = threads.filter(thread => thread.anchor?.type === "base" &&
-			(thread.anchor.target.type === "group" || thread.anchor.target.type === "timeline_range" && thread.anchor.target.lane) &&
+			(["item", "cell", "property", "formula_cell", "group"].includes(thread.anchor.target.type) || thread.anchor.target.type === "timeline_range" && thread.anchor.target.lane) &&
 			JSON.stringify(cached.get(thread.id)) === JSON.stringify(thread.anchor));
 		if (!candidates.length) return result;
 		const counts = new Map<string, number>();
-		for (const handle of context.groups.handles()) {
+		const hasGroups = candidates.some(thread => thread.anchor?.type === "base" && ["group", "timeline_range"].includes(thread.anchor.target.type));
+		for (const handle of hasGroups ? context.groups?.handles() ?? [] : []) {
 			if (!handle.current()) continue;
 			const key = nativeGroupTargetKey(handle.target); counts.set(key, (counts.get(key) ?? 0) + 1);
+		}
+		// Use file object identity, not paths or per-handle inventory scans. A
+		// recycled renderer object must not match a replacement file at its path.
+		const files = new Map<object, number>(), nativeCounts = new Map<string, number>();
+		const keyFor = (target: NativeBaseTarget) => {
+			let file: number | null = null;
+			if ("file" in target) { if (!files.has(target.file)) files.set(target.file, files.size); file = files.get(target.file)!; }
+			return JSON.stringify([target.type, file, "property" in target ? target.property.source : null, "property" in target ? target.property.name : null]);
+		};
+		if (candidates.some(thread => thread.anchor?.type === "base" && ["item", "cell", "property", "formula_cell"].includes(thread.anchor.target.type))) {
+			for (const handle of context.surface.handles()) if (handle.current()) {
+				const key = keyFor(handle.target); nativeCounts.set(key, (nativeCounts.get(key) ?? 0) + 1);
+			}
 		}
 		for (const thread of candidates) {
 			const anchor = thread.anchor;
 			if (anchor?.type !== "base") continue;
+			if (["item", "cell", "property", "formula_cell"].includes(anchor.target.type)) {
+				const target = context.native(anchor);
+				if (target && nativeCounts.get(keyFor(target)) === 1) result.add(thread.id);
+				continue;
+			}
 			if (anchor.target.type === "timeline_range" && (!this.rangeAxis || !timelineTargetMatchesAxis(context, anchor, this.rangeAxis))) continue;
 			const target = anchor.target.type === "group" ? this.groupTargets.get(thread.id) :
 				anchor.target.type === "timeline_range" && anchor.target.lane ? this.rangeLanes.get(thread.id) : undefined;
@@ -254,9 +273,9 @@ export class BaseCommentPane {
 		}
 		return context.current() ? result : new Set();
 	}
-	private publishGroupPresence(): void {
+	private publishTargetPresence(): void {
 		const context = this.context, previous = this.presence;
-		const present = context ? this.presentGroups(context.session, context.entryId, this.threads) : new Set<string>();
+		const present = context ? this.presentTargets(context.session, context.entryId, this.threads) : new Set<string>();
 		const next = context && present.size ? { session: context.session, entryId: context.entryId, signature: JSON.stringify(this.threads
 			.filter(thread => present.has(thread.id)).map(thread => [thread.id, thread.anchor]).sort(([a], [b]) => String(a).localeCompare(String(b)))) } : undefined;
 		this.presence = next;
@@ -318,7 +337,7 @@ export class BaseCommentPane {
 				this.threads = threads; this.groupTargets = groupTargets; this.rangeAxis = rangeAxis; this.sharedMarkers = sharedMarkers; this.rangeLanes = rangeLanes; this.dataDirty = false;
 			}
 			if (!context.current()) { this.detach(); return; }
-			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers(); this.publishGroupPresence();
+			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers(); this.publishTargetPresence();
 		} catch { this.detach(); }
 	}
 	async ready(): Promise<BaseCommentContext | undefined> {

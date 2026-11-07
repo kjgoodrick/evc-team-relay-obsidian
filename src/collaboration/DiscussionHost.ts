@@ -947,13 +947,15 @@ export class DiscussionHost extends Component {
 			session.permission(entryId)?.read === true && session.knownDocumentGeneration(entryId) === generation;
 		if (!available() || threads.length > 100) return result;
 		const anchors = threads.map(thread => thread.anchor), base = anchors.filter((anchor): anchor is BaseAnchor => anchor?.type === "base");
-		const [definitions, axis, markers] = await Promise.all([
+		const recordIds = [...new Set(base.flatMap(anchor => "record_id" in anchor.target ? [anchor.target.record_id] : []))];
+		const [definitions, axis, markers, records] = await Promise.all([
 			base.some(anchor => anchor.target.type !== "timeline_marker" && anchor.target.type !== "timeline_range") ? session.readBaseDefinitions(entryId).catch(() => undefined) : undefined,
 			base.some(anchor => anchor.target.type === "timeline_range") ? session.readTimelineAxis(entryId).catch(() => undefined) : undefined,
 			base.some(anchor => anchor.target.type === "timeline_marker") ? session.readTimelineMarkers(entryId).catch(() => undefined) : undefined,
+			recordIds.length ? session.readBaseRecordContexts(entryId, recordIds).catch(() => undefined) : undefined,
 		]);
 		if (!available()) return result;
-		const presentGroups = base.length ? this.baseComments?.presentGroups(session, entryId, threads) : undefined;
+		const presentTargets = base.length ? this.baseComments?.presentTargets(session, entryId, threads) : undefined;
 		const context = this.targetNoteContext(session, entryId);
 		const notes = noteTargetStatuses(anchors.map(anchor => anchor ?? { version: 1, type: "note" }), context ? {
 			text: context.text, entryId, generation: context.generation, asset: destination => {
@@ -967,9 +969,11 @@ export class DiscussionHost extends Component {
 			if (!anchor) status = uncheckedTarget("The saved target has not been loaded.");
 			else if (anchor.type === "note" && fileMatches) status = { state: "attached", message: "Attached to this note." };
 			else if (anchor.type === "base") {
-				const catalog = anchor.target.type === "timeline_marker" ? markers : anchor.target.type === "timeline_range" ? axis : definitions;
+				const catalog = anchor.target.type === "timeline_marker" ? markers : anchor.target.type === "timeline_range" ? axis :
+					anchor.target.type === "item" || anchor.target.type === "cell" ? records ?? definitions : definitions;
 				status = catalog && catalog.registry_revision < session.baseRegistryRevision(entryId) ? { state: "waiting", message: "Waiting for a newer saved-view revision before checking this target." } :
-					baseTargetStatus(anchor, { generation, definitions, axis, markers, online: session.verifiedTargetCatalog(catalog), groupPresent: presentGroups?.has(threads[index].id) });
+					baseTargetStatus(anchor, { generation, definitions, axis, markers, records, recordsOnline: session.verifiedTargetCatalog(records),
+						online: session.verifiedTargetCatalog(catalog), groupPresent: presentTargets?.has(threads[index].id), targetPresent: presentTargets?.has(threads[index].id) });
 			} else if (anchor.type === "image_file") {
 				let asset;
 				try { if (file && fileMatches) asset = this.images?.describeTargetAsset(file); } catch { /* Missing image bytes/access are not evidence of deletion. */ }

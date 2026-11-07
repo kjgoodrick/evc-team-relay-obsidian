@@ -55,6 +55,42 @@ test("definition codecs retain typed lineage and reject evaluated data, malforme
 	expect(() => parseBaseDefinitionPage({ ...catalog(), has_more: true, next_after: id(100) }, id(3), id(4))).toThrow();
 });
 
+test("record batches deduplicate in-flight reads, distinguish offline proof, and retain only the last page", async () => {
+	const factory = new IDBFactory(), s = await open(factory); let next: Awaited<ReturnType<typeof open>> | undefined;
+	const { targets: _targets, computed_values: _computed, ...context } = catalog();
+	const value = { ...context, records: [{ record_id: id(20), record_generation: id(21) }] };
+	const read = jest.fn().mockResolvedValue(value); Object.assign(s.transport, { baseRecordContexts: read });
+	try {
+		s.session.setForeground(true); await s.session.refresh(); s.session.outbox.stop(); await s.session.outbox.settled();
+		const [a, b] = await Promise.all([s.session.readBaseRecordContexts(scope, [id(20)]), s.session.readBaseRecordContexts(scope, [id(20)])]);
+		expect(a).toBe(b); expect(read).toHaveBeenCalledTimes(1); expect(s.session.verifiedTargetCatalog(a)).toBe(true);
+		read.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+		const cached = await s.session.readBaseRecordContexts(scope, [id(20)]); expect(cached).toEqual(value); expect(s.session.verifiedTargetCatalog(cached)).toBe(false);
+		await s.session.close();
+		const offline = remote(); for (const call of [offline.capabilities, offline.permissions, offline.baseTargetContext, offline.changes]) call.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		next = await open(factory, offline); Object.assign(next.transport, { baseRecordContexts: jest.fn() });
+		expect(await next.session.readBaseRecordContexts(scope, [id(20)])).toEqual(value);
+		await expect(next.session.readBaseRecordContexts(scope, [id(99)])).rejects.toThrow();
+		expect((next.transport as unknown as { baseRecordContexts: jest.Mock }).baseRecordContexts).not.toHaveBeenCalled();
+	} finally { await s.session.close(); await next?.session.close(); }
+});
+
+test.each(["success", "denial"] as const)("a competing record batch fences a late %s without overwriting the newer page", async outcome => {
+	const factory = new IDBFactory(), a = await open(factory), b = await open(factory); let finish!: (value: unknown) => void, fail!: (error: unknown) => void;
+	const { targets: _targets, computed_values: _computed, ...context } = catalog();
+	const old = { ...context, records: [{ record_id: id(20), record_generation: id(21) }] };
+	const newer = { ...context, records: [{ record_id: id(22), record_generation: id(23) }] };
+	const slow = jest.fn(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+	Object.assign(a.transport, { baseRecordContexts: slow }); Object.assign(b.transport, { baseRecordContexts: jest.fn().mockResolvedValue(newer) });
+	try {
+		const reading = a.session.readBaseRecordContexts(scope, [id(20)]), rejected = expect(reading).rejects.toThrow();
+		await until(() => !!finish); await b.session.readBaseRecordContexts(scope, [id(22)]);
+		if (outcome === "success") finish(old); else fail(new DiscussionFailure("reject", "target_unavailable", 404));
+		await rejected;
+		expect(await a.store.preference("baseRecords:" + scope)).toEqual(newer);
+	} finally { finish?.(old); await a.session.close(); await b.session.close(); }
+});
+
 test("formula cells require both record permission and definition proof across offline restart", async () => {
 	const factory = new IDBFactory(), first = await open(factory);
 	const choice = { ...selection, type: "formula_cell" as const, recordId: id(20) };
@@ -320,15 +356,15 @@ test("fresh HTTP catalog proof never transfers to a retry fallback or an offline
 	} finally { await s.session.close(); }
 });
 
-test.each(["definitions", "axis", "markers"] as const)("%s target verification started before authentication loss stays invalid after sign-in recovery", async kind => {
+test.each(["definitions", "axis", "markers", "records"] as const)("%s target verification started before authentication loss stays invalid after sign-in recovery", async kind => {
 	const s = await open(new IDBFactory()); let finish!: (value: unknown) => void;
 	const { targets: _targets, computed_values: _computed, ...context } = catalog();
-	const value = kind === "definitions" ? catalog() : kind === "markers" ? { ...context, catalog_revision: 0, markers: [] } :
+	const value = kind === "definitions" ? catalog() : kind === "records" ? { ...context, records: [{ record_id: id(20), record_generation: id(21) }] } : kind === "markers" ? { ...context, catalog_revision: 0, markers: [] } :
 		{ ...context, axis: { id: id(60), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1,
 			renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null } } };
 	const remoteRead = jest.fn(() => new Promise(resolve => { finish = resolve; }));
-	Object.assign(s.transport, { [kind === "definitions" ? "baseDefinitions" : kind === "axis" ? "timelineAxis" : "timelineMarkers"]: remoteRead });
-	const read = () => kind === "definitions" ? s.session.readBaseDefinitions(scope) : kind === "axis" ? s.session.readTimelineAxis(scope) : s.session.readTimelineMarkers(scope);
+	Object.assign(s.transport, { [kind === "definitions" ? "baseDefinitions" : kind === "axis" ? "timelineAxis" : kind === "records" ? "baseRecordContexts" : "timelineMarkers"]: remoteRead });
+	const read = () => kind === "definitions" ? s.session.readBaseDefinitions(scope) : kind === "axis" ? s.session.readTimelineAxis(scope) : kind === "records" ? s.session.readBaseRecordContexts(scope, [id(20)]) : s.session.readTimelineMarkers(scope);
 	try {
 		const reading = read(), rejected = expect(reading).rejects.toThrow(); await until(() => remoteRead.mock.calls.length === 1);
 		s.transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
@@ -336,17 +372,17 @@ test.each(["definitions", "axis", "markers"] as const)("%s target verification s
 		await s.session.start(); expect(s.session.status).toBe("ready");
 		finish(value); await rejected;
 		expect(s.session.verifiedTargetCatalog(value)).toBe(false);
-		const key = (kind === "definitions" ? "baseDefinitions:" : kind === "axis" ? "timelineAxis:" : "timelineMarkers:") + scope;
+		const key = (kind === "definitions" ? "baseDefinitions:" : kind === "axis" ? "timelineAxis:" : kind === "records" ? "baseRecords:" : "timelineMarkers:") + scope;
 		expect(await s.store.preference(key)).toBeUndefined();
 		remoteRead.mockImplementation(() => Promise.resolve(value)); await expect(read()).resolves.toEqual(value);
 	} finally { finish?.(value); await s.session.close(); }
 });
 
-test.each(["definitions", "axis", "markers"] as const)("%s authentication denial locks verification until a successful sign-in check", async kind => {
+test.each(["definitions", "axis", "markers", "records"] as const)("%s authentication denial locks verification until a successful sign-in check", async kind => {
 	const s = await open(new IDBFactory());
 	const failure = new DiscussionFailure("authenticate", "session_revoked", 401), remoteRead = jest.fn().mockRejectedValue(failure);
-	Object.assign(s.transport, { [kind === "definitions" ? "baseDefinitions" : kind === "axis" ? "timelineAxis" : "timelineMarkers"]: remoteRead });
-	const read = () => kind === "definitions" ? s.session.readBaseDefinitions(scope) : kind === "axis" ? s.session.readTimelineAxis(scope) : s.session.readTimelineMarkers(scope);
+	Object.assign(s.transport, { [kind === "definitions" ? "baseDefinitions" : kind === "axis" ? "timelineAxis" : kind === "records" ? "baseRecordContexts" : "timelineMarkers"]: remoteRead });
+	const read = () => kind === "definitions" ? s.session.readBaseDefinitions(scope) : kind === "axis" ? s.session.readTimelineAxis(scope) : kind === "records" ? s.session.readBaseRecordContexts(scope, [id(20)]) : s.session.readTimelineMarkers(scope);
 	try {
 		await expect(read()).rejects.toBe(failure);
 		expect(s.session.status).toBe("authentication_required"); expect(s.session.canQueue).toBe(false);

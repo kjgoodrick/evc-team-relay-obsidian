@@ -404,7 +404,7 @@ test("group markers deduplicate target verification, share a header badge and na
 test("group status uses exact current local targets, not stale anchors, hidden or ambiguous handles, and scroll does not repeat checks", async () => {
 	const f = fixture();
 	try {
-		await settle(); const context = f.contexts[0]; let current = true, visible = true, duplicate = false;
+		await settle(); f.targetsChanged.mockClear(); const context = f.contexts[0]; let current = true, visible = true, duplicate = false;
 		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Done" } },
 			element: f.row, ambiguous: false, current: () => current, members: () => [] };
 		const native = jest.fn().mockResolvedValue(handle.target);
@@ -414,13 +414,13 @@ test("group status uses exact current local targets, not stale anchors, hidden o
 		const threads = [{ id: id(20), author_id: null, state: "open" as const, anchor, state_revision: 1, anchor_revision: 1,
 			removed: false, created_sequence: 1, activity_sequence: 1, created_at: "2026-11-07T00:00:00Z" }];
 		f.session.anchorThreads.mockResolvedValue(threads as never); f.pane.invalidate(); await settle();
-		const present = () => f.pane.presentGroups(context.session, context.entryId, threads);
+		const present = () => f.pane.presentTargets(context.session, context.entryId, threads);
 		expect(present()).toEqual(new Set([id(20)])); expect(f.targetsChanged).toHaveBeenCalledTimes(1);
 		const reads = f.session.anchorThreads.mock.calls.length;
 		f.root.dispatchEvent(new Event("scroll")); await settle();
 		expect(f.targetsChanged).toHaveBeenCalledTimes(1); expect(native).toHaveBeenCalledTimes(1); expect(f.session.anchorThreads).toHaveBeenCalledTimes(reads);
-		expect(f.pane.presentGroups(context.session, context.entryId, [{ ...threads[0], anchor: { ...anchor, registry_revision: 2 } }])).toEqual(new Set());
-		expect(f.pane.presentGroups(context.session, baseDiscussionScope(id(1), id(99)), threads)).toEqual(new Set());
+		expect(f.pane.presentTargets(context.session, context.entryId, [{ ...threads[0], anchor: { ...anchor, registry_revision: 2 } }])).toEqual(new Set());
+		expect(f.pane.presentTargets(context.session, baseDiscussionScope(id(1), id(99)), threads)).toEqual(new Set());
 		current = false; expect(present()).toEqual(new Set()); f.pane.invalidate(false); await settle(); expect(f.targetsChanged).toHaveBeenCalledTimes(2);
 		current = true; duplicate = true; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set());
 		duplicate = false; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set([id(20)])); expect(f.targetsChanged).toHaveBeenCalledTimes(3);
@@ -447,9 +447,27 @@ test("lane-range status loses positive evidence when the captured lane disappear
 		Object.assign(f.surface, { rangeContext: () => ({ axis, effectiveTimeZone: "UTC", kinds: ["calendar"], current: () => true }),
 			rangeGeometry: () => ({ startX: 100, endX: 300, top: 40, bottom: 60, discontinuous: false, current: () => true }) });
 		f.pane.invalidate(); await settle(); const threads = await f.session.anchorThreads();
-		expect(f.pane.presentGroups(context.session, context.entryId, threads)).toEqual(new Set([id(7)]));
-		present = false; f.pane.invalidate(false); await settle(); expect(f.pane.presentGroups(context.session, context.entryId, threads)).toEqual(new Set());
+		expect(f.pane.presentTargets(context.session, context.entryId, threads)).toEqual(new Set([id(7)]));
+		present = false; f.pane.invalidate(false); await settle(); expect(f.pane.presentTargets(context.session, context.entryId, threads)).toEqual(new Set());
 		present = true; proof.axis.revision = 2; f.pane.invalidate(); await settle();
-		expect(f.pane.presentGroups(context.session, context.entryId, threads)).toEqual(new Set());
+		expect(f.pane.presentTargets(context.session, context.entryId, threads)).toEqual(new Set());
+	} finally { f.close(); }
+});
+
+test("cell evidence requires its exact live handle; a row fallback, duplicate or recycled file object cannot confirm it", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0], threads = await f.session.anchorThreads();
+		const present = () => f.pane.presentTargets(context.session, context.entryId, threads);
+		expect(present()).toEqual(new Set([id(7)]));
+		f.hideProperty(); await settle(); expect(present()).toEqual(new Set());
+		f.cellHandle.current = () => true;
+		const target = f.cellHandle.target;
+		f.surface.handles.mockReturnValue([f.cellHandle, f.cellHandle]); expect(present()).toEqual(new Set());
+		f.surface.handles.mockReturnValue([{ ...f.cellHandle, current: () => false }]); expect(present()).toEqual(new Set());
+		if (!("file" in target)) throw new Error("Expected cell");
+		const recycled = { ...f.cellHandle, target: { ...target, file: { ...target.file } } };
+		f.surface.handles.mockReturnValue([recycled]); expect(present()).toEqual(new Set());
+		f.surface.handles.mockReturnValue([f.cellHandle]); expect(present()).toEqual(new Set([id(7)]));
 	} finally { f.close(); }
 });

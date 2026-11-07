@@ -1,4 +1,5 @@
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
+import { baseRecordIds, parseBaseRecordContexts } from "./BaseRecordContexts";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
 import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictureHash, type PictureMetadata, type PictureRendition, type PictureUpload } from "./PictureProtocol";
@@ -296,6 +297,11 @@ export class DiscussionTransport implements DiscussionSender {
 		this.scopeView(entryId, viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + "/bases/target-context", JSON.stringify({ view_id: viewId,
 			...(recordId !== undefined ? { record_id: recordId } : {}) })), value => parseBaseTargetContext(value, parseDiscussionScope(entryId)!.entryId, viewId, recordId));
+	}
+	async baseRecordContexts(entryId: string, viewId: string, recordIds: readonly string[]) {
+		const ids = baseRecordIds(recordIds); this.scopeView(entryId, viewId);
+		return this.parse(await this.request(this.scopePath(entryId) + "/bases/record-contexts", JSON.stringify({ view_id: viewId, record_ids: ids })),
+			value => parseBaseRecordContexts(value, parseDiscussionScope(entryId)!.entryId, viewId, ids));
 	}
 	async baseDefinitions(entryId: string, viewId: string): Promise<BaseDefinitionCatalog> {
 		if (!isId(viewId)) throw new DiscussionFailure("reject", "invalid_local_target");

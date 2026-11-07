@@ -19,8 +19,8 @@ Bases definitions, timeline axes and shared markers use complete account-scoped
 catalogs. One page performs at most one read per needed catalog type. Fresh HTTP
 proof is distinguished from cached retry fallback; absence from an old cache is
 not proof of deletion. Changed definitions/axes/markers retain the captured
-target and request review. Cells, records and properties remain unchecked where authoritative existence
-evidence is missing. Group and lane targets can additionally use exact positive
+target and request review. Cells, records and properties remain unchecked where identity or local existence
+evidence is missing. Their bounded verification path is described below. Group and lane targets can additionally use exact positive
 evidence from the current native saved view, as described below.
 Being filtered out of a saved view is never treated as deletion.
 
@@ -117,3 +117,42 @@ Sequence lane range now pass against the actual temporary services. The full
 plugin suite passes 3,210 tests / 249 suites; build, main types, frozen test-type
 gate and changed-source lint pass. See [native group evidence](base-group-native-preview.md)
 for scope and outstanding acceptance.
+
+## Record, cell and header identity follow-up
+
+The current page now reads at most 100 distinct record identities in one scoped
+request. The server holds the share lock, reads inventory and permissions in
+batches, and returns only requested IDs with a readable current generation or
+null. Missing, deleted, unreadable, unsupported and uninitialized records have
+the same null result. No file paths, cell values or comment bodies are returned;
+the check does not create identities or grant comment access.
+
+The sidebar distinguishes a rebuilt record from the originally captured identity.
+A record discussion can remain attached while filters hide its row. Ordinary and
+formula cells require both matching record lineage and an exact current native
+cell handle; a row fallback cannot confirm a hidden property. Formula cells also
+require their captured definition revision. Property headers use exact native
+handles. Duplicate, stale and recycled file handles are not positive evidence.
+
+Identical in-flight reads share one request. One latest record batch per saved
+view is cached, bounding persistent status metadata; another page stays unchecked
+when its proof is unavailable offline. Authentication lifetimes, scope/generation
+checks and cross-window verification tickets fence delayed responses and denials.
+Older servers without this endpoint leave record checks unknown. This proof is
+for status only and does not replace capture or command authorization.
+
+Validation: 3,220 plugin tests / 250 suites pass (22 opt-in tests / 17 suites
+skipped), along with 78 server tests, seven actual HTTP integration cases, build,
+main types, frozen test-type gate and changed-source lint. Batches of 1, 50 and
+100 records each use 17 SELECTs in the measured test fixture; the count includes
+constant authentication/fixture work and does not grow per record. PostgreSQL
+verifies that a batch waiting behind permission revocation returns unavailable
+instead of stale authority. Actual client/server checks cover offline restart,
+revocation and record replacement. Native acceptance of this follow-up remains.
+
+Local logs: `/private/tmp/base-record-status-regression.log`,
+`/private/tmp/base-record-status-server-regression.log`,
+`/private/tmp/base-record-status-actual.log`,
+`/private/tmp/base-record-status-postgres.log`,
+`/private/tmp/base-record-status-testtypes.log`,
+`/private/tmp/base-record-status-build.log` and `/private/tmp/base-record-status-lint.log`.
