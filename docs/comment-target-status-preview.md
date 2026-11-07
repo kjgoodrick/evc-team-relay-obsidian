@@ -148,7 +148,9 @@ main types, frozen test-type gate and changed-source lint. Batches of 1, 50 and
 constant authentication/fixture work and does not grow per record. PostgreSQL
 verifies that a batch waiting behind permission revocation returns unavailable
 instead of stale authority. Actual client/server checks cover offline restart,
-revocation and record replacement. Native acceptance of this follow-up remains.
+revocation and record replacement. Native Table/Cards/List status, column hide/restore and offline reload/reconnect
+now pass; see [native record evidence](base-record-native-preview.md). The broader
+reviewer/formula-cell/mobile/resource acceptance matrix remains.
 
 Local logs: `/private/tmp/base-record-status-regression.log`,
 `/private/tmp/base-record-status-server-regression.log`,
