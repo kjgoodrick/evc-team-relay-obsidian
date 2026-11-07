@@ -110,6 +110,7 @@ export class BaseCommentPane {
 	private context?: BaseCommentContext;
 	private chosen?: NativeBaseHandle;
 	private chosenGroups: NativeBaseGroupHandle[] = [];
+	private unavailableGroup = false;
 	private groupTargets = new Map<string, NativeBaseGroupTarget>();
 	private toolsContext?: BaseCommentContext;
 	private toolsChosen?: NativeBaseHandle;
@@ -140,7 +141,7 @@ export class BaseCommentPane {
 			const node = event.target as Node | null;
 			if (!node || !Number.isInteger(node.nodeType) || this.owns(node)) return;
 			if (this.context?.surface.annotationSupported && event.type === "pointerdown") { this.action++; return; }
-			this.action++; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
+			this.action++; this.unavailableGroup = false; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
 			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node, event as PointerEvent); this.renderTools();
 		};
 		listen(root, "pointerdown", select, true); listen(root, "focusin", select, true);
@@ -176,7 +177,7 @@ export class BaseCommentPane {
 		finally { this.checking = false; }
 	}
 	private detach(): void {
-		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = [];
+		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.unavailableGroup = false;
 		this.groupTargets.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
 		this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true;
@@ -242,11 +243,11 @@ export class BaseCommentPane {
 		const view = context.surface.handles().find(handle => handle.target.type === "view");
 		if (this.annotating && (!view || !context.canComment(view.target))) this.cancelAnnotation();
 		const selectedGroups = this.chosenGroups.filter(handle => context.groups?.canCapture(handle));
-		const target = selected ?? (this.chosenGroups.length ? undefined : view);
+		const target = selected ?? (this.chosenGroups.length || this.unavailableGroup ? undefined : view);
 		const selection = target && context.canComment(target.target) ? context.selection(target.target) : undefined;
 		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
 		const commentRecord = !!item && context.canComment(item);
-		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported]);
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup]);
 		// Preserve live buttons through scroll, polling and unrelated thread updates.
 		// A new handle/context must still replace callbacks, even for the same label.
 		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
@@ -256,8 +257,9 @@ export class BaseCommentPane {
 		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
 		if (context.surface.annotationSupported && view && context.canComment(view.target)) {
 			this.button(this.toolbar, this.annotating ? "Cancel target selection" : "Select timeline target", () => this.toggleAnnotation());
-			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task or property badge. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
+			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task, property badge, or lane header. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
 		}
+		if (this.unavailableGroup) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "This lane is unavailable for commenting. Its grouping or source value is unsupported."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
 		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups));
 		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => { void this.host.commentBaseHandle(context, target); });
 		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => { void this.host.commentBaseHandle(context, selected, item); });
@@ -270,8 +272,12 @@ export class BaseCommentPane {
 		this.annotating = true;
 		const stop = context.surface.beginAnnotation(handle => {
 			if (this.context !== context || !context.current() || !handle.current() || !context.canComment(handle.target)) return;
-			this.chosen = handle; this.chosenGroups = []; this.action++; this.renderTools();
-		}, () => { this.annotating = false; this.annotationStop = undefined; if (!this.closed) this.renderTools(); });
+			this.chosen = handle; this.chosenGroups = []; this.unavailableGroup = false; this.action++; this.renderTools();
+		}, () => { this.annotating = false; this.annotationStop = undefined; if (!this.closed) this.renderTools(); }, location => {
+			if (this.context !== context || !context.current() || !location.current()) return;
+			this.chosen = undefined; this.chosenGroups = context.groups?.hit(location.element) ?? [];
+			this.unavailableGroup = !this.chosenGroups.some(handle => context.groups?.canCapture(handle)); this.action++; this.renderTools();
+		});
 		if (!stop) { this.annotating = false; new Notice("Target selection is unavailable. Close the task inspector and refresh the view."); }
 		else if (this.annotating) this.annotationStop = stop; else stop();
 		this.renderTools();

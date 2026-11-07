@@ -1,5 +1,5 @@
 import { TFile, type EventRef, type Workspace } from "obsidian";
-import { nativeBaseProperty, type NativeBaseHandle, type NativeBaseReveal, type NativeBaseTarget, type NativeBasesExtension, type NativeBasesIntegrations } from "./NativeBasesSurface";
+import { nativeBaseProperty, type NativeBaseHandle, type NativeBaseGroupLocation, type NativeBaseReveal, type NativeBaseTarget, type NativeBasesExtension, type NativeBasesIntegrations } from "./NativeBasesSurface";
 
 declare module "obsidian" {
 	interface Workspace {
@@ -20,6 +20,7 @@ interface RemoteSurface {
 	protocolVersion: number; owner: ObjectValue; root: HTMLElement; capabilities: string[];
 	current(): unknown; viewport(): unknown; handles(): unknown; hit(node: Node, point?: { clientX: number; clientY: number }): unknown;
 	reveal(target: unknown): unknown; beginAnnotation(select: (handle: unknown) => void, stopped: () => void): unknown;
+	groups?(): unknown; revealGroup?(group: unknown): unknown;
 }
 interface Adapter extends NativeBasesExtension { source: RemoteSurface }
 
@@ -95,7 +96,33 @@ export class TimelineBridgeClient implements NativeBasesIntegrations {
 				catch { return false; }
 			} };
 		};
+		const group = (value: unknown): NativeBaseGroupLocation | undefined => {
+			if (!current() || !source.capabilities.includes("groups") || typeof source.revealGroup !== "function" ||
+				!object(value) || !object(value.target) || value.target.type !== "group" || !object(value.target.group) ||
+				!Array.isArray(value.target.group.entries) || value.target.group.entries.length > 20_000 || !node(value.element) ||
+				!root.contains(value.element) || typeof value.current !== "function") return;
+			const captured = value.target, identity = captured.group, element = value.element;
+			const live = () => {
+				try { return current() && source.capabilities.includes("groups") && typeof source.groups === "function" && typeof source.revealGroup === "function" &&
+					value.target === captured && captured.type === "group" && captured.group === identity && value.element === element &&
+					element.isConnected && root.contains(element) && (value.current as () => unknown).call(value) === true; }
+				catch { return false; }
+			};
+			return { group: identity, element, current: live, reveal: () => {
+				try {
+					if (!live()) return "unavailable";
+					if (!this.canNavigate(root.ownerDocument)) return "busy";
+					const result = source.revealGroup!(identity);
+					return ["revealed", "hidden", "unavailable", "busy", "ambiguous"].includes(String(result)) ? result as NativeBaseReveal : "unavailable";
+				} catch { return "unavailable"; }
+			} };
+		};
 		return { source, owner, root, current,
+			groups: () => {
+				try { const values = current() && source.capabilities.includes("groups") && source.groups?.();
+					return Array.isArray(values) && values.length <= 256 ? values.map(group).filter((value): value is NativeBaseGroupLocation => !!value && value.current()) : []; }
+				catch { return []; }
+			},
 			viewport: () => { try { const view = current() && source.viewport(); return node(view) && view.isConnected && root.contains(view) ? view : undefined; } catch { return; } },
 			handles: () => { try { const values = current() && source.handles(); return Array.isArray(values) && values.length <= 2048 ? values.map(handle).filter((value): value is NativeBaseHandle => !!value && value.current()) : []; } catch { return []; } },
 			hit: (node, point) => { try { return current() ? handle(source.hit(node, point)) : undefined; } catch { return; } },
@@ -109,7 +136,7 @@ export class TimelineBridgeClient implements NativeBasesIntegrations {
 					return ["revealed", "hidden", "property-hidden", "unavailable", "busy", "ambiguous"].includes(String(value)) ? value as NativeBaseReveal : "unavailable";
 				} catch { return "unavailable"; }
 			},
-			beginAnnotation: (select, stopped) => {
+			beginAnnotation: (select, stopped, selectGroup) => {
 				try {
 					if (!current() || !this.canNavigate(root.ownerDocument)) return;
 					this.annotations.get(owner)?.();
@@ -118,6 +145,9 @@ export class TimelineBridgeClient implements NativeBasesIntegrations {
 					const stop = () => { if (cancelled) return; cancelled = true; try { remote(); } finally { done(); } };
 					const result = source.beginAnnotation(value => {
 						if (cancelled || delivered) return;
+						if (object(value) && object(value.target) && value.target.type === "group") {
+							const selected = group(value); if (selected?.current() && selectGroup) { delivered = true; selectGroup(selected); } return;
+						}
 						const selected = handle(value); if (selected?.current()) { delivered = true; select(selected); }
 					}, done);
 					if (typeof result !== "function") { done(); return; }

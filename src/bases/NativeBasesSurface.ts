@@ -53,7 +53,7 @@ export type NativeBaseTarget = { type: "view" } | { type: "item"; file: TFile } 
 export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement | SVGElement; current(): boolean }
 export interface NativeBaseGroupTarget { type: "group"; property: BaseDefinitionProperty; value: NativeBaseGroupValue }
 export interface NativeBaseGroupHandle {
-	target: NativeBaseGroupTarget; element: HTMLElement;
+	target: NativeBaseGroupTarget; element: HTMLElement | SVGElement;
 	/** One native header can represent several typed values. Capture must offer
 	 * the distinct choices instead of choosing whichever record was sorted first. */
 	ambiguous: boolean; current(): boolean;
@@ -61,11 +61,15 @@ export interface NativeBaseGroupHandle {
 	members(): TFile[];
 }
 export type NativeBaseReveal = "revealed" | "hidden" | "property-hidden" | "unavailable" | "busy" | "ambiguous";
+export interface NativeBaseGroupLocation {
+	group: unknown; element: HTMLElement | SVGElement; current(): boolean; reveal(): NativeBaseReveal;
+}
 export interface NativeBasesExtension {
 	owner: unknown; root: HTMLElement; current(): boolean; viewport(): HTMLElement | undefined;
 	handles(): NativeBaseHandle[]; hit(node: Node, point?: { clientX: number; clientY: number }): NativeBaseHandle | undefined;
 	reveal(target: NativeBaseTarget): NativeBaseReveal;
-	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void): (() => void) | undefined;
+	groups?(): NativeBaseGroupLocation[];
+	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void, group?: (location: NativeBaseGroupLocation) => void): (() => void) | undefined;
 }
 export interface NativeBasesIntegrations {
 	find(owner: unknown): NativeBasesExtension | undefined;
@@ -169,9 +173,10 @@ export class NativeBasesSurface {
 	}
 	viewport(): HTMLElement | undefined { return this.current() ? this.scrollElement() : undefined; }
 	get annotationSupported(): boolean { return !!this.external; }
-	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void): (() => void) | undefined {
+	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void, group?: (location: NativeBaseGroupLocation) => void): (() => void) | undefined {
 		if (!this.current()) return;
-		return this.external?.beginAnnotation(handle => { if (this.current() && handle.current()) select(handle); }, stopped);
+		return this.external?.beginAnnotation(handle => { if (this.current() && handle.current()) select(handle); }, stopped,
+			location => { if (this.current() && location.current()) group?.(location); });
 	}
 	private rows(): ObjectValue[] | undefined {
 		if (this.type === "table" || this.type === "cards") {
@@ -285,31 +290,57 @@ export class NativeBasesSurface {
 		}
 		return values;
 	}
+	private groupLocations(): (NativeBaseGroupLocation & { group: ObjectValue })[] | undefined {
+		const groups = this.groups(); if (!groups) return;
+		if (this.external) {
+			const locations = this.external.groups?.() ?? []; if (locations.length > 256) return;
+			const seen = new Set<unknown>(), elements = new Set<Element>(), verified: (NativeBaseGroupLocation & { group: ObjectValue })[] = [];
+			for (const location of locations) {
+				const group = location.group;
+				if (!object(group) || !groups.includes(group) || seen.has(group) || elements.has(location.element) ||
+					!element(location.element) || !this.root.contains(location.element) || !location.current()) return;
+				seen.add(group); elements.add(location.element);
+				verified.push({ ...location, group, current: () => this.current() && this.groups()?.includes(group) === true && location.current() });
+			}
+			return verified;
+		}
+		const models = list(this.renderer.groups, 256); if (!models || groups.length !== models.length) return;
+		const locations: (NativeBaseGroupLocation & { group: ObjectValue })[] = [];
+		for (let slot = 0; slot < groups.length; slot++) {
+			const group = groups[slot], model = models[slot]; if (!object(model)) return;
+			const heading = this.groupHeading(model, group); if (!heading?.isConnected) continue;
+			const current = () => this.current() && this.groups()?.[slot] === group && list(this.renderer.groups, 256)?.[slot] === model &&
+				this.groupHeading(model, group) === heading && heading.isConnected;
+			locations.push({ group, element: heading, current, reveal: () => {
+				if (!current()) return "unavailable";
+				heading.scrollIntoView({ block: "nearest", inline: "nearest" }); return "revealed";
+			} });
+		}
+		return locations;
+	}
 	/** Explicit-action API until group capture/authorization is connected. It
 	 * neither exports member values nor treats local membership as authority. */
 	groupHandles(resolve: NativeGroupLinkResolver): NativeBaseGroupHandle[] {
 		try {
-			if (!this.current() || this.external) return [];
-			const property = this.groupingProperty(), groups = this.groups(), models = list(this.renderer.groups, 256);
-			if (!property || !groups || !models || groups.length !== models.length || !this.entries()) return [];
+			if (!this.current()) return [];
+			const property = this.groupingProperty(), locations = this.groupLocations();
+			if (!property || !locations || !this.entries()) return [];
 			const handles: NativeBaseGroupHandle[] = [], budget = nativeGroupValueBudget();
-			for (let slot = 0; slot < groups.length; slot++) {
-				const group = groups[slot], model = models[slot]; if (!object(model)) return [];
-				const heading = this.groupHeading(model, group); if (!heading?.isConnected) continue;
+			for (const location of locations) {
+				const { group, element: heading } = location;
 				const values = this.groupValues(group, property, resolve, budget);
 				if (budget.nodes < 0 || budget.characters < 0) return [];
 				if (!values) continue;
 				for (const [key, value] of [...values.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
 					handles.push({ target: { type: "group", property, value }, element: heading, ambiguous: values.size > 1, current: () => {
 						try {
-							if (!this.current() || nativeBaseGroupValueKey(value) !== key || this.groups()?.[slot] !== group ||
-								list(this.renderer.groups, 256)?.[slot] !== model || this.groupHeading(model, group) !== heading || !heading.isConnected) return false;
+							if (!location.current() || nativeBaseGroupValueKey(value) !== key) return false;
 							const currentValues = this.groupValues(group, property, resolve);
 							return currentValues?.size === values.size && [...values.keys()].every(captured => currentValues.has(captured));
 						} catch { return false; }
 					}, members: () => {
 						try {
-							if (!this.current() || this.groups()?.[slot] !== group || this.groupHeading(model, group) !== heading) return [];
+							if (!location.current()) return [];
 							const entries = list(group.entries); if (!entries) return [];
 							const members = new Set<TFile>(), budget = nativeGroupValueBudget();
 							for (const entry of entries) {
@@ -335,6 +366,7 @@ export class NativeBasesSurface {
 	revealGroup(target: NativeBaseGroupTarget, resolve: NativeGroupLinkResolver, authorized: () => boolean): NativeBaseReveal {
 		try {
 			if (!authorized() || !this.current()) return "unavailable";
+			if (this.integrations?.canNavigate(this.root.ownerDocument) === false) return "busy";
 			const property = this.groupingProperty();
 			if (!property || !propertyEqual(property, target.property)) return "unavailable";
 			const key = nativeBaseGroupValueKey(target.value), groups = this.groups(); if (!groups || !this.entries()) return "unavailable";
@@ -349,8 +381,8 @@ export class NativeBasesSurface {
 			// Keep the target but refuse to guess which header to reveal.
 			const matches = this.groupHandles(resolve).filter(handle => nativeBaseGroupValueKey(handle.target.value) === key);
 			if (matches.length !== 1 || !matches[0].current() || !authorized() || !this.current()) return "unavailable";
-			matches[0].element.scrollIntoView({ block: "nearest", inline: "nearest" });
-			return "revealed";
+			const locations = this.groupLocations()?.filter(location => location.element === matches[0].element && location.current());
+			return locations?.length === 1 && authorized() && this.current() ? locations[0].reveal() : "unavailable";
 		} catch { return "unavailable"; }
 	}
 	private entries(): Set<unknown> | undefined {

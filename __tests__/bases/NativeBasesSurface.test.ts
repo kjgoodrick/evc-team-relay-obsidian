@@ -156,6 +156,78 @@ describe("Time & Line saved-view integration", () => {
 			unload: () => { bridge.available = false; for (const listener of [...listeners]) listener(); },
 			close: () => { client.close(); f.root.remove(); } };
 	}
+	function lane() {
+		const f = timeline(), values = [new StringValue("1"), new NumberValue(1)], group = f.renderer.data.groupedData[0];
+		Object.assign(f.config, { groupBy: { property: "note.status" } });
+		Object.assign(f.serial.views[0], { groupBy: { property: "note.status" } });
+		f.host.data = f.host.lastSavedData = JSON.stringify(f.serial);
+		f.entries.forEach((entry, index) => Object.assign(entry, { getValue: () => values[index] }));
+		const handle = { target: { type: "group", group }, element: f.badge, current: () => true };
+		const groups = jest.fn(() => [handle]), reveal = jest.fn(() => "revealed");
+		f.remote.capabilities.push("groups"); Object.assign(f.remote, { groups, revealGroup: reveal });
+		return { ...f, group, values, groupHandle: handle, remoteGroups: groups, revealGroup: reveal };
+	}
+	test("lane values use source entries, preserve mixed typed values and authorize exact group navigation", () => {
+		const f = lane();
+		try {
+			const surface = f.inspect()!, handles = surface.groupHit(f.badge, () => null);
+			expect(handles.map(handle => handle.target.value)).toEqual([{ type: "number", value: 1 }, { type: "text", value: "1" }]);
+			expect(handles.every(handle => handle.ambiguous && handle.element === f.badge && handle.current())).toBe(true);
+			expect(handles.map(handle => handle.members())).toEqual([[f.b], [f.a]]);
+			expect(surface.revealGroup(handles[0].target, () => null, () => false)).toBe("unavailable"); expect(f.revealGroup).not.toHaveBeenCalled();
+			expect(surface.revealGroup(handles[1].target, () => null, () => true)).toBe("revealed"); expect(f.revealGroup).toHaveBeenCalledWith(f.group);
+			f.busy(); expect(surface.revealGroup(handles[0].target, () => null, () => true)).toBe("busy"); expect(f.revealGroup).toHaveBeenCalledTimes(1);
+		} finally { f.close(); }
+	});
+	test.each(["source", "duplicate", "duplicate-element", "too-many", "stale", "unsupported-value"])("lane %s mismatch cannot become a comment target", kind => {
+		const f = lane();
+		try {
+			const surface = f.inspect()!;
+			if (kind === "source") f.groupHandle.target.group = { ...f.group };
+			if (kind === "duplicate") f.remoteGroups.mockReturnValue([f.groupHandle, f.groupHandle]);
+			if (kind === "duplicate-element") {
+				const second = { entries: [f.entries[0]] }; f.renderer.data.groupedData.push(second);
+				f.remoteGroups.mockReturnValue([f.groupHandle, { ...f.groupHandle, target: { type: "group", group: second } }]);
+			}
+			if (kind === "too-many") f.remoteGroups.mockReturnValue(Array(257).fill(f.groupHandle));
+			if (kind === "stale") f.groupHandle.current = () => false;
+			if (kind === "unsupported-value") Object.assign(f.entries[0], { getValue: () => ({ toString: () => "1" }) });
+			expect(surface.groupHandles(() => null)).toEqual([]);
+		} finally { f.close(); }
+	});
+	test("lane values, membership, capability and detach changes retire previously selected handles", () => {
+		const f = lane();
+		try {
+			const surface = f.inspect()!, handle = surface.groupHandles(() => null)[0];
+			f.values[1] = new NumberValue(2); expect(handle.current()).toBe(false); expect(handle.members()).toEqual([]);
+			const fresh = surface.groupHandles(() => null)[0]; f.renderer.data.groupedData.splice(0);
+			expect(fresh.current()).toBe(false); expect(fresh.members()).toEqual([]);
+			f.renderer.data.groupedData.push(f.group); const disabled = surface.groupHandles(() => null)[0];
+			f.remote.capabilities = f.remote.capabilities.filter(value => value !== "groups"); expect(disabled.current()).toBe(false);
+			f.remote.capabilities.push("groups"); const latest = surface.groupHandles(() => null)[0]; f.badge.remove();
+			expect(latest.current()).toBe(false); expect(surface.groupHandles(() => null)).toEqual([]);
+		} finally { f.close(); }
+	});
+	test("equal typed values in different lanes refuse ambiguous navigation", () => {
+		const f = lane();
+		try {
+			const second = { entries: [f.entries[0]] }, element = document.createElementNS("http://www.w3.org/2000/svg", "g"); f.container.append(element);
+			f.renderer.data.groupedData.push(second);
+			f.remoteGroups.mockReturnValue([f.groupHandle, { ...f.groupHandle, target: { type: "group", group: second }, element }]);
+			const surface = f.inspect()!, handle = surface.groupHandles(() => null).find(value => value.target.value.type === "text")!;
+			expect(surface.revealGroup(handle.target, () => null, () => true)).toBe("unavailable"); expect(f.revealGroup).not.toHaveBeenCalled();
+		} finally { f.close(); }
+	});
+	test("lane annotation preserves its location through the client without becoming an item or whole view", () => {
+		const f = lane(); let deliver: (value: unknown) => void = () => {};
+		f.remote.beginAnnotation.mockImplementation(select => { deliver = select; return () => {}; });
+		try {
+			const surface = f.inspect()!, item = jest.fn(), group = jest.fn();
+			surface.beginAnnotation(item, jest.fn(), group); deliver(f.groupHandle);
+			expect(item).not.toHaveBeenCalled(); expect(group).toHaveBeenCalledTimes(1);
+			expect(group.mock.calls[0][0].group).toBe(f.group); expect(group.mock.calls[0][0].current()).toBe(true);
+		} finally { f.close(); }
+	});
 	test.each(["sabidurian-timeline", "sabidurian-sequence"] as const)("%s binds exact saved bytes before mapping SVG property targets", async type => {
 		const f = timeline(type);
 		try {

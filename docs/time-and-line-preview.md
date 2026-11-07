@@ -6,7 +6,7 @@ The bridge must advertise version one, `available`, both registered view types,
 pre-navigation checks and the `annotation` capability. The initial bridge without
 those additions is insufficient. Both plugins must be updated together.
 
-This is a development preview. Native Obsidian validation, timeline lanes/ranges,
+This is a development preview. Native Obsidian validation, timeline ranges,
 shared milestones and timeline presence remain unfinished. It does not establish
 the complete desktop/mobile collaboration release.
 
@@ -32,6 +32,14 @@ the complete desktop/mobile collaboration release.
   unsaved/invalid task inspector prevents file/view navigation and target reveal;
   the guard is rechecked after asynchronous steps. Hidden or ambiguous targets
   produce explicit feedback without rewriting filters or scheduling data.
+- Lane headers expose exact query group objects and their current source entries.
+  Existing note-property and inventory-backed file-group capture can use these
+  lanes. Typed values distinguish text/numbers/empty values; a mixed header offers
+  explicit choices. Only records matching the chosen typed value can supply a
+  source witness. Unsupported values cannot silently become a view/item target.
+  Navigation preserves collapse and horizontal scroll; duplicate typed targets
+  across headers are refused rather than guessed. Formula groups and remaining
+  file-metadata properties still await dependency/authorization support.
 
 ## Ownership and lifecycle
 
@@ -67,15 +75,31 @@ test TypeScript claim.
 
 The interoperability script bundles the actual production Timeline/Sequence
 views, bridge, Team Relay client and saved-view adapter. It checks both load
-orders, exact formula-property targets, annotation callbacks, saved-view digest
-binding, navigation, dirty inspector preservation, render invalidation and
-disposal. Only the Obsidian API/DOM host and synthetic source records are supplied
-by fixtures; no services or vault are installed. This complements, and does not
-replace, native desktop/mobile and actual-service acceptance.
+orders, grouped/ungrouped layouts, exact formula-property targets, annotation
+callbacks, saved-view digest binding, navigation, dirty inspector preservation,
+render invalidation and disposal. Grouped cases also use the real source-capture
+adapter with synthetic Yjs notes and a controlled session port. Only the Obsidian
+API/DOM host, session boundary and synthetic source records are supplied by
+fixtures; no services or vault are installed.
+
+The separate real-service fixture accepts `EVC_BASE_GROUP_VIEW_TYPE` as `table`,
+`sabidurian-timeline`, or `sabidurian-sequence`. From the server's control-plane
+checkout, with its dependencies and relay binary available:
+
+```sh
+EVC_BASE_GROUP_VIEW_TYPE=sabidurian-timeline .venv/bin/python tests/integration/managed_stack.py --base-groups --plugin /path/to/evc-team-relay-obsidian
+EVC_BASE_GROUP_VIEW_TYPE=sabidurian-sequence .venv/bin/python tests/integration/managed_stack.py --base-groups --plugin /path/to/evc-team-relay-obsidian
+```
+
+Both variants verify real group capture and retained-source/offline recovery,
+lost capture/comment responses, database reopen, source permissions, relay
+restart and file-group capture. This checks the shared protocol in each view type
+separately from the real-source renderer fixture; it does not establish native
+Obsidian end-to-end acceptance.
 
 ## Remaining targets and acceptance
 
-Typed lanes/groups; calendar, instant, historical and ordinal ranges; opt-in
+Formula and remaining metadata lanes; calendar, instant, historical and ordinal ranges; opt-in
 shared marker/milestone identities; timeline presence and Jump/Follow; keyboard
 target selection/accessibility; popouts and physical touch; resource/battery
 measurements; native authorization, offline delivery and recovery against actual

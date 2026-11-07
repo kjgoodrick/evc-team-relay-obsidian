@@ -2,7 +2,7 @@
 import type { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments";
 import type { FileView } from "obsidian";
 import { BaseCommentPane } from "../../src/collaboration/BaseComments";
-import { NativeBasesSurface, type NativeBaseTarget, type NativeBaseGroupHandle, type NativeBaseHandle } from "../../src/bases/NativeBasesSurface";
+import { NativeBasesSurface, type NativeBaseTarget, type NativeBaseGroupHandle, type NativeBaseHandle, type NativeBaseGroupLocation } from "../../src/bases/NativeBasesSurface";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
@@ -80,11 +80,33 @@ test("inline cell and record controls preserve exact semantic targets and marker
 
 function annotation(f: ReturnType<typeof fixture>) {
 	let select: (handle: NativeBaseHandle) => void = () => {}, stopped: () => void = () => {};
+	let group: ((location: NativeBaseGroupLocation) => void) | undefined;
 	const stop = jest.fn(() => stopped());
-	const begin = jest.fn((chosen: typeof select, finished: typeof stopped): (() => void) | undefined => { select = chosen; stopped = finished; return stop; });
+	const begin = jest.fn((chosen: typeof select, finished: typeof stopped, selectedGroup?: typeof group): (() => void) | undefined => { select = chosen; stopped = finished; group = selectedGroup; return stop; });
 	Object.assign(f.surface, { type: "sabidurian-timeline", annotationSupported: true, beginAnnotation: begin });
-	return { begin, stop, deliver: () => select(f.cellHandle as NativeBaseHandle), finish: () => { stop(); select(f.cellHandle as NativeBaseHandle); } };
+	return { begin, stop, deliver: () => select(f.cellHandle as NativeBaseHandle), finish: () => { stop(); select(f.cellHandle as NativeBaseHandle); },
+		lane: () => { stop(); group?.({ group: {}, element: f.row, current: () => true, reveal: () => "revealed" }); } };
 }
+
+test.each([true, false])("explicit lane selection offers typed choices or an unavailable state (supported: %s)", async supported => {
+	const f = fixture(), a = annotation(f);
+	try {
+		await settle(); const context = f.contexts[0];
+		const handles: NativeBaseGroupHandle[] = [
+			{ target: { type: "group", property: { source: "note", name: "status" }, value: { type: "number", value: 1 } }, element: f.row, ambiguous: true, current: () => true, members: () => [] },
+			{ target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "1" } }, element: f.row, ambiguous: true, current: () => true, members: () => [] },
+		];
+		context.groups = { hit: () => supported ? handles : [], handles: () => handles, canCapture: () => true } as unknown as NativeBaseGroupComments;
+		f.buttons().find(button => button.textContent === "Select timeline target")!.click(); a.lane();
+		expect(f.buttons().some(button => button.textContent === "Comment on view")).toBe(false);
+		expect(f.host.commentBaseHandle).not.toHaveBeenCalled();
+		if (supported) {
+			f.buttons().find(button => button.textContent === "Choose group value to comment")!.click();
+			expect(mockMenus.at(-1)?.map(item => item.title)).toEqual(["1 (number)", '"1" (text)']);
+			mockMenus.at(-1)![1].click(); expect(f.host.commentBaseGroupHandle).toHaveBeenCalledWith(context, handles[1]);
+		} else expect(f.root.querySelector('[role="status"]')?.textContent).toContain("lane is unavailable");
+	} finally { f.close(); }
+});
 
 test("timeline annotation requires explicit entry, preserves selection identity and reuses cached discussions while panning", async () => {
 	const f = fixture(), a = annotation(f);

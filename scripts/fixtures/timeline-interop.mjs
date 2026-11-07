@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import { Window } from "happy-dom";
-import { TFile, Modal } from "obsidian";
+import { TFile, Modal, StringValue } from "obsidian";
+import * as Y from "yjs";
 import { SabidurianView } from "timeline-view";
 import { SequenceView } from "sequence-view";
 import { CollaborationBridge } from "timeline-bridge";
@@ -9,6 +10,7 @@ import { TaskInspector } from "timeline-inspector";
 import { TimelineBridgeClient } from "../../src/bases/TimelineBridgeClient.ts";
 import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface.ts";
 import { sha256Hex } from "../../src/contentDigest.ts";
+import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments.ts";
 
 const win = new Window();
 Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS });
@@ -35,12 +37,13 @@ const uuid = n => `40000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const file = path => Object.assign(new TFile(), { path, basename: path.split("/").pop().split(".")[0], extension: path.split(".").pop(),
 	parent: { path: "Tasks" }, stat: { mtime: 1, ctime: 1, size: 1 } });
 
-for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const providerFirst of [true, false]) {
+for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const providerFirst of [true, false]) for (const grouped of [false, true]) {
 	const files = [file("Tasks/one.md"), file("Tasks/two.md")], base = file("Tasks/Plan.base");
 	const metadata = new Map(files.map(value => [value.path, { start: "2026-11-26T08:00:00Z", end: "2026-11-26T09:00:00Z", status: "Ready", title: "Same label" }]));
 	const values = { startDateProp: "note.start", endDateProp: "note.end", labelProp: "note.title", orderProp: "note.order", orderEndProp: null,
 		timeZone: "UTC", scaleId: "day", snapMinutes: 5, tickMinutes: 15, oneTaskPerRow: true, showTable: false, showArrows: false, showToday: false,
 		locked: true, initialScroll: "start", collapsedGroups: [], barDisplayProp1: "note.status", barDisplayProp2: "formula.total" };
+	if (grouped) values.groupBy = { property: "note.status" };
 	const writes = [], bridge = new CollaborationBridge(), listeners = new Map(); let published = providerFirst;
 	const workspace = { on: (name, callback) => { listeners.set(name, callback); return { name }; }, offref: ref => listeners.delete(ref.name),
 		trigger: (name, receive) => { if (name === "time-and-line:collaboration-request" && published) receive(bridge); },
@@ -56,10 +59,11 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 	const controller = { query, viewName: "Work", initialScan: false };
 	const view = new (type === "sabidurian-timeline" ? SabidurianView : SequenceView)(controller, root, plugin);
 	controller.view = view;
-	view.config = { type, name: "Work", query, get: key => values[key], set: (...args) => writes.push(args),
+	view.config = { type, name: "Work", query, groupBy: values.groupBy, get: key => values[key], set: (...args) => writes.push(args),
 		getAsPropertyId: key => values[key] ?? null, getOrder: () => [], getDisplayName: key => "Alias " + key };
 	query.views = [view.config]; view.allProperties = ["note.status", "formula.total"];
-	view.data = { data: files.map((value, index) => ({ file: value, getValue: key => key === "note.order" ? index + 1 : key === "formula.total" ? index + 20 : metadata.get(value.path)[key.replace(/^note\./, "")] })), groupedData: [] };
+	const entries = files.map((value, index) => ({ file: value, getValue: key => key === "note.order" ? index + 1 : key === "formula.total" ? index + 20 : key === "note.status" ? new StringValue("Ready") : metadata.get(value.path)[key.replace(/^note\./, "")] }));
+	view.data = { data: entries, groupedData: grouped ? [{ entries, hasKey: () => true, key: "Ready" }] : [] };
 	const client = new TimelineBridgeClient(workspace, () => {}); client.start();
 	try {
 		view.onDataUpdated(); for (const callback of [...frames.values()]) callback(0); frames.clear();
@@ -81,9 +85,38 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		modal.open(); modal.contentEl.querySelector("input").value = "2026-11-26T08:05:00";
 		assert.equal(client.canNavigate(document), false); assert.equal(await surface.reveal(cell.target, () => true), "busy"); modal.close();
 		assert.equal(client.canNavigate(document), true); assert.equal(host.data, source); assert.deepEqual(writes, []);
+		if (grouped) {
+			const lanes = surface.groupHandles(() => null); assert.equal(lanes.length, 1); const lane = lanes[0];
+			assert.deepEqual(lane.target, { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Ready" } });
+			assert.deepEqual(lane.members(), files); let selectedLane;
+			surface.beginAnnotation(() => assert.fail("lane became item"), () => {}, location => { selectedLane = location; });
+			lane.element.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+			assert.equal(selectedLane.group, view.data.groupedData[0]); assert.equal(surface.revealGroup(lane.target, () => null, () => true), "revealed");
+			assert.equal(surface.revealGroup(lane.target, () => null, () => false), "unavailable");
+			// Exercise real source/witness capture through the shared group adapter.
+			// The session is a controlled port; server acceptance is a separate fixture.
+			const doc = new Y.Doc({ gc: false }), text = doc.getText("contents"); text.insert(0, "---\nstatus: Ready\n---\nSynthetic task");
+			let allowed = true, captured;
+			const catalog = { protocol_version: 1, entry_id: uuid(2), view_id: uuid(4), definition_id: uuid(1), generation: uuid(3), registry_revision: 1,
+				computed_values: false, targets: [{ kind: "group", id: uuid(5), revision: 1, property: lane.target.property, fingerprint: "a".repeat(64) }] };
+			const session = { permission: () => ({ read: true, comment: allowed }), canAnchorBaseGroup: () => true,
+				readBaseContext: async (_scope, record) => ({ ...catalog, record_id: record, record_generation: uuid(8) }),
+				captureBaseGroupSelection: async (_scope, capture) => { captured = capture; return { version: 1, type: "base_group_pending", entry_id: uuid(2), property: lane.target.property,
+					capture: { ...capture, operation_id: uuid(9), definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1 } }; } };
+			const groups = new NativeBaseGroupComments({ session, surface, entryId: "synthetic-view", baseEntryId: uuid(2), binding: { snapshot: { revision: 1 } }, current: () => surface.current() }, catalog, {
+				record: record => { const index = files.indexOf(record); return index < 0 ? undefined : { id: uuid(6 + index), type: "markdown", path: record.basename + ".md" }; },
+				file: () => undefined, fileAtPath: () => null, source: () => ({ text, current: () => true }), read: async () => text.toString(), resolve: () => null });
+			try {
+				const pending = await groups.capture(lane); assert.equal(pending.type, "base_group_pending");
+				assert.equal(captured.record_id, uuid(6)); assert.equal(captured.group_definition_id, uuid(5)); assert.deepEqual(captured.value, { type: "text", value: "Ready" });
+				assert.ok(Y.decodeSnapshot(Buffer.from(captured.dependency, "base64")).sv.size > 0);
+				allowed = false; await assert.rejects(() => groups.capture(lane), /not available/);
+			} finally { doc.destroy(); }
+			assert.equal(host.data, source); assert.deepEqual(writes, []);
+		}
 		const captured = surface.handles()[1]; view.onDataUpdated(); assert.equal(captured.current(), false);
 		bridge.dispose(); assert.equal(client.find(view), undefined); assert.equal(surface.current(), false);
-		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; saved view, property target, annotation, navigation, dirty inspector and disposal`);
+		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, property target, annotation, navigation, dirty inspector and disposal`);
 	} finally {
 		client.close(); view.onunload(); bridge.dispose(); for (const modal of Modal.opened) modal.close(); Modal.opened = [];
 		frames.clear(); root.remove();

@@ -30,6 +30,8 @@ async function until(check: () => boolean, label: string) {
 }
 
 run("actual group capture verifies delete-only dependencies, exact recovery, source permissions and relay restart", async () => {
+	const viewType = process.env.EVC_BASE_GROUP_VIEW_TYPE ?? "table";
+	expect(["table", "sabidurian-timeline", "sabidurian-sequence"]).toContain(viewType);
 	const f = JSON.parse(readFileSync(process.env.EVC_BASE_GROUP_FIXTURE!, "utf8"));
 	for (const url of [f.base, f.relay]) expect(new URL(url).hostname).toBe("127.0.0.1");
 	const identity = { serverId: f.base, accountId: f.bobId, shareId: f.share };
@@ -53,7 +55,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 	try {
 		const state = await content.read(f.baseEntry);
 		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: state.state, bytes: new TextEncoder().encode(JSON.stringify({
-			views: [{ name: "Groups", type: "table", groupBy: { property: "status", direction: "ASC" } }],
+			views: [{ name: "Groups", type: viewType, groupBy: { property: "status", direction: "ASC" } }],
 		})).buffer as ArrayBuffer });
 		const saved = await content.read(f.baseEntry), snapshot = await registry.inspect(f.baseEntry, saved.state.record.hash!, saved.state.generation!);
 		const view = snapshot.views[0].id!, scope = baseDiscussionScope(f.baseEntry, view);
@@ -166,7 +168,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		// two-phase delivery with response loss and a reopened cache.
 		const beforeFile = await content.read(f.baseEntry);
 		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: beforeFile.state, bytes: new TextEncoder().encode(JSON.stringify({
-			views: [{ name: "Groups", type: "table", groupBy: { property: "file.ext", direction: "ASC" } }],
+			views: [{ name: "Groups", type: viewType, groupBy: { property: "file.ext", direction: "ASC" } }],
 		})).buffer as ArrayBuffer });
 		const fileState = await content.read(f.baseEntry), fileSnapshot = await registry.inspect(f.baseEntry, fileState.state.record.hash!, fileState.state.generation!);
 		const fileView = fileSnapshot.views[0].id!, fileScope = baseDiscussionScope(f.baseEntry, fileView);
