@@ -7,6 +7,7 @@ import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { parseTimelineAxisContext } from "./TimelineRangeProtocol";
 import { parseTimelineMarkerCatalog, parseTimelineMarkerPage, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
+import { parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMarkerReceipt, type TimelineMarkerCommand } from "./TimelineMarkerManagementProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
 
@@ -41,7 +42,7 @@ for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch",
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
 for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "timeline_axis_changed", "unsupported_timeline_time_zone"]) errorCodes.add(code);
 for (const code of ["timeline_markers_disabled", "timeline_marker_catalog_changed", "timeline_marker_changed", "timeline_marker_unavailable",
-	"timeline_marker_limit", "timeline_marker_placement_limit", "invalid_marker_placement", "base_editor_required"]) errorCodes.add(code);
+	"timeline_marker_limit", "timeline_marker_placement_limit", "invalid_marker_placement", "base_editor_required", "base_generation_changed"]) errorCodes.add(code);
 for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
 for (const code of ["base_groups_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
 	"base_group_limit", "base_group_witness_limit", "base_group_identity_conflict", "operation_conflict"]) errorCodes.add(code);
@@ -324,6 +325,19 @@ export class DiscussionTransport implements DiscussionSender {
 			after = page.next_after!;
 		}
 		throw new DiscussionFailure("pause", "invalid_read_response");
+	}
+	async timelineMarker(scopeId: string, markerId: string) {
+		if (!isId(markerId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		const path = this.scopePath(scopeId) + "/bases/timeline-markers/" + markerId.toLowerCase();
+		return this.parse(await this.request(path), value => parseTimelineMarkerDetail(value, parseDiscussionScope(scopeId)!.entryId, markerId.toLowerCase()));
+	}
+	async manageTimelineMarker(scopeId: string, request: TimelineMarkerCommand) {
+		let command: TimelineMarkerCommand;
+		try { command = parseTimelineMarkerCommand(request); } catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
+		const body = JSON.stringify(command);
+		if (new TextEncoder().encode(body).byteLength > 65536) throw new DiscussionFailure("reject", "command_too_large");
+		const value = await this.request(this.scopePath(scopeId) + "/bases/timeline-markers/commands", body, { responseLimit: 256 * 1024 });
+		return this.parse(value, data => parseTimelineMarkerReceipt(data, parseDiscussionScope(scopeId)!.entryId, command));
 	}
 	async captureBaseGroup(entryId: string, request: BaseGroupCapture) {
 		let copy: BaseGroupCapture;

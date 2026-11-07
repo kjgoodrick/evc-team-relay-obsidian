@@ -51,6 +51,22 @@ its metadata remains readable but cannot become a new comment target.
 
 ## Verification
 
+The session also exposes explicit online marker-management commands. Before a
+write, the client durably saves its exact operation, content, expected revisions
+and complete placement set. One pending operation per managed base prevents a
+second local promotion while the first result is unknown. Windows share that
+slot through compare-and-swap; accounts, servers, shares and vaults remain
+isolated. This is not background offline management.
+
+Timeouts, malformed success responses, authorization loss and feature disablement
+retain the original intent for explicit retry. Confirmed receipts validate the
+operation, lineage, counter advances, content and active placements. A late
+failure cannot overwrite a confirmed receipt. Terminal revision conflicts remain
+visible until acknowledged; a generation conflict means this intent cannot
+apply to the current generation, not proof that it never succeeded in an older
+generation. Pending intents cannot be dismissed. The user interface for this
+workflow, repair/export and management controls remains to be built.
+
 Focused tests exercise malformed/cross-scope catalogs, pagination and revision
 changes, point precision, offline reopen, account isolation, archive/detach/edit
 and axis changes, authoritative denial, read-only access and late-response fencing.
@@ -64,6 +80,21 @@ response, another cache reopen, metadata edit/archive before exact retry,
 historical replies and stale new-capture rejection. The `.base` state is unchanged
 by marker metadata and comments. This is not native Obsidian or server-restart
 acceptance; the separate server PostgreSQL tests cover transaction serialization.
+
+The same HTTP fixture now loses an accepted editor marker-save response, reopens
+the owner's cache, changes and archives the marker from another device, then
+retries the retained operation. The original revision-one receipt is recovered
+byte-for-byte in request intent while a fresh detail read reports archived
+revision three. Both Calendar and exact-decimal Sequence pass. The six actual
+HTTP tests pass and their disposable server/database are removed. Twenty-four
+focused management tests cover strict decoding, access gates, isolation, restart,
+cross-window races, uncertain failures and explicit acknowledgement.
+
+The management increment passes **2,463 plugin tests in 205 suites**, preview
+build/main types, changed-source lint and whitespace checks. The frozen test-type
+gate reports no new errors (206 errors/45 signatures versus the existing
+207/46 baseline); it is not a clean full test-type check. The build retains its
+15 existing Svelte warnings. No management UI or new native acceptance is claimed.
 
 The interface increment passes **2,439 plugin tests in 204 suites**, the preview
 build/main types, changed-source lint (five existing warnings), whitespace and
@@ -80,7 +111,7 @@ desktop/mobile or physical keyboard/touch acceptance.
 
 Current-marker overlays independent of discussion presence, side-by-side
 current-versus-captured position UI, automatic metadata refresh/change delivery,
-online management receipts/UI, local marker promotion and explicit matching
+online management UI and recovery controls, local marker promotion and explicit matching
 remain. The picker provides explicit refresh; it does not yet subscribe to live
 metadata changes. Overlapping overlay polish also remains. The Time & Line fork
 has not changed in this increment. Native desktop/mobile, accessibility, recovery

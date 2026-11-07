@@ -1,5 +1,6 @@
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
+import { TimelineMarkerManagement } from "./TimelineMarkerManagement";
 import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
@@ -43,6 +44,9 @@ export class DiscussionSession {
 	readonly outbox: DiscussionOutbox;
 	readonly inbox: DiscussionInbox;
 	readonly pictures = new DiscussionPictures(this);
+	readonly markerManagement = new TimelineMarkerManagement(this, () => {
+		if (!this.closed) { this.invalidate(); this.broadcast(); this.notify(); }
+	});
 	private entries = new Map<string, Entry>();
 	private listeners = new Set<() => void>();
 	private foreground = true;

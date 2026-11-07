@@ -10,6 +10,7 @@ import { DiscussionOutbox } from "../../src/collaboration/DiscussionOutbox";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { bodyFromText, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import { parseTimelineMarkerCommand } from "../../src/collaboration/TimelineMarkerManagementProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const run = process.env.EVC_BASE_CONTENT_FIXTURE ? test : test.skip;
@@ -39,6 +40,16 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			return response;
 		});
 		const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory), session = new DiscussionSession(store, transport), outbox: DiscussionOutbox | undefined;
+		const ownerFactory = new IDBFactory(), managementRequests: string[] = []; let loseManagement = true;
+		const ownerTransport = new DiscussionTransport(ownerIdentity, ownerCredential, async (url, init) => {
+			const management = String(url).endsWith("/timeline-markers/commands");
+			if (management) managementRequests.push(String(init?.body));
+			const response = await fetch(url, init);
+			if (management && loseManagement && response.ok) { loseManagement = false; await response.text(); throw new TypeError("Lost marker save response"); }
+			return response;
+		});
+		let ownerStore = await DiscussionStore.open(ownerIdentity, ownerFactory), ownerSession = new DiscussionSession(ownerStore, ownerTransport);
+		const startOwner = async () => { await ownerSession.start(); ownerSession.watch(scope, () => {}, "base"); await ownerSession.refresh(); expect(ownerSession.online).toBe(true); };
 		const start = async () => { await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); session.setForeground(false); await session.outbox.settled(); };
 		const operation = (anchor: BaseAnchor) => ({ operationId: randomUUID(), scopeId: scope, type: "thread.create" as const, dependsOn: [], payload: {
 			type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Review milestone")) } });
@@ -47,12 +58,17 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			const axis = await session.readTimelineAxis(scope), initial = await session.readTimelineMarkers(scope), markerId = randomUUID();
 			const range = index === 0 ? { version: 1, kind: "calendar", start: "2026-11-07", end: "2026-11-07", time_zone: "America/Denver", start_inclusive: true, end_inclusive: true } :
 				{ version: 1, kind: "ordinal", start: "999999999999999.000000001", end: "999999999999999.000000001", unit: "property-value", start_inclusive: true, end_inclusive: true };
-			const put = { operation_id: randomUUID(), definition_id: initial.definition_id, generation: initial.generation, registry_revision: initial.registry_revision,
+			const put = parseTimelineMarkerCommand({ operation_id: randomUUID(), definition_id: initial.definition_id, generation: initial.generation, registry_revision: initial.registry_revision,
 				expected_catalog_revision: initial.catalog_revision, command: { type: "marker.put", marker_id: markerId, expected_marker_revision: 0,
-					content: { kind: "point", label: "Original launch", color: "#ABCDEF", range }, placements: [{ view_id: axis.view_id, axis_definition_id: axis.axis.id, axis_definition_revision: axis.axis.revision }] } };
+					content: { kind: "point", label: "Original launch", color: "#ABCDEF", range }, placements: [{ view_id: axis.view_id, axis_definition_id: axis.axis.id, axis_definition_revision: axis.axis.revision }] } });
+			if (put.command.type !== "marker.put") throw new Error("Expected put");
 			const manage = async (payload: unknown, token = f.ownerToken) => fetch(path, { method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" }, body: JSON.stringify(payload) });
 			expect((await manage(put, f.reviewerToken)).status).toBe(403);
-			expect((await manage(put)).status).toBe(200);
+			await startOwner();
+			await expect(ownerSession.markerManagement.save(scope, put)).rejects.toMatchObject({ action: "retry" });
+			expect(await ownerSession.markerManagement.state(scope)).toMatchObject({ status: "pending", request: put });
+			expect(await ownerSession.markerManagement.acknowledge(scope, put.operation_id)).toBe(false);
+			await ownerSession.close(); ownerStore = await DiscussionStore.open(ownerIdentity, ownerFactory); ownerSession = new DiscussionSession(ownerStore, ownerTransport);
 			const selected = await session.readTimelineMarkers(scope), captured = await session.captureTimelineMarker(scope, selected, markerId);
 			expect(captured.target).toMatchObject({ marker_id: markerId, marker_revision: 1, content: { label: "Original launch", color: "#abcdef", range } });
 			await store.saveDraft({ id: "marker", scopeId: scope, revision: 1, body: "Offline milestone", target: protocolJson(captured) });
@@ -70,10 +86,17 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			const latest = await transport.timelineMarkers(scope, axis.view_id);
 			const edited = { ...put, operation_id: randomUUID(), expected_catalog_revision: latest.catalog_revision,
 				command: { ...put.command, expected_marker_revision: 1, content: { ...put.command.content, label: "Moved launch" } } };
-			const editResponse = await manage(edited); expect(editResponse.status).toBe(200);
-			const edit = await editResponse.json() as { catalog_revision: number };
-			expect((await manage({ ...put, operation_id: randomUUID(), expected_catalog_revision: edit.catalog_revision,
-				command: { type: "marker.archive", marker_id: markerId, expected_marker_revision: 2 } })).status).toBe(200);
+			// A different device changes metadata while this device retains its lost save.
+			const edit = await ownerTransport.manageTimelineMarker(scope, edited);
+			await ownerTransport.manageTimelineMarker(scope, { ...put, operation_id: randomUUID(), expected_catalog_revision: edit.catalog_revision,
+				command: { type: "marker.archive", marker_id: markerId, expected_marker_revision: 2 } });
+			await startOwner();
+			const recovered = await ownerSession.markerManagement.retry(scope);
+			expect(recovered.marker).toMatchObject({ revision: 1, active: true, content: { label: "Original launch" } });
+			expect((await ownerTransport.timelineMarker(scope, markerId)).marker).toMatchObject({ revision: 3, active: false, content: { label: "Moved launch" } });
+			const retries = managementRequests.filter(body => (JSON.parse(body) as { operation_id: string }).operation_id === put.operation_id);
+			expect(retries).toHaveLength(2); expect(retries[0]).toBe(retries[1]);
+			expect(await ownerSession.markerManagement.acknowledge(scope, put.operation_id)).toBe(true);
 			outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport), randomUUID(), () => {}, () => Date.now() + 120000);
 			outbox.resume(); await outbox.settled(); outbox.stop();
 			expect((await store.getOperation(queued.operationId))?.state).toBe("accepted");
@@ -85,7 +108,7 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			expect((await transport.thread(scope, queued.payload.thread_id)).messages).toHaveLength(2);
 			await start(); expect(await session.baseDefinitionStatus(scope, captured)).toContain("archived");
 			await expect(session.captureTimelineMarker(scope, selected, markerId)).rejects.toThrow("changed");
-		} finally { outbox?.stop(); await outbox?.settled(); await session.close(); }
+		} finally { outbox?.stop(); await outbox?.settled(); await session.close(); await ownerSession.close(); }
 	}
 	expect((await content.read(f.markersEntry)).state).toEqual(saved.state);
 }, 25000);
