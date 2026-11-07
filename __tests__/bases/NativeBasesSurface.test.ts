@@ -578,3 +578,62 @@ describe("typed native groups", () => {
   expect(f.heading.scrollIntoView).not.toHaveBeenCalled(); expect(heading.scrollIntoView).not.toHaveBeenCalled();
  });
 });
+
+describe("group summary cells", () => {
+	function summaryGroup() {
+		const f = groupedFixture();
+		Object.assign(f.serial.views[0], { summaries: { "note.status": "Unique" } });
+		Object.assign(f.config, { summaries: { "note.status": "Unique" } });
+		f.host.data = f.host.lastSavedData = JSON.stringify(f.serial);
+		const row = { view: f.renderer, location: "group", el: node(f.model.tableEl as HTMLElement), cells: [] as Record<string, unknown>[] };
+		const cell = { view: f.renderer, prop: "note.status", el: node(row.el), entries: f.group.entries, renderedKey: "Unique", renderedPlaceholder: false };
+		Object.defineProperty(cell, "renderedValue", { get() { throw new Error("Do not evaluate or disclose aggregates"); } });
+		row.cells = [cell]; f.model.summaryRow = row;
+		Object.assign(f.renderer, { minColWidth: 100, maxColWidth: 600, columnInfo: {
+			"file.name": { getWidth: () => 150 }, "note.status": { getWidth: () => 120 } } });
+		return { ...f, row, cell, surface: f.inspect()! };
+	}
+	test("exact group choices share a summary cell without becoming a header or whole-view summary", () => {
+		const f = summaryGroup(), handles = f.surface.groupSummaryHandles(() => null);
+		expect(handles).toHaveLength(2); expect(handles.every(handle => handle.current() && handle.ambiguous)).toBe(true);
+		expect(handles.map(handle => handle.target.value)).toEqual([{ type: "number", value: 1 }, { type: "text", value: "1" }]);
+		expect(handles.every(handle => handle.element === f.cell.el && handle.target.summary?.summary === "Unique")).toBe(true);
+		expect(handles[0].members()).toEqual([f.b]); expect(handles[1].members()).toEqual([f.a]);
+		expect(f.surface.hit(f.cell.el)).toBeUndefined(); expect(f.surface.groupHit(f.cell.el, () => null)).toEqual([]);
+		expect(f.surface.groupHandles(() => null).every(handle => !handle.target.summary)).toBe(true);
+		expect(f.surface.revealGroup(handles[0].target, () => null, () => true)).toBe("unavailable");
+	});
+	test.each(["row", "view", "location", "entries", "property", "key", "placeholder", "cells", "element", "detached", "group"])("recycled %s invalidates a summary handle", change => {
+		const f = summaryGroup(), handle = f.surface.groupSummaryHandles(() => null)[0];
+		if (change === "row") f.model.summaryRow = { ...f.row };
+		if (change === "view") f.row.view = {} as typeof f.row.view;
+		if (change === "location") f.row.location = "footer";
+		if (change === "entries") f.cell.entries = [...f.group.entries];
+		if (change === "property") f.cell.prop = "file.name";
+		if (change === "key") f.cell.renderedKey = "Sum";
+		if (change === "placeholder") f.cell.renderedPlaceholder = true;
+		if (change === "cells") f.row.cells = [];
+		if (change === "element") f.cell.el = node(f.row.el);
+		if (change === "detached") f.row.el.remove();
+		if (change === "group") f.values[0] = f.values[1] = new StringValue("Other");
+		expect(handle.current()).toBe(false); expect(handle.members()).toEqual([]);
+	});
+	test("navigation restores failed horizontal mounting and never substitutes the group header", async () => {
+		const f = summaryGroup(), target = f.surface.groupSummaryHandles(() => null)[0].target;
+		f.cell.el.remove(); f.scroll.scrollLeft = 12; f.scroll.scrollTop = 37;
+		expect(await f.surface.revealGroupSummary(target, () => null, () => true, async () => {})).toBe("unavailable");
+		expect([f.scroll.scrollLeft, f.scroll.scrollTop]).toEqual([12, 37]); expect(f.heading.scrollIntoView).not.toHaveBeenCalled();
+		f.renderer.updateVirtualDisplay.mockImplementation(() => { f.row.el.append(f.cell.el); });
+		expect(await f.surface.revealGroupSummary(target, () => null, () => true, async () => {})).toBe("revealed");
+		expect([f.scroll.scrollLeft, f.scroll.scrollTop]).toEqual([150, 37]); expect(f.cell.el.scrollIntoView).toHaveBeenCalledTimes(1);
+		f.renderer.data.properties = ["file.name"];
+		expect(await f.surface.revealGroupSummary(target, () => null, () => true)).toBe("property-hidden");
+	});
+	test("duplicate cells and access loss cannot choose a summary location", async () => {
+		const f = summaryGroup(), target = f.surface.groupSummaryHandles(() => null)[0].target;
+		f.row.cells.push({ ...f.cell, el: node(f.row.el) });
+		expect(await f.surface.revealGroupSummary(target, () => null, () => true)).toBe("ambiguous");
+		expect(await f.surface.revealGroupSummary(target, () => null, () => false)).toBe("unavailable");
+		expect(f.cell.el.scrollIntoView).not.toHaveBeenCalled(); expect(f.heading.scrollIntoView).not.toHaveBeenCalled();
+	});
+});

@@ -521,3 +521,32 @@ test("a late capture completion cannot restore controls after its pane closes", 
 		expect(f.root.querySelector(".relay-bases-comment-tools")).toBeNull();
 	} finally { finish?.(); f.close(); }
 });
+
+test("group summaries use exact distinct badges, capture controls and target status without merging with headers", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0]; let duplicate = false, visible = true;
+		const group = { type: "group" as const, property: { source: "note" as const, name: "status" }, value: { type: "text" as const, value: "Done" } };
+		const header: NativeBaseGroupHandle = { target: group, element: f.row, ambiguous: false, current: () => true, members: () => [] };
+		const summary: NativeBaseGroupHandle = { ...header, element: f.cell, target: { ...group, summary: { property: { source: "formula", name: "Total" }, summary: "Average" } } };
+		const grouped = { ...group, definition_id: id(10), definition_revision: 1, group_id: id(11), witness_id: id(12) };
+		const anchor: BaseAnchor = { ...f.anchor, target: { type: "group_summary", definition_id: id(15), definition_revision: 1, ...summary.target.summary!, group: grouped } };
+		const native = jest.fn(async (anchor: BaseAnchor) => anchor.target.type === "group_summary" ? summary.target : header.target);
+		context.groups = { handles: () => [header, ...(visible ? duplicate ? [summary, summary] : [summary] : [])], hit: () => [summary],
+			canCapture: () => true, native, reveal: jest.fn(() => "revealed") } as unknown as NativeBaseGroupComments;
+		const threads = [{ id: id(20), author_id: null, state: "open" as const, anchor },
+			{ id: id(21), author_id: null, state: "open" as const, anchor: { ...f.anchor, target: grouped } }];
+		f.session.anchorThreads.mockResolvedValue(threads); f.pane.invalidate(); await settle();
+		expect(native).toHaveBeenCalledTimes(2); expect(f.root.querySelectorAll(".relay-base-comment-marker")).toHaveLength(2);
+		f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		const button = f.buttons().find(button => button.textContent?.startsWith("Comment on summary"))!;
+		expect(button).toBeDefined(); button.click(); expect(f.host.commentBaseGroupHandle).toHaveBeenCalledWith(context, summary);
+		const present = () => f.pane.presentTargets(f.session as unknown as BaseCommentContext["session"], context.entryId, threads as never);
+		expect(present()).toEqual(new Set([id(20), id(21)]));
+		visible = false; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set([id(21)]));
+		expect(f.root.querySelectorAll(".relay-base-comment-marker")).toHaveLength(1);
+		visible = true; duplicate = true; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set([id(21)]));
+		duplicate = false; f.pane.invalidate(false); await settle(); expect(present()).toEqual(new Set([id(20), id(21)]));
+		expect(native).toHaveBeenCalledTimes(2);
+	} finally { f.close(); }
+});

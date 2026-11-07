@@ -1,9 +1,10 @@
-# Bases group-summary protocol and offline preview
+# Bases group-summary native and offline preview
 
 November 7, 2026. The server and client can retain and deliver a discussion about
-one summary definition in one saved-view group. Native summary-row selection,
-markers and exact navigation are the next increment; this checkpoint does not
-claim native or mobile acceptance.
+one summary definition in one saved-view group. Built-in table summary rows now
+support contextual capture, distinct markers, current-target status and exact
+navigation, with native Obsidian 1.13.7 desktop evidence. Mobile and broader
+resource acceptance remain.
 
 ## Identity and access
 
@@ -48,9 +49,35 @@ new sends without deleting drafts or hiding existing readable discussions.
 Enable only after every participating client supports the new target kind;
 older wire parsers cannot read it. There is no SQL schema migration.
 
+## Native table behavior
+
+The adapter checks the native group, summary row, property, assigned summary and
+current cell ownership. It reuses exact typed group choices and server-verified
+member evidence without evaluating or copying aggregate results. A group header,
+a group summary and the whole-view footer have separate target keys. Mixed typed
+groups require an explicit choice. Recycled, duplicated or stale cells fail
+closed. Horizontal navigation is bounded and never falls back to a group header.
+
+Native acceptance used a disposable vault and local Python/Rust services. Four
+posted discussions covered ordinary and formula summaries, separate Ready and
+Planned groups, and a whole-view footer. Hiding/restoring the formula column
+preserved discussions and restored exact markers. Show summary correctly reports
+a hidden property; a native-discovered catalog-kind navigation bug was fixed and
+retested. Switching grouping from status to file.ext and back leaves all three
+old group summaries in revision review, while the whole-view footer stays valid.
+
+A fifth discussion was captured and queued with both services paused, survived a
+full app reload and delivered exactly once after reconnect. Its group revision
+is newer; its summary identity is unchanged. Independent owner/reviewer readback
+agrees on all readable anchors and bodies. The protected Planned group remains
+absent from the reviewer list and direct access returns 404. Source Markdown is
+unchanged. The test window is closed, the original window restored and both test
+services stopped. Local evidence is in
+`/private/tmp/group-summary-native-evidence.json`.
+
 ## Validation
 
-- 3,250 plugin tests in 250 suites pass; 22 environment-specific tests remain
+- 3,271 plugin tests in 250 suites pass; 22 environment-specific tests remain
   skipped. Preview build and main types pass. Test types remain within the frozen
   baseline (206 existing errors / 45 signatures versus 207 / 46 allowed).
 - Focused coverage includes malformed/nested targets, distinct capability gates,
@@ -63,10 +90,10 @@ older wire parsers cannot read it. There is no SQL schema migration.
 - Disposable PostgreSQL verifies same-value witness isolation for both ordinary
   groups and group summaries alongside the existing transaction/migration suite.
   The test container was stopped and removed.
-- Changed-source lint has no errors and two existing proper-name warnings.
-- A subsequent native-adapter regression confirms pending summary targets do
-  not fall back to group headers while exact summary controls are unavailable.
+- Changed-source lint has no errors and five existing proper-name warnings.
+- Native adapter tests cover cell recycling, typed ambiguity, hidden properties,
+  bounded virtualization, authorization loss and both definition revisions.
 
 The local service fixture is stopped. No live vault installation or production
-rollout is included. Native group-summary controls, native offline/reconnect,
-mobile, accessibility and resource acceptance remain.
+rollout is included. Wider native layouts, mobile, accessibility and resource
+acceptance remain. Aggregate-result authorization is a separate unfinished area.

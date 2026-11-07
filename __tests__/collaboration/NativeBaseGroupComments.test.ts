@@ -31,7 +31,7 @@ function fixture(value: NativeBaseGroupValue = { type: "text", value: "Done" }) 
 		captureBaseGroupSelection: jest.fn(async (_scope: string, input: BaseGroupCapture): Promise<PendingBaseGroupAnchor> => ({ version: 1,
 			type: "base_group_pending", entry_id: id(1), property: target.property, capture: { ...input, operation_id: id(9),
 				definition_id: id(3), view_id: id(2), generation: id(4), registry_revision: 1 } })) };
-	const surface = { groupHandles: () => [handle], groupHit: () => [handle], revealGroup: jest.fn(() => "revealed") };
+	const surface = { groupHandles: () => [handle], groupSummaryHandles: () => [], groupHit: () => [handle], revealGroup: jest.fn(() => "revealed") };
 	const context = { session, entryId: baseDiscussionScope(id(1), id(2)), baseEntryId: id(1), binding: { snapshot: { revision: 1 } }, surface, current: () => current };
 	const sources: NativeGroupSources = { record: f => records.get(f), file: id => [...records].find(([, record]) => record.id === id)?.[0],
 		fileAtPath: path => [a, b].find(f => f.path === path) ?? null, source: () => ready ? { text, current: () => ready } : undefined,
@@ -242,4 +242,35 @@ test("a pending group-summary selection cannot silently navigate to a plain grou
 		property: { source: "formula" as const, name: "Total" }, summary: "Average" };
 	expect(await f.groups.native({ ...captured, summary })).toBeUndefined();
 	expect(await f.groups.native(captured)).toEqual(f.target);
+});
+
+function summarySetup() {
+	const f = setup(), summary = { property: { source: "formula" as const, name: "Total" }, summary: "Average" };
+	f.target.summary = summary;
+	f.catalog.targets.push({ kind: "summary", id: id(20), revision: 1, fingerprint: "b".repeat(64), ...summary });
+	const capture = jest.fn(async (_scope: string, group: PendingBaseGroupAnchor, definitionId: string, revision: number) => ({ ...group,
+		summary: { type: "summary" as const, definition_id: definitionId, definition_revision: revision, ...summary } }));
+	Object.assign(f.session, { captureBaseGroupSummary: capture });
+	return { ...f, summary, capture };
+}
+
+test("native group summaries capture separate definition intent and map back only with both exact revisions", async () => {
+	const f = summarySetup(), selected = await f.groups.capture(f.handle);
+	expect(f.capture).toHaveBeenCalledWith(f.context.entryId, expect.not.objectContaining({ summary: expect.anything() }), id(20), 1);
+	expect(selected.summary).toEqual({ type: "summary", definition_id: id(20), definition_revision: 1, ...f.summary });
+	expect(await f.groups.native(selected)).toEqual(f.target);
+	const group = { type: "group" as const, definition_id: id(5), definition_revision: 1, group_id: id(30), witness_id: id(31), property: f.target.property, value: { type: "text" as const, value: "Done" } };
+	const wire: BaseAnchor = { version: 1, type: "base", definition_id: id(3), view_id: id(2), generation: id(4), registry_revision: 1,
+		target: { ...selected.summary!, type: "group_summary", group } };
+	expect(await f.groups.native(wire)).toEqual(f.target);
+	f.catalog.targets[1].revision = 2; expect(await f.groups.native(wire)).toBeUndefined();
+	f.catalog.targets[1].revision = 1; f.catalog.targets[0].revision = 2; expect(await f.groups.native(wire)).toBeUndefined();
+});
+
+test.each(["capability", "definition", "changed-during-capture"])("native summary %s loss cannot become a plain group capture", async change => {
+	const f = summarySetup();
+	if (change === "capability") f.session.canAnchorBase = () => false;
+	if (change === "definition") f.catalog.targets.splice(1);
+	if (change === "changed-during-capture") f.sources.read = async () => { f.target.summary = { ...f.summary, summary: "Sum" }; return f.text.toString(); };
+	await expect(f.groups.capture(f.handle)).rejects.toThrow(); expect(f.capture).not.toHaveBeenCalled();
 });

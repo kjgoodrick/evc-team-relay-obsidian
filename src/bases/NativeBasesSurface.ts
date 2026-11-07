@@ -55,7 +55,8 @@ export type NativeBaseTarget = { type: "view" } | { type: "item"; file: TFile } 
 	{ type: "cell"; file: TFile; property: BaseDefinitionProperty } | { type: "property"; property: BaseDefinitionProperty } |
 	{ type: "summary"; property: BaseDefinitionProperty; summary: string };
 export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement | SVGElement; current(): boolean }
-export interface NativeBaseGroupTarget { type: "group"; property: BaseDefinitionProperty; value: NativeBaseGroupValue }
+export interface NativeBaseGroupTarget { type: "group"; property: BaseDefinitionProperty; value: NativeBaseGroupValue;
+	summary?: { property: BaseDefinitionProperty; summary: string } }
 export interface NativeBaseGroupHandle {
 	target: NativeBaseGroupTarget; element: HTMLElement | SVGElement;
 	/** One native header can represent several typed values. Capture must offer
@@ -513,11 +514,73 @@ export class NativeBasesSurface {
 	groupHit(node: Node, resolve: NativeGroupLinkResolver): NativeBaseGroupHandle[] {
 		return this.groupHandles(resolve).filter(handle => handle.element.contains(node));
 	}
+	/** Summary cells use the group's exact typed choices and member candidates.
+	 * They are separate from header handles and never evaluate aggregate values. */
+	groupSummaryHandles(resolve: NativeGroupLinkResolver): NativeBaseGroupHandle[] {
+		try {
+			if (!this.current() || this.external || this.type !== "table") return [];
+			const groups = this.groups(), models = list(this.renderer.groups, 256), locations = this.groupLocations();
+			if (!groups || !models || groups.length !== models.length || !locations) return [];
+			const output: NativeBaseGroupHandle[] = [];
+			const byHeading = new Map(locations.map(location => [location.element, location]));
+			for (const header of this.groupHandles(resolve)) {
+				const location = byHeading.get(header.element); if (!location) continue;
+				const slot = groups.indexOf(location.group), model = models[slot];
+				if (!object(model) || !object(model.summaryRow)) continue;
+				const row = model.summaryRow, cells = list(row.cells, 256), rowEl = row.el, entries = location.group.entries;
+				if (row.view !== this.renderer || row.location !== "group" || !element(rowEl) || !this.root.contains(rowEl) || !cells) continue;
+				for (const cell of cells) {
+					if (!object(cell)) continue;
+					const prop = cell.prop, property = nativeBaseProperty(prop), summary = this.summaryKey(prop), cellEl = cell.el;
+					if (!property || !summary || !element(cellEl) || !rowEl.contains(cellEl)) continue;
+					const current = () => this.current() && header.current() && model.summaryRow === row &&
+						row.view === this.renderer && row.location === "group" && row.el === rowEl && this.root.contains(rowEl) &&
+						cell.view === this.renderer && cell.prop === prop && cell.el === cellEl && rowEl.contains(cellEl) &&
+						cell.entries === entries && location.group.entries === entries && cell.renderedKey === summary && cell.renderedPlaceholder === false &&
+						this.summaryKey(prop) === summary && list(row.cells, 256)?.includes(cell) === true;
+					if (current()) output.push({ ...header, target: { ...header.target, summary: { property, summary } }, element: cellEl, current,
+						members: () => current() ? header.members() : [] });
+					if (output.length > MAX_HANDLES) return [];
+				}
+			}
+			return output;
+		} catch { return []; }
+	}
+	async revealGroupSummary(target: NativeBaseGroupTarget, resolve: NativeGroupLinkResolver, authorized: () => boolean,
+		frame = () => this.nextFrame()): Promise<NativeBaseReveal> {
+		const current = () => authorized() && this.current(); let restore: (() => void) | undefined;
+		try {
+			if (!current() || !target.summary || this.external || this.type !== "table") return "unavailable";
+			if (this.integrations?.canNavigate(this.root.ownerDocument) === false) return "busy";
+			if (!this.propertyDisplayed(target.summary.property)) return "property-hidden";
+			if (this.summaryKey(target.summary.property.source + "." + target.summary.property.name) !== target.summary.summary) return "unavailable";
+			const property = this.groupingProperty(); if (!property || !propertyEqual(property, target.property)) return "unavailable";
+			const key = nativeBaseGroupValueKey(target.value);
+			const headers = this.groupHandles(resolve).filter(handle => nativeBaseGroupValueKey(handle.target.value) === key);
+			if (!headers.length) return "hidden";
+			if (headers.length > 1) return "ambiguous";
+			const matching = () => this.groupSummaryHandles(resolve).filter(handle => handle.current() && handle.target.summary &&
+				nativeBaseGroupValueKey(handle.target.value) === key && propertyEqual(handle.target.summary.property, target.summary!.property) &&
+				handle.target.summary.summary === target.summary!.summary);
+			let matches = matching(); if (matches.length > 1) return "ambiguous";
+			if (!matches.length) {
+				const scroll = this.scrollElement(), left = this.summaryLeft(target.summary.property);
+				if (!scroll || left === undefined || !callable(this.renderer.updateVirtualDisplay)) return "unavailable";
+				const before = { top: scroll.scrollTop, left: scroll.scrollLeft };
+				restore = () => { if (current()) { scroll.scrollTop = before.top; scroll.scrollLeft = before.left; } };
+				scroll.scrollLeft = left; this.renderer.updateVirtualDisplay(true); await frame();
+				if (!current()) return "unavailable";
+				matches = matching();
+			}
+			if (matches.length !== 1 || !matches[0].current() || !current()) { restore?.(); return matches.length > 1 ? "ambiguous" : "unavailable"; }
+			matches[0].element.scrollIntoView({ block: "nearest", inline: "nearest" }); return "revealed";
+		} catch { try { restore?.(); } catch { /* A detached view cannot be restored. */ } return "unavailable"; }
+	}
 	/** Headers are mounted for all three verified built-in layouts, including
 	 * offscreen groups. Scrolling never expands a lane or changes saved filters. */
 	revealGroup(target: NativeBaseGroupTarget, resolve: NativeGroupLinkResolver, authorized: () => boolean): NativeBaseReveal {
 		try {
-			if (!authorized() || !this.current()) return "unavailable";
+			if (!authorized() || !this.current() || target.summary) return "unavailable";
 			if (this.integrations?.canNavigate(this.root.ownerDocument) === false) return "busy";
 			const property = this.groupingProperty();
 			if (!property || !propertyEqual(property, target.property)) return "unavailable";

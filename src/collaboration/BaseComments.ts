@@ -17,7 +17,7 @@ import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
-const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type === "group" ? "group · " + nativeGroupTargetLabel(target) : target.type === "view" ? "view" : target.type === "property" ? "property header · " + target.property.source + "." + target.property.name :
+const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type === "group" ? (target.summary ? "summary · " : "group · ") + nativeGroupTargetLabel(target) : target.type === "view" ? "view" : target.type === "property" ? "property header · " + target.property.source + "." + target.property.name :
 	target.type === "summary" ? "summary · " + target.property.source + "." + target.property.name + " · " + target.summary : target.type === "cell" ? "cell · " + target.property.source + "." + target.property.name : "record";
 
 export class BaseComments extends Component {
@@ -114,7 +114,7 @@ export class BaseComments extends Component {
 			} catch { new Notice("The timeline axis or your access changed. The original range and discussion are retained."); }
 			return true;
 		}
-		const target = anchor.type === "base_group_pending" || anchor.target.type === "group" ? await context.groups?.native(anchor) : context.native(anchor);
+		const target = anchor.type === "base_group_pending" || (anchor.target.type === "group" || anchor.target.type === "group_summary") ? await context.groups?.native(anchor) : context.native(anchor);
 		if (!target) return false;
 		try {
 			if (!await this.host.verifyBaseTarget(context, anchor.type === "base_group_pending" ? undefined : anchor)) throw new Error("Target changed");
@@ -241,11 +241,11 @@ export class BaseCommentPane {
 		if (!this.visible() || !context?.current() || context.session !== session || context.entryId !== entryId) return result;
 		const cached = new Map(this.threads.map(thread => [thread.id, thread.anchor]));
 		const candidates = threads.filter(thread => thread.anchor?.type === "base" &&
-			(["item", "cell", "property", "formula_cell", "group"].includes(thread.anchor.target.type) || thread.anchor.target.type === "timeline_range" && thread.anchor.target.lane) &&
+			(["item", "cell", "property", "formula_cell", "group", "group_summary"].includes(thread.anchor.target.type) || thread.anchor.target.type === "timeline_range" && thread.anchor.target.lane) &&
 			JSON.stringify(cached.get(thread.id)) === JSON.stringify(thread.anchor));
 		if (!candidates.length) return result;
 		const counts = new Map<string, number>();
-		const hasGroups = candidates.some(thread => thread.anchor?.type === "base" && ["group", "timeline_range"].includes(thread.anchor.target.type));
+		const hasGroups = candidates.some(thread => thread.anchor?.type === "base" && ["group", "group_summary", "timeline_range"].includes(thread.anchor.target.type));
 		for (const handle of hasGroups ? context.groups?.handles() ?? [] : []) {
 			if (!handle.current()) continue;
 			const key = nativeGroupTargetKey(handle.target); counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -272,7 +272,7 @@ export class BaseCommentPane {
 				continue;
 			}
 			if (anchor.target.type === "timeline_range" && (!this.rangeAxis || !timelineTargetMatchesAxis(context, anchor, this.rangeAxis))) continue;
-			const target = anchor.target.type === "group" ? this.groupTargets.get(thread.id) :
+			const target = (anchor.target.type === "group" || anchor.target.type === "group_summary") ? this.groupTargets.get(thread.id) :
 				anchor.target.type === "timeline_range" && anchor.target.lane ? this.rangeLanes.get(thread.id) : undefined;
 			if (target && counts.get(nativeGroupTargetKey(target)) === 1) result.add(thread.id);
 		}
@@ -332,8 +332,8 @@ export class BaseCommentPane {
 							}
 							return;
 						}
-						if (thread.anchor?.type !== "base" || thread.anchor.target.type !== "group" || !context.groups) return;
-						const id = thread.anchor.target.group_id;
+						if (thread.anchor?.type !== "base" || (thread.anchor.target.type !== "group" && thread.anchor.target.type !== "group_summary") || !context.groups) return;
+						const id = JSON.stringify(thread.anchor);
 						let pending = groups.get(id); if (!pending) { pending = context.groups.native(thread.anchor); groups.set(id, pending); }
 						const target = await pending; if (target) groupTargets.set(thread.id, target);
 					}));
@@ -406,7 +406,7 @@ export class BaseCommentPane {
 		}
 		if (this.unavailableGroup) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "This lane is unavailable for commenting. Its grouping or source value is unsupported."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
 		if (this.unavailableTarget) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Select a supported comment target."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
-		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups), true);
+		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? (selectedGroups[0].target.summary ? "Comment on summary · " : "Comment on group · ") + nativeGroupTargetLabel(selectedGroups[0].target) : selectedGroups[0].target.summary ? "Choose group value for summary" : "Choose group value to comment", () => this.commentGroup(selectedGroups), true);
 		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => this.startCapture(() => this.host.commentBaseHandle(context, target)), true);
 		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => this.startCapture(() => this.host.commentBaseHandle(context, selected, item)), true);
 		this.updateCaptureState();
@@ -470,7 +470,7 @@ export class BaseCommentPane {
 		for (const thread of this.threads) {
 			if (thread.anchor?.type !== "base") continue;
 			if (thread.anchor.target.type === "timeline_range" || thread.anchor.target.type === "timeline_marker") continue;
-			if (thread.anchor.target.type === "group") {
+			if (thread.anchor.target.type === "group" || thread.anchor.target.type === "group_summary") {
 				const target = this.groupTargets.get(thread.id); if (!target) continue;
 				const key = nativeGroupTargetKey(target), handle = byKey.get(key); if (!handle) continue;
 				const marker = markers.get(key) ?? { handle, threads: [], hiddenProperty: false };

@@ -117,7 +117,7 @@ class ThreadCard {
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "base") {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
-			const target = this.controls.createEl("button", { text: thread.anchor.target.type === "summary" ? "Show summary" : thread.anchor.target.type === "timeline_marker" ? "Show captured marker position" : "Show Bases target" });
+			const target = this.controls.createEl("button", { text: (thread.anchor.target.type === "summary" || thread.anchor.target.type === "group_summary") ? "Show summary" : thread.anchor.target.type === "timeline_marker" ? "Show captured marker position" : "Show Bases target" });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 			if (thread.anchor.target.type === "timeline_marker") {
 				const captured = thread.anchor, revision = thread.anchor_revision;

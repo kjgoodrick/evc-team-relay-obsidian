@@ -30,9 +30,10 @@ export interface NativeGroupSources {
 	resolve: NativeGroupLinkResolver;
 }
 const propertyKey = (property: { source: string; name: string }) => JSON.stringify([property.source, property.name]);
-export const nativeGroupTargetKey = (target: NativeBaseGroupTarget) => JSON.stringify(["group", propertyKey(target.property), nativeBaseGroupValueKey(target.value)]);
+export const nativeGroupTargetKey = (target: NativeBaseGroupTarget) => JSON.stringify(["group", propertyKey(target.property), nativeBaseGroupValueKey(target.value),
+	target.summary ? [propertyKey(target.summary.property), target.summary.summary] : null]);
 export function nativeGroupTargetLabel(target: NativeBaseGroupTarget): string {
-	return baseGroupValueLabel(target.value);
+	return (target.summary ? target.summary.property.name + " · " + target.summary.summary + " · " : "") + baseGroupValueLabel(target.value);
 }
 
 /** Current native values select candidates; only the server grants a witness.
@@ -42,10 +43,16 @@ export class NativeBaseGroupComments {
 	private definition(target: NativeBaseGroupTarget) {
 		return this.catalog.targets.find(item => item.kind === "group" && propertyKey(item.property) === propertyKey(target.property));
 	}
-	handles(): NativeBaseGroupHandle[] { return this.context.current() ? this.context.surface.groupHandles(this.sources.resolve) : []; }
-	hit(node: Node): NativeBaseGroupHandle[] { return this.context.current() ? this.context.surface.groupHit(node, this.sources.resolve) : []; }
+	private summaryDefinition(target: NativeBaseGroupTarget) {
+		const selected = target.summary;
+		return selected ? this.catalog.targets.find(item => item.kind === "summary" && propertyKey(item.property) === propertyKey(selected.property) && item.summary === selected.summary) : undefined;
+	}
+	handles(): NativeBaseGroupHandle[] { return this.context.current() ? [...this.context.surface.groupHandles(this.sources.resolve),
+		...this.context.surface.groupSummaryHandles(this.sources.resolve)] : []; }
+	hit(node: Node): NativeBaseGroupHandle[] { return this.handles().filter(handle => handle.element.contains(node)); }
 	canCapture(handle: NativeBaseGroupHandle): boolean {
 		return this.context.current() && handle.current() && !!this.definition(handle.target) &&
+			(!handle.target.summary || !!this.summaryDefinition(handle.target) && this.context.session.canAnchorBase("group_summary")) &&
 			this.context.session.canAnchorBaseGroup(handle.target.property) && this.context.session.permission(this.context.entryId)?.comment === true;
 	}
 	private async reference(file: TFile, capturedPath: string) {
@@ -58,6 +65,15 @@ export class NativeBaseGroupComments {
 		return { record_id: record.id, record_generation: proof.record_generation, source_path_sha256: hash };
 	}
 	async capture(handle: NativeBaseGroupHandle): Promise<PendingBaseGroupAnchor> {
+		const selected = this.summaryDefinition(handle.target), key = nativeGroupTargetKey(handle.target);
+		const group = await this.captureGroup(handle);
+		if (!handle.target.summary && !selected) return group;
+		if (!selected || key !== nativeGroupTargetKey(handle.target) || !this.canCapture(handle)) throw new Error("The group summary changed. Select it again; your draft is retained.");
+		const captured = await this.context.session.captureBaseGroupSummary(this.context.entryId, group, selected.id, selected.revision);
+		if (!this.canCapture(handle) || key !== nativeGroupTargetKey(handle.target)) throw new Error("The group summary changed. Select it again; your draft is retained.");
+		return captured;
+	}
+	private async captureGroup(handle: NativeBaseGroupHandle): Promise<PendingBaseGroupAnchor> {
 		if (!this.canCapture(handle)) throw new Error("This group is not available for commenting");
 		if (handle.target.property.source === "file") return this.captureFile(handle);
 		const definition = this.definition(handle.target)!, key = nativeGroupTargetKey(handle.target);
@@ -161,9 +177,6 @@ export class NativeBaseGroupComments {
 		throw new Error("The file group or its source changed. Refresh this view and select the group again; existing drafts are retained.");
 	}
 	async native(anchor: BaseAnchor | PendingBaseGroupAnchor): Promise<NativeBaseGroupTarget | undefined> {
-		// A summary selection must never navigate to a plain group header while
-		// its exact native summary adapter is unavailable.
-		if (anchor.type === "base_group_pending" && anchor.summary) return;
 		try {
 			if (anchor.type === "base_group_pending" && anchor.entry_id !== this.context.baseEntryId) return;
 			const captured = anchor.type === "base_group_pending" ? anchor.capture : anchor;
@@ -171,7 +184,10 @@ export class NativeBaseGroupComments {
 				captured.generation !== this.catalog.generation || captured.registry_revision > this.catalog.registry_revision) return;
 			const target = anchor.type === "base_group_pending" ? { definition_id: anchor.capture.group_definition_id,
 				definition_revision: anchor.capture.group_definition_revision, property: anchor.property, value: anchor.capture.value } :
-				anchor.target.type === "group" ? anchor.target : undefined;
+				anchor.target.type === "group" ? anchor.target : anchor.target.type === "group_summary" ? anchor.target.group : undefined;
+			const summary = anchor.type === "base_group_pending" ? anchor.summary : anchor.target.type === "group_summary" ? anchor.target : undefined;
+			if (summary && !this.catalog.targets.some(item => item.kind === "summary" && item.id === summary.definition_id &&
+				item.revision === summary.definition_revision && propertyKey(item.property) === propertyKey(summary.property) && item.summary === summary.summary)) return;
 			if (!target || !this.catalog.targets.some(item => item.kind === "group" && item.id === target.definition_id &&
 				item.revision === target.definition_revision && propertyKey(item.property) === propertyKey(target.property))) return;
 			const references = new Map<string, ReturnType<NativeBaseGroupComments["reference"]>>();
@@ -189,10 +205,12 @@ export class NativeBaseGroupComments {
 				if (path === undefined) return;
 				value = { type: "text", value: path };
 			}
-			return this.context.current() ? { type: "group", property: target.property, value } : undefined;
+			return this.context.current() ? { type: "group", property: target.property, value,
+				...(summary ? { summary: { property: summary.property, summary: summary.summary } } : {}) } : undefined;
 		} catch { return undefined; }
 	}
 	reveal(target: NativeBaseGroupTarget, current: () => boolean) {
+		if (target.summary) return this.context.surface.revealGroupSummary(target, this.sources.resolve, () => this.context.current() && current());
 		return this.context.surface.revealGroup(target, this.sources.resolve, () => this.context.current() && current());
 	}
 }

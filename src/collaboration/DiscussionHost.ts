@@ -633,7 +633,7 @@ export class DiscussionHost extends Component {
 		try {
 			const thread = await context.session.cachedThread(context.entryId, threadId);
 			if (!current() || thread?.anchor?.type !== "base") return;
-			if (thread.anchor.target.type !== "timeline_range" && thread.anchor.target.type !== "timeline_marker" && (thread.anchor.target.type === "group" ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor))) return;
+			if (thread.anchor.target.type !== "timeline_range" && thread.anchor.target.type !== "timeline_marker" && ((thread.anchor.target.type === "group" || thread.anchor.target.type === "group_summary") ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor))) return;
 			if (!await this.verifyBaseTarget(context, thread.anchor) || !current()) return;
 			if (await this.pinBaseContext(context, current)) await this.openThread(context.file, context.session, context.entryId, threadId);
 		} catch { new Notice("This discussion is no longer available in the current view."); }
@@ -655,7 +655,9 @@ export class DiscussionHost extends Component {
 			const catalog = await context.session.readBaseDefinitions(context.entryId);
 			if (!context.current() || catalog.registry_revision !== context.binding.snapshot.revision || catalog.generation !== anchor!.generation ||
 				catalog.definition_id !== anchor!.definition_id || !catalog.targets.some(item => item.id === target.definition_id &&
-					item.revision === target.definition_revision && item.kind === (target.type === "formula_cell" ? "formula" : target.type))) return false;
+					item.revision === target.definition_revision && item.kind === (target.type === "formula_cell" ? "formula" : target.type === "group_summary" ? "summary" : target.type))) return false;
+			if (target.type === "group_summary" && !catalog.targets.some(item => item.kind === "group" && item.id === target.group.definition_id &&
+				item.revision === target.group.definition_revision && item.property.source === target.group.property.source && item.property.name === target.group.property.name)) return false;
 		}
 		return context.current() && proof.definition_id === context.binding.snapshot.definition_id && proof.view_id === context.binding.viewId &&
 			proof.registry_revision === context.binding.snapshot.revision && proof.generation === context.binding.snapshot.generation &&

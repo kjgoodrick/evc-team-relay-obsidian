@@ -881,3 +881,24 @@ test("record status batches repeated cells once and rejects an older record batc
 		revision = 3; expect((await f.host.targetStatuses(session, scope, threads, () => true)).get(id(11))?.state).toBe("waiting");
 	} finally { f.close(); }
 });
+
+test("group-summary navigation verifies summary and grouping identities independently", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		const catalog = await s.session.readBaseDefinitions(), property = { source: "note" as const, name: "score" };
+		const targets: BaseDefinitionCatalog["targets"] = [{ id: id(10), kind: "summary", revision: 1, fingerprint: "a".repeat(64), property, summary: "Sum" },
+			{ id: id(11), kind: "group", revision: 1, fingerprint: "b".repeat(64), property: { source: "note", name: "status" } }];
+		s.session.readBaseDefinitions.mockResolvedValue({ ...catalog, targets });
+		const anchor: BaseAnchor = { ...await s.session.captureBaseTarget(), target: { type: "group_summary", definition_id: id(10), definition_revision: 1,
+			property, summary: "Sum", group: { type: "group", definition_id: id(11), definition_revision: 1, property: { source: "note", name: "status" },
+				group_id: id(12), witness_id: id(13), value: { type: "text", value: "Ready" } } } };
+		const context = (await s.context())!;
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(true);
+		for (const kind of ["summary", "group"]) {
+			s.session.readBaseDefinitions.mockResolvedValue({ ...catalog, targets: targets.map(item => item.kind === kind ? { ...item, revision: 2 } : item) });
+			expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false);
+		}
+		s.session.readBaseDefinitions.mockResolvedValue({ ...catalog, targets }); s.revoke();
+		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false); context.release();
+	} finally { s.close(); }
+});
