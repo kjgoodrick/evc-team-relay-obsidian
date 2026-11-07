@@ -9,6 +9,7 @@ import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { protocolJson, type MessageBody } from "../../src/collaboration/DiscussionProtocol";
 import { EditorState } from "prosemirror-state";
 import { bodyToCommentDoc, commentDocBody, richCommentBody } from "../../src/collaboration/ui/RichCommentModel";
+import { PermissionPolicyClient } from "../../src/collaboration/PermissionPolicy";
 
 const fixturePath = process.env.EVC_DISCUSSION_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -167,4 +168,27 @@ integration("rich history retains structure and removal history is limited to it
 		expect(await authorSession.historyWindow(fixture.entry, thread, message)).toMatchObject({ latest: 3,
 			selected: { revision: 3, body: null, reason: "Synthetic removal" }, previous: { revision: 2, body: rich("After") } });
 	} finally { stops.forEach(stop => stop()); await Promise.all([authorSession.close(), readerSession.close()]); }
+}, 30_000);
+
+integration("combined permission client grants a read-only reviewer, detects stale saves and reconciles a lost response", async () => {
+	const f = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string };
+	if (new URL(f.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const permissions = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.ownerToken, () => true, fetch);
+	const reviewer = new DiscussionTransport({ serverId: f.base, shareId: f.share, accountId: f.reviewer }, async () => ({ accountId: f.reviewer, accessToken: f.token }), fetch);
+	const before = await permissions.read();
+	const reading = await permissions.save(before, { file_rules: [{ user_id: f.reviewer, path: "", recursive: true, permission: "read" }], comment_rules: [] });
+	expect(await reviewer.permissions(f.entry)).toEqual({ read: true, comment: false, edit: false, moderate: false });
+	const proposed = { file_rules: reading.file_rules, comment_rules: [{ user_id: f.reviewer, path: "", recursive: true, allowed: true }] };
+	const unreliable = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.ownerToken, () => true, async (url, init) => {
+		const response = await fetch(url, init); if (init.method === "PUT" && response.ok) { await response.text(); throw new Error("Lost successful response"); } return response;
+	});
+	await expect(unreliable.save(reading, proposed)).rejects.toMatchObject({ code: "unconfirmed" });
+	const confirmed = await permissions.read(); expect(confirmed).toMatchObject(proposed);
+	await expect(permissions.save(reading, { file_rules: [], comment_rules: [] })).rejects.toMatchObject({ code: "changed", status: 409 });
+	expect(await reviewer.permissions(f.entry)).toEqual({ read: true, comment: true, edit: false, moderate: false });
+	expect(await reviewer.send({ operationId: randomUUID(), scopeId: f.entry, type: "thread.create", dependsOn: [], payload: {
+		type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: { version: 1, type: "note" }, body: { version: 1, blocks: [{ type: "paragraph", children: [{ type: "text", text: "Reviewer preset comment" }] }] } } })).toMatchObject({ changed: true });
+	const switched = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.token, () => true, fetch);
+	await expect(switched.read()).rejects.toMatchObject({ code: "account_changed", status: 403 });
+	await permissions.save(confirmed, { file_rules: before.file_rules, comment_rules: before.comment_rules });
 }, 30_000);

@@ -7,6 +7,7 @@
 import { namedLogger } from "./logging";
 import { platformFetch } from "./platformFetch";
 import { RelayHttpError, parseRetryAfterMs } from "./relayRequestErrors";
+import { PermissionPolicyClient } from "./collaboration/PermissionPolicy";
 
 const log = namedLogger("[RelayOnPremShareClient]");
 
@@ -470,6 +471,10 @@ export class RelayOnPremShareClient {
 		const response = await platformFetch(`${this.normalizedUrl}/v1/managed/shares/${shareId}/rules`, { headers: await this.getHeaders() });
 		if (!response.ok) throw new Error(`Cannot load file permissions (${response.status})`);
 		return await response.json() as PathRule[];
+	}
+
+	permissionEditor(shareId: string, actorId: string, current: () => boolean): PermissionPolicyClient {
+		return new PermissionPolicyClient(this.normalizedUrl, { shareId, actorId }, this.getAuthToken, current);
 	}
 
 	async setPathRules(shareId: string, rules: PathRule[]): Promise<void> {
