@@ -5,6 +5,7 @@ import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
+import { discussionLinkScope, discussionLinkUrl, discussionServerKey, parseDiscussionLink } from "../../src/collaboration/DiscussionLinks";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 Object.assign(globalThis, { IDBKeyRange });
@@ -48,7 +49,15 @@ run("actual server worker projects inbox entries and recovers offline preference
 		await session.start(); await poll(() => session.inbox.items.length === 1);
 		expect(session.inbox.items[0]).toMatchObject({ thread_id: tid, reason: "mention", version: 1, unread: true });
 		const stop = session.watch(fixture.entry, () => {}); await session.scopeReady(fixture.entry);
-		expect((await session.inboxThread(session.inbox.items[0]))?.anchor?.type).toBe("note"); stop();
+		expect((await session.inboxThread(session.inbox.items[0]))?.anchor?.type).toBe("note");
+		const link = parseDiscussionLink(discussionLinkUrl({ version: 1, server: await discussionServerKey(identity.serverId), shareId: fixture.share,
+			entryId: fixture.entry, threadId: tid, kind: "note", messageId: mid }));
+		const direct = await session.linkedThread(discussionLinkScope(link), link.threadId, link.messageId);
+		expect(direct?.thread.anchor?.type).toBe("note"); expect(direct?.message?.body).toEqual(body);
+		expect(await session.linkedThread(fixture.entry, tid, randomUUID())).toMatchObject({ thread: { id: tid }, message: undefined });
+		session.setForeground(false);
+		expect((await session.linkedThread(fixture.entry, tid, mid))?.message?.id).toBe(mid);
+		session.setForeground(true); await session.refresh(); stop();
 		await session.inbox.configure(true, "offline", true);
 		await session.inbox.queue(session.inbox.items[0], { type: "state", action: "read", seen_version: 1 });
 		await session.inbox.queue(session.inbox.items[0], { type: "subscription", expected_version: 0, following: true, muted: false });

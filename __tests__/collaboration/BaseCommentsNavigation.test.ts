@@ -38,6 +38,16 @@ function fixture(stage: Stage, existing = false) {
 }
 afterEach(() => { jest.restoreAllMocks(); document.body.replaceChildren(); });
 
+test("a cancelled link cannot continue native Bases navigation after opening the file", async () => {
+	const f = fixture("never"); let current = true;
+	f.leaf.openFile.mockImplementation(async () => { current = false; });
+	try {
+		expect(await f.comments.reveal(f.session, f.scope, f.anchor, () => current)).toBe(true);
+		expect(f.workspace.revealLeaf).not.toHaveBeenCalled(); expect(f.host.activateBaseView).not.toHaveBeenCalled();
+		expect(f.pane.reveal).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
 test.each([false, true])("dirty inspector refuses navigation before opening or focusing a Bases file (already open: %s)", async existing => {
 	const f = fixture("before", existing);
 	try {

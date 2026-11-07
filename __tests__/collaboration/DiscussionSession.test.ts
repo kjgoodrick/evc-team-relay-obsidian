@@ -2,7 +2,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionFailure, type DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
-import { bodyFromText } from "../../src/collaboration/DiscussionProtocol";
+import { bodyFromText, protocolJson, type MessageRead } from "../../src/collaboration/DiscussionProtocol";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
@@ -31,6 +31,83 @@ async function fixture() {
 	await session.start(); const unwatch = session.watch(entry, () => {}); await session.refresh();
 	return { store, transport, session, close: async () => { unwatch(); await session.close(); } };
 }
+
+function linkedRead(): MessageRead {
+	return { thread: { id: id(5), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 802, created_at: "2026-11-05T00:00:00Z" }, anchor: { version: 1, type: "note" },
+		message: { id: id(6), author_id: id(1), revision: 2, deleted: false, body: bodyFromText("Older reply"), created_sequence: 801,
+			created_at: "2026-11-05T00:00:00Z", edited_at: "2026-11-06T00:00:00Z", reactions: [] } };
+}
+async function linkedFixture() {
+	const f = await fixture(), read = linkedRead();
+	const transport = Object.assign(f.transport, { message: jest.fn().mockResolvedValue(read),
+		thread: jest.fn().mockResolvedValue({ thread: read.thread, anchor: read.anchor, messages: [], has_more: false, next_after: 0 }) });
+	return { ...f, transport, read };
+}
+
+test("direct older-message read works without inbox capability and caches without advancing the event cursor", async () => {
+	const f = await linkedFixture();
+	try {
+		const checkpoint = await f.store.checkpoint(entry);
+		expect(await f.session.linkedThread(entry, id(5), id(6))).toEqual({ thread: { ...f.read.thread, anchor: f.read.anchor }, message: f.read.message });
+		expect(f.transport.message).toHaveBeenCalledTimes(1); expect(f.transport.thread).not.toHaveBeenCalled();
+		expect(await f.store.checkpoint(entry)).toEqual(checkpoint);
+		expect((await f.session.messages(entry, id(5), 800)).messages).toEqual([f.read.message]);
+		f.session.setForeground(false);
+		expect((await f.session.linkedThread(entry, id(5), id(6)))?.message?.id).toBe(id(6));
+		expect(f.transport.message).toHaveBeenCalledTimes(1);
+	} finally { await f.close(); }
+});
+
+test("a missing reply falls back once to its thread and does not revive the old cached message", async () => {
+	const f = await linkedFixture();
+	try {
+		await f.session.linkedThread(entry, id(5), id(6));
+		f.transport.message.mockRejectedValue(new DiscussionFailure("reject", "missing", 404));
+		expect(await f.session.linkedThread(entry, id(5), id(6))).toEqual({ thread: { ...f.read.thread, anchor: f.read.anchor }, message: undefined });
+		expect(f.transport.thread).toHaveBeenCalledTimes(1);
+	} finally { await f.close(); }
+});
+
+test.each(["generation", "permission", "close"])("late direct reads cannot restore content after %s changes", async change => {
+	const f = await linkedFixture(); let release!: (value: MessageRead) => void, entered!: () => void;
+	const enteredRead = new Promise<void>(resolve => { entered = resolve; });
+	f.transport.message.mockImplementationOnce(() => new Promise(resolve => { release = resolve; entered(); }));
+	try {
+		const opening = f.session.linkedThread(entry, id(5), id(6)); await enteredRead;
+		let closing: Promise<void> | undefined;
+		if (change === "generation") await f.store.clearRemoteScope(entry);
+		if (change === "permission") { f.transport.permissions.mockResolvedValue({ read: false, comment: false, edit: false, moderate: false }); await f.session.refresh(); }
+		if (change === "close") closing = f.session.close();
+		release(f.read); expect(await opening).toBeUndefined();
+		if (closing) await closing;
+		else expect(await f.store.entity(entry, "thread:" + id(5))).toBeUndefined();
+	} finally { await f.close(); }
+});
+
+test.each([403, 404, 401])("a %s direct read clears remote scope and retains local drafts", async status => {
+	const f = await linkedFixture();
+	try {
+		await f.session.linkedThread(entry, id(5), id(6));
+		await f.store.saveDraft({ id: "local", scopeId: entry, revision: 0, body: "Unsent" });
+		const failure = new DiscussionFailure(status === 401 ? "authenticate" : "reject", "unavailable", status);
+		f.transport.message.mockRejectedValue(failure); f.transport.thread.mockRejectedValue(failure);
+		await expect(f.session.linkedThread(entry, id(5), id(6))).rejects.toBe(failure);
+		expect(await f.store.entity(entry, "thread:" + id(5))).toBeUndefined();
+		expect(await f.store.getDraft("local")).toBeDefined();
+		if (status !== 404) expect(f.transport.thread).not.toHaveBeenCalled();
+		if (status === 401) expect(f.session.status).toBe("authentication_required");
+	} finally { await f.close(); }
+});
+
+test("a later message revision from synchronization wins over an older direct read", async () => {
+	const f = await linkedFixture();
+	try {
+		const checkpoint = await f.store.checkpoint(entry), newer = { ...f.read.message, revision: 3, body: bodyFromText("Newer") };
+		await f.store.cacheRemoteRead(entry, checkpoint.generation, [{ id: "message:" + id(5) + ":" + id(6), revision: 900, value: protocolJson(newer) }]);
+		expect((await f.session.linkedThread(entry, id(5), id(6)))?.message?.body).toEqual(newer.body);
+	} finally { await f.close(); }
+});
 
 test("queues a comment-only user's draft atomically and does not require note-write access", async () => {
 	const { store, session, transport, close } = await fixture();

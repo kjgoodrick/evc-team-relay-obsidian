@@ -15,6 +15,7 @@ import { DiscussionDrafts } from "../../src/collaboration/ui/DiscussionDrafts";
 import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import type { OnlineOperation } from "../../src/collaboration/DiscussionTransport";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import * as clipboard from "../../src/utils/clipboard";
 
 jest.mock("obsidian", () => ({
 	ItemView: class {
@@ -215,6 +216,76 @@ test("incoming sidebar refresh preserves the focused draft and closes the old no
 		expect((await store.getDraft("new:" + entry))?.body).toMatchObject({ text: "Unsent text" });
 		currentSession = undefined; notify();
 		expect(view.contentEl.querySelector("textarea")).toBeNull(); // No debounce window exposing the old account.
+	} finally { await view.onClose(); store.close(); }
+});
+
+test("direct message focus shows an older reply, preserves previous-page navigation and copies thread/message links", async () => {
+	const { store, session, typed } = await fixture();
+	const thread: ThreadSummary = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 900, created_at: "2026-11-05T00:00:00Z" };
+	const message = { id: id(5), author_id: id(1), revision: 1, deleted: false, body: bodyFromText("Exact older reply"),
+		created_sequence: 801, created_at: thread.created_at, edited_at: null, reactions: [] };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockImplementation(async (_scope, _thread, after) => ({ messages: after === 800 ? [message] : [], hasMore: false }));
+	const discussionUrl = jest.fn().mockResolvedValue("obsidian://evc-team-relay-comment?test=portable");
+	const host = { focusedThread: () => ({ threadId: id(4), serial: 1, messageId: id(5), messageSequence: 801 }), discussionUrl,
+		onChange: () => () => {}, current: () => ({ path: "Linked discussion", entryId: entry, session: typed, message: "The file is not present locally." }) } as unknown as DiscussionHost;
+	const scroll = jest.fn(); Object.assign(HTMLElement.prototype, { scrollIntoView: scroll });
+	const copy = jest.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined), view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => (document.activeElement as HTMLElement)?.dataset.messageId === id(5));
+		expect(session.messages).toHaveBeenCalledWith(entry, id(4), 800, 20);
+		expect(view.contentEl.textContent).toContain("The file is not present locally.");
+		const button = (text: string) => Array.from(view.contentEl.querySelectorAll("button")).find(button => button.textContent === text)!;
+		expect(button("Previous replies")).toBeDefined();
+		button("Copy comment link").click(); await until(() => copy.mock.calls.length === 1);
+		expect(discussionUrl).toHaveBeenLastCalledWith(typed, entry, id(4), id(5));
+		button("Copy discussion link").click(); await until(() => copy.mock.calls.length === 2);
+		expect(discussionUrl).toHaveBeenLastCalledWith(typed, entry, id(4), undefined);
+		button("Previous replies").click(); await until(() => session.messages.mock.calls.some(call => call[2] === 0 && call[3] === 20));
+	} finally { await view.onClose(); copy.mockRestore(); store.close(); }
+});
+
+test("closing the sidebar while a copied link resolves prevents a stale clipboard write", async () => {
+	const { store, session, typed } = await fixture();
+	const thread: ThreadSummary = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z" };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockResolvedValue({ messages: [], hasMore: false });
+	let release!: (value: string) => void;
+	const host = { focusedThread: jest.fn(), discussionUrl: () => new Promise<string>(resolve => { release = resolve; }),
+		onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const copy = jest.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined), view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Copy discussion link"));
+		Array.from(view.contentEl.querySelectorAll("button")).find(button => button.textContent === "Copy discussion link")!.click();
+		await view.onClose(); release("obsidian://evc-team-relay-comment"); await Promise.resolve(); await Promise.resolve();
+		expect(copy).not.toHaveBeenCalled();
+	} finally { await view.onClose(); copy.mockRestore(); store.close(); }
+});
+
+test("permission loss immediately clears linked content and rejects a delayed message repaint", async () => {
+	const { store, session, typed } = await fixture();
+	const thread: ThreadSummary = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z" };
+	const result = { messages: [{ id: id(5), author_id: id(1), revision: 1, deleted: false, body: bodyFromText("Remote private content"),
+		created_sequence: 1, created_at: thread.created_at, edited_at: null, reactions: [] }], hasMore: false };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockResolvedValue(result);
+	let notify!: () => void;
+	const host = { focusedThread: jest.fn(), onChange: (fn: () => void) => { notify = fn; return () => {}; },
+		current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Remote private content"));
+		let release!: (value: typeof result) => void;
+		session.messages.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+		Array.from(view.contentEl.querySelectorAll("button")).find(button => button.textContent === "Show replies")!.click();
+		await until(() => !!release);
+		session.permission = () => ({ read: false, comment: false, edit: false, moderate: false }); notify();
+		expect(view.contentEl.textContent).not.toContain("Remote private content");
+		release(result); await Promise.resolve(); await Promise.resolve();
+		expect(view.contentEl.textContent).not.toContain("Remote private content");
 	} finally { await view.onClose(); store.close(); }
 });
 

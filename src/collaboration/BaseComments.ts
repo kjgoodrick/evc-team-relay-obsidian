@@ -58,16 +58,16 @@ export class BaseComments extends Component {
 			pane.invalidate();
 		}
 	}
-	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor): Promise<boolean> {
-		if (this.stopped || !this.host.nativeBasesCommentsEnabled) return false;
+	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor, authorized: () => boolean = () => true): Promise<boolean> {
+		if (this.stopped || !authorized() || !this.host.nativeBasesCommentsEnabled) return false;
 		const placement = anchor.type === "base_group_pending" ? anchor.capture : anchor;
 		const scope = parseDiscussionScope(entryId), file = scope ? this.host.baseFile(session, scope.entryId) : undefined;
 		if (!file || scope?.viewId !== placement.view_id || !session.permission(entryId)?.read) return false;
 		const workspace = this.plugin.app.workspace;
 		let leaf = workspace.getLeavesOfType("bases").find(leaf => leaf.view instanceof FileView && leaf.view.file === file);
-		const canNavigate = () => this.timeline.canNavigate(workspace.getMostRecentLeaf()?.view.containerEl.ownerDocument ?? document) &&
+		const canNavigate = () => authorized() && this.timeline.canNavigate(workspace.getMostRecentLeaf()?.view.containerEl.ownerDocument ?? document) &&
 			(!leaf || this.timeline.canNavigate(leaf.view.containerEl.ownerDocument));
-		const interrupted = () => { if (canNavigate()) return false; new Notice("Save or discard the task inspector changes before navigating to this discussion."); return true; };
+		const interrupted = () => { if (!authorized()) return true; if (canNavigate()) return false; new Notice("Save or discard the task inspector changes before navigating to this discussion."); return true; };
 		if (interrupted()) return true;
 		if (!leaf) { leaf = workspace.getLeaf("tab"); await leaf.openFile(file); }
 		if (interrupted()) return true;
@@ -75,7 +75,7 @@ export class BaseComments extends Component {
 		if (interrupted()) return true;
 		const pane = leaf.view instanceof FileView ? this.panes.get(leaf.view) : undefined;
 		if (!pane) return false;
-		const navigating = pane.navigationGuard();
+		const guard = pane.navigationGuard(), navigating = () => authorized() && guard();
 		const surface = NativeBasesSurface.inspect(leaf.view, apiVersion, this.host.nativeBasesCommentsEnabled, this.timeline);
 		if (!surface) return false;
 		const activated = await this.host.activateBaseView(surface, session, entryId, placement, navigating);

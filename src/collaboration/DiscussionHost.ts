@@ -18,7 +18,7 @@ import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession, type BaseTargetSelection } from "./DiscussionSession";
 import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
-import { DiscussionTransport } from "./DiscussionTransport";
+import { DiscussionFailure, DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
 import { isId, isBaseRecordType, protocolJson, type BaseAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
@@ -41,6 +41,8 @@ import { isRecord } from "./DiscussionProtocol";
 import type { NativeBasesSurface, NativeBaseHandle, NativeBaseTarget, NativeBaseGroupHandle } from "../bases/NativeBasesSurface";
 import { baseSelectionKey, type BaseCommentContext } from "./BaseCommentContext";
 import { BaseComments } from "./BaseComments";
+import { DISCUSSION_LINK_ACTION, discussionServerKey, discussionLinkScope, discussionLinkUrl, parseDiscussionLink } from "./DiscussionLinks";
+import { OpenDiscussionLink } from "./ui/OpenDiscussionLink";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; kind?: "note" | "image" | "base"; entryId?: string; session?: DiscussionSession; message?: string;
@@ -57,7 +59,9 @@ export class DiscussionHost extends Component {
 	private stopped = false;
 	private lastFile?: TFile;
 	private editors = new Set<CommentEditorSurface>();
-	private focus?: { session: DiscussionSession; entryId: string; threadId: string; serial: number };
+	private focus?: { session: DiscussionSession; entryId: string; threadId: string; serial: number; messageId?: string; messageSequence?: number; notice?: string };
+	private detachedTarget?: CommentTarget;
+	private linkAction = 0;
 	private focusSerial = 0;
 	private reading?: ReadingComments;
 	private images?: ImageComments;
@@ -79,6 +83,10 @@ export class DiscussionHost extends Component {
 		this.plugin.registerView(INBOX_VIEW, leaf => new InboxView(leaf, this));
 		this.plugin.addCommand({ id: "open-comment-inbox", name: "Open comment inbox", callback: () => { void this.openInbox(); } });
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
+		this.plugin.addCommand({ id: "open-comment-link", name: "Open comment link", callback: () => new OpenDiscussionLink(this.plugin.app, (link, current) => this.openDiscussionLink(link, current)).open() });
+		this.plugin.registerObsidianProtocolHandler(DISCUSSION_LINK_ACTION, params => {
+			void this.openDiscussionLink(params).catch(error => { if (!this.stopped) new Notice(error instanceof Error ? error.message : "The discussion could not be opened.", 10000); });
+		});
 		this.plugin.registerEditorExtension(commentEditorExtension(this));
 		this.plugin.addCommand({ id: "comment-selection", name: "Comment on selected text", editorCheckCallback: (checking, editor, info) => {
 			const available = info.file?.extension === "md" && !!this.shares.shareFor(info.file.path);
@@ -104,7 +112,7 @@ export class DiscussionHost extends Component {
 		this.register(this.auth.onTokenRefreshed(() => { this.reconcile(); for (const slot of this.slots.values()) void slot.session?.refresh(); }));
 		this.register(this.shares.on(() => this.reconcile()));
 		this.register(this.settings.subscribe(() => this.reconcile()));
-		this.registerEvent(this.plugin.app.workspace.on("file-open", file => { if (file) this.lastFile = file; this.notify(); }));
+		this.registerEvent(this.plugin.app.workspace.on("file-open", file => { if (file) { this.lastFile = file; this.detachedTarget = undefined; } this.notify(); }));
 		this.registerEvent(this.plugin.app.vault.on("rename", () => this.notify()));
 		this.registerEvent(this.plugin.app.vault.on("delete", file => { if (file === this.lastFile) this.lastFile = undefined; this.notify(); }));
 		this.registerEvent(this.plugin.app.workspace.on("file-menu", (menu, file) => {
@@ -114,6 +122,8 @@ export class DiscussionHost extends Component {
 		this.registerDomEvent(document, "visibilitychange", () => {
 			for (const slot of this.slots.values()) slot.session?.setForeground(!document.hidden);
 		});
+		this.registerDomEvent(document, "pointerdown", () => { this.linkAction++; }, { capture: true });
+		this.registerDomEvent(document, "keydown", event => { if (!["Control", "Meta", "Shift", "Alt"].includes(event.key)) this.linkAction++; }, { capture: true });
 		this.registerDomEvent(window, "online", () => { for (const slot of this.slots.values()) void slot.session?.refresh(); });
 		this.lastFile = this.plugin.app.workspace.getActiveFile() ?? undefined;
 		this.reconcile();
@@ -161,7 +171,81 @@ export class DiscussionHost extends Component {
 		this.notify();
 	}
 	current(): CommentTarget {
+		if (this.detachedTarget?.session && this.sessionCurrent(this.detachedTarget.session)) return this.detachedTarget;
+		this.detachedTarget = undefined;
 		return this.targetFor(this.lastFile);
+	}
+	private sessionCurrent(session: DiscussionSession): boolean {
+		return !this.stopped && !["closed", "authentication_required", "unavailable"].includes(session.status) &&
+			[...this.slots.values()].some(slot => !slot.cancelled && slot.session === session);
+	}
+	async discussionUrl(session: DiscussionSession, scopeId: string, threadId: string, messageId?: string): Promise<string> {
+		const current = () => this.sessionCurrent(session) && session.permission(scopeId)?.read === true;
+		const scope = parseDiscussionScope(scopeId); if (!scope || !current()) throw new Error("Discussion access changed.");
+		const thread = await session.cachedThread(scopeId, threadId), anchor = thread?.anchor;
+		if (!anchor || !current() || messageId && !await session.cachedMessage(scopeId, threadId, messageId)) throw new Error("Only a saved discussion can be linked.");
+		const kind = anchor.type === "base" ? "base" : anchor.type === "image_file" ? "image" : "note";
+		if (kind === "base" ? anchor.type !== "base" || scope.viewId !== anchor.view_id : scope.viewId !== undefined) throw new Error("The saved discussion view changed.");
+		const server = await discussionServerKey(session.identity.serverId); if (!current()) throw new Error("Discussion access changed.");
+		return discussionLinkUrl({ version: 1, server, shareId: session.identity.shareId, entryId: scope.entryId, threadId, kind, viewId: scope.viewId, messageId });
+	}
+	async openDiscussionLink(input: unknown, live: () => boolean = () => true): Promise<void> {
+		const link = parseDiscussionLink(input), action = ++this.linkAction;
+		let expectedFile = this.lastFile;
+		const check = () => { if (this.stopped || action !== this.linkAction || !live()) throw new Error("Opening this discussion was cancelled."); };
+		check();
+		const folders = this.shares.toArray().filter(folder => folder.entityGuid === link.shareId);
+		if (folders.length !== 1) throw new Error("Open this link in a vault with its shared folder connected once.");
+		const folder = folders[0], server = this.settings.readValue().servers.find(server => server.id === folder.config.onpremServerId);
+		const serverId = server?.id, endpoint = server?.controlPlaneUrl;
+		if (!this.settings.readValue().enabled || !serverId || !endpoint || await discussionServerKey(endpoint) !== link.server) throw new Error("This link belongs to a different server. Open it in the matching configured shared folder.");
+		check(); const provider = this.auth.getAuthProviderForServer(serverId), account = provider?.getCurrentUser();
+		if (!provider?.isLoggedIn() || !account) throw new Error("Sign in to this shared folder’s server, then open the comment link again.");
+		this.reconcile(); const key = this.key(endpoint, account.id, link.shareId), slot = this.slots.get(key);
+		await slot?.pending; check();
+		const session = slot?.session, scopeId = discussionLinkScope(link);
+		if (!session) throw new Error("Comments could not be opened for this account. Check local storage and try again.");
+		const current = () => !this.stopped && action === this.linkAction && live() && this.lastFile === expectedFile && this.slots.get(key) === slot && this.sessionCurrent(session) &&
+			this.shares.toArray().includes(folder) && this.settings.readValue().enabled &&
+			this.settings.readValue().servers.some(value => value.id === serverId && value.controlPlaneUrl === endpoint) &&
+			this.auth.getAuthProviderForServer(serverId)?.isLoggedIn() === true &&
+			this.auth.getAuthProviderForServer(serverId)?.getCurrentUser()?.id === account.id;
+		const requireCurrent = () => { check(); if (!current()) throw new Error("Discussion access changed. Check the active account and shared folder, then open the link again."); };
+		await session.start(); requireCurrent();
+		const stop = session.watch(scopeId, () => {}, link.kind);
+		try {
+			await session.scopeReady(scopeId); requireCurrent();
+			if (!session.permission(scopeId)?.read) throw new Error("This discussion is unavailable to your current account.");
+			const result = await session.linkedThread(scopeId, link.threadId, link.messageId); requireCurrent();
+			const anchor = result?.thread.anchor;
+			if (!anchor || !session.permission(scopeId)?.read) throw new Error("The discussion is unavailable or has not been saved for offline use.");
+			if (link.kind === "base" ? anchor.type !== "base" || anchor.view_id !== link.viewId : link.kind === "image" ? anchor.type !== "image_file" : anchor.type === "base" || anchor.type === "image_file") throw new Error("The link does not match this discussion’s original scope.");
+			if (link.kind === "base") {
+				const prior = this.baseSelection(session, link.entryId), choice: BaseDiscussionChoice = prior && prior.id === link.viewId ? prior : { id: link.viewId!, name: "Original saved view", type: "unknown", state: "unmatched" };
+				await session.trackLocal(session.store.setPreference("activeBaseView:" + link.entryId, protocolJson(choice))); requireCurrent();
+				this.baseSelections.get(session)!.get(link.entryId)!.choice = choice;
+			}
+			const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === link.entryId && paths.length < 2) paths.push(path); });
+			const candidate = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
+			const target = candidate ? this.targetFor(candidate) : undefined;
+			const file = candidate && target?.session === session && target.entryId === scopeId && target.kind === link.kind ? candidate : undefined;
+			if (file) { this.detachedTarget = undefined; expectedFile = file; this.lastFile = file; }
+			else this.detachedTarget = { path: "Linked discussion", session, entryId: scopeId, kind: link.kind, ...(link.kind === "base" ? { baseEntryId: link.entryId, baseViewName: "Original saved view" } : {}),
+				message: "The original file is not available uniquely in this vault. The authorized discussion is shown below; synchronize the file to navigate to its target." };
+			this.focus = { session, entryId: scopeId, threadId: link.threadId, serial: ++this.focusSerial,
+				messageId: result.message?.id, messageSequence: result.message?.created_sequence,
+				notice: link.messageId && !result.message ? "The linked message is unavailable or has not been saved offline. Showing its discussion." : undefined };
+			await this.open(current); requireCurrent();
+			if (file) await this.revealTarget(session, scopeId, anchor, current);
+		} catch (error) {
+			if (error instanceof DiscussionFailure) {
+				if (error.action === "authenticate") throw new Error("Sign in to this shared folder’s server, then open the comment link again.");
+				if ([403, 404].includes(error.status)) throw new Error("This discussion is unavailable to your current account.");
+				if (error.action === "retry") throw new Error("The discussion could not be reached. Check your connection and try again.");
+				throw new Error("The server could not open this discussion. Refresh comments and try again.");
+			}
+			throw error;
+		} finally { stop(); }
 	}
 	inboxSources(): { session: DiscussionSession; label: string }[] {
 		const result: { session: DiscussionSession; label: string }[] = [];
@@ -175,6 +259,7 @@ export class DiscussionHost extends Component {
 		return result;
 	}
 	async openInboxItem(session: DiscussionSession, value: InboxItem): Promise<void> {
+		this.linkAction++;
 		const item = parseInboxItem(value), scopeId = inboxScope(item), action = ++this.inboxAction;
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		if (!folder) throw new Error("This shared folder is no longer connected.");
@@ -675,9 +760,10 @@ export class DiscussionHost extends Component {
 		return this.focus?.session === session && this.focus.entryId === entryId ? this.focus : undefined;
 	}
 	async openThread(file: TFile, session: DiscussionSession, entryId: string, threadId: string): Promise<void> {
+		this.linkAction++;
 		if (this.stopped || session.status === "closed" || !session.permission(entryId)?.read ||
 			this.targetFor(file).session !== session || this.targetFor(file).entryId !== entryId) return;
-		this.lastFile = file; this.focus = { session, entryId, threadId, serial: ++this.focusSerial };
+		this.detachedTarget = undefined; this.lastFile = file; this.focus = { session, entryId, threadId, serial: ++this.focusSerial };
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
 	targetLabel(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): string | undefined {
@@ -697,25 +783,25 @@ export class DiscussionHost extends Component {
 		const record = paths.length === 1 ? paths[0] : "Unavailable record (" + target.record_id.slice(0, 8) + ")";
 		return target.type === "item" ? "Record: " + record : "Cell: " + record + " · " + target.property.source + "." + target.property.name;
 	}
-	async revealTarget(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): Promise<void> {
-		const available = () => !this.stopped && session.status !== "closed" && session.permission(entryId)?.read;
+	async revealTarget(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor, current: () => boolean = () => true): Promise<void> {
+		const available = () => current() && !this.stopped && session.status !== "closed" && session.permission(entryId)?.read === true;
 		if (!available()) return;
 		const workspace = this.plugin.app.workspace;
 		try {
 			if (anchor.type === "base_group_pending") {
-				if (await this.baseComments?.reveal(session, entryId, anchor)) return;
+				if (await this.baseComments?.reveal(session, entryId, anchor, available)) return;
 				if (available()) new Notice("This selection and its lane evidence are saved with your draft. Its original location is unavailable in the current view."); return;
 			}
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;
-				if (anchor.target.type !== "summary" && await this.baseComments?.reveal(session, entryId, anchor)) return;
+				if (anchor.target.type !== "summary" && await this.baseComments?.reveal(session, entryId, anchor, available)) return;
 				if ("definition_id" in anchor.target || anchor.target.type === "timeline_marker") {
 					const status = await session.baseDefinitionStatus(entryId, anchor);
 					if (available()) new Notice(this.targetLabel(session, entryId, anchor) + ". " + status + " The original target is retained; its exact location cannot be shown in this view.", 10000);
 					return;
 				}
-				new Notice("Discussion view: " + (this.baseSelection(session, scope.entryId)?.name ?? "saved view") + ". " +
+				if (available()) new Notice("Discussion view: " + (this.baseSelection(session, scope.entryId)?.name ?? "saved view") + ". " +
 					this.targetLabel(session, entryId, anchor) + ". Inline navigation is unavailable here. The discussion and its target are retained.");
 				return;
 			}
@@ -731,22 +817,22 @@ export class DiscussionHost extends Component {
 				let existing: WorkspaceLeaf | undefined;
 				workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof FileView && leaf.view.file === file) existing = leaf; });
 				const leaf = existing ?? workspace.getLeaf("tab");
-				await leaf.openFile(file); await workspace.revealLeaf(leaf);
+				await leaf.openFile(file); if (!available()) return; await workspace.revealLeaf(leaf);
 				if (available()) this.images?.revealFile(file, session, entryId, anchor);
 				return;
 			}
 			const existing = workspace.getLeavesOfType("markdown").find(leaf => leaf.view instanceof MarkdownView && leaf.view.file === file);
 			if (anchor.type === "image" && existing?.view instanceof MarkdownView) {
-				await workspace.revealLeaf(existing);
+				await workspace.revealLeaf(existing); if (!available()) return;
 				if (this.images?.reveal(existing.view, session, entryId, anchor)) return;
 			}
 			if (anchor.type !== "image" && existing?.view instanceof MarkdownView && existing.view.getMode() === "preview") {
-				await workspace.revealLeaf(existing);
+				await workspace.revealLeaf(existing); if (!available()) return;
 				if (anchor.type === "note" || this.reading?.reveal(existing.view, session, entryId, anchor)) return;
 			}
 			const leaf = existing ?? workspace.getLeaf("tab");
 			await leaf.setViewState({ type: "markdown", active: true, state: { file: file.path, mode: "source" } });
-			await workspace.revealLeaf(leaf);
+			if (!available()) return; await workspace.revealLeaf(leaf);
 			if (anchor.type === "note") return;
 			for (let attempt = 0; attempt < 20; attempt++) {
 				if (!available()) return;
@@ -762,11 +848,12 @@ export class DiscussionHost extends Component {
 		for (const [key, slot] of this.slots) if (slot.failed) { slot.cancelled = true; this.slots.delete(key); }
 		this.reconcile();
 	}
-	async open(): Promise<void> {
+	async open(current: () => boolean = () => true): Promise<void> {
 		const workspace = this.plugin.app.workspace;
 		const leaf = workspace.getLeavesOfType(COMMENTS_VIEW)[0] ?? workspace.getRightLeaf(false) ?? workspace.getRightLeaf(true) ?? workspace.getLeaf(true);
-		await leaf.setViewState({ type: COMMENTS_VIEW, active: true }); await workspace.revealLeaf(leaf);
-		this.notify();
+		if (!current()) return; await leaf.setViewState({ type: COMMENTS_VIEW, active: true });
+		if (!current()) return; await workspace.revealLeaf(leaf);
+		if (current()) this.notify();
 	}
 	async openInbox(): Promise<void> {
 		const workspace = this.plugin.app.workspace;

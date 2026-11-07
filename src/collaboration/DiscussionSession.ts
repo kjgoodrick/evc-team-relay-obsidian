@@ -376,29 +376,58 @@ export class DiscussionSession {
 	async cachedThread(entryId: string, threadId: string): Promise<AnchoredThread | undefined> {
 		if (this.closed || !this.permission(entryId)?.read) return undefined;
 		const row = await this.store.entity(entryId, threadKey(threadId));
-		return row && isRecord(row.value) && !row.value.removed ? storedThread(row.value) : undefined;
+		return !this.closed && this.permission(entryId)?.read && row && isRecord(row.value) && !row.value.removed ? storedThread(row.value) : undefined;
 	}
 	async inboxThread(item: InboxItem): Promise<AnchoredThread | undefined> {
+		return (await this.linkedThread(inboxScope(item), item.thread_id))?.thread;
+	}
+	async cachedMessage(scopeId: string, threadId: string, messageId: string): Promise<DiscussionMessage | undefined> {
+		if (this.closed || !isId(threadId) || !isId(messageId) || !this.permission(scopeId)?.read) return;
+		const row = await this.store.entity(scopeId, messageKey(threadId, messageId));
+		return !this.closed && this.permission(scopeId)?.read && row ? parseMessage(row.value) : undefined;
+	}
+	/** One authorized read can address an older reply without replaying a long
+	 * thread. Cache commits are fenced by the scope generation, as for sync. */
+	async linkedThread(scopeId: string, threadId: string, messageId?: string): Promise<{ thread: AnchoredThread; message?: DiscussionMessage } | undefined> {
+		if (!parseDiscussionScope(scopeId) || !isId(threadId) || messageId !== undefined && !isId(messageId)) throw new Error("Invalid discussion target.");
 		return this.trackLocal((async () => {
-			const scopeId = inboxScope(item);
-			if (!this.permission(scopeId)?.read || this.closed) return;
-			if (!this.online) return this.cachedThread(scopeId, item.thread_id);
-			const checkpoint = await this.store.checkpoint(scopeId);
-			let page;
-			try { page = await this.transport.thread(scopeId, item.thread_id); }
-			catch (error) {
-				if (error instanceof DiscussionFailure && [403, 404].includes(error.status)) { await this.store.clearRemoteScope(scopeId); await this.inbox.forgetScope(scopeId); }
-				throw error;
+			const current = () => !this.closed && !["authentication_required", "unavailable"].includes(this.statusValue) && this.permission(scopeId)?.read === true;
+			if (!current()) return;
+			let hasMessage = !this.online;
+			if (this.online) {
+				const checkpoint = await this.store.checkpoint(scopeId); if (!current()) return;
+				let thread: AnchoredThread, messages: DiscussionMessage[];
+				try {
+					let selected;
+					if (messageId) {
+						try { selected = await this.transport.message(scopeId, threadId, messageId); }
+						catch (error) { if (!(error instanceof DiscussionFailure) || error.status !== 404) throw error; }
+					}
+					if (!current()) return;
+					if (selected) { thread = { ...selected.thread, anchor: selected.anchor }; messages = [selected.message]; }
+					else { const page = await this.transport.thread(scopeId, threadId); thread = { ...page.thread, anchor: page.anchor }; messages = page.messages; }
+				} catch (error) {
+					if (error instanceof DiscussionFailure && (error.action === "authenticate" || [403, 404].includes(error.status))) {
+						if (error.action === "authenticate") { this.statusValue = "authentication_required"; this.notify(); }
+						await this.store.clearRemoteScope(scopeId); await this.inbox.forgetScope(scopeId);
+					}
+					throw error;
+				}
+				if (!current() || thread.removed) return;
+				hasMessage = messages.some(message => message.id === messageId);
+				const sequence = thread.activity_sequence;
+				if (!await this.store.cacheRemoteRead(scopeId, checkpoint.generation, [
+					{ id: threadKey(thread.id), revision: sequence, value: protocolJson(thread) },
+					...messages.map(message => ({ id: messageKey(thread.id, message.id), revision: sequence, value: protocolJson({ ...message, thread_id: thread.id }) })),
+				])) return;
+				this.notify();
 			}
-			if (this.closed || !this.permission(scopeId)?.read) return;
-			const thread = { ...page.thread, anchor: page.anchor }, sequence = thread.activity_sequence;
-			if (!await this.store.cacheRemoteRead(scopeId, checkpoint.generation, [
-				{ id: threadKey(thread.id), revision: sequence, value: protocolJson(thread) },
-				...page.messages.map(message => ({ id: messageKey(thread.id, message.id), revision: sequence, value: protocolJson({ ...message, thread_id: thread.id }) })),
-			])) return;
-			this.notify(); return this.cachedThread(scopeId, thread.id);
+			const thread = await this.cachedThread(scopeId, threadId); if (!thread || !current()) return;
+			const message = messageId && hasMessage ? await this.cachedMessage(scopeId, threadId, messageId) : undefined;
+			return current() ? { thread, message } : undefined;
 		})());
 	}
+
 	async anchorThreads(entryId: string): Promise<AnchoredThread[]> {
 		const threads: AnchoredThread[] = []; let after = 0;
 		while (!this.closed && this.permission(entryId)?.read) {

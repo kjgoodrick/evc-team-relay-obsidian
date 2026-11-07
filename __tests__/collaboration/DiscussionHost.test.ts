@@ -21,9 +21,17 @@ import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeP
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol";
 import type { TimelineRange } from "../../src/collaboration/TimelineRange";
 import { pendingRangeLocation, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
+import { TextEncoder } from "node:util";
+import { webcrypto } from "node:crypto";
+import { DISCUSSION_LINK_ACTION, discussionLinkUrl, discussionServerKey, parseDiscussionLink } from "../../src/collaboration/DiscussionLinks";
+import { DiscussionFailure } from "../../src/collaboration/DiscussionTransport";
+
+Object.assign(globalThis, { TextEncoder });
+Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
+jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 jest.mock("../../src/collaboration/ui/BaseTargetPicker", () => ({ BaseTargetPicker: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
 jest.mock("../../src/Document", () => ({ isDocument: (value: { isDocument?: boolean }) => value?.isDocument === true }));
 jest.mock("../../src/AttachmentFile", () => ({ isAttachmentFile: (value: { isAttachment?: boolean }) => value?.isAttachment === true }));
@@ -33,6 +41,7 @@ jest.mock("obsidian", () => ({
 	ItemView: class {}, Modal: class {}, Notice: class {}, TFile: class { path = "Team/Note.md"; extension = "md"; },
 }));
 jest.mock("../../src/collaboration/DiscussionTransport", () => ({
+	DiscussionFailure: jest.requireActual("../../src/collaboration/DiscussionTransport").DiscussionFailure,
 	DiscussionTransport: class {
 		constructor(readonly identity: unknown, credential: () => Promise<unknown>) { mockCredentials.push(credential); }
 	},
@@ -57,7 +66,7 @@ function fixture(bases?: BaseSyncHost) {
 	const folder = { entityGuid: id(2), config: { onpremServerId: "server" }, folderIndex: { on: () => () => {}, recordFor: () => ({ id: id(3), type: "markdown" }) }, toVirtualPath: () => "Note.md" };
 	const shares = { on: () => () => {}, toArray: () => [folder], shareFor: () => folder };
 	const file = new TFile();
-	const plugin = { registerView: jest.fn(), registerEditorExtension: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn(), getFileByPath: () => file } } };
+	const plugin = { registerObsidianProtocolHandler: jest.fn(), registerView: jest.fn(), registerEditorExtension: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn(), getFileByPath: () => file } } };
 	const scope = { readValue: () => settings, subscribe: (fn: () => void) => { settingsChanged = fn; return () => {}; } };
 	const store = { close: jest.fn(), preference: jest.fn().mockResolvedValue(undefined) };
 	const opening = jest.spyOn(DiscussionStore, "open").mockResolvedValue(store as unknown as DiscussionStore);
@@ -115,6 +124,102 @@ async function inboxFixture() {
 	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined), reveal = jest.spyOn(s.host, "revealTarget").mockResolvedValue(undefined);
 	return { ...s, session, stop, anchor, open, reveal };
 }
+
+async function linkFixture() {
+	const s = await inboxFixture();
+	const session = Object.assign(s.session, { identity: { serverId: "https://one.test", accountId: id(1), shareId: id(2) },
+		linkedThread: jest.fn().mockResolvedValue({ thread: { id: id(30), anchor: s.anchor }, message: { id: id(31), created_sequence: 801 } }),
+		cachedThread: jest.fn().mockResolvedValue({ id: id(30), anchor: s.anchor }), cachedMessage: jest.fn().mockResolvedValue({ id: id(31) }) });
+	const link = { version: 1 as const, server: await discussionServerKey("https://one.test"), shareId: id(2), entryId: id(3), threadId: id(30), kind: "note" as const, messageId: id(31) };
+	return { ...s, session, typed: session as unknown as DiscussionSession, link, url: discussionLinkUrl(link) };
+}
+
+test("direct links use stable IDs across file renames, focus an older reply and register a native URI handler", async () => {
+	const s = await linkFixture(); s.file.path = "Different mount/Renamed.md";
+	try {
+		expect(s.plugin.registerObsidianProtocolHandler).toHaveBeenCalledWith(DISCUSSION_LINK_ACTION, expect.any(Function));
+		await s.host.openDiscussionLink(s.url);
+		expect(s.session.linkedThread).toHaveBeenCalledWith(id(3), id(30), id(31));
+		expect(s.host.current()).toMatchObject({ path: s.file.path, entryId: id(3), kind: "note" });
+		expect(s.host.focusedThread(s.typed, id(3))).toMatchObject({ threadId: id(30), messageId: id(31), messageSequence: 801 });
+		expect(s.reveal).toHaveBeenCalledWith(s.session, id(3), s.anchor, expect.any(Function));
+		expect(s.stop).toHaveBeenCalledTimes(1);
+		expect(parseDiscussionLink(await s.host.discussionUrl(s.typed, id(3), id(30), id(31)))).toEqual(s.link);
+	} finally { s.close(); }
+});
+
+test.each(["missing", "ambiguous"])("%s local files show authorized discussion without inventing a target", async situation => {
+	const s = await linkFixture();
+	Object.assign(s.folder.folderIndex, { eachRecord: (fn: (record: { id: string }, path: string) => void) => {
+		if (situation === "ambiguous") { fn({ id: id(3) }, "First.md"); fn({ id: id(3) }, "Second.md"); }
+	} });
+	try {
+		await s.host.openDiscussionLink(s.url);
+		expect(s.host.current()).toMatchObject({ path: "Linked discussion", entryId: id(3), message: expect.stringContaining("not available uniquely") });
+		expect(s.open).toHaveBeenCalledTimes(1); expect(s.reveal).not.toHaveBeenCalled();
+		s.account(id(90)); expect(s.host.current().path).not.toBe("Linked discussion");
+	} finally { s.close(); }
+});
+
+test.each(["server", "share", "signed out", "disabled"])("links cannot create a connection or reuse credentials for %s", async situation => {
+	const s = await linkFixture(); let link = s.link;
+	if (situation === "server") link = { ...link, server: "b".repeat(64) };
+	if (situation === "share") link = { ...link, shareId: id(90) };
+	if (situation === "signed out") s.account();
+	if (situation === "disabled") s.settings.enabled = false;
+	try {
+		await expect(s.host.openDiscussionLink(discussionLinkUrl(link))).rejects.toThrow();
+		expect(s.session.watch).not.toHaveBeenCalled(); expect(s.session.linkedThread).not.toHaveBeenCalled();
+		expect(s.provider.getValidToken).not.toHaveBeenCalled(); expect(s.reveal).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test.each(["account", "endpoint", "revoked", "cancelled", "unload"])("a delayed link cannot open after %s changes", async change => {
+	const s = await linkFixture(); let release!: (value: unknown) => void, entered!: () => void, live = true;
+	const started = new Promise<void>(resolve => { entered = resolve; });
+	s.session.linkedThread.mockImplementationOnce(() => new Promise(resolve => { release = resolve; entered(); }));
+	const navigation = s.host.openDiscussionLink(s.url, () => live), rejected = expect(navigation).rejects.toThrow();
+	try {
+		await started;
+		if (change === "account") s.account(id(90));
+		if (change === "endpoint") s.settings.servers[0].controlPlaneUrl = "https://other.test";
+		if (change === "revoked") s.session.permission = () => ({ read: false });
+		if (change === "cancelled") live = false;
+		if (change === "unload") s.host.onunload();
+		release({ thread: { id: id(30), anchor: s.anchor } }); await rejected;
+		expect(s.open).not.toHaveBeenCalled(); expect(s.reveal).not.toHaveBeenCalled(); expect(s.stop).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("unavailable message falls back to the original thread with an explanation", async () => {
+	const s = await linkFixture(); s.session.linkedThread.mockResolvedValue({ thread: { id: id(30), anchor: s.anchor } });
+	try {
+		await s.host.openDiscussionLink(s.url);
+		expect(s.host.focusedThread(s.typed, id(3))).toMatchObject({ threadId: id(30), notice: expect.stringContaining("linked message is unavailable") });
+	} finally { s.close(); }
+});
+
+test("permission failures show a human explanation and release the temporary subscription", async () => {
+	const s = await linkFixture(); s.session.linkedThread.mockRejectedValue(new DiscussionFailure("reject", "internal_detail", 403));
+	try {
+		await expect(s.host.openDiscussionLink(s.url)).rejects.toThrow("unavailable to your current account");
+		expect(s.stop).toHaveBeenCalledTimes(1); expect(s.open).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("Bases links retain the original saved view rather than whichever view the recipient last used", async () => {
+	const s = await nativeBaseFixture(), anchor = { version: 1, type: "base", definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1, target: { type: "view" } };
+	Object.assign(s.session, { identity: { serverId: "https://one.test", shareId: id(2), accountId: id(1) },
+		linkedThread: jest.fn().mockResolvedValue({ thread: { id: id(30), anchor } }) });
+	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined), reveal = jest.spyOn(s.host, "revealTarget").mockResolvedValue(undefined);
+	const link = { version: 1 as const, server: await discussionServerKey("https://one.test"), shareId: id(2), entryId: id(3), threadId: id(30), kind: "base" as const, viewId: id(4) };
+	try {
+		await s.host.openDiscussionLink(discussionLinkUrl(link));
+		expect(s.savedPreference).toHaveBeenCalledWith("activeBaseView:" + id(3), expect.objectContaining({ id: id(4) }));
+		expect(s.host.current()).toMatchObject({ entryId: s.scope, baseEntryId: id(3), kind: "base" });
+		expect(open).toHaveBeenCalledTimes(1); expect(reveal).toHaveBeenCalledWith(s.session, s.scope, anchor, expect.any(Function));
+	} finally { s.close(); }
+});
 
 test("inbox navigation resolves the current local file by managed identity instead of its old display path", async () => {
 	const s = await inboxFixture();

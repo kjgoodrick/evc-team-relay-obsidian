@@ -11,6 +11,7 @@ import { DiscussionDrafts } from "./DiscussionDrafts";
 import { ThreadSubscription } from "./ThreadSubscription";
 import { CommentPicture } from "./CommentPicture";
 import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
+import { copyToClipboard } from "../../utils/clipboard";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 
@@ -119,6 +120,7 @@ class ThreadCard {
 		const generation = ++this.generation;
 		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
 		this.controls.empty();
+		this.copyLink(this.controls, "Copy discussion link");
 		if (thread.anchor?.type === "image" || thread.anchor?.type === "image_file") {
 			const target = this.controls.createEl("button", { text: "Show image " + (thread.anchor.geometry.type === "whole" ? "discussion" : thread.anchor.geometry.type) });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
@@ -173,7 +175,7 @@ class ThreadCard {
 		}
 		this.composerContainer.hidden = !this.expanded; this.composer?.update();
 		const result = await this.session.messages(this.entryId, thread.id, this.after, this.count);
-		if (this.disposed || generation !== this.generation || this.session.status === "closed") return;
+		if (this.disposed || generation !== this.generation || !this.session.permission(this.entryId)?.read || ["closed", "authentication_required", "unavailable"].includes(this.session.status)) return;
 		this.pictures.forEach(p => p.dispose()); this.pictures = []; this.content.empty();
 		for (const message of result.messages) this.message(message);
 		if (!result.messages.length) this.content.createEl("p", { text: "Loading discussion…", cls: "relay-comment-muted" });
@@ -187,13 +189,35 @@ class ThreadCard {
 		}
 		this.renderedKey = key;
 	}
-	async focus(): Promise<void> { this.expanded = true; this.count = 20; await this.update(this.thread); this.el.scrollIntoView({ block: "nearest" }); }
+	async focus(messageId?: string, sequence?: number, notice?: string, current: () => boolean = () => true): Promise<boolean> {
+		this.expanded = true; this.count = 20;
+		if (messageId && sequence !== undefined) { this.after = Math.max(0, sequence - 1); this.pages = this.after ? [0] : []; }
+		await this.update(this.thread);
+		if (this.disposed || !current() || !this.session.permission(this.entryId)?.read) return false;
+		const selected = messageId ? Array.from(this.content.querySelectorAll<HTMLElement>("[data-message-id]")).find(element => element.dataset.messageId === messageId) : undefined;
+		const element = selected ?? this.el; element.tabIndex = -1; element.scrollIntoView({ block: "nearest" }); element.focus({ preventScroll: true });
+		if (notice || messageId && !selected) this.error.setText(notice ?? "The linked message is unavailable. Showing its discussion.");
+		return true;
+	}
+	private copyLink(parent: HTMLElement, label: string, messageId?: string): void {
+		const button = parent.createEl("button", { text: label });
+		button.onclick = () => {
+			button.disabled = true;
+			void this.host.discussionUrl(this.session, this.entryId, this.thread.id, messageId).then(async url => {
+				if (this.disposed || !this.session.permission(this.entryId)?.read || this.session.status === "closed") return;
+				await copyToClipboard(url); if (!this.disposed && this.session.permission(this.entryId)?.read) this.error.setText("Comment link copied.");
+			}).catch(() => { if (!this.disposed) this.error.setText("The comment link could not be copied. Check your access and try again."); })
+				.finally(() => { if (!this.disposed) button.disabled = false; });
+		};
+	}
 	private message(message: DiscussionMessage): void {
 		const article = this.content.createDiv({ cls: "relay-comment-message" });
+		article.dataset.messageId = message.id;
 		article.createDiv({ cls: "relay-comment-author", text: `${message.author_id === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, message.author_id)} · ${new Date(message.created_at).toLocaleString()}${message.revision > 1 ? " · edited" : ""}` });
 		renderCommentBody(article, message.body, id => this.session.displayName(this.entryId, id),
 			(parent, picture) => this.pictures.push(new CommentPicture(parent, this.session, this.entryId, picture)));
 		const permission = this.session.permission(this.entryId), actions = article.createDiv({ cls: "relay-comment-message-actions" });
+		this.copyLink(actions, "Copy comment link", message.id);
 		if (!message.deleted) for (const [emoji, label] of Object.entries(REACTIONS)) {
 			const reaction = message.reactions.find(r => r.emoji === emoji);
 			if (!permission?.comment && !reaction) continue;
@@ -252,6 +276,10 @@ export class CommentsView extends ItemView {
 			const next = this.host.current();
 			// Clear the old account/note synchronously; debounce only subsequent rendering.
 			if (this.session && (next.session !== this.session || next.entryId !== this.entryId || this.session.status === "closed")) this.reset();
+			else if (this.session && this.entryId && (!this.session.permission(this.entryId)?.read || ["authentication_required", "unavailable"].includes(this.session.status))) {
+				this.generation++;
+				for (const card of this.cards.values()) card.dispose(); this.cards.clear(); this.list?.empty();
+			}
 			this.schedule();
 		});
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.schedule()));
@@ -288,6 +316,7 @@ export class CommentsView extends ItemView {
 		if (target.session !== this.session || target.entryId !== this.entryId) {
 			this.reset(); this.session = target.session; this.entryId = target.entryId;
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Comments" });
+			if (target.message) this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message });
 			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
 			if (target.kind === "base") {
 				this.contentEl.createEl("p", { cls: "relay-comment-base-view", text: "Discussion view: " + target.baseViewName });
@@ -306,6 +335,9 @@ export class CommentsView extends ItemView {
 		}
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");
 		this.contentEl.querySelector("h2")?.setText(target.path.split("/").pop() ?? "Comments");
+		const targetStatus = this.contentEl.querySelector(".relay-comment-target-status");
+		if (targetStatus) { targetStatus.setText(target.message ?? ""); (targetStatus as HTMLElement).hidden = !target.message; }
+		else if (target.message) this.contentEl.querySelector("h2")?.insertAdjacentElement("afterend", this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message }));
 		this.contentEl.querySelector(".relay-comment-base-view")?.setText("Discussion view: " + target.baseViewName);
 		const session = this.session, entryId = this.entryId, generation = ++this.generation;
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);
@@ -324,11 +356,11 @@ export class CommentsView extends ItemView {
 			{ threads: [], pending: await session.store.pending(entryId), hasMore: false, nextAfter: this.after };
 		if (this.closed || generation !== this.generation || session.status === "closed") return;
 		this.pendingView!.update(local.pending);
-		if (!canRead) return;
+		if (!canRead || !session.permission(entryId)?.read || ["authentication_required", "unavailable"].includes(session.status)) return;
 		const focus = this.host.focusedThread(session, entryId);
 		if (focus && !local.threads.some(thread => thread.id === focus.threadId)) {
 			const thread = await session.cachedThread(entryId, focus.threadId);
-			if (this.closed || generation !== this.generation) return;
+			if (this.closed || generation !== this.generation || !session.permission(entryId)?.read || ["authentication_required", "unavailable"].includes(session.status)) return;
 			if (thread) local.threads.unshift(thread);
 		}
 		const retained = new Set(local.threads.map(thread => thread.id));
@@ -338,7 +370,9 @@ export class CommentsView extends ItemView {
 			if (!card) { card = new ThreadCard(this.list!, this.app, session, entryId, thread, this.host); this.cards.set(thread.id, card); }
 			await card.update(thread);
 			if (this.closed || generation !== this.generation) return;
-			if (focus?.threadId === thread.id && focus.serial !== this.focusedSerial) { this.focusedSerial = focus.serial; await card.focus(); }
+			if (focus?.threadId === thread.id && focus.serial !== this.focusedSerial) {
+				if (await card.focus(focus.messageId, focus.messageSequence, focus.notice, () => !this.closed && generation === this.generation)) this.focusedSerial = focus.serial;
+			}
 		}
 		this.list!.querySelectorAll(".relay-comment-more").forEach(el => el.remove());
 		if (local.hasMore) {
