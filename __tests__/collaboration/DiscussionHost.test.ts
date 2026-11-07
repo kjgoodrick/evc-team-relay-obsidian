@@ -29,6 +29,7 @@ import type { DiscussionSearchItem } from "../../src/collaboration/DiscussionSea
 import { ReattachCommentModal } from "../../src/collaboration/ui/ReattachComment";
 import { RecoverCommentModal } from "../../src/collaboration/ui/RecoverComment";
 import type { AnchoredThread } from "../../src/collaboration/DiscussionSession";
+import { CommentStorageModal } from "../../src/collaboration/ui/CommentStorage";
 
 Object.assign(globalThis, { TextEncoder });
 Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
@@ -42,6 +43,7 @@ jest.mock("../../src/collaboration/ui/ReattachComment", () => ({
 	commentTargetDescription: () => "Target", TargetHistoryModal: jest.fn(),
 }));
 jest.mock("../../src/collaboration/ui/RecoverComment", () => ({ RecoverCommentModal: jest.fn().mockImplementation(() => ({ open: jest.fn(), close: jest.fn(), validate: jest.fn() })) }));
+jest.mock("../../src/collaboration/ui/CommentStorage", () => ({ CommentStorageModal: jest.fn().mockImplementation(() => ({ open: jest.fn(), close: jest.fn(), validate: jest.fn() })) }));
 jest.mock("../../src/Document", () => ({ isDocument: (value: { isDocument?: boolean }) => value?.isDocument === true }));
 jest.mock("../../src/AttachmentFile", () => ({ isAttachmentFile: (value: { isAttachment?: boolean }) => value?.isAttachment === true }));
 jest.mock("obsidian", () => ({
@@ -58,10 +60,11 @@ jest.mock("../../src/collaboration/DiscussionTransport", () => ({
 jest.mock("../../src/collaboration/DiscussionSession", () => ({
 	DiscussionSession: class {
 		status = "ready";
+		identity: DiscussionStore["identity"];
 		close = jest.fn(() => { this.status = "closed"; return Promise.resolve(); });
 		onChange() {} setForeground() {} start() { return Promise.resolve(); } refresh() { return Promise.resolve(); }
 		trackLocal<T>(promise: Promise<T>) { return promise; }
-		constructor(readonly store: DiscussionStore) { mockSessions.push(this); }
+		constructor(readonly store: DiscussionStore) { this.identity = store.identity; mockSessions.push(this); }
 	},
 }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -77,7 +80,7 @@ function fixture(bases?: BaseSyncHost) {
 	const file = new TFile();
 	const plugin = { registerObsidianProtocolHandler: jest.fn(), registerView: jest.fn(), registerEditorExtension: jest.fn(), addCommand: jest.fn(), app: { workspace: { on: jest.fn(), getActiveFile: () => file }, vault: { on: jest.fn(), getFileByPath: () => file } } };
 	const scope = { readValue: () => settings, subscribe: (fn: () => void) => { settingsChanged = fn; return () => {}; } };
-	const store = { close: jest.fn(), preference: jest.fn().mockResolvedValue(undefined) };
+	const store = { close: jest.fn(), preference: jest.fn().mockResolvedValue(undefined), identity: { serverId: "https://one.test", accountId: id(1), shareId: id(2), vaultId: "vault" } };
 	const opening = jest.spyOn(DiscussionStore, "open").mockResolvedValue(store as unknown as DiscussionStore);
 	const host = new DiscussionHost(plugin as unknown as Plugin, auth as unknown as AuthSession, shares as unknown as ShareRegistry,
 		 scope as unknown as SettingsScope<RelayOnPremSettings>, "vault", bases);
@@ -85,6 +88,31 @@ function fixture(bases?: BaseSyncHost) {
 		account: (value?: string) => { accountId = value; authChanged(); }, settingsChanged: () => settingsChanged(),
 		close: () => { host.onunload(); opening.mockRestore(); } };
 }
+
+test("local storage opens without a surviving note or remote read access and remains bound to the signed-in account", async () => {
+	const f = fixture(); await f.start();
+	try {
+		const session = Object.assign(mockSessions[0], { status: "unavailable", permission: () => ({ read: false, comment: false }) });
+		jest.spyOn(f.host, "current").mockReturnValue({ path: "", message: "No file" });
+		const command = f.plugin.addCommand.mock.calls.map(([command]) => command).find(command => command.id === "open-comment-storage");
+		expect(command.checkCallback(true)).toBe(true); command.checkCallback(false);
+		const call = jest.mocked(CommentStorageModal).mock.calls.at(-1)!;
+		expect(call[1]).toBe(session); expect(call[2]()).toBe(true);
+		jest.spyOn(f.provider, "getCurrentUser").mockReturnValue({ id: id(99) });
+		expect(call[2]()).toBe(false); expect(command.checkCallback(true)).toBe(false);
+	} finally { f.close(); }
+});
+
+test("local storage rejects a changed endpoint, disabled configuration or signed-out account", async () => {
+	const f = fixture(); await f.start();
+	try {
+		const command = f.plugin.addCommand.mock.calls.map(([command]) => command).find(command => command.id === "open-comment-storage");
+		expect(command.checkCallback(true)).toBe(true);
+		f.settings.servers[0].controlPlaneUrl = "https://two.test"; expect(command.checkCallback(true)).toBe(false);
+		f.settings.servers[0].controlPlaneUrl = "https://one.test"; f.settings.enabled = false; expect(command.checkCallback(true)).toBe(false);
+		f.settings.enabled = true; jest.spyOn(f.provider, "isLoggedIn").mockReturnValue(false); expect(command.checkCallback(true)).toBe(false);
+	} finally { f.close(); }
+});
 
 test("target selection opens a review for the existing discussion without consuming or creating a comment draft", async () => {
 	const s = fixture(); await s.start();

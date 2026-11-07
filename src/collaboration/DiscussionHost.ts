@@ -20,6 +20,7 @@ import { DiscussionSession, type AnchoredThread, type BaseTargetSelection } from
 import { ReattachCommentModal, commentTargetDescription } from "./ui/ReattachComment";
 import { RecoverCommentModal } from "./ui/RecoverComment";
 import { CommentStorageModal } from "./ui/CommentStorage";
+import { CommentStoragePicker, type CommentStorageSource } from "./ui/CommentStoragePicker";
 import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { DiscussionFailure, DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore, type Draft, type OutboxOperation } from "./storage/DiscussionStore";
@@ -80,6 +81,7 @@ export class DiscussionHost extends Component {
 	private reattachModal?: ReattachCommentModal;
 	private recoveryModal?: RecoverCommentModal;
 	private storageModal?: CommentStorageModal;
+	private storagePicker?: CommentStoragePicker;
 	private recoverySelection?: { session: DiscussionSession; entryId: string; operation: OutboxOperation; draft: Draft };
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
@@ -93,8 +95,15 @@ export class DiscussionHost extends Component {
 		this.plugin.addCommand({ id: "open-comment-inbox", name: "Open comment inbox", callback: () => { void this.openInbox(); } });
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
 		this.plugin.addCommand({ id: "open-comment-storage", name: "Open comment storage", checkCallback: checking => {
-			const session = this.current().session; if (!session) return false;
-			if (!checking) this.openCommentStorage(session); return true;
+			const sources = this.storageSources(); if (!sources.length) return false;
+			if (!checking) {
+				if (sources.length === 1) this.openCommentStorage(sources[0].session);
+				else {
+					this.storagePicker?.close();
+					this.storagePicker = new CommentStoragePicker(this.plugin.app, () => this.storageSources(), session => this.openCommentStorage(session)); this.storagePicker.open();
+				}
+			}
+			return true;
 		} });
 		this.plugin.addCommand({ id: "cancel-comment-target-selection", name: "Cancel comment target selection", checkCallback: checking => {
 			if (!this.choosingReattachment) return false;
@@ -149,6 +158,7 @@ export class DiscussionHost extends Component {
 	private notify(): void {
 		this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); this.reattachModal?.validate(); this.recoveryModal?.validate();
 		this.storageModal?.validate();
+		this.storagePicker?.validate();
 		const move = this.reattachSelection;
 		if (move && (!this.sessionCurrent(move.session) || !move.session.canReattach || !move.session.permission(move.entryId)?.comment)) this.reattachSelection = undefined;
 		const recovery = this.recoverySelection;
@@ -833,9 +843,23 @@ export class DiscussionHost extends Component {
 		this.recoveryModal.open(); this.notify();
 	}
 	openCommentStorage(session: DiscussionSession): void {
-		if (!this.sessionCurrent(session)) return;
+		if (!this.localStorageCurrent(session)) return;
 		this.storageModal?.close();
-		this.storageModal = new CommentStorageModal(this.plugin.app, session, () => this.sessionCurrent(session)); this.storageModal.open();
+		this.storageModal = new CommentStorageModal(this.plugin.app, session, () => this.localStorageCurrent(session)); this.storageModal.open();
+	}
+	private localStorageCurrent(session: DiscussionSession): boolean {
+		if (this.stopped || session.status === "closed" || session.identity.vaultId !== this.vaultId ||
+			![...this.slots.values()].some(slot => !slot.cancelled && slot.session === session)) return false;
+		const settings = this.settings.readValue(); if (!settings.enabled) return false;
+		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
+		const server = folder && settings.servers.find(server => server.id === folder.config.onpremServerId);
+		if (!server || this.key(server.controlPlaneUrl, session.identity.accountId, session.identity.shareId) !==
+			this.key(session.identity.serverId, session.identity.accountId, session.identity.shareId)) return false;
+		const provider = this.auth.getAuthProviderForServer(server.id);
+		return !!provider?.isLoggedIn() && provider.getCurrentUser()?.id === session.identity.accountId;
+	}
+	private storageSources(): CommentStorageSource[] {
+		return this.inboxSources().filter(source => this.localStorageCurrent(source.session));
 	}
 	openReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected?: LocalDiscussionAnchor): void {
 		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
@@ -968,6 +992,7 @@ export class DiscussionHost extends Component {
 		this.reattachSelection = undefined; this.reattachModal?.close(); this.reattachModal = undefined;
 		this.recoverySelection = undefined; this.recoveryModal?.close(); this.recoveryModal = undefined;
 		this.storageModal?.close(); this.storageModal = undefined;
+		this.storagePicker?.close(); this.storagePicker = undefined;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
 		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.markerManager?.close(); this.markerManager = undefined;
