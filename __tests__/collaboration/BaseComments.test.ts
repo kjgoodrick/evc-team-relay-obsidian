@@ -78,6 +78,30 @@ test("inline cell and record controls preserve exact semantic targets and marker
 	} finally { f.close(); }
 });
 
+test("range toolbar and cached markers preserve the saved axis without a network read on scroll", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0]; context.binding.type = "sabidurian-timeline";
+		const axis = { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "UTC" };
+		const proof = { protocol_version: 1, entry_id: id(1), definition_id: id(3), generation: id(4), view_id: id(2), registry_revision: 1,
+			axis: { id: id(40), kind: "axis", revision: 1, fingerprint: "a".repeat(64), axis } };
+		const range = { version: 1, kind: "calendar", start: "2026-01-01", end: "2026-01-02", time_zone: "UTC", start_inclusive: true, end_inclusive: true };
+		f.anchor.target = { type: "timeline_range", axis_definition_id: id(40), axis_definition_revision: 1, axis, range } as BaseAnchor["target"];
+		let canComment = true;
+		const readAxis = jest.fn().mockResolvedValue(proof), choose = jest.fn();
+		Object.assign(f.session, { readTimelineAxis: readAxis, canAnchorBase: () => true, permission: () => ({ read: true, comment: canComment }) });
+		Object.assign(f.surface, { rangeContext: () => ({ axis, effectiveTimeZone: "UTC", kinds: ["calendar"], current: () => true }),
+			rangeGeometry: () => ({ startX: 100, endX: 300, top: 40, bottom: 60, discontinuous: false, current: () => true }) });
+		Object.assign(f.host, { chooseTimelineRange: choose }); f.pane.invalidate(); await settle();
+		f.buttons().find(button => button.textContent === "Comment on range")!.click(); expect(choose).toHaveBeenCalledWith(context);
+		const marker = f.root.querySelector<HTMLButtonElement>(".relay-timeline-range-marker")!; expect(marker).not.toBeNull(); marker.click();
+		expect(f.host.openBaseThread).toHaveBeenCalledWith(context, id(7)); const reads = readAxis.mock.calls.length;
+		f.root.dispatchEvent(new Event("scroll")); await settle(); expect(readAxis).toHaveBeenCalledTimes(reads);
+		canComment = false; f.pane.invalidate(); await settle(); expect(f.buttons().some(button => button.textContent === "Comment on range")).toBe(false);
+		proof.axis.revision = 2; f.pane.invalidate(); await settle(); expect(f.root.querySelector(".relay-timeline-range-marker")).toBeNull();
+	} finally { f.close(); }
+});
+
 function annotation(f: ReturnType<typeof fixture>) {
 	let select: (handle: NativeBaseHandle) => void = () => {}, stopped: () => void = () => {};
 	let group: ((location: NativeBaseGroupLocation) => void) | undefined;

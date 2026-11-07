@@ -1,4 +1,7 @@
-import { timelineRangeLabel } from "./TimelineRange";
+import { timelineRangeLabel, type TimelineRange } from "./TimelineRange";
+import type { TimelineAxisContext } from "./TimelineRangeProtocol";
+import { rangeLane, rangeMatchesAxis, readNativeTimelineAxis, timelineAxisMatches } from "./NativeTimelineRanges";
+import { TimelineRangeWorkflow } from "./ui/TimelineRangeWorkflow";
 import { NativeBaseGroupComments } from "./NativeBaseGroupComments";
 import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
 import { baseGroupValueLabel } from "./BaseGroupValueBridge";
@@ -58,6 +61,7 @@ export class DiscussionHost extends Component {
 	private baseComments?: BaseComments;
 	private baseSelections = new WeakMap<DiscussionSession, Map<string, { choice?: BaseDiscussionChoice }>>();
 	private baseAction = 0;
+	private rangeWorkflow?: TimelineRangeWorkflow;
 	private inboxAction = 0;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
@@ -110,7 +114,7 @@ export class DiscussionHost extends Component {
 		this.reconcile();
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-	private notify(): void { for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
+	private notify(): void { this.rangeWorkflow?.validate(); for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
 	private key(serverUrl: string, accountId: string, shareId: string): string {
 		return JSON.stringify([serverUrl.replace(/\/+$/, ""), accountId, shareId]);
 	}
@@ -416,12 +420,29 @@ export class DiscussionHost extends Component {
 			return await this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
 		} catch (error) { new Notice(error instanceof Error ? error.message : "The group selection could not be saved. Existing drafts are retained."); return false; }
 	}
+	chooseTimelineRange(context: BaseCommentContext): void {
+		this.rangeWorkflow?.close();
+		const action = ++this.baseAction;
+		const workflow = new TimelineRangeWorkflow(this.plugin.app, context, () => !this.stopped && action === this.baseAction,
+			(proof, range, current) => this.commentTimelineRange(context, proof, range, current));
+		this.rangeWorkflow = workflow; void workflow.open();
+	}
+	async commentTimelineRange(context: BaseCommentContext, proof: TimelineAxisContext, range: TimelineRange, alive: () => boolean): Promise<boolean> {
+		const native = context.surface.rangeContext(), action = this.baseAction;
+		const current = () => !this.stopped && action === this.baseAction && alive() && !!native && timelineAxisMatches(context, proof, native) &&
+			context.session.permission(context.entryId)?.comment === true;
+		if (!current()) return false;
+		const anchor = await context.session.captureTimelineRange(context.entryId, proof, range);
+		if (!current() || !rangeMatchesAxis(context, anchor, proof) || anchor.registry_revision !== context.binding.snapshot.revision) return false;
+		if (!await this.pinBaseContext(context, current)) return false;
+		return this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
+	}
 	async openBaseThread(context: BaseCommentContext, threadId: string): Promise<void> {
 		const action = ++this.baseAction, current = () => action === this.baseAction && context.current();
 		try {
 			const thread = await context.session.cachedThread(context.entryId, threadId);
 			if (!current() || thread?.anchor?.type !== "base") return;
-			if (thread.anchor.target.type === "group" ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor)) return;
+			if (thread.anchor.target.type !== "timeline_range" && (thread.anchor.target.type === "group" ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor))) return;
 			if (!await this.verifyBaseTarget(context, thread.anchor) || !current()) return;
 			if (await this.pinBaseContext(context, current)) await this.openThread(context.file, context.session, context.entryId, threadId);
 		} catch { new Notice("This discussion is no longer available in the current view."); }
@@ -435,6 +456,10 @@ export class DiscussionHost extends Component {
 		if (!context.current()) return false;
 		const target = anchor?.target, recordId = target && "record_id" in target ? target.record_id : undefined;
 		const proof = await context.session.readBaseContext(context.entryId, recordId);
+		if (anchor && target?.type === "timeline_range") {
+			const axis = await readNativeTimelineAxis(context);
+			if (!rangeMatchesAxis(context, anchor, axis) || target.lane && !await rangeLane(context, anchor)) return false;
+		}
 		if (target && "definition_id" in target) {
 			const catalog = await context.session.readBaseDefinitions(context.entryId);
 			if (!context.current() || catalog.registry_revision !== context.binding.snapshot.revision || catalog.generation !== anchor!.generation ||
@@ -702,6 +727,7 @@ export class DiscussionHost extends Component {
 	}
 	onunload(): void {
 		this.stopped = true;
+		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
 		this.focus = undefined; this.editors.clear();
 		for (const slot of this.slots.values()) { slot.cancelled = true; void slot.session?.close(); }
 		for (const unsubscribe of this.folderListeners.values()) unsubscribe();

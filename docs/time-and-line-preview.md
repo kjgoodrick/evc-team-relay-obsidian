@@ -6,8 +6,8 @@ The bridge must advertise version one, `available`, both registered view types,
 pre-navigation checks and the `annotation` capability. The initial bridge without
 those additions is insufficient. Both plugins must be updated together.
 
-This is a development preview. Native Obsidian validation, the timeline range comment interface,
-shared milestones and timeline presence remain unfinished. It does not establish
+This is a development preview. Native Obsidian validation, new lane-specific
+range creation, shared milestones and timeline presence remain unfinished. It does not establish
 the complete desktop/mobile collaboration release.
 
 ## Supported behavior
@@ -52,13 +52,34 @@ Range and item annotation modes share cancellation ownership. Explicit
 cancellation suppresses late delivery; provider cleanup may precede a valid
 single selection. Dirty inspectors prevent navigation and new selection.
 
-This is a consumer API, **not a completed range-comment UI**. The toolbar,
-confirmation/editor, durable capture hookup, saved range markers and discussion
-navigation still need connecting. The renderer supports mouse/touch/keyboard
-endpoints and lane geometry, but outside-axis reveal currently reports hidden.
-Current plugin tests and eight actual-source interoperability cases exercise
-these boundaries without native installation. Range-specific PostgreSQL,
-desktop/mobile and physical-touch acceptance remain.
+The consumer API now drives a **Comment on range** toolbar control, confirmation
+form, durable target capture, saved markers and discussion navigation. The form
+supports whole dates, exact times with explicit offsets, historical CE/BCE dates
+with independent endpoint precision, and exact decimal Sequence values. Endpoint
+inclusion is explicit. Users can enter values or select endpoints on the rendered
+timeline; cancelling selection preserves even unfinished form input. Failed
+capture retains values, concurrent sends are suppressed, and a changed axis or
+lost permission prevents saving. Successful capture pins the original saved
+view, saves the target through the normal draft store, and opens the existing
+comment composer/offline outbox.
+
+New ranges created through this form span the saved view. New lane-specific range
+composition is still unfinished. Existing authorized lane ranges can display on
+their exact typed lane, and cannot fall back to a view-wide span. Saved markers
+aggregate identical ranges, clip to the viewport, distinguish included/excluded
+endpoints and flag civil-axis DST discontinuities. Geometry refresh uses cached
+threads/axis proofs and does not fetch them on scroll. Changed-axis targets stay
+in discussions without misleading placement. Navigation respects dirty inspectors
+and the original saved-view identity; outside-axis reveal currently reports hidden.
+
+Validation: 2,377 plugin tests in 203 suites pass (15 opt-in tests skipped), as do
+the preview build/main types, changed-source lint and frozen test-type gate.
+Eight source interoperability cases exercise both real renderers, plugin load
+orders and grouping modes, including the actual confirmation workflow and marker
+renderer. The session port in that fixture supplies a verified axis; HTTP
+persistence/recovery has separate evidence. These are not native Obsidian tests.
+Range-specific PostgreSQL, desktop/mobile, physical touch and resource acceptance
+remain. Native availability was checked again November 6: the Mac was locked.
 
 `TimelineBridgeClient` discovers either plugin load order through the fork's
 request/ready workspace events. It validates the API shape, bounds surfaces and
@@ -140,8 +161,9 @@ Sequence values remain decimal strings; dense positions never become identities.
 
 At the protocol checkpoint the renderer was not connected. The later optional
 range API described above adds gesture, geometry and in-axis reveal consumption.
-The range toolbar/confirmation, durable capture hookup, saved markers, discussion
-navigation, new unverified offline lane composition and native acceptance remain.
+The current range interface above adds toolbar/confirmation, durable capture,
+saved markers and discussion navigation. New unverified offline lane composition
+and native acceptance remain.
 Reading an existing range must
 retain its original axis/zone/precision even when the current renderer cannot
 project it. See the server's `docs/timeline-range-preview.md` for the wire contract

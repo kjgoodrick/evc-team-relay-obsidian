@@ -11,11 +11,14 @@ import { TimelineBridgeClient } from "../../src/bases/TimelineBridgeClient.ts";
 import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface.ts";
 import { sha256Hex } from "../../src/contentDigest.ts";
 import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments.ts";
+import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeWorkflow.ts";
+import { renderTimelineRangeMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
 
 const win = new Window();
 Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS });
 Object.defineProperty(window.crypto, "subtle", { value: webcrypto.subtle });
 const proto = win.HTMLElement.prototype;
+Modal.prototype.setTitle = function(text) { this.contentEl.setAttribute("aria-label", text); };
 proto.createEl = function(tag, opts = {}) {
 	const element = document.createElement(tag);
 	if (opts.text != null) element.textContent = opts.text;
@@ -73,7 +76,7 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const snapshot = { protocol_version: 1, definition_id: uuid(1), entry_id: uuid(2), generation: uuid(3), revision: 1,
 			content_sha256: await sha256Hex(new TextEncoder().encode(source).buffer), views: [{ slot: 0, id: uuid(4), name: "Work", type, descriptor_sha256: "a".repeat(64) }],
 			unmatched: { views: [], has_more: false, next_after: null } };
-		assert.ok(await surface.bind(snapshot, uuid(2), async () => source, () => true));
+		const binding = await surface.bind(snapshot, uuid(2), async () => source, () => true); assert.ok(binding);
 		const cell = surface.handles().find(handle => handle.target.type === "cell" && handle.target.file === files[0] && handle.target.property.source === "formula"); assert.ok(cell);
 		assert.equal(surface.hit(cell.element)?.target.property.name, "total");
 		let selected, stopped = 0;
@@ -136,10 +139,37 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		surface.beginRange(sequence ? "ordinal" : "calendar", "day", () => assert.fail("cancelled range"), () => rangeStops++);
 		const stopAnnotation = surface.beginAnnotation(() => {}, () => {}); assert.equal(rangeStops, 2);
 		assert.equal(root.querySelector(".sabidurian-range-selection-status"), null); stopAnnotation();
+		// Exercise the real confirmation workflow and saved-marker renderer. The
+		// session port supplies a verified axis; actual HTTP persistence is tested
+		// separately by realBaseGroupStack.test.ts.
+		const axisProof = { protocol_version: 1, entry_id: uuid(2), definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1,
+			axis: { id: uuid(40), kind: "axis", revision: 1, fingerprint: "a".repeat(64), axis: rangeContext.axis } };
+		const rangeCommentContext = { file: base, surface, binding, baseEntryId: uuid(2), entryId: "synthetic-scope", current: () => surface.current(),
+			session: { permission: () => ({ read: true, comment: true }), canAnchorBase: () => true, readTimelineAxis: async () => axisProof } };
+		let savedRange;
+		const workflow = new TimelineRangeWorkflow(plugin.app, rangeCommentContext, () => true, async (proof, range, current) => {
+			assert.ok(current()); assert.equal(proof, axisProof); savedRange = range; return true;
+		});
+		await workflow.open();
+		const rangeButton = label => [...document.querySelectorAll(".relay-timeline-range-dialog button")].find(button => button.textContent === label);
+		assert.ok(rangeButton("Select endpoints on timeline")); rangeButton("Select endpoints on timeline").click();
+		const rangeStatus = root.querySelector(".sabidurian-range-selection-status"); assert.ok(rangeStatus);
+		for (const key of ["Enter", "ArrowRight", "Enter"]) rangeStatus.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));
+		assert.equal(rangeButton("Write comment").disabled, false); rangeButton("Write comment").click();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		assert.equal(savedRange.kind, sequence ? "ordinal" : "calendar"); workflow.close();
+		const rangeAnchor = { version: 1, type: "base", definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1,
+			target: { type: "timeline_range", axis_definition_id: uuid(40), axis_definition_revision: 1, axis: rangeContext.axis, range: savedRange } };
+		const marks = document.createElement("div"); root.append(marks); let markerOpened = false;
+		assert.equal(renderTimelineRangeMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(41), anchor: rangeAnchor }],
+			lanes: new Map(), root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks, limit: 128,
+			open: (_threads, _button, current) => { assert.ok(current()); markerOpened = true; } }), 1);
+		marks.querySelector("button").click(); assert.ok(markerOpened); marks.remove();
+		assert.equal(host.data, source); assert.deepEqual(writes, []);
 		const captured = surface.handles()[1]; view.onDataUpdated(); assert.equal(captured.current(), false);
 		assert.equal(rangeContext.current(), false); assert.equal(selectedRange.current(), false); assert.equal(geometry.current(), false);
 		bridge.dispose(); assert.equal(client.find(view), undefined); assert.equal(surface.current(), false);
-		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, item/range selection, projection, navigation, dirty inspector and disposal`);
+		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, range confirmation/markers, projection, navigation, dirty inspector and disposal`);
 	} finally {
 		client.close(); view.onunload(); bridge.dispose(); for (const modal of Modal.opened) modal.close(); Modal.opened = [];
 		frames.clear(); root.remove();

@@ -10,6 +10,9 @@ import type { BaseAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 import { TimelineBridgeClient } from "../bases/TimelineBridgeClient";
 import type { NativeBasesIntegrations } from "../bases/NativeBasesSurface";
+import { rangeLane, rangeLaneHandle, rangeMatchesAxis, readNativeTimelineAxis } from "./NativeTimelineRanges";
+import type { TimelineAxisContext } from "./TimelineRangeProtocol";
+import { renderTimelineRangeMarkers } from "./TimelineRangeMarkers";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -83,6 +86,16 @@ export class BaseComments extends Component {
 		if (!context || context.session !== session || context.baseEntryId !== scope.entryId || !context.current() ||
 			context.binding.snapshot.definition_id !== placement.definition_id || context.binding.snapshot.generation !== placement.generation) return false;
 		if (!context || context.entryId !== entryId || context.session !== session || !context.current()) return false;
+		if (anchor.type === "base" && anchor.target.type === "timeline_range") {
+			try {
+				if (!await this.host.verifyBaseTarget(context, anchor)) throw new Error("Timeline axis changed");
+				if (interrupted() || !navigating()) return true;
+				const result = await pane.revealRange(context, anchor, navigating);
+				if (result !== "revealed") new Notice(result === "busy" ? "Save or discard the task inspector changes before navigating to this discussion." :
+					"This range or lane is outside the current rendered view. Its original target and discussion are retained.");
+			} catch { new Notice("The timeline axis or your access changed. The original range and discussion are retained."); }
+			return true;
+		}
 		const target = anchor.type === "base_group_pending" || anchor.target.type === "group" ? await context.groups?.native(anchor) : context.native(anchor);
 		if (!target) return false;
 		try {
@@ -112,6 +125,8 @@ export class BaseCommentPane {
 	private chosenGroups: NativeBaseGroupHandle[] = [];
 	private unavailableGroup = false;
 	private groupTargets = new Map<string, NativeBaseGroupTarget>();
+	private rangeAxis?: TimelineAxisContext;
+	private rangeLanes = new Map<string, NativeBaseGroupTarget>();
 	private toolsContext?: BaseCommentContext;
 	private toolsChosen?: NativeBaseHandle;
 	private toolsKey?: string;
@@ -178,7 +193,7 @@ export class BaseCommentPane {
 	}
 	private detach(): void {
 		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.unavailableGroup = false;
-		this.groupTargets.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
+		this.groupTargets.clear(); this.rangeAxis = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
 		this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true;
 	}
@@ -208,8 +223,19 @@ export class BaseCommentPane {
 				const threads = await context.session.anchorThreads(context.entryId);
 				if (!context.current() || this.closed || this.context !== context || version !== this.version) { this.invalidate(); return; }
 				const groupTargets = new Map<string, NativeBaseGroupTarget>(), groups = new Map<string, Promise<NativeBaseGroupTarget | undefined>>();
+				let rangeAxis: TimelineAxisContext | undefined;
+				const rangeLanes = new Map<string, NativeBaseGroupTarget>();
+				if (threads.some(thread => thread.anchor?.type === "base" && thread.anchor.target.type === "timeline_range")) {
+					try { rangeAxis = await readNativeTimelineAxis(context); } catch { /* Retain discussions without projecting a guessed axis. */ }
+				}
 				for (let offset = 0; offset < threads.length; offset += 8) {
 					await Promise.all(threads.slice(offset, offset + 8).map(async thread => {
+						if (thread.anchor?.type === "base" && thread.anchor.target.type === "timeline_range") {
+							if (rangeAxis && rangeMatchesAxis(context, thread.anchor, rangeAxis) && thread.anchor.target.lane) {
+								const lane = await rangeLane(context, thread.anchor); if (lane) rangeLanes.set(thread.id, lane);
+							}
+							return;
+						}
 						if (thread.anchor?.type !== "base" || thread.anchor.target.type !== "group" || !context.groups) return;
 						const id = thread.anchor.target.group_id;
 						let pending = groups.get(id); if (!pending) { pending = context.groups.native(thread.anchor); groups.set(id, pending); }
@@ -217,7 +243,7 @@ export class BaseCommentPane {
 					}));
 					if (!context.current() || this.closed || this.context !== context || version !== this.version) { this.invalidate(); return; }
 				}
-				this.threads = threads; this.groupTargets = groupTargets; this.dataDirty = false;
+				this.threads = threads; this.groupTargets = groupTargets; this.rangeAxis = rangeAxis; this.rangeLanes = rangeLanes; this.dataDirty = false;
 			}
 			if (!context.current()) { this.detach(); return; }
 			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers();
@@ -247,7 +273,8 @@ export class BaseCommentPane {
 		const selection = target && context.canComment(target.target) ? context.selection(target.target) : undefined;
 		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
 		const commentRecord = !!item && context.canComment(item);
-		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup]);
+		const rangeAvailable = !!context.surface.rangeContext?.()?.current() && context.session.canAnchorBase("timeline_range") && context.session.permission(context.entryId)?.comment === true;
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup, rangeAvailable]);
 		// Preserve live buttons through scroll, polling and unrelated thread updates.
 		// A new handle/context must still replace callbacks, even for the same label.
 		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
@@ -255,6 +282,7 @@ export class BaseCommentPane {
 		const focused = this.toolbar.contains(this.toolbar.ownerDocument.activeElement) ? this.toolbar.ownerDocument.activeElement?.getAttribute("aria-label") : undefined;
 		this.toolbar.replaceChildren();
 		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
+		if (rangeAvailable) this.button(this.toolbar, "Comment on range", () => { this.cancelAnnotation(); if (context.current()) this.host.chooseTimelineRange(context); });
 		if (context.surface.annotationSupported && view && context.canComment(view.target)) {
 			this.button(this.toolbar, this.annotating ? "Cancel target selection" : "Select timeline target", () => this.toggleAnnotation());
 			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task, property badge, or lane header. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
@@ -314,6 +342,7 @@ export class BaseCommentPane {
 		const markers = new Map<string, Marker>();
 		for (const thread of this.threads) {
 			if (thread.anchor?.type !== "base") continue;
+			if (thread.anchor.target.type === "timeline_range") continue;
 			if (thread.anchor.target.type === "group") {
 				const target = this.groupTargets.get(thread.id); if (!target) continue;
 				const key = nativeGroupTargetKey(target), handle = byKey.get(key); if (!handle) continue;
@@ -338,7 +367,13 @@ export class BaseCommentPane {
 				existing.marker.hiddenProperty ||= marker.hiddenProperty;
 			} else presentations.set(element, { key, marker });
 		}
-		let count = 0;
+		let count = renderTimelineRangeMarkers({ context, threads: this.threads, proof: this.rangeAxis, lanes: this.rangeLanes, root, viewport, marks: this.marks, limit: 128,
+			open: (threads, button, current) => {
+				if (threads.length === 1) { void this.host.openBaseThread(context, threads[0].id); return; }
+				const menu = new Menu();
+				for (const thread of threads) menu.addItem(item => item.setTitle((thread.state === "resolved" ? "Resolved" : "Open") + " · " + context.session.displayName(context.entryId, thread.author_id)).onClick(() => { if (current()) void this.host.openBaseThread(context, thread.id); }));
+				const box = button.getBoundingClientRect(); menu.showAtPosition({ x: box.left, y: box.bottom });
+			} });
 		for (const [element, { key, marker }] of presentations) {
 			// Keep a trailing lane for the badge; numeric values must remain readable.
 			const rect = element.getBoundingClientRect();
@@ -369,6 +404,14 @@ export class BaseCommentPane {
 		const current = () => navigating() && this.context === context && context.current();
 		if (target.type === "group") return context.groups?.reveal(target, current) ?? "unavailable";
 		return context.surface.reveal(target, current);
+	}
+	async revealRange(context: BaseCommentContext, anchor: BaseAnchor, navigating = this.navigationGuard()) {
+		const current = () => navigating() && this.context === context && context.current();
+		if (!current() || anchor.target.type !== "timeline_range") return "unavailable";
+		const lane = anchor.target.lane ? await rangeLane(context, anchor) : undefined;
+		const handle = lane ? rangeLaneHandle(context, lane) : undefined;
+		if (!current() || anchor.target.lane && !handle) return "hidden";
+		return context.surface.revealRange(anchor.target.range, anchor.target.axis, current, handle?.element);
 	}
 	close(): void {
 		if (this.closed) return; this.closed = true; this.action++;

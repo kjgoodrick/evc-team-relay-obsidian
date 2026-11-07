@@ -745,6 +745,18 @@
 button.relay-base-comment-marker { position: absolute; pointer-events: auto; min-width: 24px; min-height: 24px; height: auto; padding: 1px 4px; background: var(--interactive-accent); color: var(--text-on-accent); font-size: var(--font-ui-smaller); }
 .relay-base-comment-marker:focus-visible, .relay-bases-comment-tools button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
 .is-mobile .relay-bases-comment-tools button, .is-mobile .relay-base-comment-marker { min-height: 44px; min-width: 44px; }
+.relay-timeline-range-mark { position: absolute; pointer-events: none; background: color-mix(in srgb, var(--interactive-accent) 16%, transparent); border-inline: 2px solid var(--interactive-accent); border-top: 1px solid var(--interactive-accent); }
+.relay-timeline-range-mark[data-start-inclusive="false"] { border-left-style: dashed; }
+.relay-timeline-range-mark[data-end-inclusive="false"] { border-right-style: dashed; }
+.relay-timeline-range-mark[data-left-clipped="true"] { border-left: 0; }
+.relay-timeline-range-mark[data-right-clipped="true"] { border-right: 0; }
+.relay-timeline-range-mark.is-discontinuous { background: transparent; border-top-style: dashed; }
+.relay-timeline-range-dialog label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 8px; }
+.relay-timeline-range-dialog label[hidden] { display: none; }
+.relay-timeline-range-dialog fieldset { margin-block: 12px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.relay-timeline-range-dialog input:not([type="checkbox"]), .relay-timeline-range-dialog select { flex: 1 1 160px; min-width: 0; }
+.relay-timeline-range-dialog button { margin: 4px; }
+.is-mobile .relay-timeline-range-dialog input, .is-mobile .relay-timeline-range-dialog select, .is-mobile .relay-timeline-range-dialog button { min-height: 44px; }
 .relay-inbox-view { overflow-y: auto; padding: var(--size-4-3); }
 .relay-inbox-toolbar, .relay-inbox-controls, .relay-inbox-pages { display: flex; gap: var(--size-4-2); flex-wrap: wrap; margin-block: var(--size-4-2); }
 .relay-inbox-item { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: var(--size-4-3); margin-block: var(--size-4-2); }

@@ -66,3 +66,15 @@ test("clean navigation opens the original saved view and reveals the authorized 
 		expect(f.host.verifyBaseTarget).toHaveBeenCalledTimes(1); expect(f.pane.reveal).toHaveBeenCalledTimes(1);
 	} finally { f.close(); }
 });
+
+test.each(["never", "verify"] as const)("range navigation uses its own reveal path and respects late inspector changes (%s)", async stage => {
+	const f = fixture(stage), revealRange = jest.fn().mockResolvedValue("revealed");
+	try {
+		f.anchor.target = { type: "timeline_range", axis_definition_id: id(20), axis_definition_revision: 1,
+			axis: { version: 1, renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null },
+			range: { version: 1, kind: "ordinal", start: "1", end: "2", unit: "property-value", start_inclusive: true, end_inclusive: true } };
+		Object.assign(f.pane, { revealRange });
+		expect(await f.comments.reveal(f.session, f.scope, f.anchor)).toBe(true);
+		expect(f.pane.reveal).not.toHaveBeenCalled(); expect(revealRange).toHaveBeenCalledTimes(stage === "never" ? 1 : 0);
+	} finally { f.close(); }
+});
