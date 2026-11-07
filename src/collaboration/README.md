@@ -565,11 +565,14 @@ Send and reopen uploads first, then locks its exact online command. A failed
 upload leaves the draft editable; a lost reply acknowledgment preserves the
 receipt and retries without uploading again. It never queues moderation offline.
 
-IndexedDB version 7 adds a separate 50 MiB LRU rendition cache. It cannot evict
-original draft/outbox sources. Downloads always reauthorize online, validate
+IndexedDB version 22 adds [local storage controls](../../docs/comment-storage-preview.md)
+for the separate LRU rendition cache. New databases default to 100 MiB; upgrades
+preserve the former 50 MiB budget. Users can change the limit or disable/clear
+download caching. It cannot evict original draft/outbox sources. Downloads always reauthorize online, validate
 MIME/size/digest, and use account-local blob URLs. Only retryable network failures
 allow a cached offline rendition; authorization failures purge its variants.
-Scope-generation checks prevent late downloads from repopulating revoked data.
+Scope-generation checks prevent late downloads from repopulating revoked data;
+a separate cache epoch fences downloads started before an explicit cleanup.
 The account-owned loader deduplicates requests and permits at most two reads,
 with a bounded waiting list. The renderer loads visible pictures, frees blob
 URLs/offscreen decoded pixels while reserving layout, and releases everything

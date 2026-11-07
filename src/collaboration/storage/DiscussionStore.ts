@@ -1,9 +1,10 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
-import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, PICTURE_CACHE_QUOTA, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
+import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
 import { isId, isRecord, parseBody, protocolJson } from "../DiscussionProtocol";
 import { parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "../LocalDiscussionAnchor";
 import { INBOX_KEY, parseInboxLocalState, forgetInboxScope, type InboxLocalState } from "./InboxRecords";
+import { pictureCacheLimit, validPictureCacheLimit, type DiscussionStorageUsage } from "./CachePolicy";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -88,10 +89,9 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 21 fences workers that cannot preserve withdrawn-command review
-		// drafts and atomically reconnect their dependent operations on replacement.
+		// Version 22 fences older workers that ignore picture cache limits/epochs.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 21);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 22);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -126,6 +126,9 @@ export class DiscussionStore {
 				cache.createIndex("scope", "scopeId"); cache.createIndex("usedAt", "usedAt");
 			}
 			if (event.oldVersion < 8) open.transaction!.objectStore("outbox").createIndex("dependency", "dependsOn", { multiEntry: true });
+			// Existing previews used a fixed 50 MiB cache. Preserve that budget;
+			// newly created databases use the agreed 100 MiB default.
+			if (event.oldVersion > 0 && event.oldVersion < 22) open.transaction!.objectStore("preferences").put(50 * 1024 * 1024, "pictureCacheLimit");
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -190,19 +193,67 @@ export class DiscussionStore {
 			return row;
 		});
 	}
+	async pictureCacheEpoch(): Promise<number> {
+		return (await this.pictureCachePolicy()).epoch;
+	}
+	async pictureCachePolicy(): Promise<{ epoch: number; limit: number }> {
+		return this.transaction(["preferences"], "readonly", async tx => {
+			const preferences = tx.objectStore("preferences"), value = await request(preferences.get("pictureCacheEpoch"));
+			return { epoch: typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0,
+				limit: pictureCacheLimit(await request(preferences.get("pictureCacheLimit"))) };
+		});
+	}
+	/** Counts and byte ledgers avoid cloning picture blobs merely to display usage. */
+	async storageUsage(): Promise<DiscussionStorageUsage> {
+		return this.transaction(["drafts", "outbox", "entities", "pictureCache", "pictureSources", "preferences"], "readonly", async tx => {
+			const states = tx.objectStore("outbox").index("state"), preferences = tx.objectStore("preferences");
+			return { drafts: await request(tx.objectStore("drafts").count()), queued: await request(states.count("queued")),
+				sending: await request(states.count("sending")), rejected: await request(states.count("rejected")), review: await request(states.count("review")),
+				cachedRecords: await request(tx.objectStore("entities").count()), cachedPictures: await request(tx.objectStore("pictureCache").count()),
+				cachedPictureBytes: await request(preferences.get("pictureCacheBytes")) ?? 0, pictureCacheLimit: pictureCacheLimit(await request(preferences.get("pictureCacheLimit"))),
+				savedPictures: await request(tx.objectStore("pictureSources").count()), savedPictureBytes: await request(preferences.get("pictureSourceBytes")) ?? 0 };
+		});
+	}
+	async setPictureCacheLimit(limit: number): Promise<void> {
+		if (!validPictureCacheLimit(limit)) throw new Error("Choose a picture cache limit from 0 to 500 MiB.");
+		await this.transaction(["pictureCache", "preferences"], "readwrite", async tx => {
+			const cache = tx.objectStore("pictureCache"), preferences = tx.objectStore("preferences");
+			let total: number = await request(preferences.get("pictureCacheBytes")) ?? 0;
+			while (total > limit) {
+				const oldest = await request(cache.index("usedAt").openCursor());
+				if (!oldest) throw new Error("Picture cache accounting is inconsistent");
+				total -= (oldest.value as CachedPicture).rendition.size; await request(oldest.delete());
+			}
+			await request(preferences.put(limit, "pictureCacheLimit")); await request(preferences.put(total, "pictureCacheBytes"));
+			await request(preferences.put((await request(preferences.get("pictureCacheEpoch")) ?? 0) + 1, "pictureCacheEpoch"));
+		});
+	}
+	/** Account/share-local downloaded bytes only. A global picture epoch also
+	 * fences downloads for scopes that have not previously populated this cache. */
+	async clearDownloadedPictures(): Promise<void> {
+		await this.transaction(["pictureCache", "preferences"], "readwrite", async tx => {
+			await request(tx.objectStore("pictureCache").clear());
+			const preferences = tx.objectStore("preferences");
+			await request(preferences.put(0, "pictureCacheBytes"));
+			await request(preferences.put((await request(preferences.get("pictureCacheEpoch")) ?? 0) + 1, "pictureCacheEpoch"));
+		});
+	}
 	/** Downloaded renditions are disposable LRU data, never original draft bytes.
 	 * Generation fencing prevents an in-flight download repopulating a revoked scope.
 	 */
-	async cachePicture(scopeId: string, id: string, variant: PictureVariant, rendition: PictureRendition, bytes: ArrayBuffer, generation: number): Promise<boolean> {
+	async cachePicture(scopeId: string, id: string, variant: PictureVariant, rendition: PictureRendition, bytes: ArrayBuffer, generation: number, cacheEpoch = 0): Promise<boolean> {
 		const safe = parsePictureRendition(rendition, variant === "thumbnail"), copy = bytes.slice(0);
 		if (copy.byteLength !== safe.size || await pictureHash(copy) !== safe.sha256) throw new Error("Invalid cached picture");
 		return this.transaction(["pictureCache", "preferences", "generations"], "readwrite", async tx => {
 			if ((await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== generation) return false;
 			const cache = tx.objectStore("pictureCache"), preferences = tx.objectStore("preferences"), key = [scopeId, id, variant];
+			if ((await request(preferences.get("pictureCacheEpoch")) ?? 0) !== cacheEpoch) return false;
+			const limit = pictureCacheLimit(await request(preferences.get("pictureCacheLimit")));
+			if (safe.size > limit) return false;
 			const previous: CachedPicture | undefined = await request(cache.get(key));
 			let total = (await request(preferences.get("pictureCacheBytes")) ?? 0) - (previous?.rendition.size ?? 0);
 			await request(cache.delete(key));
-			while (total + safe.size > PICTURE_CACHE_QUOTA) {
+			while (total + safe.size > limit) {
 				const oldest = await request(cache.index("usedAt").openCursor());
 				if (!oldest) throw new Error("Picture cache accounting is inconsistent");
 				total -= (oldest.value as CachedPicture).rendition.size; await request(oldest.delete());

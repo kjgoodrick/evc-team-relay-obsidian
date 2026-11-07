@@ -38,6 +38,18 @@ function linkedRead(): MessageRead {
 		message: { id: id(6), author_id: id(1), revision: 2, deleted: false, body: bodyFromText("Older reply"), created_sequence: 801,
 			created_at: "2026-11-05T00:00:00Z", edited_at: "2026-11-06T00:00:00Z", reactions: [] } };
 }
+
+test("local cache controls work offline without resuming command delivery", async () => {
+	const f = await fixture();
+	try {
+		f.session.setForeground(false); await f.session.outbox.settled();
+		const wake = jest.spyOn(f.session.outbox, "wake");
+		await f.session.setPictureCacheLimit(0); await f.session.clearDownloadedPictures();
+		expect(await f.store.storageUsage()).toMatchObject({ pictureCacheLimit: 0, cachedPictures: 0 });
+		expect(wake).not.toHaveBeenCalled(); expect(f.transport.send).not.toHaveBeenCalled();
+		await f.session.close(); await expect(f.session.setPictureCacheLimit(0)).rejects.toThrow("closed");
+	} finally { await f.close(); }
+});
 async function linkedFixture() {
 	const f = await fixture(), read = linkedRead();
 	const transport = Object.assign(f.transport, { message: jest.fn().mockResolvedValue(read),

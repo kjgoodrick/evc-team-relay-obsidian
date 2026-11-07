@@ -317,6 +317,7 @@ export class CommentsView extends ItemView {
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Comments" });
 			if (target.message) this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message });
 			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
+			const storage = this.contentEl.createEl("button", { text: "Storage on this device" }); storage.onclick = () => { if (this.session) this.host.openCommentStorage(this.session); };
 			const search = this.contentEl.createEl("button", { text: "Search and filter comments", attr: { "aria-expanded": "false" } });
 			const searchContainer = this.contentEl.createDiv();
 			search.onclick = () => {

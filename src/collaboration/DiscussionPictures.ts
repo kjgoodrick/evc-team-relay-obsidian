@@ -55,6 +55,7 @@ export class DiscussionPictures {
 		}
 		if (!this.allowed(entryId)) throw new Error("Reconnect and check access to view this picture.");
 		const checkpoint = await session.store.checkpoint(entryId);
+		const cachePolicy = await session.store.pictureCachePolicy();
 		const cached = await session.store.cachedPicture(entryId, pictureId, variant);
 		const current = async () => this.allowed(entryId) && (await session.store.checkpoint(entryId)).generation === checkpoint.generation;
 		try {
@@ -66,7 +67,7 @@ export class DiscussionPictures {
 			if (saved && await current()) return { ...saved, offline: false };
 			const bytes = await session.transport.pictureContent(entryId, pictureId, variant, rendition);
 			if (!await current()) throw new Error("Access to this picture changed.");
-			try { await session.store.cachePicture(entryId, pictureId, variant, rendition, bytes, checkpoint.generation); }
+			try { if (rendition.size <= cachePolicy.limit) await session.store.cachePicture(entryId, pictureId, variant, rendition, bytes, checkpoint.generation, cachePolicy.epoch); }
 			catch { /* A disposable cache failure must not discard a downloaded image. */ }
 			if (!await current()) throw new Error("Access to this picture changed.");
 			return { bytes, ...rendition, offline: false, local: false };

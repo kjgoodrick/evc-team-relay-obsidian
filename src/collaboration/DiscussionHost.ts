@@ -19,6 +19,7 @@ import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession, type AnchoredThread, type BaseTargetSelection } from "./DiscussionSession";
 import { ReattachCommentModal, commentTargetDescription } from "./ui/ReattachComment";
 import { RecoverCommentModal } from "./ui/RecoverComment";
+import { CommentStorageModal } from "./ui/CommentStorage";
 import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { DiscussionFailure, DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore, type Draft, type OutboxOperation } from "./storage/DiscussionStore";
@@ -78,6 +79,7 @@ export class DiscussionHost extends Component {
 	private reattachSelection?: { session: DiscussionSession; entryId: string; thread: AnchoredThread };
 	private reattachModal?: ReattachCommentModal;
 	private recoveryModal?: RecoverCommentModal;
+	private storageModal?: CommentStorageModal;
 	private recoverySelection?: { session: DiscussionSession; entryId: string; operation: OutboxOperation; draft: Draft };
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
@@ -90,6 +92,10 @@ export class DiscussionHost extends Component {
 		this.plugin.registerView(INBOX_VIEW, leaf => new InboxView(leaf, this));
 		this.plugin.addCommand({ id: "open-comment-inbox", name: "Open comment inbox", callback: () => { void this.openInbox(); } });
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
+		this.plugin.addCommand({ id: "open-comment-storage", name: "Open comment storage", checkCallback: checking => {
+			const session = this.current().session; if (!session) return false;
+			if (!checking) this.openCommentStorage(session); return true;
+		} });
 		this.plugin.addCommand({ id: "cancel-comment-target-selection", name: "Cancel comment target selection", checkCallback: checking => {
 			if (!this.choosingReattachment) return false;
 			if (!checking) this.cancelReattachmentSelection(); return true;
@@ -142,6 +148,7 @@ export class DiscussionHost extends Component {
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private notify(): void {
 		this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); this.reattachModal?.validate(); this.recoveryModal?.validate();
+		this.storageModal?.validate();
 		const move = this.reattachSelection;
 		if (move && (!this.sessionCurrent(move.session) || !move.session.canReattach || !move.session.permission(move.entryId)?.comment)) this.reattachSelection = undefined;
 		const recovery = this.recoverySelection;
@@ -825,6 +832,11 @@ export class DiscussionHost extends Component {
 		});
 		this.recoveryModal.open(); this.notify();
 	}
+	openCommentStorage(session: DiscussionSession): void {
+		if (!this.sessionCurrent(session)) return;
+		this.storageModal?.close();
+		this.storageModal = new CommentStorageModal(this.plugin.app, session, () => this.sessionCurrent(session)); this.storageModal.open();
+	}
 	openReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected?: LocalDiscussionAnchor): void {
 		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
 		if (!current() || !session.permission(entryId)?.read) return;
@@ -955,6 +967,7 @@ export class DiscussionHost extends Component {
 		this.stopped = true;
 		this.reattachSelection = undefined; this.reattachModal?.close(); this.reattachModal = undefined;
 		this.recoverySelection = undefined; this.recoveryModal?.close(); this.recoveryModal = undefined;
+		this.storageModal?.close(); this.storageModal = undefined;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
 		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.markerManager?.close(); this.markerManager = undefined;

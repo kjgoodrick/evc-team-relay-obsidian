@@ -25,6 +25,35 @@ function setup() {
 	return { transport, session, loader: new DiscussionPictures(session as unknown as DiscussionSession) };
 }
 
+test("clearing the cache fences an in-flight download without discarding the visible online picture", async () => {
+	const { loader, transport } = setup();
+	let finish!: (value: ArrayBuffer) => void, entered!: () => void;
+	const started = new Promise<void>(resolve => { entered = resolve; });
+	transport.pictureContent.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; entered(); }));
+	const loading = loader.load(entry, id(5)); await started;
+	await store.clearDownloadedPictures(); finish(bytes());
+	await expect(loading).resolves.toMatchObject({ bytes: bytes(), offline: false });
+		expect(await store.storageUsage()).toMatchObject({ cachedPictures: 0, cachedPictureBytes: 0 });
+		await loader.load(entry, id(5)); expect(transport.pictureContent).toHaveBeenCalledTimes(2);
+		expect((await store.storageUsage()).cachedPictures).toBe(1);
+});
+
+test("turning off download caching keeps online display and local saved originals available", async () => {
+	const { loader, session, transport } = setup();
+	const caching = jest.spyOn(store, "cachePicture");
+	await store.setPictureCacheLimit(0);
+	await expect(loader.load(entry, id(5))).resolves.toMatchObject({ offline: false });
+	await expect(loader.load(entry, id(5))).resolves.toMatchObject({ offline: false });
+		expect(transport.pictureContent).toHaveBeenCalledTimes(2);
+		expect(caching).not.toHaveBeenCalled();
+		expect((await store.storageUsage()).cachedPictures).toBe(0);
+	const source = await prepareLocalPicture(id(20), entry, bytes());
+	await store.saveDraft({ id: "local", scopeId: entry, revision: 0, body: { text: "", mentions: [], pictures: [{ type: "picture", picture_id: source.id }] } }, null, [source]);
+	session.online = false;
+	await expect(loader.load(entry, id(20), "thumbnail", true)).resolves.toMatchObject({ offline: true, local: true });
+	await expect(loader.load(entry, id(5))).rejects.toThrow("not saved");
+});
+
 test("downloads once but reauthorizes every online read, then serves a verified cached rendition offline", async () => {
 	const { loader, session, transport } = setup();
 	expect(await loader.load(entry, id(5))).toMatchObject({ offline: false, local: false, bytes: bytes() });
@@ -71,13 +100,14 @@ test("image downloads deduplicate and run at most two reads at once; closing sto
 });
 
 test("disposable cache eviction does not remove original draft bytes or another account's data", async () => {
+	await store.setPictureCacheLimit(50 * 1024 * 1024); const epoch = await store.pictureCacheEpoch();
 	const source = await prepareLocalPicture(id(20), entry, bytes());
 	await store.saveDraft({ id: "local", scopeId: entry, revision: 0, body: { text: "", mentions: [], pictures: [{ type: "picture", picture_id: id(20) }] } }, null, [source]);
 	const large = new ArrayBuffer(10 * 1024 * 1024), metadata = { ...rendition, size: large.byteLength, sha256: await pictureHash(large) };
 	let time = 0; jest.spyOn(Date, "now").mockImplementation(() => ++time);
-	for (let i = 1; i <= 5; i++) await store.cachePicture(entry, id(i), "content", metadata, large, 0);
+	for (let i = 1; i <= 5; i++) await store.cachePicture(entry, id(i), "content", metadata, large, 0, epoch);
 	await store.cachedPicture(entry, id(1), "content"); // Keep the recently used first image.
-	await store.cachePicture(entry, id(6), "content", metadata, large, 0);
+	await store.cachePicture(entry, id(6), "content", metadata, large, 0, epoch);
 	expect(await store.cachedPicture(entry, id(2), "content")).toBeUndefined();
 	expect(await store.cachedPicture(entry, id(1), "content")).toBeDefined(); expect(await store.preference("pictureCacheBytes")).toBe(50 * 1024 * 1024);
 	expect(await store.pictureSource(id(20), entry)).toBeDefined();

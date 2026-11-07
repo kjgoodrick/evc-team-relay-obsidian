@@ -107,6 +107,7 @@ export class DiscussionSession {
 				store.identity.serverId, store.identity.accountId, store.identity.vaultId, store.identity.shareId]));
 			this.channel.onmessage = event => {
 				if (event.data === "inbox" && !this.closed) { void this.inbox.reload(); return; }
+				if (event.data === "cache" && !this.closed) { this.notify(); return; }
 				if (event.data !== "changed" || this.closed) return;
 				if (this.foreground && this.enabled) this.outbox.wake();
 				this.invalidate(); this.notify();
@@ -114,6 +115,16 @@ export class DiscussionSession {
 		}
 	}
 	get identity(): Readonly<StoreIdentity> { return this.store.identity; }
+	async setPictureCacheLimit(limit: number): Promise<void> {
+		if (this.closed) throw new Error("This discussion account is closed.");
+		await this.trackLocal(this.store.setPictureCacheLimit(limit));
+		if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); }
+	}
+	async clearDownloadedPictures(): Promise<void> {
+		if (this.closed) throw new Error("This discussion account is closed.");
+		await this.trackLocal(this.store.clearDownloadedPictures());
+		if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); }
+	}
 	get status(): SessionStatus { return this.statusValue; }
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
