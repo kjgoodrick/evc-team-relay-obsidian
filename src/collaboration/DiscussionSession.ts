@@ -5,7 +5,8 @@ import { parseTimelineMarkerVersion, type TimelineMarkerVersion } from "./Discus
 import type { HistoryWindow } from "./DiscussionProtocol";
 import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
-import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
+import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
+import { DiscussionReattachment } from "./DiscussionReattachment";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
 import { parseBaseGroupValue } from "./BaseGroupValue";
 import { DiscussionOutbox } from "./DiscussionOutbox";
@@ -74,6 +75,8 @@ export class DiscussionSession {
 	private recoveryEnabled = false;
 	private inboxEnabled = false;
 	private searchEnabled = false;
+	private reattachEnabled = false;
+	private reattachments: DiscussionReattachment;
 	private baseKinds: BaseTargetKind[] = [];
 	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
@@ -86,6 +89,7 @@ export class DiscussionSession {
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
+		this.reattachments = new DiscussionReattachment(store, transport);
 		this.inbox = new DiscussionInbox(store, transport, broadcast => { if (broadcast) this.channel?.postMessage("inbox"); this.notify(); });
 		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled), uuid(), status => {
 			if (this.closed) return;
@@ -112,6 +116,7 @@ export class DiscussionSession {
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
+	get canReattach(): boolean { return this.online && this.reattachEnabled; }
 	async search(input: DiscussionSearchRequest): Promise<DiscussionSearchPage> {
 		const request = searchRequest(input);
 		if (!this.canSearch) throw new Error("Connect to a server with comment search enabled.");
@@ -220,6 +225,7 @@ export class DiscussionSession {
 			this.recoveryEnabled = capability.recovery === true;
 			this.inboxEnabled = capability.inbox === true;
 			this.searchEnabled = capability.search === true;
+			this.reattachEnabled = capability.reattach === true;
 			this.baseKinds = capability.baseTargets ?? [];
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
 			this.baseFileGroupProperties = capability.baseFileGroupProperties ?? [];
@@ -930,6 +936,50 @@ export class DiscussionSession {
 			if (found.revision !== target.definition_revision) return "The definition has changed since this discussion was created. The original discussion is retained.";
 			return this.statusValue === "ready" ? "Matches the latest verified definition." : "Matches the last verified definition. Reconnect to check for changes.";
 		} catch { return "The current definition could not be verified. The original discussion and target are retained."; }
+	}
+	async pendingReattachment(scopeId: string, threadId: string): Promise<OnlineOperation | undefined> {
+		if (this.closed || !this.permission(scopeId)?.read) return;
+		return this.trackLocal(this.reattachments.pending(scopeId, threadId));
+	}
+	async prepareReattachment(scopeId: string, threadId: string, revision: number, input: LocalDiscussionAnchor, visible: () => boolean = () => true): Promise<OnlineOperation> {
+		const local = parseLocalDiscussionAnchor(input), epoch = this.authenticationEpoch;
+		const current = () => visible() && epoch === this.authenticationEpoch && this.canReattach && this.permission(scopeId)?.comment === true;
+		return this.trackLocal((async () => {
+			if (!current()) throw new Error("Reconnect with comment access before moving this discussion.");
+			let anchor: DiscussionAnchor;
+			if (local.type === "base_group_pending") {
+				const scope = parseDiscussionScope(scopeId);
+				if (scope?.entryId !== local.entry_id || scope.viewId !== local.capture.view_id) throw new Error("Choose a target in the same saved view.");
+				const verified = await this.transport.captureBaseGroup(scopeId, local.capture);
+				if (!current() || verified.target.type !== "group" || verified.target.property.source !== local.property.source || verified.target.property.name !== local.property.name) throw new Error("The group selection changed. Select it again.");
+				anchor = local.range ? parseAnchor({ ...verified, target: { ...local.range, lane: verified.target } }) : verified;
+			} else anchor = local;
+			return this.reattachments.prepare(scopeId, threadId, revision, anchor, current);
+		})());
+	}
+	async sendReattachment(operation: OnlineOperation, visible: () => boolean = () => true): Promise<void> {
+		const epoch = this.authenticationEpoch;
+		const current = () => visible() && epoch === this.authenticationEpoch && this.online && this.permission(operation.scopeId)?.comment === true;
+		return this.trackLocal(this.reattachments.send(operation, current).finally(() => {
+			if (!this.closed) { this.invalidate(); this.broadcast(); this.notify(); }
+		}));
+	}
+	async recoverReattachment(operation: OnlineOperation, visible: () => boolean = () => true): Promise<"accepted" | "withdrawn"> {
+		const epoch = this.authenticationEpoch;
+		const current = () => visible() && epoch === this.authenticationEpoch && this.online && this.permission(operation.scopeId)?.comment === true;
+		return this.trackLocal(this.reattachments.recover(operation, current).finally(() => {
+			if (!this.closed) { this.invalidate(); this.broadcast(); this.notify(); }
+		}));
+	}
+	async anchorHistory(scopeId: string, threadId: string, after = 0) {
+		const epoch = this.authenticationEpoch, generation = this.knownDocumentGeneration(scopeId);
+		const current = () => epoch === this.authenticationEpoch && this.online && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		return this.trackLocal((async () => {
+			if (!current()) throw new Error("Reconnect with read access to view target history.");
+			const page = await this.transport.anchorHistory(scopeId, threadId, after);
+			if (!current()) throw new Error("History access changed.");
+			return page;
+		})());
 	}
 	async onlineAction(operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");

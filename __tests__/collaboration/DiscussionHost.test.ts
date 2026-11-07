@@ -26,6 +26,8 @@ import { webcrypto } from "node:crypto";
 import { DISCUSSION_LINK_ACTION, discussionLinkUrl, discussionServerKey, parseDiscussionLink } from "../../src/collaboration/DiscussionLinks";
 import { DiscussionFailure } from "../../src/collaboration/DiscussionTransport";
 import type { DiscussionSearchItem } from "../../src/collaboration/DiscussionSearchProtocol";
+import { ReattachCommentModal } from "../../src/collaboration/ui/ReattachComment";
+import type { AnchoredThread } from "../../src/collaboration/DiscussionSession";
 
 Object.assign(globalThis, { TextEncoder });
 Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
@@ -34,6 +36,10 @@ const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 jest.mock("../../src/collaboration/ui/BaseTargetPicker", () => ({ BaseTargetPicker: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
+jest.mock("../../src/collaboration/ui/ReattachComment", () => ({
+	ReattachCommentModal: jest.fn().mockImplementation(() => ({ open: jest.fn(), close: jest.fn(), validate: jest.fn() })),
+	commentTargetDescription: () => "Target", TargetHistoryModal: jest.fn(),
+}));
 jest.mock("../../src/Document", () => ({ isDocument: (value: { isDocument?: boolean }) => value?.isDocument === true }));
 jest.mock("../../src/AttachmentFile", () => ({ isAttachmentFile: (value: { isAttachment?: boolean }) => value?.isAttachment === true }));
 jest.mock("obsidian", () => ({
@@ -77,6 +83,52 @@ function fixture(bases?: BaseSyncHost) {
 		account: (value?: string) => { accountId = value; authChanged(); }, settingsChanged: () => settingsChanged(),
 		close: () => { host.onunload(); opening.mockRestore(); } };
 }
+
+test("target selection opens a review for the existing discussion without consuming or creating a comment draft", async () => {
+	const s = fixture(); await s.start();
+	const session = Object.assign(mockSessions[0], { canReattach: true, permission: () => ({ read: true, comment: true }), store: s.store });
+	const typed = session as unknown as DiscussionSession, anchor = { version: 1 as const, type: "note" as const };
+	const thread: AnchoredThread = { id: id(30), author_id: id(1), state: "resolved", state_revision: 4, anchor_revision: 2,
+		removed: false, created_sequence: 1, activity_sequence: 5, created_at: "2026-11-07T00:00:00Z", anchor };
+	const saveDraft = jest.fn(), setPreference = jest.fn(); Object.assign(s.store, { saveDraft, setPreference });
+	const modal = jest.mocked(ReattachCommentModal);
+	try {
+		s.host.openReattachment(typed, id(3), thread);
+		modal.mock.calls.at(-1)![4].choose(thread);
+		expect(s.host.selectingReattachment(typed, id(3))).toBe(true);
+		const count = modal.mock.calls.length;
+		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(3), file: s.file, anchor })).toBe(true);
+		expect(modal.mock.calls).toHaveLength(count + 1);
+		expect(modal.mock.calls.at(-1)!.slice(1, 4)).toEqual([typed, id(3), thread]);
+		expect(modal.mock.calls.at(-1)![5]).toEqual(anchor);
+		expect(s.host.choosingReattachment).toBe(false);
+		expect(saveDraft).not.toHaveBeenCalled(); expect(setPreference).not.toHaveBeenCalled();
+		modal.mock.calls.at(-1)![4].saved();
+		expect(s.host.focusedThread(typed, id(3))?.threadId).toBe(thread.id);
+	} finally { s.close(); }
+});
+
+test("target selection rejects another note and cancellation restores ordinary draft capture", async () => {
+	const s = fixture(); await s.start();
+	const session = Object.assign(mockSessions[0], { canReattach: true, permission: () => ({ read: true, comment: true }), store: s.store });
+	const typed = session as unknown as DiscussionSession, anchor = { version: 1 as const, type: "note" as const };
+	const thread = { id: id(30), anchor, anchor_revision: 1 } as AnchoredThread;
+	const saveDraft = jest.fn().mockResolvedValue(undefined), setPreference = jest.fn().mockResolvedValue(undefined); Object.assign(s.store, { saveDraft, setPreference });
+	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined);
+	try {
+		s.host.openReattachment(typed, id(3), thread); jest.mocked(ReattachCommentModal).mock.calls.at(-1)![4].choose(thread);
+		const other = Object.assign(new TFile(), { path: "Team/Other.md" });
+		Object.assign(s.folder.folderIndex, { recordFor: (path: string) => ({ id: path === "Other.md" ? id(99) : id(3), type: "markdown" }) });
+		Object.assign(s.folder, { toVirtualPath: (path: string) => path.slice(5) });
+		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(99), file: other, anchor })).toBe(false);
+		expect(s.host.choosingReattachment).toBe(true); expect(saveDraft).not.toHaveBeenCalled();
+		s.host.cancelReattachmentSelection();
+		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(3), file: s.file, anchor })).toBe(true);
+		expect(saveDraft).toHaveBeenCalledTimes(1); expect(open).toHaveBeenCalledTimes(1);
+		s.host.openReattachment(typed, id(3), thread); jest.mocked(ReattachCommentModal).mock.calls.at(-1)![4].choose(thread);
+		s.account(id(90)); expect(s.host.choosingReattachment).toBe(false);
+	} finally { s.close(); }
+});
 
 async function nativeBaseFixture() {
 	const snapshot = { definition_id: id(6), entry_id: id(3), generation: id(7), revision: 1 };

@@ -11,6 +11,7 @@ import { parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMar
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
 import { parseSearchPage, searchEnvelope, searchRequest, type DiscussionSearchRequest } from "./DiscussionSearchProtocol";
+import { parseAnchorHistory, reattachmentAnchor } from "./ReattachmentProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -28,6 +29,7 @@ export type CommandResult = {
 	operation_id: string; scope_id: string; thread_id: string; sequence: number;
 	state: "open" | "resolved"; state_revision: number; removed: boolean; changed: boolean;
 	message_id?: string; message_revision?: number; message_deleted?: boolean;
+	anchor_revision?: number;
 };
 export interface DiscussionSender {
 	readonly identity: Readonly<DiscussionIdentity>;
@@ -40,6 +42,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
 for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query"]) errorCodes.add(code);
+for (const code of ["reattach_disabled", "stale_anchor_revision", "reattach_scope_changed", "reattach_readers_changed", "reattach_target_unanchored"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
 for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "timeline_axis_changed", "unsupported_timeline_time_zone"]) errorCodes.add(code);
@@ -104,31 +107,40 @@ function onlineEnvelope(shareId: string, operation: OnlineOperation): string {
 	const command = operation.payload;
 	const scope = parseDiscussionScope(operation.scopeId);
 	if (!isId(shareId) || !isId(operation.operationId) || !scope || !object(command) || !isId(command.thread_id) ||
-		!["reply.create", "thread.state", "message.delete", "thread.remove"].includes(String(command.type)) ||
+		!["reply.create", "thread.state", "message.delete", "thread.remove", "thread.reattach"].includes(String(command.type)) ||
 		(["reply.create", "message.delete"].includes(String(command.type)) && !isId(command.message_id))) {
 		throw new DiscussionFailure("reject", "invalid_local_command");
 	}
+	let limit = 65536;
+	if (command.type === "thread.reattach") {
+		try {
+			const anchor = reattachmentAnchor(operation);
+			if (sourceAnchor(anchor) || anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
+		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
+	}
 	const body = JSON.stringify({ protocol_version: 1, operation_id: operation.operationId, share_id: shareId,
 		entry_id: scope.entryId, command });
-	if (new TextEncoder().encode(body).byteLength > 65536) throw new DiscussionFailure("reject", "command_too_large");
+	if (new TextEncoder().encode(body).byteLength > limit) throw new DiscussionFailure("reject", "command_too_large");
 	return body;
 }
 
 function accepted(value: unknown, op: OnlineOperation): CommandResult {
 	const command = op.payload as Record<string, Json>;
 	const message = command.message_id !== undefined;
+	const reattach = command.type === "thread.reattach";
 	if (!object(value) || value.operation_id !== op.operationId || value.thread_id !== command.thread_id ||
 		value.message_id !== command.message_id || !validId(value.scope_id) || !positive(value.sequence) ||
 		!positive(value.state_revision) || (message && (!positive(value.message_revision) || typeof value.message_deleted !== "boolean")) ||
 		!["open", "resolved"].includes(String(value.state)) || typeof value.removed !== "boolean" ||
-		typeof value.changed !== "boolean" || (!message && (value.message_revision !== undefined || value.message_deleted !== undefined))) {
+		typeof value.changed !== "boolean" || (!message && (value.message_revision !== undefined || value.message_deleted !== undefined)) ||
+		reattach && (!positive(value.anchor_revision) || value.anchor_revision !== Number(command.expected_anchor_revision) + (value.changed ? 1 : 0))) {
 		// A mutation may have committed even when a proxy returned invalid data.
 		throw new DiscussionFailure("pause", "invalid_command_response");
 	}
 	// Whitelist fields before saving; avoid persisting arbitrary response content.
 	return { operation_id: op.operationId, scope_id: value.scope_id, thread_id: value.thread_id as string,
 		sequence: value.sequence, state: value.state as "open" | "resolved", state_revision: value.state_revision,
-		removed: value.removed, changed: value.changed, ...(message ? { message_id: value.message_id as string,
+		removed: value.removed, changed: value.changed, ...(reattach ? { anchor_revision: value.anchor_revision as number } : {}), ...(message ? { message_id: value.message_id as string,
 			message_revision: value.message_revision as number, message_deleted: value.message_deleted as boolean } : {}) };
 }
 
@@ -161,12 +173,12 @@ export class DiscussionTransport implements DiscussionSender {
 		const body = queuedEnvelope(this.identity.shareId, operation);
 		return this.withdrawEnvelope(operation, body);
 	}
-	async withdrawOnline(operation: OnlineOperation): Promise<WithdrawalResult> {
-		return this.withdrawEnvelope(operation, onlineEnvelope(this.identity.shareId, operation));
+	async withdrawOnline(operation: OnlineOperation, current?: () => boolean): Promise<WithdrawalResult> {
+		return this.withdrawEnvelope(operation, onlineEnvelope(this.identity.shareId, operation), current);
 	}
-	private async withdrawEnvelope(operation: OnlineOperation, body: string): Promise<WithdrawalResult> {
+	private async withdrawEnvelope(operation: OnlineOperation, body: string, current?: () => boolean): Promise<WithdrawalResult> {
 		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
-		const value = await this.request("/commands/withdraw", body);
+		const value = await this.request("/commands/withdraw", body, { current });
 		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
 		if (!object(value) || value.status !== "withdrawn" || value.operation_id !== captured.operationId || value.entry_id !== parseDiscussionScope(captured.scopeId)?.entryId) {
 			throw new DiscussionFailure("pause", "invalid_withdrawal_response");
@@ -175,17 +187,17 @@ export class DiscussionTransport implements DiscussionSender {
 	}
 
 	/** One online-only attempt. Retain this operation ID for an explicit retry after an ambiguous failure. */
-	async sendOnline(operation: OnlineOperation): Promise<CommandResult> {
+	async sendOnline(operation: OnlineOperation, current?: () => boolean): Promise<CommandResult> {
 		const body = onlineEnvelope(this.identity.shareId, operation);
 		const immutable = JSON.parse(body) as { command: Json };
-		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
+		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_timeline_markers"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -220,6 +232,7 @@ export class DiscussionTransport implements DiscussionSender {
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
+			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
 			...(value.features.discussion_search === undefined ? {} : { search: value.features.discussion_commands && value.features.discussion_search === true }),
 			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
 	}
@@ -438,6 +451,12 @@ export class DiscussionTransport implements DiscussionSender {
 			return page;
 		});
 	}
+	async anchorHistory(scopeId: string, threadId: string, after = 0, limit = 10) {
+		if (!isId(threadId) || !positive(limit) || limit > 20) throw new DiscussionFailure("reject", "invalid_local_target");
+		const query = this.page(after, limit);
+		return this.parse(await this.request(this.scopePath(scopeId) + `/threads/${threadId}/anchor-history` + query),
+			value => parseAnchorHistory(value, scopeId, threadId, after, limit));
+	}
 	async changes(entryId: string, cursor?: string, viewId?: string) {
 		viewId = this.scopeView(entryId, viewId);
 		if (cursor !== undefined && (typeof cursor !== "string" || !cursor.length || cursor.length > 2048)) throw new DiscussionFailure("reject", "invalid_local_target");
@@ -446,14 +465,16 @@ export class DiscussionTransport implements DiscussionSender {
 			v => parseChanges(v, viewId, parseDiscussionScope(entryId)!.entryId));
 	}
 
-	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number } = {}): Promise<unknown> {
+	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number; current?: () => boolean } = {}): Promise<unknown> {
 		let timer: number | undefined;
 		let ended = false;
 		const attempt = async () => {
+			if (options.current && !options.current()) throw new DiscussionFailure("pause", "action_context_changed");
 			let credential: DiscussionCredential | undefined;
 			try { credential = await this.credential(); }
 			catch { throw new DiscussionFailure("authenticate", "credentials_unavailable", 401); }
 			if (ended) throw new DiscussionFailure("retry", "request_timeout");
+			if (options.current && !options.current()) throw new DiscussionFailure("pause", "action_context_changed");
 			if (!credential || !credential.accessToken || credential.accountId !== this.identity.accountId) {
 				throw new DiscussionFailure("authenticate", "account_credentials_required", 401);
 			}
@@ -505,7 +526,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

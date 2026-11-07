@@ -46,6 +46,7 @@ async function fixture() {
 	const store = await DiscussionStore.open(identity, new IDBFactory());
 	const session = {
 		store, identity, status: "ready", canQueue: true, online: true,
+		canReattach: false, pendingReattachment: jest.fn().mockResolvedValue(undefined),
 		permission: () => ({ read: true, comment: true, edit: false, moderate: false }),
 		participants: () => [{ id: id(1), name: "Alice" }], displayName: () => "Alice", syncStatus: () => "current",
 		trackLocal: <T>(promise: Promise<T>) => promise,
@@ -364,11 +365,11 @@ test("selected drafts keep their exact targets and text across switching, restar
 		const textarea = parent.querySelector("textarea")!; textarea.value = "Preserve my first draft"; textarea.dispatchEvent(new Event("input"));
 		const picker = parent.querySelector<HTMLSelectElement>('select[aria-label="Discussion draft"]')!;
 		picker.value = second; picker.dispatchEvent(new Event("change"));
-		await until(() => parent.querySelector("textarea")?.value === "Second draft");
+		await until(() => parent.querySelector("textarea")?.value === "Second draft" && !parent.querySelector("textarea")?.disabled);
 		expect((await store.getDraft(first))?.body).toMatchObject({ text: "Preserve my first draft" });
 		expect((await store.getDraft(first))?.target).toEqual(selection("alpha"));
 		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, entry, reveal);
-		await until(() => parent.querySelector("textarea")?.value === "Second draft");
+		await until(() => parent.querySelector("textarea")?.value === "Second draft" && !parent.querySelector("textarea")?.disabled);
 		[...parent.querySelectorAll("button")].find(button => button.textContent === "Show selection")!.click();
 		expect(reveal).toHaveBeenCalledWith(selection("beta"));
 		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));

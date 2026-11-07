@@ -16,7 +16,8 @@ import type { AuthSession } from "../AuthSession";
 import type { ShareRegistry } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
-import { DiscussionSession, type BaseTargetSelection } from "./DiscussionSession";
+import { DiscussionSession, type AnchoredThread, type BaseTargetSelection } from "./DiscussionSession";
+import { ReattachCommentModal, commentTargetDescription } from "./ui/ReattachComment";
 import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { DiscussionFailure, DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
@@ -73,6 +74,8 @@ export class DiscussionHost extends Component {
 	private markerPicker?: TimelineMarkerPicker;
 	private markerManager?: TimelineMarkerManager;
 	private inboxAction = 0;
+	private reattachSelection?: { session: DiscussionSession; entryId: string; thread: AnchoredThread };
+	private reattachModal?: ReattachCommentModal;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
 		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string, private bases?: BaseSyncHost) { super(); }
@@ -84,6 +87,10 @@ export class DiscussionHost extends Component {
 		this.plugin.registerView(INBOX_VIEW, leaf => new InboxView(leaf, this));
 		this.plugin.addCommand({ id: "open-comment-inbox", name: "Open comment inbox", callback: () => { void this.openInbox(); } });
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
+		this.plugin.addCommand({ id: "cancel-comment-target-selection", name: "Cancel comment target selection", checkCallback: checking => {
+			if (!this.choosingReattachment) return false;
+			if (!checking) this.cancelReattachmentSelection(); return true;
+		} });
 		this.plugin.addCommand({ id: "open-comment-link", name: "Open comment link", callback: () => new OpenDiscussionLink(this.plugin.app, (link, current) => this.openDiscussionLink(link, current)).open() });
 		this.plugin.registerObsidianProtocolHandler(DISCUSSION_LINK_ACTION, params => {
 			void this.openDiscussionLink(params).catch(error => { if (!this.stopped) new Notice(error instanceof Error ? error.message : "The discussion could not be opened.", 10000); });
@@ -130,7 +137,12 @@ export class DiscussionHost extends Component {
 		this.reconcile();
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-	private notify(): void { this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
+	private notify(): void {
+		this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); this.reattachModal?.validate();
+		const move = this.reattachSelection;
+		if (move && (!this.sessionCurrent(move.session) || !move.session.canReattach || !move.session.permission(move.entryId)?.comment)) this.reattachSelection = undefined;
+		for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } }
+	}
 	private key(serverUrl: string, accountId: string, shareId: string): string {
 		return JSON.stringify([serverUrl.replace(/\/+$/, ""), accountId, shareId]);
 	}
@@ -757,6 +769,13 @@ export class DiscussionHost extends Component {
 		try {
 			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session && this.targetFor(file).entryId === entryId && session.permission(entryId)?.comment;
 			if (!current()) return false;
+			if (this.reattachSelection) {
+				const move = this.reattachSelection;
+				if (move.session !== session || move.entryId !== entryId) { new Notice("Return to the original note or saved view to move this discussion, or cancel target selection."); return false; }
+				this.reattachSelection = undefined;
+				this.lastFile = file;
+				this.openReattachment(session, entryId, move.thread, anchor); this.notify(); return true;
+			}
 			const draftId = "selection:" + entryId + ":" + uuid();
 			await session.trackLocal(session.store.saveDraft({ id: draftId, scopeId: entryId, revision: 0,
 				body: { text: "", mentions: [] }, target: protocolJson(anchor) }, null));
@@ -765,6 +784,32 @@ export class DiscussionHost extends Component {
 			if (!current()) return false;
 			this.lastFile = file; this.focus = undefined; await this.open(); return true;
 		} catch { new Notice("The selection draft could not be saved. Check local storage and comment access, then try again."); return false; }
+	}
+	selectingReattachment(session: DiscussionSession, entryId: string): boolean {
+		return this.reattachSelection?.session === session && this.reattachSelection.entryId === entryId;
+	}
+	get choosingReattachment(): boolean { return this.reattachSelection !== undefined; }
+	cancelReattachmentSelection(): void { this.reattachSelection = undefined; this.notify(); }
+	openReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected?: LocalDiscussionAnchor): void {
+		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
+		if (!current() || !session.permission(entryId)?.read) return;
+		this.reattachModal?.close();
+		const label = (anchor: LocalDiscussionAnchor) => this.targetLabel(session, entryId, anchor) ?? commentTargetDescription(anchor);
+		this.reattachModal = new ReattachCommentModal(this.plugin.app, session, entryId, thread, {
+			current, label,
+			choose: latest => {
+				if (!current() || !session.canReattach || !session.permission(entryId)?.comment) return;
+				this.reattachSelection = { session, entryId, thread: latest }; this.notify();
+				if (this.current().kind === "image") this.commentCurrentImage(session, entryId);
+				else if (this.current().kind === "base") this.commentCurrentBase(session, entryId);
+				else new Notice("Select text, blocks or an image and use its comment action to choose the new target. Review the move before saving.", 10000);
+			},
+			saved: () => {
+				this.reattachSelection = undefined;
+				this.focus = { session, entryId, threadId: thread.id, serial: ++this.focusSerial }; this.notify();
+			},
+		}, selected);
+		this.reattachModal.open();
 	}
 	focusedThread(session: DiscussionSession, entryId: string) {
 		return this.focus?.session === session && this.focus.entryId === entryId ? this.focus : undefined;
@@ -872,6 +917,7 @@ export class DiscussionHost extends Component {
 	}
 	onunload(): void {
 		this.stopped = true;
+		this.reattachSelection = undefined; this.reattachModal?.close(); this.reattachModal = undefined;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
 		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.markerManager?.close(); this.markerManager = undefined;

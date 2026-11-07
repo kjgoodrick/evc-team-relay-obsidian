@@ -8,6 +8,10 @@ import { bodyFromText, localTextAnchor, protocolJson, wireTextAnchor } from "../
 import { captureTextAnchor, resolveTextAnchor } from "../../src/collaboration/anchors/text";
 import { captureBlockAnchor } from "../../src/collaboration/anchors/blocks";
 import type { QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionReattachment } from "../../src/collaboration/DiscussionReattachment";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+Object.assign(globalThis, { IDBKeyRange });
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 const run = process.env.EVC_TEXT_ANCHOR_FIXTURE ? test : test.skip;
@@ -92,5 +96,34 @@ run("real selected-text comments wait for delete-only edits, survive lost replie
 		expect(blockThread.anchor.structure).toEqual({ kind: "blocks", blocks: [{ kind: "paragraph" }] });
 		expect(resolveTextAnchor(restored.text, fixture.note, context.generation, localTextAnchor(blockThread.anchor)))
 			.toEqual({ status: "attached", from: 0, to: "beta gamma".length });
+		// Reattach through the real private durability barrier, then lose the
+		// successful response and recover from the durable client intent.
+		expect((await transport.capabilities()).reattach).toBe(true);
+		const store = await DiscussionStore.open({ ...transport.identity, vaultId: "reattach-real" }, new IDBFactory());
+		try {
+			let loseMove = true;
+			const uncertain = new DiscussionTransport(transport.identity, async () => ({ accountId: fixture.bobId, accessToken: fixture.bobToken }), async (url, options) => {
+				const response = await fetch(url, options);
+				if (loseMove && response.ok && options.method === "POST") { loseMove = false; await response.text(); throw new Error("Lost move response"); }
+				return response;
+			});
+			const moves = new DiscussionReattachment(store, uncertain);
+			const gamma = wireTextAnchor(captureTextAnchor(restored.text, fixture.note, context.generation, 5, 10));
+			const move = await moves.prepare(fixture.note, blockReceipt.thread_id, 1, gamma, () => true);
+			await expect(moves.send(move, () => true)).rejects.toMatchObject({ code: "network_unavailable" });
+			expect(await moves.pending(fixture.note, blockReceipt.thread_id)).toEqual(move);
+			expect(await moves.recover(move, () => true)).toBe("accepted");
+			const history = await transport.anchorHistory(fixture.note, blockReceipt.thread_id);
+			expect(history.revisions.map(row => row.anchor)).toEqual([block, gamma]);
+			expect(history.thread.anchor_revision).toBe(2); expect(history.revisions[1].actor_id).toBe(fixture.bobId);
+			const state = await transport.state(fixture.note, blockReceipt.thread_id);
+			expect(state.anchor).toEqual(gamma); expect(state.thread.state_revision).toBe(1);
+			await expect(transport.sendOnline({ ...move, operationId: randomUUID() })).rejects.toMatchObject({ code: "stale_anchor_revision" });
+			const abandoned = await moves.prepare(fixture.note, blockReceipt.thread_id, 2, { version: 1, type: "note" }, () => true);
+			expect(await moves.recover(abandoned, () => true)).toBe("withdrawn");
+			await expect(transport.sendOnline(abandoned)).rejects.toMatchObject({ code: "operation_withdrawn" });
+			expect((await transport.anchorHistory(fixture.note, blockReceipt.thread_id)).revisions).toHaveLength(2);
+			expect((await transport.changes(fixture.note)).events.some(event => event.kind === "thread.state" && event.data.thread_id === blockReceipt.thread_id)).toBe(true);
+		} finally { store.close(); }
 	} finally { for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy(); }
 }, 60000);

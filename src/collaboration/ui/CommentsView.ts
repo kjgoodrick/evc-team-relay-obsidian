@@ -14,6 +14,7 @@ import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
 import { copyToClipboard } from "../../utils/clipboard";
 import { DiscussionSearchPanel } from "./DiscussionSearchPanel";
 import { CommentHistoryModal } from "./CommentHistory";
+import { TargetHistoryModal, commentTargetDescription } from "./ReattachComment";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 
@@ -123,7 +124,20 @@ class ThreadCard {
 		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
 		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
 		const permission = this.session.permission(this.entryId);
+		if (thread.anchor_revision > 1) {
+			const history = this.controls.createEl("button", { text: "Target history" }); history.disabled = !this.session.online;
+			history.onclick = () => new TargetHistoryModal(this.app, this.session, this.entryId, thread.id,
+				anchor => this.host.targetLabel(this.session, this.entryId, anchor) ?? commentTargetDescription(anchor),
+				anchor => { void this.host.revealTarget(this.session, this.entryId, anchor); }).open();
+		}
 		if (permission?.comment) {
+			const pendingMove = this.session.canReattach ? undefined : await this.session.pendingReattachment(this.entryId, thread.id);
+			if (this.disposed || generation !== this.generation) return;
+			if (this.session.canReattach || pendingMove) {
+				const move = this.controls.createEl("button", { text: pendingMove ? "Review unconfirmed move" : "Move target" });
+				move.disabled = !this.session.online;
+				move.onclick = () => this.host.openReattachment(this.session, this.entryId, this.thread);
+			}
 			const state = thread.state === "open" ? "resolved" : "open";
 			const button = this.controls.createEl("button", { text: state === "resolved" ? "Resolve" : "Reopen" });
 			button.disabled = !this.session.online;
@@ -247,6 +261,7 @@ export class CommentsView extends ItemView {
 	private status?: HTMLElement;
 	private list?: HTMLElement;
 	private pending?: HTMLElement;
+	private moveSelection?: HTMLElement;
 	private pendingView?: PendingComments;
 	private closed = false;
 	constructor(leaf: WorkspaceLeaf, private host: DiscussionHost) { super(leaf); }
@@ -279,7 +294,7 @@ export class CommentsView extends ItemView {
 		const watch = this.watch; this.watch = undefined; watch?.(); this.drafts?.dispose(); this.drafts = undefined; this.focusedSerial = 0;
 		for (const card of this.cards.values()) card.dispose(); this.cards.clear();
 		this.pendingView?.dispose(); this.pendingView = undefined;
-		this.contentEl.empty(); this.status = undefined; this.list = undefined; this.pending = undefined; this.count = 20; this.after = 0; this.pages = [];
+		this.contentEl.empty(); this.status = undefined; this.list = undefined; this.pending = undefined; this.moveSelection = undefined; this.count = 20; this.after = 0; this.pages = [];
 	}
 	private async render(): Promise<void> {
 		if (!this.containerEl.getClientRects().length) { const watch = this.watch; this.watch = undefined; watch?.(); return; }
@@ -314,6 +329,7 @@ export class CommentsView extends ItemView {
 				const choose = this.contentEl.createEl("button", { text: "Change discussion view" }); choose.onclick = () => this.host.chooseBaseView();
 			}
 			this.status = this.contentEl.createDiv({ cls: "relay-comment-status", attr: { role: "status", "aria-live": "polite" } });
+			this.moveSelection = this.contentEl.createDiv({ cls: "relay-comment-target-selection", attr: { role: "status", "aria-live": "polite" } });
 			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { void this.session?.refresh(); };
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
 			this.pendingView = new PendingComments(this.pending, this.session, this.entryId);
@@ -331,6 +347,13 @@ export class CommentsView extends ItemView {
 		else if (target.message) this.contentEl.querySelector("h2")?.insertAdjacentElement("afterend", this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message }));
 		this.contentEl.querySelector(".relay-comment-base-view")?.setText("Discussion view: " + target.baseViewName);
 		const session = this.session, entryId = this.entryId, generation = ++this.generation;
+		if (this.moveSelection) {
+			this.moveSelection.empty(); this.moveSelection.hidden = !this.host.choosingReattachment;
+			if (this.host.choosingReattachment) {
+				this.moveSelection.createEl("p", { text: this.host.selectingReattachment(session, entryId) ? "Moving a discussion: choose text, blocks, an image or a Bases target using its comment action. You will review the move before saving." : "A discussion target selection is active in another note or saved view. Return there or cancel the selection." });
+				const cancel = this.moveSelection.createEl("button", { text: "Cancel target selection" }); cancel.onclick = () => this.host.cancelReattachmentSelection();
+			}
+		}
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);
 		const statuses: Record<string, string> = { starting: "Connecting…", ready: "Comments are up to date", offline: "Offline — comments are saved to send when connected",
 			unavailable: "Comments are not enabled on this server.", authentication_required: "Sign in again to continue.", error: "Comments need attention. Refresh to retry." };

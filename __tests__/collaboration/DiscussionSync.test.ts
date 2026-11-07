@@ -4,6 +4,9 @@ import { DiscussionFailure } from "../../src/collaboration/DiscussionTransport";
 import { DiscussionSync, messageKey, threadKey, type DiscussionReader } from "../../src/collaboration/DiscussionSync";
 import { bodyFromText, type ChangesPage, type MessageRead } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import * as Y from "yjs";
+import { captureTextAnchor } from "../../src/collaboration/anchors/text";
+import { wireTextAnchor } from "../../src/collaboration/DiscussionProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -74,6 +77,24 @@ test("collapses repeated message events and never infers deletion from an empty 
 		worker.wake(); await worker.settled();
 		expect(await store.entity(entry, threadKey(thread))).toBeDefined();
 	} finally { await close(); }
+});
+
+test("a compatible state event refreshes a moved target without changing discussion state or cached replies", async () => {
+	const remote = reader(), { store, worker, close } = await setup(remote);
+	const document = new Y.Doc(); document.getText("content").insert(0, "alpha beta gamma");
+	try {
+		worker.resume(); await worker.settled();
+		const before = await store.entity(entry, messageKey(thread, message));
+		const moved = { ...read(2).thread, anchor_revision: 2 };
+		const anchor = wireTextAnchor(captureTextAnchor(document.getText("content"), entry, id(9), 6, 10));
+		remote.state.mockResolvedValue({ thread: moved, anchor });
+		remote.changes.mockResolvedValue(changes(2, "thread.state"));
+		worker.wake(); await worker.settled();
+		expect(await store.entity(entry, threadKey(thread))).toMatchObject({ revision: 2, value: { ...moved, anchor } });
+		expect(await store.entity(entry, messageKey(thread, message))).toEqual(before);
+		expect(remote.message).toHaveBeenCalledTimes(1);
+		expect(await store.cursor(entry)).toBe("cursor2");
+	} finally { document.destroy(); await close(); }
 });
 
 test("removal erases cached messages atomically and retains locally authored recovery text", async () => {
