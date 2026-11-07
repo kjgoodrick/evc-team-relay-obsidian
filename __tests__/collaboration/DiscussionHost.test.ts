@@ -14,6 +14,8 @@ import type { BaseSyncHost } from "../../src/bases/BaseSyncHost";
 import type { NativeBasesSurface, NativeBaseHandle } from "../../src/bases/NativeBasesSurface";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import type { BaseDefinitionCatalog } from "../../src/collaboration/BaseDefinitionProtocol";
+import * as retainedSources from "../../src/collaboration/RetainedBaseGroupSources";
+import type { NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
@@ -91,6 +93,49 @@ async function nativeBaseFixture() {
 		context: () => s.host.baseCommentContext(surface as unknown as NativeBasesSurface, () => valid),
 		invalidate() { valid = false; }, revoke() { read = false; }, readOnly() { comment = false; } };
 }
+
+test("retained group sources are bound to the exact native file, inventory and account without creating a document", async () => {
+	const s = await nativeBaseFixture();
+	if (s.handle.target.type !== "cell") throw new Error("Expected cell fixture");
+	const file = s.handle.target.file, tracked = new Map<string, object>([[id(3), { isAttachment: true }]]);
+	Object.assign(s.folder, { hostAppId: "synthetic-vault", trackedEntries: tracked });
+	const catalog = await s.session.readBaseDefinitions();
+	catalog.targets.push({ id: id(11), kind: "group", revision: 1, fingerprint: "b".repeat(64), property: { source: "note", name: "status" } });
+	let key: ReturnType<Parameters<typeof retainedSources.retainedBaseGroupSources>[1]["key"]>;
+	const discover = jest.spyOn(retainedSources, "retainedBaseGroupSources").mockImplementation(async (files, port) => { key = port.key(files[0]); return []; });
+	try {
+		const context = (await s.context())!;
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Done" } },
+			element: document.createElement("div"), ambiguous: false, current: () => true, members: () => [file] };
+		await expect(context.groups!.capture(handle)).rejects.toThrow("synchronized source");
+		expect(key!.name).toBe(`synthetic-vault-relay-doc-${id(8)}`); expect(key!.current()).toBe(true);
+		expect(tracked.size).toBe(1);
+		tracked.set(id(8), { isDocument: true, isLocallyPersisted: false }); expect(key!.current()).toBe(false);
+		tracked.delete(id(8)); expect(key!.current()).toBe(true);
+		file.path = "Team/Renamed.md"; expect(key!.current()).toBe(false); file.path = "Team/Note.md";
+		const index = { registered: () => true, snapshot: { owner: false, permissions: { "Note.md": "read" } } };
+		Object.assign(s.folder, { _liveProvider: { managedIndex: index } }); expect(key!.current()).toBe(true);
+		index.snapshot.permissions["Note.md"] = "none"; expect(key!.current()).toBe(false);
+		index.snapshot.permissions["Note.md"] = "read"; expect(key!.current()).toBe(true);
+		s.account(id(90)); expect(key!.current()).toBe(false);
+		context.release();
+	} finally { discover.mockRestore(); s.close(); }
+});
+
+test("an initializing native document cannot be replaced by its older retained cache", async () => {
+	const s = await nativeBaseFixture(); if (s.handle.target.type !== "cell") throw new Error("Expected cell fixture");
+	const file = s.handle.target.file;
+	Object.assign(s.folder, { trackedEntries: new Map([[id(3), { isAttachment: true }], [id(8), { isDocument: true, isLocallyPersisted: false }]]) });
+	const catalog = await s.session.readBaseDefinitions();
+	catalog.targets.push({ id: id(11), kind: "group", revision: 1, fingerprint: "b".repeat(64), property: { source: "note", name: "status" } });
+	const discover = jest.spyOn(retainedSources, "retainedBaseGroupSources").mockImplementation(async (files, port) => { expect(port.key(files[0])).toBeUndefined(); return []; });
+	try {
+		const context = (await s.context())!;
+		await expect(context.groups!.capture({ target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Done" } },
+			element: document.createElement("div"), ambiguous: false, current: () => true, members: () => [file] })).rejects.toThrow("synchronized source");
+		expect(discover).toHaveBeenCalledTimes(1); context.release();
+	} finally { discover.mockRestore(); s.close(); }
+});
 
 test("native Bases discovery does not pin the sidebar; explicit capture pins and saves the exact cell", async () => {
 	const s = await nativeBaseFixture(); const saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);

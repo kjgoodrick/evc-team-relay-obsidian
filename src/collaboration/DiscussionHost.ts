@@ -1,4 +1,5 @@
 import { NativeBaseGroupComments } from "./NativeBaseGroupComments";
+import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
 import { baseGroupValueLabel } from "./BaseGroupValueBridge";
 import { isDocument } from "../Document";
 import type { LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
@@ -279,6 +280,26 @@ export class DiscussionHost extends Component {
 				fileAtPath: path => this.plugin.app.vault.getFileByPath(path),
 				read: file => this.plugin.app.vault.read(file),
 				resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
+				retained: (files, selected) => {
+					if (!selected() || !authorized()) return Promise.resolve([]);
+					const counts = new Map<string, number>(); folder.folderIndex.eachRecord(record => counts.set(record.id, (counts.get(record.id) ?? 0) + 1));
+					return retainedBaseGroupSources(files, {
+						read: file => this.plugin.app.vault.read(file),
+						key: file => {
+							const record = recordFor(file, counts), path = file.path, vpath = folder.toVirtualPath(path);
+							// An initializing/live wrapper may contain edits not yet on disk.
+							// Never substitute its older retained state or create a provider.
+							if (!record || record.type !== "markdown" || folder.trackedEntries.has(record.id)) return;
+							return { name: `${folder.hostAppId}-relay-doc-${record.id}`, current: () => {
+								const index = folder._liveProvider?.managedIndex;
+								return authorized() && file.path === path && this.plugin.app.vault.getFileByPath(path) === file &&
+									this.shares.shareFor(path) === folder && folder.folderIndex.recordFor(vpath) === record &&
+									!folder.trackedEntries.has(record.id) && (!index || index.registered(vpath, record.id) &&
+										(index.snapshot.owner || ["read", "write"].includes(index.snapshot.permissions[vpath])));
+							} };
+						},
+					}, selected);
+				},
 				source: file => {
 					if (this.shares.shareFor(file.path) !== folder) return;
 					const record = folder.folderIndex.recordFor(folder.toVirtualPath(file.path)), doc = record ? folder.trackedEntries.get(record.id) : undefined;

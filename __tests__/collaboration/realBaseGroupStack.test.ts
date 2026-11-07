@@ -3,6 +3,8 @@ import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroup
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
+import { retainedBaseGroupSources } from "../../src/collaboration/RetainedBaseGroupSources";
+import { LocalDocumentStore } from "../../src/storage/local-document-store";
 import { DiscussionDelivery } from "../../src/collaboration/DiscussionDelivery";
 import { prepareBaseGroupCommand } from "../../src/collaboration/LocalDiscussionAnchor";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -37,6 +39,8 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 	const content = new BaseContentTransport(ownerIdentity, ownerCredential, fetch), registry = new BaseRegistryTransport(ownerIdentity, ownerCredential, fetch);
 	const docs: Y.Doc[] = [], providers: YSweetProvider[] = [];
 	const factory = new IDBFactory(), storeIdentity = { ...identity, vaultId: randomUUID() };
+	const previousIndexedDB = globalThis.indexedDB, sourceFactory = new IDBFactory();
+	Object.assign(globalThis, { indexedDB: sourceFactory });
 	let store: DiscussionStore | undefined, captureSession: DiscussionSession | undefined;
 	async function peer(token: string, mode: string) {
 		const response = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: {
@@ -91,10 +95,18 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		const file = { path: "Team/Note.md" } as TFile;
 		const handle: NativeBaseGroupHandle = { target: { type: "group", property: definition.property, value: { type: "text", value: "Done" } },
 			element: {} as HTMLElement, ambiguous: false, current: () => true, members: () => [file] };
+		// Persist a read-only peer's actual relay history, close it, and capture
+		// without a live document/provider. The same intent then survives both
+		// capture and comment response loss through the ordinary outbox below.
+		const cacheName = `retained-${randomUUID()}`, cacheDoc = new Y.Doc(), cache = new LocalDocumentStore(cacheName, cacheDoc);
+		await cache.whenSynced; Y.applyUpdate(cacheDoc, Y.encodeStateAsUpdate(reviewer.doc)); await cache.rememberServerSync();
+		await cache.close(); cacheDoc.destroy(); reviewer.provider.disconnect();
 		const native = new NativeBaseGroupComments({ session: captureSession, entryId: scope, baseEntryId: f.baseEntry, current: () => true } as BaseCommentContext, catalog, {
 			record: candidate => candidate === file ? { id: f.note, type: "markdown", path: "Note.md" } : undefined,
 			file: id => id === f.note ? file : undefined, fileAtPath: path => path === file.path ? file : null,
-			source: () => ({ text: owner.text, current: () => true }), read: async () => owner.text.toString(), resolve: () => null,
+			source: () => undefined, read: async () => owner.text.toString(), resolve: () => null,
+			retained: (files, current) => retainedBaseGroupSources(files, { key: () => ({ name: cacheName, current: () => true }),
+				read: async () => owner.text.toString() }, current, sourceFactory),
 		});
 		const localTarget = await native.capture(handle);
 		expect(localTarget.capture.value).toEqual({ type: "text", value: "Done" });
@@ -148,5 +160,8 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect((await transport.send(operation(fresh))).message_revision).toBe(1);
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_generation: randomUUID() }))
 			.rejects.toMatchObject({ action: "reject", code: "anchor_generation_mismatch" });
-	} finally { await captureSession?.close(); store?.close(); for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy(); }
+	} finally {
+		await captureSession?.close(); store?.close(); for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy();
+		Object.assign(globalThis, { indexedDB: previousIndexedDB });
+	}
 }, 60000);

@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import * as Y from "yjs";
 import type { TFile } from "obsidian";
 import { createHash } from "node:crypto";
@@ -11,12 +12,14 @@ import type { BaseGroupCapture } from "../../src/collaboration/BaseGroupProtocol
 import type { PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import { retainedBaseGroupSources } from "../../src/collaboration/RetainedBaseGroupSources";
+import { LocalDocumentStore } from "../../src/storage/local-document-store";
 
 const id = (n: number) => `40000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const file = (name: string) => ({ path: "Team/" + name, extension: "md" }) as TFile;
 const hash = (path: string) => createHash("sha256").update(path).digest("hex");
 function fixture(value: NativeBaseGroupValue = { type: "text", value: "Done" }) {
-	const a = file("A.md"), b = file("B.md"), doc = new Y.Doc(), text = doc.getText("content"); text.insert(0, "---\nstatus: Done\n---\nBody");
+	const a = file("A.md"), b = file("B.md"), doc = new Y.Doc(), text = doc.getText("contents"); text.insert(0, "---\nstatus: Done\n---\nBody");
 	let current = true, ready = true, members = [b, a];
 	const catalog: BaseDefinitionCatalog = { protocol_version: 1, entry_id: id(1), view_id: id(2), definition_id: id(3), generation: id(4), registry_revision: 1,
 		computed_values: false, targets: [{ kind: "group", id: id(5), revision: 1, property: { source: "note", name: "status" }, fingerprint: "a".repeat(64) }] };
@@ -40,6 +43,77 @@ function fixture(value: NativeBaseGroupValue = { type: "text", value: "Done" }) 
 const fixtures: ReturnType<typeof fixture>[] = [];
 function setup(value?: NativeBaseGroupValue) { const f = fixture(value); fixtures.push(f); return f; }
 afterEach(() => { fixtures.splice(0).forEach(f => f.doc.destroy()); });
+
+async function coldFixture() {
+	const f = setup(), names = new Map<TFile, string>();
+	async function persist(file: TFile, source = f.doc) {
+		const name = `group-retained-${crypto.randomUUID()}`, doc = new Y.Doc(), store = new LocalDocumentStore(name, doc);
+		await store.whenSynced; Y.applyUpdate(doc, Y.encodeStateAsUpdate(source)); await store.rememberServerSync();
+		await store.close(); doc.destroy(); names.set(file, name);
+	}
+	f.unload();
+	const loaded: Y.Doc[] = [];
+	f.sources.retained = async (files, current) => {
+		const candidates = await retainedBaseGroupSources(files, {
+			key: file => names.has(file) ? { name: names.get(file)!, current: () => f.context.current() } : undefined,
+			read: file => f.sources.read(file),
+		}, current);
+		return candidates.map(candidate => ({ file: candidate.file, load: async () => {
+			const source = await candidate.load(); if (source) loaded.push(source.text.doc!); return source;
+		} }));
+	};
+	return { ...f, persist, names, loaded };
+}
+
+test("captures from a closed actual document cache, keeps exact history and disposes the temporary document", async () => {
+	const f = await coldFixture(); await f.persist(f.a);
+	const captured = await f.groups.capture(f.handle);
+	expect(captured.capture.record_id).toBe(id(6));
+	expect(Y.equalSnapshots(Y.decodeSnapshot(Buffer.from(captured.capture.dependency, "base64")), Y.snapshot(f.doc))).toBe(true);
+	expect(f.loaded).toHaveLength(1); expect(f.loaded[0].isDestroyed).toBe(true);
+	expect(f.session.readBaseContext).toHaveBeenCalledWith(f.context.entryId, id(6));
+});
+
+test("tries a second cached member when the first is stale or unreadable", async () => {
+	const f = await coldFixture(), stale = new Y.Doc(); stale.getText("contents").insert(0, "old source");
+	await f.persist(f.a, stale); stale.destroy(); await f.persist(f.b);
+	expect((await f.groups.capture(f.handle)).capture.record_id).toBe(id(7));
+	const g = await coldFixture(); await g.persist(g.a); await g.persist(g.b);
+	g.session.readBaseContext.mockImplementation(async (_scope, record) => {
+		if (record === id(6)) throw new Error("Access denied");
+		return { ...g.catalog, record_id: record, record_generation: id(8) };
+	});
+	expect((await g.groups.capture(g.handle)).capture.record_id).toBe(id(7));
+	expect((g.sources.read as jest.Mock).mock.calls.every(([file]) => file === g.b)).toBe(true);
+});
+
+test("does not read retained content before source authorization and stops after revocation", async () => {
+	const f = setup(); f.unload(); const load = jest.fn(async () => ({ text: f.text, current: () => true }));
+	f.sources.retained = async () => [{ file: f.a, load }]; f.session.readBaseContext.mockRejectedValue(new Error("No source access"));
+	await expect(f.groups.capture(f.handle)).rejects.toThrow("synchronized source"); expect(load).not.toHaveBeenCalled();
+	const g = await coldFixture(); await g.persist(g.a);
+	g.sources.read = async () => { g.revoke(); return g.text.toString(); };
+	await expect(g.groups.capture(g.handle)).rejects.toThrow(); expect(g.session.captureBaseGroupSelection).not.toHaveBeenCalled();
+});
+
+test("disposes retained sources when membership or the final server lineage check changes", async () => {
+	const f = await coldFixture(); await f.persist(f.a);
+	const original = f.sources.retained!;
+	f.sources.retained = async (files, current) => (await original(files, current)).map(candidate => ({ ...candidate, load: async () => {
+		const source = await candidate.load(); f.members([f.b]); return source;
+	} }));
+	await expect(f.groups.capture(f.handle)).rejects.toThrow("still updating");
+	expect(f.loaded[0].isDestroyed).toBe(true); expect(f.session.captureBaseGroupSelection).not.toHaveBeenCalled();
+	const g = await coldFixture(); await g.persist(g.a); g.session.captureBaseGroupSelection.mockRejectedValue(new Error("Record generation changed"));
+	await expect(g.groups.capture(g.handle)).rejects.toThrow("generation changed"); expect(g.loaded[0].isDestroyed).toBe(true);
+});
+
+test("uses loaded sources without scanning databases and freezes native values during cache discovery", async () => {
+	const f = setup(); f.sources.retained = jest.fn(); await f.groups.capture(f.handle); expect(f.sources.retained).not.toHaveBeenCalled();
+	const g = await coldFixture(); await g.persist(g.a); const original = g.sources.retained!;
+	g.sources.retained = async (files, current) => { g.target.value = { type: "text", value: "Different" }; return original(files, current); };
+	await expect(g.groups.capture(g.handle)).rejects.toThrow(); expect(g.session.captureBaseGroupSelection).not.toHaveBeenCalled();
+});
 
 test("native capture uses a stable existing source and an exact Yjs snapshot without opening or changing notes", async () => {
 	const f = setup(), source = f.text.toString(), lookup = jest.spyOn(f.sources, "source");

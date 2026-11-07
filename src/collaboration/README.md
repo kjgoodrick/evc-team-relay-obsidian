@@ -117,8 +117,20 @@ Automated component tests and the actual Python/Rust/Yjs capture/session/deliver
 fixture verify the integration. This increment still needs a native Obsidian run:
 the Mac was locked when that check was attempted. The temporary native services
 were stopped without installing into a vault. A source whose CRDT is not loaded
-currently requires opening a note in the group; cold-cache capture remains to
-implement. Formula/file-property groups, group summaries, source-resolution
+can now be read from its retained cache after source-read authorization. Cache
+discovery is deferred until no live source is available; inventory identities are
+counted once, and supported hosts enumerate database names once per action.
+The reader uses a readonly transaction, requires initialized local/server state,
+rejects incomplete history, and compares the retained text with the current file.
+It does not construct a provider or use the normal cache writer/compactor. Limits
+are 32 MiB total retained bytes, 8 MiB per update, 50,000 records, 2 Mi UTF-16 text,
+5 seconds per storage read and 10 seconds across source discovery. Temporary
+documents are disposed on success and failure; a newly opened native document
+invalidates the retained source instead of letting stale cache replace its edits.
+The actual Python/Rust fixture captures from a closed read-only peer cache and
+verifies outbox delivery through both accepted-response losses and reopen.
+Native Obsidian validation of this path remains pending.
+Formula/file-property groups, group summaries, source-resolution
 compatibility, mobile and native acceptance also remain. Do not treat this as
 release-ready group commenting.
 
