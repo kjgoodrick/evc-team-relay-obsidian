@@ -640,20 +640,25 @@ export class DiscussionSession {
 	private fetchBaseContext(scopeId: string, recordId?: string): Promise<BaseTargetContext> {
 		const key = "baseContext:" + scopeId + (recordId ? ":" + recordId : "");
 		const existing = this.baseContextFlights.get(key); if (existing) return existing;
+		const authenticationEpoch = this.authenticationEpoch;
+		const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue);
 		const flight = (async () => {
-			const scope = parseDiscussionScope(scopeId); if (!scope?.viewId || this.closed) throw new Error("Saved view access is unavailable.");
+			const scope = parseDiscussionScope(scopeId); if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
 			const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+			if (!current()) throw new Error("Saved view access changed during verification.");
 			let context: BaseTargetContext;
 			try { context = await this.transport.baseTargetContext(scopeId, scope.viewId, recordId); }
 			catch (error) {
-				if (!this.closed && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+				if (current() && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null, current);
+				if (authenticationEpoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
 				throw error;
 			}
-			if (this.closed) throw new Error("This discussion account is closed.");
+			if (!current()) throw new Error("Saved view access changed during verification.");
 			let previous: BaseTargetContext | undefined;
 			try { previous = parseBaseTargetContext(proof.previous, scope.entryId, scope.viewId, recordId); } catch { /* No prior verified target. */ }
 			if (previous?.generation === context.generation && previous.registry_revision > context.registry_revision) throw new Error("Saved view association changed.");
-			if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(context))) throw new Error("Saved target verification changed. Try again.");
+			if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(context), current)) throw new Error("Saved target verification changed. Try again.");
+			if (!current()) throw new Error("Saved view access changed during verification.");
 			this.observeBaseRevision(scopeId, context.generation, context.registry_revision);
 			return context;
 		})().finally(() => { if (this.baseContextFlights.get(key) === flight) this.baseContextFlights.delete(key); });
@@ -664,7 +669,9 @@ export class DiscussionSession {
 	 * Offline navigation requires a context previously verified for this account. */
 	async readBaseContext(scopeId: string, recordId?: string): Promise<BaseTargetContext> {
 		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
-		const current = () => !this.closed && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const authenticationEpoch = this.authenticationEpoch;
+		const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue) &&
+			this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
 		if (!scope?.viewId || !generation || !current()) throw new Error("Saved view access is unavailable.");
 		return this.trackLocal((async () => {
 			let context: BaseTargetContext | undefined;
@@ -701,11 +708,14 @@ export class DiscussionSession {
 	async captureBaseTarget(scopeId: string, target: BaseTargetSelection): Promise<BaseAnchor> {
 		const scope = parseDiscussionScope(scopeId), entry = this.entries.get(scopeId);
 		if (!scope?.viewId || entry?.kind !== "base" || !entry.permission?.comment || !this.canAnchorBase(target.type)) throw new Error("Open this saved view with comment permission first.");
+		const authenticationEpoch = this.authenticationEpoch, generation = entry.documentGeneration;
+		const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && this.canAnchorBase(target.type) &&
+			this.permission(scopeId)?.comment === true && !entry.unavailable && entry.documentGeneration === generation;
 		if (target.type === "formula" || target.type === "summary") {
 			const catalog = await this.readBaseDefinitions(scopeId);
 			const definition = catalog.targets.find(item => item.id === target.definitionId && item.kind === target.type);
 			if (!definition || definition.revision !== target.definitionRevision) throw new Error("This definition changed. Choose its current definition before starting another comment. Existing drafts are retained.");
-			if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
+			if (!current() ||
 				this.documentGeneration(scopeId) !== catalog.generation) throw new Error("Comment access or the saved view changed during capture.");
 			return parseAnchor({ version: 1, type: "base", definition_id: catalog.definition_id, view_id: catalog.view_id,
 				generation: catalog.generation, registry_revision: catalog.registry_revision,
@@ -716,18 +726,22 @@ export class DiscussionSession {
 		if (recordId !== undefined && !isId(recordId)) throw new Error("The selected record has no synchronized identity.");
 		const permissionKey = "baseRecordComment:" + scopeId + ":" + recordId;
 		return this.trackLocal((async () => {
-			let context: BaseTargetContext | undefined;
+			let context: BaseTargetContext | undefined, permissionProof: PreferenceVerification | undefined;
 			try {
 				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
+				if (recordId) permissionProof = await this.store.beginPreferenceVerification(scopeId, permissionKey, uuid());
+				if (!current()) throw new Error("Comment access changed during capture.");
 				context = await this.fetchBaseContext(scopeId, recordId);
+				if (!current()) throw new Error("Comment access changed during capture.");
 				const permission = recordId ? await this.transport.permissions(recordId) : entry.permission;
-				if (this.closed) throw new Error("This discussion account is closed.");
-				if (recordId) await this.store.setPreference(permissionKey, permission?.read === true && permission.comment);
+				if (!current()) throw new Error("Comment access changed during capture.");
+				if (permissionProof && !await this.store.finishPreferenceVerification(scopeId, permissionKey, permissionProof, permission?.read === true && permission.comment, current)) throw new Error("Record comment verification changed.");
 				if (!permission?.read || !permission.comment) throw new DiscussionFailure("reject", "comment_forbidden", 403);
 			} catch (error) {
-				if (this.closed) throw error;
+				if (authenticationEpoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				if (!current()) throw error;
 				if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
-					if (recordId) await this.store.setPreference(permissionKey, false);
+					if (permissionProof) await this.store.finishPreferenceVerification(scopeId, permissionKey, permissionProof, false, current);
 					throw error;
 				}
 				context = await this.cachedBaseContext(scopeId, recordId);
@@ -737,7 +751,7 @@ export class DiscussionSession {
 				const catalog = await this.readBaseDefinitions(scopeId);
 				const definition = catalog.targets.find(item => item.kind === "formula" && item.id === target.definitionId);
 				if (!definition || definition.revision !== target.definitionRevision) throw new Error("This definition changed. Choose its current definition before starting another comment. Existing drafts are retained.");
-				if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
+				if (!current() ||
 					this.documentGeneration(scopeId) !== catalog.generation || context.generation !== catalog.generation ||
 					context.definition_id !== catalog.definition_id || context.registry_revision > catalog.registry_revision) throw new Error("The saved view or record changed during capture.");
 				return parseAnchor({ version: 1, type: "base", definition_id: catalog.definition_id, view_id: catalog.view_id,
@@ -745,7 +759,7 @@ export class DiscussionSession {
 					target: { type: "formula_cell", definition_id: definition.id, definition_revision: definition.revision,
 						property: definition.property, record_id: recordId, record_generation: context.record_generation } }) as BaseAnchor;
 			}
-			if (this.closed || !this.canAnchorBase(target.type) || !this.permission(scopeId)?.comment || entry.unavailable ||
+			if (!current() ||
 				this.documentGeneration(scopeId) !== context.generation) throw new Error("Comment access or the saved view changed while capturing this target. Refresh before trying again.");
 			const parsed = parseAnchor({ version: 1, type: "base", definition_id: context.definition_id, view_id: context.view_id,
 				generation: context.generation, registry_revision: context.registry_revision, target: target.type === "view" ? { type: "view" } :

@@ -85,3 +85,18 @@ tests / 6 suites**; the full suite passes **3,104 tests / 246 suites**, with 22
 tests / 17 suites skipped. Build/main types, frozen test types and changed-source
 lint pass. This is automated follow-up to the native evidence above; the newer
 build has not been installed in a live vault.
+
+The related record-context path now also fences navigation and capture across
+authentication loss/recovery. Late successes, retry fallbacks and denials cannot
+reuse or erase a previous context. Record comment-permission checks use the same
+cross-window verification tickets and guarded transaction, preventing an older
+grant or denial from overwriting another window's newer result. Capture rechecks
+its original authentication/document lifetime through the completed permission
+read and final anchor construction.
+
+Four additional authentication cases failed before this correction. They and
+the two competing-window permission cases now pass. The focused regression set
+passes **254 tests / 6 suites**; the full suite passes **3,110 tests / 246 suites**,
+with 22 tests / 17 suites skipped. Build/main types, frozen test types and
+changed-source lint pass. These checks do not complete native Bases placement,
+computed-result authorization or the remaining release matrix.

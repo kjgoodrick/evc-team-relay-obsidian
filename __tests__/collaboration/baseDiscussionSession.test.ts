@@ -434,3 +434,51 @@ test("a response arriving after remote-cache revocation cannot repopulate marker
 		expect(await store.preference("timelineMarkers:" + scope)).toBeUndefined();
 	} finally { await session.close(); }
 });
+
+test.each(["success", "retry", "denied"] as const)("record navigation started before authentication loss rejects a late %s after recovery", async outcome => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport); let finish!: () => void;
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); session.setForeground(false); await session.outbox.settled();
+		const original = await session.readBaseContext(scope, id(9)), originalRead = transport.baseTargetContext.getMockImplementation()!;
+		transport.baseTargetContext.mockImplementation((key, view, record) => record !== id(9) ? originalRead(key, view, record) : new Promise((resolve, reject) => {
+			finish = () => outcome === "success" ? resolve({ ...original, registry_revision: 2 }) : reject(new DiscussionFailure(outcome === "retry" ? "retry" : "reject", "old_response", outcome === "retry" ? 503 : 403));
+		}));
+		const reading = session.readBaseContext(scope, id(9)), rejected = expect(reading).rejects.toThrow(); await until(() => !!finish);
+		transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await session.start(); expect(session.status).toBe("authentication_required"); await session.start(); expect(session.status).toBe("ready");
+		finish(); await rejected;
+		expect(await store.preference("baseContext:" + scope + ":" + id(9))).toEqual(original);
+	} finally { finish?.(); await session.close(); }
+});
+
+test("a record capture cannot accept a late comment permission after authentication recovery", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote();
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport); let finish!: () => void;
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); session.setForeground(false); await session.outbox.settled();
+		transport.permissions.mockImplementation(key => key !== id(9) ? Promise.resolve({ read: true, comment: true, edit: false, moderate: false }) :
+			new Promise(resolve => { finish = () => resolve({ read: true, comment: true, edit: false, moderate: false }); }));
+		const capturing = session.captureBaseTarget(scope, { type: "item", recordId: id(9) }), rejected = expect(capturing).rejects.toThrow(); await until(() => !!finish);
+		transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await session.start(); await session.start(); expect(session.status).toBe("ready");
+		finish(); await rejected;
+		expect(await store.preference("baseRecordComment:" + scope + ":" + id(9))).not.toBe(true);
+	} finally { finish?.(); await session.close(); }
+});
+
+test.each([true, false])("record permission proof from another window survives an older %s response", async oldAllowed => {
+	const factory = new IDBFactory(), storeA = await DiscussionStore.open(identity, factory), storeB = await DiscussionStore.open(identity, factory);
+	const remoteA = remote(), remoteB = remote(), a = new DiscussionSession(storeA, remoteA as unknown as DiscussionTransport), b = new DiscussionSession(storeB, remoteB as unknown as DiscussionTransport);
+	let finish!: () => void;
+	try {
+		for (const session of [a, b]) { await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); session.setForeground(false); await session.outbox.settled(); }
+		remoteA.permissions.mockImplementation(key => key !== id(9) ? Promise.resolve({ read: true, comment: true, edit: false, moderate: false }) :
+			new Promise(resolve => { finish = () => resolve({ read: true, comment: oldAllowed, edit: false, moderate: false }); }));
+		const target = { type: "item" as const, recordId: id(9) }, pending = a.captureBaseTarget(scope, target), rejected = expect(pending).rejects.toThrow();
+		await until(() => !!finish);
+		remoteB.permissions.mockResolvedValue({ read: true, comment: !oldAllowed, edit: false, moderate: false });
+		if (oldAllowed) await expect(b.captureBaseTarget(scope, target)).rejects.toMatchObject({ code: "comment_forbidden" }); else await b.captureBaseTarget(scope, target);
+		finish(); await rejected; expect(await storeA.preference("baseRecordComment:" + scope + ":" + id(9))).toBe(!oldAllowed);
+	} finally { finish?.(); await a.close(); await b.close(); }
+});
