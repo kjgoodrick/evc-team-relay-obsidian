@@ -1,4 +1,4 @@
-import { Component, FileView, MarkdownView, type Plugin, type TFile } from "obsidian";
+import { apiVersion, Component, FileView, MarkdownView, type Plugin, type TFile } from "obsidian";
 import { decodeJwt } from "jose";
 import type { AuthSession } from "../../AuthSession";
 import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
@@ -6,8 +6,11 @@ import type { SettingsScope } from "../../SettingsPersistence";
 import type { ShareRegistry, VaultShare } from "../../VaultShare";
 import { ImageAssets } from "../ImageAssets";
 import { ImagePresenceSurface } from "./ImagePresenceSurface";
+import { BasePresenceSurface } from "./BasePresenceSurface";
+import { NativeBasesSurface } from "../../bases/NativeBasesSurface";
+import { TimelineBridgeClient } from "../../bases/TimelineBridgeClient";
 import { LocationChannel, type LocationChannelStatus, type LocationIdentity } from "./LocationChannel";
-import { locationId, type LocationEvent, type NoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
+import { locationId, type BaseLocation, type LocationEvent, type NoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 import type { ActivePresencePeer, SurfacePresencePeer } from "./PresencePeers";
 import type { ImagePresenceState, ImageStatesEvent } from "./LocationProtocol";
 import type * as Y from "yjs";
@@ -17,16 +20,18 @@ import type { ImageOccurrence } from "../anchors/images";
 import type { RenderedImageTarget } from "../anchors/renderedImages";
 import type { PresencePeer } from "./PresencePeers";
 
-type Context = { key: string; serverId: string; identity: LocationIdentity; file: TFile; folder: VaultShare; id: string; kind: "note" | "image"; location?: NoteLocation };
+type Context = { key: string; serverId: string; identity: LocationIdentity; file: TFile; folder: VaultShare; id: string; kind: "note" | "image" | "base"; location?: NoteLocation };
 type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void; interacted?: () => void; positions?: () => void };
 
-/** One foreground connection across notes and image files. Inventory and local
+/** One foreground connection across notes, image files and saved Bases views. Inventory and local
  * rendering are verified independently of discussions and comment permission. */
 export class LocationHost extends Component {
 	private channel?: LocationChannel;
 	private context?: Context;
 	private view?: FileView;
 	private image?: ImagePresenceSurface;
+	private base?: BasePresenceSurface;
+	private timeline?: TimelineBridgeClient;
 	private roster?: SurfaceRosterEvent;
 	private imageStates?: ImageStatesEvent;
 	private embedded?: EmbeddedImageSurface;
@@ -50,23 +55,28 @@ export class LocationHost extends Component {
 		this.watchFolders();
 	}
 	get status(): LocationChannelStatus { return this.channel?.status ?? "idle"; }
-	get currentLocation(): SurfaceLocation | undefined { return this.context?.kind === "image" ? this.image?.location : this.context?.location; }
+	get currentLocation(): SurfaceLocation | undefined { return this.context?.kind === "image" ? this.image?.location : this.context?.kind === "base" ? this.base?.location : this.context?.location; }
 	get ready(): boolean { return this.channel?.ready === true; }
 	get supportsImages(): boolean { return this.channel?.supportsImageContext === true && this.channel.supportsSurfaceRoster; }
+	get supportsBases(): boolean { return this.channel?.supportsBaseContext === true && this.channel.supportsSurfaceRoster; }
 	get embeddedUnavailable(): boolean { return this.embedDenied || this.embedded?.unavailable === true; }
 	get imageActive(): boolean { return this.context?.kind === "image"; }
+	get baseActive(): boolean { return this.context?.kind === "base"; }
+	get surfaceActive(): boolean { return this.imageActive || this.baseActive; }
+	get surfaceState(): ImagePresenceSurface["state"] { return this.baseActive ? this.base?.state ?? "waiting" : this.imageState; }
 	get imageState(): ImagePresenceSurface["state"] { return this.image?.state ?? "waiting"; }
-	get imagePeers(): SurfacePresencePeer[] {
+	get imagePeers(): SurfacePresencePeer[] { return this.imageActive ? this.surfacePeers : []; }
+	get surfacePeers(): SurfacePresencePeer[] {
 		const scope = this.currentLocation, roster = this.roster;
-		if (scope?.kind !== "image" || roster?.status !== "available" || JSON.stringify(scope) !== JSON.stringify(roster.scope)) return [];
+		if (!scope || scope.kind === "note" || roster?.status !== "available" || JSON.stringify(scope) !== JSON.stringify(roster.scope)) return [];
 		const positions = this.imageStates?.status === "available" && JSON.stringify(this.imageStates.scope) === JSON.stringify(scope) ?
 			new Map(this.imageStates.peers.map(peer => [JSON.stringify(peer.target), peer.state])) : undefined;
 		return roster.peers.map(peer => ({ key: JSON.stringify(["surface", peer.target.user_id, peer.target.session_id, peer.target.instance_id]),
-			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: "image" as const, location: scope, imageState: positions?.get(JSON.stringify(peer.target)) }))
+			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: scope.kind, location: scope, imageState: positions?.get(JSON.stringify(peer.target)) }))
 			.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 	}
-	retry(): void { this.embedDenied = false; this.channel?.retry(); this.image?.retry(); this.embedded?.retry(); }
-	unfollow(): void { this.channel?.unfollow(); }
+	retry(): void { this.embedDenied = false; this.channel?.retry(); this.image?.retry(); this.base?.retry(); this.embedded?.retry(); }
+	unfollow(): void { this.channel?.unfollow(); this.base?.cancelNavigation(); }
 	follow(peer: ActivePresencePeer): string | undefined {
 		const location = this.currentLocation;
 		if (!location || !peer.instanceId) return;
@@ -74,6 +84,10 @@ export class LocationHost extends Component {
 		catch { return; }
 	}
 	revealImage(current: () => boolean, state?: ImagePresenceState, follow = false): boolean { return this.image?.reveal(current, state, follow) === true; }
+	revealSurface(peer: SurfacePresencePeer, current: () => boolean, follow = false): boolean {
+		return peer.surface === "base" ? this.base?.reveal(current) === true : this.revealImage(current, peer.imageState, follow);
+	}
+	activateBase(location: BaseLocation, current: () => boolean): "ready" | "waiting" | "unavailable" { return this.base?.activate(location, current) ?? "waiting"; }
 	embedPosition(peer: PresencePeer, follow = false): ReturnType<EmbeddedImageSurface["position"]> { return this.embedded?.position(peer, follow); }
 	revealEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): boolean { return this.embedded?.reveal(peer, follow, current) === true; }
 	async materializeEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): Promise<boolean> { return await this.embedded?.revealAfterLayout(peer, follow, current) === true; }
@@ -112,16 +126,16 @@ export class LocationHost extends Component {
 			this.folders.set(folder, () => { stop(); base.unobserve(change); });
 		}
 	}
-	private entry(file?: TFile | null): { folder: VaultShare; id: string; kind: "note" | "image"; hash?: string } | undefined {
+	private entry(file?: TFile | null): { folder: VaultShare; id: string; kind: "note" | "image" | "base"; hash?: string } | undefined {
 		if (!file || this.plugin.app.vault.getFileByPath(file.path) !== file) return;
 		const folder = this.shares.shareFor(file.path);
 		if (!folder?.wantsConnection || folder.isRecoveringStructure) return;
 		const path = folder.toVirtualPath(file.path), record = folder.folderIndex.recordFor(path), index = folder._liveProvider.managedIndex;
 		const base = folder.crdtDoc.getMap<{ owner: boolean; permissions: Record<string, string> }>("managed_base_v1").get("snapshot");
-		if (!record || !["markdown", "image"].includes(record.type) || !locationId(record.id) || !locationId(folder.entityGuid) ||
+		if (!record || !["markdown", "image", "file"].includes(record.type) || !locationId(record.id) || !locationId(folder.entityGuid) ||
 			!index?.registered(path, record.id) || index.isBlocked(path, record.id) || !base || !base.owner && !["read", "write"].includes(base.permissions[path])) return;
-		if (record.type === "markdown" && file.extension !== "md" || record.type === "image" && (!record.hash || !/^[0-9a-f]{64}$/.test(record.hash))) return;
-		return { folder, id: record.id, kind: record.type === "image" ? "image" : "note", hash: record.hash };
+		if (record.type === "markdown" && file.extension !== "md" || record.type === "file" && file.extension !== "base" || record.type !== "markdown" && (!record.hash || !/^[0-9a-f]{64}$/.test(record.hash))) return;
+		return { folder, id: record.id, kind: record.type === "file" ? "base" : record.type === "image" ? "image" : "note", hash: record.hash };
 	}
 	private identify(view?: FileView | null): Context | undefined {
 		const entry = this.entry(view?.file), settings = this.settings.readValue();
@@ -140,8 +154,10 @@ export class LocationHost extends Component {
 		if (this.closed) return;
 		this.visible = visible;
 		const context = foreground ? this.identify(view) : undefined;
-		if (this.context?.key !== context?.key || this.view !== view || this.context?.file !== context?.file || this.context?.id !== context?.id) {
+		if (this.context?.key !== context?.key || this.view !== view || this.context?.file !== context?.file || this.context?.id !== context?.id || this.context?.kind !== context?.kind || this.context?.folder !== context?.folder) {
 			this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
+			this.base?.close(); this.base = undefined;
+			this.timeline?.close(); this.timeline = undefined;
 			this.embedded?.close(); this.embedded = undefined; this.embeds = undefined; this.notePeers = []; this.embedDenied = false;
 		}
 		if (this.context?.key !== context?.key) {
@@ -162,7 +178,7 @@ export class LocationHost extends Component {
 					roster: event => {
 						if (!current()) return;
 						this.roster = event;
-						if (event.scope && event.status === "unavailable" && JSON.stringify(event.scope) === JSON.stringify(this.currentLocation)) { this.image?.deny(); this.callbacks.stopped(); }
+						if (event.scope && event.status === "unavailable" && JSON.stringify(event.scope) === JSON.stringify(this.currentLocation)) { this.image?.deny(); this.base?.deny(); this.callbacks.stopped(); }
 						this.callbacks.changed();
 					},
 					imageStates: event => {
@@ -193,9 +209,23 @@ export class LocationHost extends Component {
 			});
 			this.image.refresh();
 		}
+		if (context.kind === "base" && view) {
+			if (!this.timeline) {
+				this.timeline = new TimelineBridgeClient(this.plugin.app.workspace, () => { this.base?.refresh(); this.callbacks.changed(); });
+				this.timeline.start();
+			}
+			if (!this.base) this.base = new BasePresenceSurface(view, context.folder.entityGuid, context.id, {
+				current: () => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder,
+				connected: () => this.ready, supported: () => this.supportsBases, hash: () => this.entry(context.file)?.hash,
+				inspect: () => NativeBasesSurface.inspect(view, apiVersion, true, this.timeline),
+				read: () => this.channel!.readBaseContext(context.folder.entityGuid, context.id), readSource: () => this.plugin.app.vault.read(context.file),
+				changed: this.callbacks.changed, interacted: () => this.callbacks.interacted?.(),
+			});
+			this.base.refresh();
+		}
 		const location = this.currentLocation;
 		this.channel.start(context.folder.entityGuid, visible ? location ?? null : null);
-		if (location?.kind === "image") this.channel.watch(location);
+		if (location && location.kind !== "note") this.channel.watch(location);
 		else if (!this.embedded) this.channel.watch(null);
 		this.image?.refreshMovement();
 		this.image?.setPeers(this.imagePeers);
@@ -203,12 +233,12 @@ export class LocationHost extends Component {
 	/** Resolve only a unique authorized local entry. Remote events never provide
 	 * paths, and images must match the advertised synchronized content hash. */
 	fileFor(location: SurfaceLocation): TFile | undefined {
-		const context = this.context; if (!context || !this.ready || location.kind === "base") return;
+		const context = this.context; if (!context || !this.ready) return;
 		if (this.identify(this.plugin.app.workspace.getActiveViewOfType(FileView))?.key !== context.key) return;
 		const matches: TFile[] = [];
 		for (const folder of this.shares.toArray()) if (folder.entityGuid === location.share_id && folder.config.onpremServerId === context.serverId) {
 			folder.folderIndex.eachRecord((record, path) => {
-				if (record.id !== location.entry_id || record.type !== (location.kind === "image" ? "image" : "markdown") || location.kind === "image" && record.hash !== location.content_sha256) return;
+				if (record.id !== location.entry_id || record.type !== (location.kind === "base" ? "file" : location.kind === "image" ? "image" : "markdown") || location.kind === "image" && record.hash !== location.content_sha256) return;
 				const file = this.plugin.app.vault.getFileByPath(folder.absolutePath(path));
 				if (file && this.entry(file)?.folder === folder) matches.push(file);
 			});
@@ -217,6 +247,7 @@ export class LocationHost extends Component {
 	}
 	onunload(): void {
 		this.closed = true; this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
+		this.base?.close(); this.base = undefined; this.timeline?.close(); this.timeline = undefined;
 		this.embedded?.close(); this.embedded = undefined; this.embeds = undefined; this.notePeers = [];
 		this.channel?.stop(); this.channel = undefined; this.context = undefined; this.view = undefined;
 		for (const stop of this.folders.values()) stop(); this.folders.clear();

@@ -3,11 +3,12 @@
 The client transport supports the server's optional version-two location and
 surface-roster protocol. The foreground `LocationHost` now opts in and connects
 directly opened managed image files to the existing participant controls and
-Jump/Follow. Notes and images reuse one socket per foreground host/account.
+Jump/Follow. Notes, images and verified saved Bases views reuse one socket per
+foreground host/account. Bases participants and whole-view Jump/Follow are connected.
 Direct-image pointer overlays and position-aware Jump/Follow are also connected.
 Embedded-image capture, overlays and Jump/Follow are connected in the foreground
 note as well. These have automated host evidence; native image acceptance,
-visible split-pane image observation and Bases/timeline host integration remain unfinished.
+visible split-pane image observation and fine-grained Bases/timeline movement remain unfinished.
 
 ## Transport contract
 
@@ -61,8 +62,42 @@ file-stat, ownership or permission changes invalidate the binding. Guarded view
 activation uses the existing transient native selection method; it requires this
 surface's original binding and respects the integration's navigation guard.
 These adapter methods have automated evidence, including delayed permission loss
-and unchanged saved configuration. Foreground Bases host wiring, participant
-controls, movement and native desktop/mobile acceptance still remain.
+and unchanged saved configuration. Fine-grained movement and native desktop/mobile
+acceptance still remain.
+
+## Saved-view host and navigation
+
+`BasePresenceSurface` binds the foreground `.base` view through that read-only
+context, current authorized inventory and the existing native/Time & Line adapters.
+It requires the saved native configuration and exact synchronized bytes. A reader
+can publish or observe without comment/edit permission. The existing participant
+controls show only the exact saved-view roster. Privacy hides publication while
+preserving authorized observation; denial clears participants and ends Follow.
+
+The active file's metadata/source reads are reused across result repainting and
+saved-view changes. Repeated rejection does not poll. Explicit retry, a changed
+file or a new registry revision causes bounded fresh verification. Late results
+cannot restore a replaced, logged-out or disconnected context. Source/stat/hash
+changes immediately invalidate local proof. A 50 ms DOM check ignores owned UI
+layers, and closing the surface clears its timer/listeners and timeline bridge.
+This reuses the existing 256 KiB native Base limit; no second document/socket or
+whole-vault presence index is created.
+
+Follow crosses notes, images and saved views on the same foreground socket. It
+uses transient native view selection without saving filters/layout/configuration,
+respects timeline navigation locks, and does not reopen an already open Base to
+switch its view. A pending native selection is not repeated during result repainting.
+Newer destinations supersede an in-flight file open; cancellation permits a fresh
+action. An incompatible generation/revision is re-read once before rejection.
+Reconnect refreshes observation but never restarts Follow automatically.
+
+This increment navigates to the **whole saved view**. It does not yet publish
+cell/row/header/group/lane/item/range positions or render their remote cursors.
+Automated tests exercise the real native adapter against simulated host objects
+and the actual `TimelineBridgeClient` contract. They cover read-only/hidden
+observation, table/card and timeline view changes, denial/retry, source changes,
+late responses, navigation locks, note→Base→image→note transitions and unload.
+These are not native Obsidian desktop/mobile or performance acceptance results.
 
 ## Direct image binding
 
@@ -141,11 +176,15 @@ text nodes and continue to enforce local surface/account ownership.
 
 ## Validation
 
-The full plugin suite passes **2,669 tests in 216 suites**; 17 opt-in tests in 16
+The full plugin suite passes **2,689 tests in 217 suites**; 17 opt-in tests in 16
 suites are skipped in that default run. Preview build/main types and changed
 source/test lint pass. The build retains 15 existing Svelte warnings. The frozen
 test-type gate passes with 206 known errors/45 signatures, below its 207/46
 baseline; this is not a claim of zero test type errors.
+
+The saved-view host increment changes no server implementation or wire schema;
+the server and actual HTTP/WebSocket evidence below is retained from the preceding
+context/transport checkpoint, rather than claimed as a new run.
 
 The actual client/server runner passes seven tests in six suites, including
 `realSurfaceLocationStack.test.ts`. It uses real loopback HTTP/WebSockets with
@@ -184,9 +223,8 @@ rejection of late or mismatched source/account/view proofs.
 
 ## Required next work
 
-Connect the read-only Bases/timeline bindings to the foreground host, including
-permission/version refresh independent of whether discussions are open.
-Complete transformed-image and large-file coverage. Add semantic Jump/Follow and typed cell, row,
+Extend whole-view Bases/timeline presence with typed semantic positions.
+Complete transformed-image and large-file coverage. Add precise Jump/Follow for cell, row,
 header, group, lane and timeline targets. Preserve a single foreground publisher
 and local interaction interruption across all surfaces and popouts. Separate
 high-frequency movement from membership snapshots and measure its authorization,

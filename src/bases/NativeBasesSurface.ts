@@ -223,6 +223,7 @@ export class NativeBasesSurface {
 		} catch { return false; }
 	}
 	viewport(): HTMLElement | undefined { return this.current() ? this.scrollElement() : undefined; }
+	canNavigate(): boolean { try { return this.current() && this.integrations?.canNavigate(this.root.ownerDocument) !== false; } catch { return false; } }
 	get annotationSupported(): boolean { return !!this.external; }
 	rangeContext(): NativeTimelineContext | undefined {
 		const context = this.current() ? this.external?.rangeContext?.() : undefined;
