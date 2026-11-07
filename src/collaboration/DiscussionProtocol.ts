@@ -192,8 +192,8 @@ export function parseTimelineAxis(value: unknown): TimelineAxis {
 		isBaseDefinitionProperty(value.start_property) && (value.end_property === null || isBaseDefinitionProperty(value.end_property)));
 	const time_zone = value.time_zone === null ? null : parseTimelineTimeZone(value.time_zone);
 	requireValue(value.renderer !== "sabidurian-sequence" || time_zone === null);
-	return { version: 1, renderer: value.renderer, start_property: { ...value.start_property },
-		end_property: value.end_property === null ? null : { ...value.end_property }, time_zone };
+	return { version: 1, renderer: value.renderer, start_property: { source: value.start_property.source, name: value.start_property.name },
+		end_property: value.end_property === null ? null : { source: value.end_property.source, name: value.end_property.name }, time_zone };
 }
 
 function parseBaseAnchor(value: Record<string, unknown>): BaseAnchor {

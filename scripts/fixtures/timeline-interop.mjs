@@ -114,9 +114,32 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 			} finally { doc.destroy(); }
 			assert.equal(host.data, source); assert.deepEqual(writes, []);
 		}
+		// Actual optional range provider/consumer boundary, using synthetic geometry.
+		const viewport = view.timelineRenderer.element, svg = view.timelineRenderer.svgElement, sequence = type === "sabidurian-sequence";
+		view.axis.setView(sequence ? 1 : 2026, sequence ? 5 : 2027, 800);
+		Object.defineProperties(viewport, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 200, configurable: true }, scrollWidth: { value: 800, configurable: true } });
+		viewport.scrollLeft = 0;
+		viewport.getBoundingClientRect = () => ({ left: 100, right: 500, top: 50, bottom: 250, width: 400, height: 200 });
+		svg.getBoundingClientRect = () => ({ left: 100 - viewport.scrollLeft, right: 900 - viewport.scrollLeft, top: 50, bottom: 450, width: 800, height: 400 });
+		const rangeContext = surface.rangeContext(); assert.ok(rangeContext?.current()); assert.equal(rangeContext.axis.renderer, type);
+		let selectedRange, rangeStops = 0;
+		assert.ok(surface.beginRange(sequence ? "ordinal" : "calendar", "day", value => { selectedRange = value; }, () => rangeStops++));
+		const status = root.querySelector(".sabidurian-range-selection-status"); assert.ok(status);
+		for (const key of ["Enter", "ArrowRight", "Enter"]) status.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));
+		assert.equal(rangeStops, 1); assert.ok(selectedRange?.current()); assert.equal(selectedRange.draft.kind, sequence ? "ordinal" : "calendar");
+		const laneElement = grouped ? surface.groupHandles(() => null)[0].element : undefined;
+		const geometry = surface.rangeGeometry(selectedRange.draft, rangeContext.axis, laneElement); assert.ok(geometry?.current());
+		assert.equal(surface.revealRange(selectedRange.draft, rangeContext.axis, () => true, laneElement), "revealed");
+		assert.equal(surface.revealRange(selectedRange.draft, rangeContext.axis, () => false, laneElement), "unavailable");
+		assert.equal(host.data, source); assert.deepEqual(writes, []);
+		// Switching selection modes cancels the old mode and releases its handlers.
+		surface.beginRange(sequence ? "ordinal" : "calendar", "day", () => assert.fail("cancelled range"), () => rangeStops++);
+		const stopAnnotation = surface.beginAnnotation(() => {}, () => {}); assert.equal(rangeStops, 2);
+		assert.equal(root.querySelector(".sabidurian-range-selection-status"), null); stopAnnotation();
 		const captured = surface.handles()[1]; view.onDataUpdated(); assert.equal(captured.current(), false);
+		assert.equal(rangeContext.current(), false); assert.equal(selectedRange.current(), false); assert.equal(geometry.current(), false);
 		bridge.dispose(); assert.equal(client.find(view), undefined); assert.equal(surface.current(), false);
-		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, property target, annotation, navigation, dirty inspector and disposal`);
+		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, item/range selection, projection, navigation, dirty inspector and disposal`);
 	} finally {
 		client.close(); view.onunload(); bridge.dispose(); for (const modal of Modal.opened) modal.close(); Modal.opened = [];
 		frames.clear(); root.remove();

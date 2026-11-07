@@ -6,7 +6,7 @@ The bridge must advertise version one, `available`, both registered view types,
 pre-navigation checks and the `annotation` capability. The initial bridge without
 those additions is insufficient. Both plugins must be updated together.
 
-This is a development preview. Native Obsidian validation, timeline ranges,
+This is a development preview. Native Obsidian validation, the timeline range comment interface,
 shared milestones and timeline presence remain unfinished. It does not establish
 the complete desktop/mobile collaboration release.
 
@@ -42,6 +42,23 @@ the complete desktop/mobile collaboration release.
   file-metadata properties still await dependency/authorization support.
 
 ## Ownership and lifecycle
+
+The optional `ranges` extension now connects the fork's local range context,
+selection, geometry and navigation to `NativeBasesSurface`. It requires all four
+methods and validates renderer/kind compatibility, normalized property identity,
+timezones, bounded editable drafts and finite geometry. Captured contexts and
+geometry stop being usable after axis mutation, query replacement or unload.
+Range and item annotation modes share cancellation ownership. Explicit
+cancellation suppresses late delivery; provider cleanup may precede a valid
+single selection. Dirty inspectors prevent navigation and new selection.
+
+This is a consumer API, **not a completed range-comment UI**. The toolbar,
+confirmation/editor, durable capture hookup, saved range markers and discussion
+navigation still need connecting. The renderer supports mouse/touch/keyboard
+endpoints and lane geometry, but outside-axis reveal currently reports hidden.
+Current plugin tests and eight actual-source interoperability cases exercise
+these boundaries without native installation. Range-specific PostgreSQL,
+desktop/mobile and physical-touch acceptance remain.
 
 `TimelineBridgeClient` discovers either plugin load order through the fork's
 request/ready workspace events. It validates the API shape, bounds surfaces and

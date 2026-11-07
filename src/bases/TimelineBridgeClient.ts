@@ -1,5 +1,6 @@
 import { TFile, type EventRef, type Workspace } from "obsidian";
 import { nativeBaseProperty, type NativeBaseHandle, type NativeBaseGroupLocation, type NativeBaseReveal, type NativeBaseTarget, type NativeBasesExtension, type NativeBasesIntegrations } from "./NativeBasesSurface";
+import { timelineRangeBridge, type RemoteTimelineRanges } from "./TimelineRangeBridge";
 
 declare module "obsidian" {
 	interface Workspace {
@@ -16,7 +17,7 @@ interface RemoteBridge {
 	protocolVersion: number; available: boolean; viewTypes: string[];
 	getSurfaces(): unknown; onChange(callback: () => void): unknown; canNavigate(document: Document): unknown;
 }
-interface RemoteSurface {
+interface RemoteSurface extends RemoteTimelineRanges {
 	protocolVersion: number; owner: ObjectValue; root: HTMLElement; capabilities: string[];
 	current(): unknown; viewport(): unknown; handles(): unknown; hit(node: Node, point?: { clientX: number; clientY: number }): unknown;
 	reveal(target: unknown): unknown; beginAnnotation(select: (handle: unknown) => void, stopped: () => void): unknown;
@@ -118,6 +119,11 @@ export class TimelineBridgeClient implements NativeBasesIntegrations {
 			} };
 		};
 		return { source, owner, root, current,
+			...timelineRangeBridge(source, String(owner.type), current, () => this.canNavigate(root.ownerDocument), {
+				cancel: () => this.annotations.get(owner)?.(),
+				register: stop => { this.annotations.set(owner, stop); },
+				retire: stop => { if (this.annotations.get(owner) === stop) this.annotations.delete(owner); },
+			}),
 			groups: () => {
 				try { const values = current() && source.capabilities.includes("groups") && source.groups?.();
 					return Array.isArray(values) && values.length <= 256 ? values.map(group).filter((value): value is NativeBaseGroupLocation => !!value && value.current()) : []; }
