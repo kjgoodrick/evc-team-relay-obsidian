@@ -195,6 +195,40 @@ compatibility with previous states. The matching server has an opt-in location
 transport preview documented at `docs/presence-location-channel.md`; the plugin
 now connects to it as described in the cross-note presence section below.
 
+## Comment inbox preview
+
+`DiscussionInbox` and `InboxView` connect the opt-in `discussion_inbox` capability
+to the native sidebar and Comment inbox command. Configured shares aggregate in
+one view with unread/all/mentions/muted/dismissed filters. Opening a notification
+does not mark it read. Explicit read/unread, dismiss/restore and follow/mute choices
+persist offline; thread controls also allow readers to follow without a prior
+notification. `DiscussionHost` resolves the managed entry through the local
+inventory and preserves its original saved Bases view. Targeted thread reads
+cache content without inventing an event cursor.
+
+Cache version 16 fences older workers that cannot clear inbox references on
+access loss. Per account/vault/share storage retains at most 500 notifications,
+500 separately loaded preferences and 200 pending choices. Older paging starts
+a new bounded window at capacity, retains its starting cursor through refresh
+and restart, and offers an explicit return to latest. Expired cursors reset to
+the latest authorized page. Foreground polling runs every 30 seconds, replacing
+the loaded window with up to ten authorized pages; background polling stops.
+
+One expiring IndexedDB lease serializes delivery across windows. Ambiguous writes
+retain exact payloads, Retry-After survives restart, and preference conflicts
+retain rejected changes for review. Dependent changes cannot bypass a rejected
+preference. Read acknowledgments never advance the presented notification version
+without fetching its activity reference. Epochs fence responses that arrive after
+known access loss; pending choices remain while readable references are removed.
+
+The actual HTTP/application-worker fixture verifies notification projection,
+offline restart, a lost subscription acknowledgment, a later subscribed reply
+and access revocation. Protocol/store/DOM/host tests cover filters, focus,
+multiwindow delivery, read races, bounded paging, current-file navigation and
+saved-view preservation. Native desktop/mobile acceptance is pending; the Mac was
+locked at the latest attempt. The complete collaboration release remains disabled.
+See the server's `docs/discussion-inbox.md` for delivery and API semantics.
+
 ## Embedded-image discussion preview
 
 `ImageComments` adds whole-image, pin and region targets to Markdown image

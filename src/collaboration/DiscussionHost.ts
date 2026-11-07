@@ -15,6 +15,8 @@ import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
 import { isId, isBaseRecordType, protocolJson, type BaseAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
+import { InboxView, INBOX_VIEW } from "./ui/InboxView";
+import { inboxScope, parseInboxItem, type InboxItem } from "./InboxProtocol";
 import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection, type ImageCommentContext } from "./CommentEditor";
 import { BlockSelectionError } from "./anchors/blocks";
 import { ReadingComments } from "./CommentReading";
@@ -55,6 +57,7 @@ export class DiscussionHost extends Component {
 	private baseComments?: BaseComments;
 	private baseSelections = new WeakMap<DiscussionSession, Map<string, { choice?: BaseDiscussionChoice }>>();
 	private baseAction = 0;
+	private inboxAction = 0;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
 		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string, private bases?: BaseSyncHost) { super(); }
@@ -63,6 +66,8 @@ export class DiscussionHost extends Component {
 		this.images = this.addChild(new ImageComments(this, this.plugin, this.shares));
 		this.baseComments = this.addChild(new BaseComments(this, this.plugin, this.bases));
 		this.plugin.registerView(COMMENTS_VIEW, leaf => new CommentsView(leaf, this));
+		this.plugin.registerView(INBOX_VIEW, leaf => new InboxView(leaf, this));
+		this.plugin.addCommand({ id: "open-comment-inbox", name: "Open comment inbox", callback: () => { void this.openInbox(); } });
 		this.plugin.addCommand({ id: "open-comments", name: "Open comments", callback: () => { void this.open(); } });
 		this.plugin.registerEditorExtension(commentEditorExtension(this));
 		this.plugin.addCommand({ id: "comment-selection", name: "Comment on selected text", editorCheckCallback: (checking, editor, info) => {
@@ -147,6 +152,48 @@ export class DiscussionHost extends Component {
 	}
 	current(): CommentTarget {
 		return this.targetFor(this.lastFile);
+	}
+	inboxSources(): { session: DiscussionSession; label: string }[] {
+		const result: { session: DiscussionSession; label: string }[] = [];
+		for (const slot of this.slots.values()) {
+			const session = slot.session; if (!session || slot.cancelled || session.status === "closed") continue;
+			const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
+			if (!folder) continue;
+			const server = this.settings.readValue().servers.find(server => server.id === folder.config.onpremServerId);
+			result.push({ session, label: (server?.name ?? "Server") + " · " + (folder.path || "Shared folder") });
+		}
+		return result;
+	}
+	async openInboxItem(session: DiscussionSession, value: InboxItem): Promise<void> {
+		const item = parseInboxItem(value), scopeId = inboxScope(item), action = ++this.inboxAction;
+		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
+		if (!folder) throw new Error("This shared folder is no longer connected.");
+		const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === item.entry_id) paths.push(path); });
+		const file = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
+		const current = () => !this.stopped && action === this.inboxAction && session.inbox.available && !!file &&
+			this.plugin.app.vault.getFileByPath(file.path) === file &&
+			this.targetFor(file).session === session && this.targetFor(file).kind === item.kind &&
+			(item.kind === "base" ? this.targetFor(file).baseEntryId : this.targetFor(file).entryId) === item.entry_id;
+		if (!file || !current()) throw new Error("The original shared file is unavailable. Refresh synchronization and try again.");
+		const stop = session.watch(scopeId, () => {}, item.kind);
+		try {
+			await session.scopeReady(scopeId);
+			if (!current() || !session.permission(scopeId)?.read) throw new Error("Discussion access changed. Refresh the inbox.");
+			const thread = await session.inboxThread(item);
+			if (!current() || !thread?.anchor) throw new Error("The discussion is unavailable or has not been saved for offline use.");
+			if (item.kind === "base") {
+				if (thread.anchor.type !== "base" || thread.anchor.view_id !== item.view_id) throw new Error("The saved discussion view changed.");
+				// Keep the authoritative original ID even if its display metadata
+				// is not cached. Never redirect a notification to the current view.
+				const prior = this.baseSelection(session, item.entry_id);
+				const choice: BaseDiscussionChoice = prior?.id === item.view_id ? prior : { id: item.view_id!, name: "Original saved view", type: "unknown", state: "unmatched" };
+				await session.trackLocal(session.store.setPreference("activeBaseView:" + item.entry_id, protocolJson(choice)));
+				if (!current()) return;
+				this.baseSelections.get(session)!.get(item.entry_id)!.choice = choice;
+			}
+			await this.openThread(file, session, scopeId, item.thread_id);
+			if (current()) await this.revealTarget(session, scopeId, thread.anchor);
+		} finally { stop(); }
 	}
 	targetFor(file?: TFile): CommentTarget {
 		if (!file) return { path: "", message: "Open a shared note or image to see its comments." };
@@ -645,6 +692,11 @@ export class DiscussionHost extends Component {
 		const leaf = workspace.getLeavesOfType(COMMENTS_VIEW)[0] ?? workspace.getRightLeaf(false) ?? workspace.getRightLeaf(true) ?? workspace.getLeaf(true);
 		await leaf.setViewState({ type: COMMENTS_VIEW, active: true }); await workspace.revealLeaf(leaf);
 		this.notify();
+	}
+	async openInbox(): Promise<void> {
+		const workspace = this.plugin.app.workspace;
+		const leaf = workspace.getLeavesOfType(INBOX_VIEW)[0] ?? workspace.getRightLeaf(false) ?? workspace.getRightLeaf(true) ?? workspace.getLeaf(true);
+		await leaf.setViewState({ type: INBOX_VIEW, active: true }); await workspace.revealLeaf(leaf);
 	}
 	onunload(): void {
 		this.stopped = true;

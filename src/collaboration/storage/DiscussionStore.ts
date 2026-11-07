@@ -3,6 +3,7 @@ import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, PI
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
 import { isId, isRecord, parseBody, protocolJson } from "../DiscussionProtocol";
 import { parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "../LocalDiscussionAnchor";
+import { INBOX_KEY, parseInboxLocalState, forgetInboxScope, type InboxLocalState } from "./InboxRecords";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -86,8 +87,8 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 15 fences workers that cannot retain inventory-backed group intents.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 15);
+		// Version 16 fences workers that cannot clear inbox references on access loss.
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 16);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -241,6 +242,18 @@ export class DiscussionStore {
 	async setPreference(key: string, value: Json): Promise<void> {
 		requiredId(key); value = JSON.parse(boundedJson(value)) as Json;
 		await this.transaction(["preferences"], "readwrite", async tx => { await request(tx.objectStore("preferences").put(value, key)); });
+	}
+	async inboxState(): Promise<InboxLocalState> { return parseInboxLocalState(await this.preference(INBOX_KEY)); }
+	/** Synchronous work inside one transaction serializes inbox windows/workers. */
+	async updateInbox(work: (state: InboxLocalState) => void): Promise<InboxLocalState> {
+		return this.transaction(["preferences"], "readwrite", async tx => {
+			const prefs = tx.objectStore("preferences"), state = parseInboxLocalState(await request(prefs.get(INBOX_KEY)));
+			work(state);
+			state.revision++;
+			const result = parseInboxLocalState(state);
+			await request(prefs.put(JSON.parse(boundedJson(protocolJson(result))), INBOX_KEY));
+			return result;
+		});
 	}
 	/** Fence delayed verification responses across windows and remote-cache resets. */
 	async beginPreferenceVerification(scopeId: string, key: string, token: string): Promise<PreferenceVerification> {
@@ -561,6 +574,16 @@ export class DiscussionStore {
 			await request(tx.objectStore("preferences").delete("permission:" + scopeId));
 			await request(tx.objectStore("preferences").delete("people:" + scopeId));
 			await request(tx.objectStore("preferences").delete("documentGeneration:" + scopeId));
+			const inbox = await request(tx.objectStore("preferences").get(INBOX_KEY));
+			if (inbox !== undefined) {
+				try {
+					const state = parseInboxLocalState(inbox); forgetInboxScope(state, scopeId); state.revision++;
+					await request(tx.objectStore("preferences").put(state, INBOX_KEY));
+				} catch {
+					await request(tx.objectStore("preferences").put(inbox, "inbox:recovery"));
+					await request(tx.objectStore("preferences").delete(INBOX_KEY));
+				}
+			}
 			const cache = tx.objectStore("pictureCache");
 			let cachedBytes: number = await request(tx.objectStore("preferences").get("pictureCacheBytes")) ?? 0;
 			for (const key of await request(cache.index("scope").getAllKeys(scopeId))) {
@@ -574,8 +597,10 @@ export class DiscussionStore {
 
 	/** Explicit local account cleanup; callers must stop workers first. */
 	async clearAll(): Promise<void> {
-		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", ...PICTURE_STORES], "readwrite", async tx => {
+		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", "preferences", ...PICTURE_STORES], "readwrite", async tx => {
 			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", ...PICTURE_STORES]) await request(tx.objectStore(name).clear());
+			await request(tx.objectStore("preferences").delete(INBOX_KEY));
+			await request(tx.objectStore("preferences").delete("inbox:recovery"));
 		});
 	}
 
@@ -669,6 +694,25 @@ export class DiscussionStore {
 
 	async entity(scopeId: string, id: string): Promise<CachedEntity | undefined> {
 		return this.transaction(["entities"], "readonly", tx => request(tx.objectStore("entities").get([scopeId, id])));
+	}
+	/** Targeted authorized reads do not advance or invent an event cursor. */
+	async cacheRemoteRead(scopeId: string, generation: number, rows: CachedEntity[]): Promise<boolean> {
+		requiredId(scopeId);
+		if (!Number.isSafeInteger(generation) || generation < 0 || rows.length > 100) throw new Error("Invalid remote read");
+		const copies = rows.map(row => {
+			requiredId(row.id);
+			if (!Number.isSafeInteger(row.revision) || row.revision < 1) throw new Error("Invalid remote revision");
+			return { ...row, value: JSON.parse(boundedJson(row.value)) as Json };
+		});
+		return this.transaction(["entities", "generations"], "readwrite", async tx => {
+			if ((await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== generation) return false;
+			const entities = tx.objectStore("entities");
+			for (const row of copies) {
+				const old: CachedEntity | undefined = await request(entities.get([scopeId, row.id]));
+				if (!old || old.revision < row.revision) await request(entities.put({ ...row, ...ordered(row), scopeId }));
+			}
+			return true;
+		});
 	}
 
 	/** Bounded local browsing; a page's absence never implies a remote deletion. */

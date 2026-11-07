@@ -8,6 +8,7 @@ import { CommentComposer } from "./CommentComposer";
 import { renderCommentBody } from "./CommentBody";
 import { PendingComments } from "./PendingComments";
 import { DiscussionDrafts } from "./DiscussionDrafts";
+import { ThreadSubscription } from "./ThreadSubscription";
 import { CommentPicture } from "./CommentPicture";
 import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
 
@@ -81,6 +82,7 @@ class EditCommentModal extends AccountModal {
 }
 
 class ThreadCard {
+	private subscription: ThreadSubscription;
 	readonly el: HTMLElement;
 	private content: HTMLElement;
 	private controls: HTMLElement;
@@ -102,6 +104,7 @@ class ThreadCard {
 		this.el = parent.createEl("article", { cls: "relay-comment-thread" });
 		this.summary = this.el.createDiv({ cls: "relay-comment-thread-heading" });
 		this.controls = this.el.createDiv({ cls: "relay-comment-thread-controls" });
+		this.subscription = new ThreadSubscription(this.el, session, entryId, thread.id);
 		this.content = this.el.createDiv({ cls: "relay-comment-messages" });
 		this.error = this.el.createDiv({ attr: { role: "status" } });
 		this.composerContainer = this.el.createDiv();
@@ -218,7 +221,7 @@ class ThreadCard {
 			}
 		}
 	}
-	dispose(): void { this.disposed = true; this.generation++; this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
+	dispose(): void { this.disposed = true; this.generation++; this.subscription.dispose(); this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
 }
 
 export class CommentsView extends ItemView {
@@ -285,6 +288,7 @@ export class CommentsView extends ItemView {
 		if (target.session !== this.session || target.entryId !== this.entryId) {
 			this.reset(); this.session = target.session; this.entryId = target.entryId;
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Comments" });
+			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
 			if (target.kind === "base") {
 				this.contentEl.createEl("p", { cls: "relay-comment-base-view", text: "Discussion view: " + target.baseViewName });
 				const choose = this.contentEl.createEl("button", { text: "Change discussion view" }); choose.onclick = () => this.host.chooseBaseView();

@@ -16,6 +16,7 @@ import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import type { BaseDefinitionCatalog } from "../../src/collaboration/BaseDefinitionProtocol";
 import * as retainedSources from "../../src/collaboration/RetainedBaseGroupSources";
 import type { NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
+import type { InboxItem } from "../../src/collaboration/InboxProtocol";
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
@@ -93,6 +94,76 @@ async function nativeBaseFixture() {
 		context: () => s.host.baseCommentContext(surface as unknown as NativeBasesSurface, () => valid),
 		invalidate() { valid = false; }, revoke() { read = false; }, readOnly() { comment = false; } };
 }
+
+function inboxItem(): InboxItem {
+	return { thread_id: id(30), entry_id: id(3), scope_id: id(31), kind: "note", path: "Old server mount/Old name.md", view_id: null,
+		message_id: id(32), message_revision: 1, reason: "mention", last_sequence: 1, activity_at: "2026-11-06T00:00:00Z",
+		version: 1, read_version: 0, dismissed_version: 0, unread: true, subscription: { version: 0, following: false, muted: false } };
+}
+async function inboxFixture() {
+	const s = fixture(); await s.start();
+	Object.assign(s.folder, { absolutePath: (path: string) => "Team/" + path });
+	Object.assign(s.folder.folderIndex, { eachRecord: (fn: (record: { id: string }, path: string) => void) => fn({ id: id(3) }, "Note.md") });
+	const stop = jest.fn(), anchor = { version: 1 as const, type: "note" as const };
+	const session = Object.assign(mockSessions[0], { identity: { shareId: id(2) }, inbox: { available: true },
+		watch: jest.fn(() => stop), scopeReady: jest.fn().mockResolvedValue(undefined), permission: () => ({ read: true }),
+		inboxThread: jest.fn().mockResolvedValue({ id: id(30), anchor }) });
+	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined), reveal = jest.spyOn(s.host, "revealTarget").mockResolvedValue(undefined);
+	return { ...s, session, stop, anchor, open, reveal };
+}
+
+test("inbox navigation resolves the current local file by managed identity instead of its old display path", async () => {
+	const s = await inboxFixture();
+	try {
+		await s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
+		expect(s.open).toHaveBeenCalledTimes(1);
+		expect(s.host.current()).toMatchObject({ path: "Team/Note.md", entryId: id(3) });
+		expect(s.reveal).toHaveBeenCalledWith(s.session, id(3), s.anchor);
+		expect(s.stop).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("an ambiguous inventory identity cannot navigate from an inbox notification", async () => {
+	const s = await inboxFixture();
+	Object.assign(s.folder.folderIndex, { eachRecord: (fn: (record: { id: string }, path: string) => void) => {
+		fn({ id: id(3) }, "Note.md"); fn({ id: id(3) }, "Copy.md");
+	} });
+	try {
+		await expect(s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem())).rejects.toThrow("unavailable");
+		expect(s.session.watch).not.toHaveBeenCalled(); expect(s.open).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test.each(["account", "deleted", "revoked"])("a delayed inbox read cannot navigate after %s changes", async change => {
+	const s = await inboxFixture();
+	let release!: (value: unknown) => void;
+	s.session.inboxThread.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+	const navigation = s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
+	const result = expect(navigation).rejects.toThrow();
+	try {
+		await Promise.resolve();
+		if (change === "account") s.account(id(90));
+		else if (change === "deleted") Object.assign(s.plugin.app.vault, { getFileByPath: () => null });
+		else s.session.inbox.available = false;
+		release({ id: id(30), anchor: s.anchor }); await result;
+		expect(s.open).not.toHaveBeenCalled(); expect(s.reveal).not.toHaveBeenCalled(); expect(s.stop).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("a Bases notification pins its original saved view without adopting the active view", async () => {
+	const s = await nativeBaseFixture();
+	s.store.preference.mockResolvedValue({ id: id(40), name: "Different view", type: "table", state: "active" });
+	s.host.targetFor(s.file); await Promise.resolve();
+	const anchor = await s.session.captureBaseTarget();
+	Object.assign(s.session, { inbox: { available: true }, inboxThread: jest.fn().mockResolvedValue({ id: id(30), anchor }) });
+	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined), reveal = jest.spyOn(s.host, "revealTarget").mockResolvedValue(undefined);
+	try {
+		await s.host.openInboxItem(s.session as unknown as DiscussionSession, { ...inboxItem(), kind: "base", view_id: id(4) });
+		expect(s.savedPreference).toHaveBeenCalledWith("activeBaseView:" + id(3), expect.objectContaining({ id: id(4), state: "unmatched" }));
+		expect(s.host.current().entryId).toBe(s.scope); expect(open).toHaveBeenCalledTimes(1);
+		expect(reveal).toHaveBeenCalledWith(s.session, s.scope, anchor); expect(s.stops[0]).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
 
 test("retained group sources are bound to the exact native file, inventory and account without creating a document", async () => {
 	const s = await nativeBaseFixture();

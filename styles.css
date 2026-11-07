@@ -745,3 +745,11 @@
 button.relay-base-comment-marker { position: absolute; pointer-events: auto; min-width: 24px; min-height: 24px; height: auto; padding: 1px 4px; background: var(--interactive-accent); color: var(--text-on-accent); font-size: var(--font-ui-smaller); }
 .relay-base-comment-marker:focus-visible, .relay-bases-comment-tools button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
 .is-mobile .relay-bases-comment-tools button, .is-mobile .relay-base-comment-marker { min-height: 44px; min-width: 44px; }
+.relay-inbox-view { overflow-y: auto; padding: var(--size-4-3); }
+.relay-inbox-toolbar, .relay-inbox-controls, .relay-inbox-pages { display: flex; gap: var(--size-4-2); flex-wrap: wrap; margin-block: var(--size-4-2); }
+.relay-inbox-item { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: var(--size-4-3); margin-block: var(--size-4-2); }
+.relay-inbox-item.is-unread { border-inline-start: 3px solid var(--interactive-accent); }
+.relay-inbox-open { white-space: normal; text-align: start; height: auto; min-height: 2.5em; width: 100%; overflow-wrap: anywhere; }
+.relay-inbox-item p { margin-block: var(--size-4-2); color: var(--text-muted); font-size: var(--font-ui-small); overflow-wrap: anywhere; }
+.relay-inbox-controls button, .relay-inbox-pages button { min-height: 2.5em; }
+.relay-inbox-pending { border-block-start: 1px solid var(--background-modifier-border); }

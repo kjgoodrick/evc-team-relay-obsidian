@@ -6,6 +6,7 @@ import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, so
 import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
+import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -33,6 +34,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operation_id_conflict", "operation_withdrawn", "identifier_unavailable",
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
+for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
 for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
@@ -171,11 +173,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -208,7 +210,33 @@ export class DiscussionTransport implements DiscussionSender {
 		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
-			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}) };
+			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
+			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
+	}
+
+	async inbox(cursor: string | null = null) {
+		if (!inboxCursor(cursor)) throw new DiscussionFailure("reject", "invalid_local_target");
+		return this.parse(await this.request(`/shares/${this.identity.shareId}/inbox?limit=50&include_muted=true&include_dismissed=true` +
+			(cursor ? "&cursor=" + encodeURIComponent(cursor) : "")), parseInboxPage);
+	}
+	async inboxSubscription(scopeId: string, threadId: string) {
+		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		return this.parse(await this.request(this.scopePath(scopeId) + `/threads/${threadId}/subscription`), parseInboxSubscription);
+	}
+	async changeInbox(scopeId: string, threadId: string, change: InboxChange) {
+		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		try { change = parseInboxChange(change); } catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
+		const { type, ...payload } = change;
+		const value = await this.request(this.scopePath(scopeId) + `/threads/${threadId}/` + (type === "state" ? "inbox" : "subscription"), JSON.stringify(payload));
+		if (change.type === "subscription") {
+			const result = this.parse(value, parseInboxSubscription);
+			if (result.version !== change.expected_version + 1 || result.following !== change.following || result.muted !== change.muted) throw new DiscussionFailure("pause", "invalid_read_response");
+			return result;
+		}
+		const result = this.parse(value, parseInboxReadState);
+		if (result.version < change.seen_version || (change.action === "unread" ? result.version !== change.seen_version || !result.unread :
+			result.read_version < change.seen_version || change.action === "dismiss" && result.dismissed_version < change.seen_version)) throw new DiscussionFailure("pause", "invalid_read_response");
+		return result;
 	}
 
 	async picture(entryId: string, pictureId: string): Promise<PictureMetadata> {

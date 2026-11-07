@@ -3,11 +3,13 @@ import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGr
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
 import { parseBaseGroupValue } from "./BaseGroupValue";
 import { DiscussionOutbox } from "./DiscussionOutbox";
+import { DiscussionInbox } from "./DiscussionInbox";
+import { inboxScope, type InboxItem } from "./InboxProtocol";
 import { DiscussionDelivery } from "./DiscussionDelivery";
 import { DiscussionPictures } from "./DiscussionPictures";
 import { parsePictureUpload, pictureIds } from "./PictureProtocol";
 import { commandPictures } from "./storage/PictureRecords";
-import { DiscussionSync, messagePrefix, threadKey, type SyncStatus } from "./DiscussionSync";
+import { DiscussionSync, messagePrefix, messageKey, threadKey, type SyncStatus } from "./DiscussionSync";
 import { DiscussionFailure, DiscussionTransport, queuedEnvelope, type DiscussionParticipant, type DiscussionPermissions, type OnlineOperation } from "./DiscussionTransport";
 import { BASE_TARGET_KINDS, isId, isRecord, parseAnchor, parseBaseTargetContext, sourceAnchor, parseMessage, parseThread, protocolJson, type BaseAnchor, type BaseProperty, type BaseTargetContext, type BaseTargetKind, type DiscussionAnchor, type DiscussionMessage, type ThreadSummary } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
@@ -36,6 +38,7 @@ function storedThread(value: unknown): AnchoredThread {
  */
 export class DiscussionSession {
 	readonly outbox: DiscussionOutbox;
+	readonly inbox: DiscussionInbox;
 	readonly pictures = new DiscussionPictures(this);
 	private entries = new Map<string, Entry>();
 	private listeners = new Set<() => void>();
@@ -52,6 +55,7 @@ export class DiscussionSession {
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
+	private inboxEnabled = false;
 	private baseKinds: BaseTargetKind[] = [];
 	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
@@ -60,9 +64,11 @@ export class DiscussionSession {
 	private lastPublish = 0;
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
+		this.inbox = new DiscussionInbox(store, transport, broadcast => { if (broadcast) this.channel?.postMessage("inbox"); this.notify(); });
 		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled), uuid(), status => {
 			if (this.closed) return;
 			if (status === "authentication_required") this.statusValue = "authentication_required";
+			if (status === "authentication_required") void this.inbox.configure(this.inboxEnabled, "blocked", this.foreground).catch(() => {});
 			if (status === "protocol_error" || status === "storage_error") this.statusValue = "error";
 			if (status === "idle") { this.invalidate(); this.broadcast(); }
 			this.notify();
@@ -72,6 +78,7 @@ export class DiscussionSession {
 			this.channel = new BroadcastChannel("team-relay-discussion-wake:" + JSON.stringify([
 				store.identity.serverId, store.identity.accountId, store.identity.vaultId, store.identity.shareId]));
 			this.channel.onmessage = event => {
+				if (event.data === "inbox" && !this.closed) { void this.inbox.reload(); return; }
 				if (event.data !== "changed" || this.closed) return;
 				if (this.foreground && this.enabled) this.outbox.wake();
 				this.invalidate(); this.notify();
@@ -142,6 +149,7 @@ export class DiscussionSession {
 			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
 			this.imageFilesEnabled = await this.store.preference("imageFilesEnabled") === true;
 			this.picturesEnabled = await this.store.preference("picturesEnabled") === true;
+			this.inboxEnabled = await this.store.preference("inboxEnabled") === true;
 			const baseKinds = await this.store.preference("baseTargetKinds");
 			this.baseKinds = Array.isArray(baseKinds) ? BASE_TARGET_KINDS.filter(kind => baseKinds.includes(kind)) : [];
 			const recordTypes = await this.store.preference("baseRecordTypes");
@@ -158,6 +166,7 @@ export class DiscussionSession {
 			this.imageFilesEnabled = capability.imageFiles === true;
 			this.picturesEnabled = capability.pictures === true;
 			this.recoveryEnabled = capability.recovery === true;
+			this.inboxEnabled = capability.inbox === true;
 			this.baseKinds = capability.baseTargets ?? [];
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
 			this.baseFileGroupProperties = capability.baseFileGroupProperties ?? [];
@@ -167,6 +176,7 @@ export class DiscussionSession {
 			await this.store.setPreference("imageOccurrencesEnabled", this.imagesEnabled);
 			await this.store.setPreference("imageFilesEnabled", this.imageFilesEnabled);
 			await this.store.setPreference("picturesEnabled", this.picturesEnabled);
+			await this.store.setPreference("inboxEnabled", this.inboxEnabled);
 			await this.store.setPreference("baseTargetKinds", protocolJson(this.baseKinds));
 			await this.store.setPreference("baseRecordTypes", protocolJson(this.baseRecordTypes));
 			await this.store.setPreference("baseFileGroupProperties", protocolJson(this.baseFileGroupProperties));
@@ -177,6 +187,8 @@ export class DiscussionSession {
 			this.statusValue = error instanceof DiscussionFailure ? error.action === "retry" ? "offline" :
 				error.action === "authenticate" ? "authentication_required" : "unavailable" : "error";
 		}
+		if (this.closed) return;
+		await this.inbox.configure(this.enabled && this.inboxEnabled, this.statusValue === "ready" ? "online" : this.statusValue === "offline" ? "offline" : "blocked", this.foreground).catch(() => {});
 		if (this.closed) return;
 		if (this.foreground && this.canQueue) this.outbox.resume(); else this.outbox.stop();
 		for (const [id, entry] of this.entries) void this.refreshPermission(id, entry);
@@ -220,7 +232,9 @@ export class DiscussionSession {
 		if (this.closed) return;
 		const entry = this.entries.get(id);
 		if (entry && status === "unavailable") { entry.unavailable = true; entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined; }
+		if (status === "unavailable") void this.inbox.forgetScope(id).catch(() => {});
 		if (status === "authentication_required") this.statusValue = "authentication_required";
+		if (status === "authentication_required") void this.inbox.configure(this.inboxEnabled, "blocked", this.foreground).catch(() => {});
 		if (status === "protocol_error" || status === "storage_error") this.statusValue = "error";
 		if (status === "offline") this.statusValue = "offline";
 		if (status === "current") {
@@ -299,12 +313,15 @@ export class DiscussionSession {
 						}
 						if (!this.closed) { entry.people = people; await this.store.setPreference("people:" + id, protocolJson(people)); }
 					} catch { /* Display stable fallbacks until the directory can refresh. */ }
-				} else { entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id); }
+				} else { entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id); await this.inbox.forgetScope(id); }
 			} catch (error) {
 				if (this.closed) return;
 				if (error instanceof DiscussionFailure && [403, 404].includes(error.status)) {
 					entry.permission = undefined; entry.unavailable = true; entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id);
-				} else if (error instanceof DiscussionFailure && error.action === "authenticate") this.statusValue = "authentication_required";
+					await this.inbox.forgetScope(id);
+				} else if (error instanceof DiscussionFailure && error.action === "authenticate") {
+					this.statusValue = "authentication_required"; await this.inbox.configure(this.inboxEnabled, "blocked", this.foreground);
+				}
 			} finally {
 				entry.permissionChecked = Date.now(); entry.permissionFlight = undefined;
 				if (!this.closed) {
@@ -320,6 +337,7 @@ export class DiscussionSession {
 	setForeground(foreground: boolean): void {
 		if (this.closed || foreground === this.foreground) return;
 		this.foreground = foreground;
+		this.inbox.setForeground(foreground);
 		if (!foreground) { this.outbox.stop(); for (const entry of this.entries.values()) entry.sync.stop(); }
 		else void this.start();
 	}
@@ -341,6 +359,27 @@ export class DiscussionSession {
 		if (this.closed || !this.permission(entryId)?.read) return undefined;
 		const row = await this.store.entity(entryId, threadKey(threadId));
 		return row && isRecord(row.value) && !row.value.removed ? storedThread(row.value) : undefined;
+	}
+	async inboxThread(item: InboxItem): Promise<AnchoredThread | undefined> {
+		return this.trackLocal((async () => {
+			const scopeId = inboxScope(item);
+			if (!this.permission(scopeId)?.read || this.closed) return;
+			if (!this.online) return this.cachedThread(scopeId, item.thread_id);
+			const checkpoint = await this.store.checkpoint(scopeId);
+			let page;
+			try { page = await this.transport.thread(scopeId, item.thread_id); }
+			catch (error) {
+				if (error instanceof DiscussionFailure && [403, 404].includes(error.status)) { await this.store.clearRemoteScope(scopeId); await this.inbox.forgetScope(scopeId); }
+				throw error;
+			}
+			if (this.closed || !this.permission(scopeId)?.read) return;
+			const thread = { ...page.thread, anchor: page.anchor }, sequence = thread.activity_sequence;
+			if (!await this.store.cacheRemoteRead(scopeId, checkpoint.generation, [
+				{ id: threadKey(thread.id), revision: sequence, value: protocolJson(thread) },
+				...page.messages.map(message => ({ id: messageKey(thread.id, message.id), revision: sequence, value: protocolJson({ ...message, thread_id: thread.id }) })),
+			])) return;
+			this.notify(); return this.cachedThread(scopeId, thread.id);
+		})());
 	}
 	async anchorThreads(entryId: string): Promise<AnchoredThread[]> {
 		const threads: AnchoredThread[] = []; let after = 0;
@@ -695,9 +734,10 @@ export class DiscussionSession {
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true; this.statusValue = "closed";
+		const inboxClosing = this.inbox.close();
 		this.outbox.stop(); for (const entry of this.entries.values()) entry.sync.stop();
 		this.channel?.close(); this.channel = undefined; this.notify(); this.listeners.clear();
-		await Promise.allSettled([this.startFlight, this.outbox.settled(), ...this.onlineFlights,
+		await Promise.allSettled([inboxClosing, this.startFlight, this.outbox.settled(), ...this.onlineFlights,
 			...[...this.entries.values()].flatMap(entry => [entry.sync.settled(), entry.permissionFlight])]);
 		this.entries.clear(); this.store.close();
 	}

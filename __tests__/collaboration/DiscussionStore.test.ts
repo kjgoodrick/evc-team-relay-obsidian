@@ -3,6 +3,21 @@ Object.assign(globalThis, { IDBKeyRange });
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 
 const identity = { serverId: "server", accountId: "alice", vaultId: "vault", shareId: "share" };
+
+test("targeted inbox reads preserve the event checkpoint, newer entities and revocation fences", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory());
+	try {
+		const before = await store.checkpoint("note");
+		expect(await store.cacheRemoteRead("note", before.generation, [{ id: "message:a", revision: 10, value: "current" }])).toBe(true);
+		expect(await store.checkpoint("note")).toEqual(before);
+		await store.cacheRemoteRead("note", before.generation, [{ id: "message:a", revision: 9, value: "old" }]);
+		expect((await store.entity("note", "message:a"))?.value).toBe("current");
+		await store.clearRemoteScope("note");
+		expect(await store.cacheRemoteRead("note", before.generation, [{ id: "message:a", revision: 11, value: "late response" }])).toBe(false);
+		expect(await store.entity("note", "message:a")).toBeUndefined();
+	} finally { store.close(); }
+});
+
 function command(operationId: string, dependsOn: string[] = []): QueuedCommand {
 	return { operationId, scopeId: "note", type: "reply.create", payload: { message: operationId }, dependsOn };
 }
