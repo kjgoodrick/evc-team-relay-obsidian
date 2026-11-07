@@ -8,6 +8,8 @@ import type { DiscussionSession, AnchoredThread } from "./DiscussionSession";
 import { baseSelectionKey, type BaseCommentContext } from "./BaseCommentContext";
 import type { BaseAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
+import { TimelineBridgeClient } from "../bases/TimelineBridgeClient";
+import type { NativeBasesIntegrations } from "../bases/NativeBasesSurface";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -17,8 +19,14 @@ const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type 
 export class BaseComments extends Component {
 	private panes = new Map<FileView, BaseCommentPane>();
 	private stopped = false;
-	constructor(private host: DiscussionHost, private plugin: Plugin, private bases?: BaseSyncHost) { super(); }
+	private timeline: TimelineBridgeClient;
+	constructor(private host: DiscussionHost, private plugin: Plugin, private bases?: BaseSyncHost) {
+		super(); this.timeline = new TimelineBridgeClient(plugin.app.workspace, binding => {
+			for (const pane of this.panes.values()) pane.invalidate(binding, binding);
+		});
+	}
 	onload(): void {
+		this.timeline.start();
 		this.register(this.host.onChange(() => this.reconcile()));
 		if (this.bases) this.register(this.bases.onChange(() => { for (const pane of this.panes.values()) pane.invalidate(true, true); }));
 		this.registerEvent(this.plugin.app.workspace.on("layout-change", () => this.reconcile()));
@@ -42,7 +50,7 @@ export class BaseComments extends Component {
 		for (const [view, pane] of this.panes) if (!wanted.has(view)) { pane.close(); this.panes.delete(view); }
 		for (const view of wanted) {
 			let pane = this.panes.get(view);
-			if (!pane) { pane = new BaseCommentPane(this.host, view); this.panes.set(view, pane); }
+			if (!pane) { pane = new BaseCommentPane(this.host, view, this.timeline); this.panes.set(view, pane); }
 			pane.invalidate();
 		}
 	}
@@ -53,18 +61,25 @@ export class BaseComments extends Component {
 		if (!file || scope?.viewId !== placement.view_id || !session.permission(entryId)?.read) return false;
 		const workspace = this.plugin.app.workspace;
 		let leaf = workspace.getLeavesOfType("bases").find(leaf => leaf.view instanceof FileView && leaf.view.file === file);
+		const canNavigate = () => this.timeline.canNavigate(workspace.getMostRecentLeaf()?.view.containerEl.ownerDocument ?? document) &&
+			(!leaf || this.timeline.canNavigate(leaf.view.containerEl.ownerDocument));
+		const interrupted = () => { if (canNavigate()) return false; new Notice("Save or discard the task inspector changes before navigating to this discussion."); return true; };
+		if (interrupted()) return true;
 		if (!leaf) { leaf = workspace.getLeaf("tab"); await leaf.openFile(file); }
+		if (interrupted()) return true;
 		await workspace.revealLeaf(leaf); this.reconcile();
+		if (interrupted()) return true;
 		const pane = leaf.view instanceof FileView ? this.panes.get(leaf.view) : undefined;
 		if (!pane) return false;
 		const navigating = pane.navigationGuard();
-		const surface = NativeBasesSurface.inspect(leaf.view, apiVersion, this.host.nativeBasesCommentsEnabled);
+		const surface = NativeBasesSurface.inspect(leaf.view, apiVersion, this.host.nativeBasesCommentsEnabled, this.timeline);
 		if (!surface) return false;
 		const activated = await this.host.activateBaseView(surface, session, entryId, placement, navigating);
+		if (interrupted() || !navigating()) return true;
 		if (activated === "unavailable") return false;
 		if (activated === "changed") pane.invalidate(true, true);
 		const context = await pane.ready();
-		if (!navigating()) return true;
+		if (interrupted() || !navigating()) return true;
 		if (!context || context.session !== session || context.baseEntryId !== scope.entryId || !context.current() ||
 			context.binding.snapshot.definition_id !== placement.definition_id || context.binding.snapshot.generation !== placement.generation) return false;
 		if (!context || context.entryId !== entryId || context.session !== session || !context.current()) return false;
@@ -72,15 +87,15 @@ export class BaseComments extends Component {
 		if (!target) return false;
 		try {
 			if (!await this.host.verifyBaseTarget(context, anchor.type === "base_group_pending" ? undefined : anchor)) throw new Error("Target changed");
-			if (!navigating()) return true;
+			if (interrupted() || !navigating()) return true;
 			const result = await pane.reveal(context, target, navigating);
 			if (result === "revealed") return true;
-			new Notice(result === "hidden" ? (target.type === "group" ? "This group is absent from the current view. Its discussion is retained." : "This record is hidden by the saved view. Its filters were left unchanged.") : result === "property-hidden" ?
+			new Notice(result === "busy" ? "Save or discard the task inspector changes before navigating to this discussion." : result === "ambiguous" ? "This record appears in more than one location. Its discussion is retained." : result === "hidden" ? (target.type === "group" ? "This group is absent from the current view. Its discussion is retained." : "This record is hidden by the saved view. Its filters were left unchanged.") : result === "property-hidden" ?
 				"This property is hidden in the current layout. Its discussion remains attached to that property." : "This target is unavailable or the view changed. Its discussion is retained.");
 			return true;
 		} catch { new Notice("This target or its saved-view association changed. Refresh synchronization before navigating again."); return true; }
 	}
-	onunload(): void { this.stopped = true; for (const pane of this.panes.values()) pane.close(); this.panes.clear(); }
+	onunload(): void { this.stopped = true; for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.timeline.close(); }
 }
 
 /** One visible native pane owns one scope subscription and an external overlay.
@@ -100,7 +115,9 @@ export class BaseCommentPane {
 	private toolsChosen?: NativeBaseHandle;
 	private toolsKey?: string;
 	private threads: AnchoredThread[] = [];
-	private markerTargets = new Set<HTMLElement>();
+	private markerTargets = new Set<Element>();
+	private annotationStop?: () => void;
+	private annotating = false;
 	private dataDirty = true;
 	private version = 0;
 	private action = 0;
@@ -110,7 +127,7 @@ export class BaseCommentPane {
 	private poll?: number;
 	private flight?: Promise<void>;
 	private attemptedBinding = 0;
-	constructor(private host: DiscussionHost, private view: FileView) {
+	constructor(private host: DiscussionHost, private view: FileView, private integrations?: NativeBasesIntegrations) {
 		const root = view.contentEl, doc = root.ownerDocument; this.win = doc.defaultView ?? window;
 		this.layer = doc.createElement("div"); this.layer.className = "relay-bases-comments"; this.layer.hidden = true;
 		this.toolbar = doc.createElement("div"); this.toolbar.className = "relay-bases-comment-tools"; this.toolbar.hidden = true;
@@ -122,8 +139,9 @@ export class BaseCommentPane {
 		const select = (event: Event) => {
 			const node = event.target as Node | null;
 			if (!node || !Number.isInteger(node.nodeType) || this.owns(node)) return;
+			if (this.context?.surface.annotationSupported && event.type === "pointerdown") { this.action++; return; }
 			this.action++; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
-			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node); this.renderTools();
+			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node, event as PointerEvent); this.renderTools();
 		};
 		listen(root, "pointerdown", select, true); listen(root, "focusin", select, true);
 		listen(root, "wheel", () => { this.action++; }, true);
@@ -157,8 +175,13 @@ export class BaseCommentPane {
 		catch { if (this.context === context) this.invalidate(true, true); }
 		finally { this.checking = false; }
 	}
-	private detach(): void { this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.groupTargets.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.classList.add("is-unavailable"); this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true; }
-	private updateMarkerTargets(next: Set<HTMLElement>): void {
+	private detach(): void {
+		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = [];
+		this.groupTargets.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
+		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
+		this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true;
+	}
+	private updateMarkerTargets(next: Set<Element>): void {
 		for (const element of this.markerTargets) if (!next.has(element)) element.classList.remove("relay-base-comment-target");
 		this.markerTargets = next;
 	}
@@ -170,7 +193,7 @@ export class BaseCommentPane {
 		try {
 			if (!this.visible() || !this.host.nativeBasesCommentsEnabled) { this.detach(); return; }
 			if (!this.context?.current()) {
-				this.detach(); const surface = NativeBasesSurface.inspect(this.view, apiVersion, this.host.nativeBasesCommentsEnabled);
+				this.detach(); const surface = NativeBasesSurface.inspect(this.view, apiVersion, this.host.nativeBasesCommentsEnabled, this.integrations);
 				if (!surface) return;
 				const bindingVersion = this.bindingVersion;
 				this.attemptedBinding++;
@@ -217,12 +240,13 @@ export class BaseCommentPane {
 		if (!context?.current()) { this.layer.hidden = true; this.toolbar.classList.add("is-unavailable"); return; }
 		const selected = this.chosen?.current() ? this.chosen : undefined;
 		const view = context.surface.handles().find(handle => handle.target.type === "view");
+		if (this.annotating && (!view || !context.canComment(view.target))) this.cancelAnnotation();
 		const selectedGroups = this.chosenGroups.filter(handle => context.groups?.canCapture(handle));
 		const target = selected ?? (this.chosenGroups.length ? undefined : view);
 		const selection = target && context.canComment(target.target) ? context.selection(target.target) : undefined;
 		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
 		const commentRecord = !!item && context.canComment(item);
-		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target))]);
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported]);
 		// Preserve live buttons through scroll, polling and unrelated thread updates.
 		// A new handle/context must still replace callbacks, even for the same label.
 		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
@@ -230,10 +254,27 @@ export class BaseCommentPane {
 		const focused = this.toolbar.contains(this.toolbar.ownerDocument.activeElement) ? this.toolbar.ownerDocument.activeElement?.getAttribute("aria-label") : undefined;
 		this.toolbar.replaceChildren();
 		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
+		if (context.surface.annotationSupported && view && context.canComment(view.target)) {
+			this.button(this.toolbar, this.annotating ? "Cancel target selection" : "Select timeline target", () => this.toggleAnnotation());
+			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task or property badge. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
+		}
 		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups));
 		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => { void this.host.commentBaseHandle(context, target); });
 		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => { void this.host.commentBaseHandle(context, selected, item); });
 		if (focused) Array.from(this.toolbar.querySelectorAll("button")).find(button => button.getAttribute("aria-label") === focused)?.focus({ preventScroll: true });
+	}
+	private cancelAnnotation(): void { const stop = this.annotationStop; this.annotationStop = undefined; this.annotating = false; stop?.(); }
+	private toggleAnnotation(): void {
+		if (this.annotating) { this.cancelAnnotation(); this.renderTools(); return; }
+		const context = this.context; if (!context?.current()) return;
+		this.annotating = true;
+		const stop = context.surface.beginAnnotation(handle => {
+			if (this.context !== context || !context.current() || !handle.current() || !context.canComment(handle.target)) return;
+			this.chosen = handle; this.chosenGroups = []; this.action++; this.renderTools();
+		}, () => { this.annotating = false; this.annotationStop = undefined; if (!this.closed) this.renderTools(); });
+		if (!stop) { this.annotating = false; new Notice("Target selection is unavailable. Close the task inspector and refresh the view."); }
+		else if (this.annotating) this.annotationStop = stop; else stop();
+		this.renderTools();
 	}
 	private commentGroup(handles: NativeBaseGroupHandle[]): void {
 		const context = this.context; if (!context?.current() || !context.groups) return;
@@ -281,7 +322,7 @@ export class BaseCommentPane {
 		}
 		const root = this.view.contentEl.getBoundingClientRect(), viewport = context.surface.viewport()?.getBoundingClientRect();
 		if (!viewport) { this.updateMarkerTargets(new Set()); return; }
-		const targets = new Set<HTMLElement>(), presentations = new Map<HTMLElement, { key: string; marker: Marker }>();
+		const targets = new Set<Element>(), presentations = new Map<Element, { key: string; marker: Marker }>();
 		for (const [key, marker] of markers) {
 			const target = marker.handle.target;
 			const cells = target.type === "item" && context.surface.type === "table" ? handles.filter(handle => handle.target.type === "cell" && handle.target.file === target.file) : [];

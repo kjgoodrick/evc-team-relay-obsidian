@@ -6,6 +6,8 @@ import { TextEncoder } from "node:util";
 import { sha256Hex } from "../../src/contentDigest";
 import { NativeBasesSurface, baseConfigurationKey, nativeBaseProperty } from "../../src/bases/NativeBasesSurface";
 import type { BaseRegistrySnapshot } from "../../src/bases/BaseRegistryProtocol";
+import { TimelineBridgeClient } from "../../src/bases/TimelineBridgeClient";
+import type { Workspace } from "obsidian";
 
 jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/nativeBaseValues"), parseYaml: (source: string) => JSON.parse(source) }));
 Object.assign(window, { TextEncoder });
@@ -13,7 +15,7 @@ Object.defineProperty(window.crypto, "subtle", { configurable: true, value: webc
 const id = (n: number) => `20000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 function node(parent = document.body) { const element = document.createElement("div"); parent.appendChild(element); element.scrollIntoView = jest.fn(); return element; }
 const file = (name: string): TFile => Object.assign(Object.create(TFile.prototype), { path: "Team/" + name, extension: name.split(".").pop(), stat: { mtime: 1, ctime: 1, size: 1 } });
-function fixture(type: "table" | "cards" | "list" = "table") {
+function fixture(type: "table" | "cards" | "list" | "sabidurian-timeline" | "sabidurian-sequence" = "table") {
 	const root = node(), scroll = node(root), container = node(scroll), base = file("Plan.base"), a = file("a.md"), b = file("b.png");
 	const serial = { filters: 'file.inFolder("Team")', views: [{ type, name: "Work", order: ["file.name", "note.status"] }] };
 	const source = JSON.stringify(serial), entries = [{ file: a }, { file: b }];
@@ -130,6 +132,84 @@ describe("native Bases identity boundary", () => {
 		expect(baseConfigurationKey([1, 2])).not.toBe(baseConfigurationKey([2, 1]));
 		const cyclic: unknown[] = []; cyclic.push(cyclic);
 		for (const value of [cyclic, new Date(), { a: undefined }, Array(16_001).fill(0), "x".repeat(262_145)]) expect(baseConfigurationKey(value)).toBeUndefined();
+	});
+});
+
+describe("Time & Line saved-view integration", () => {
+	function timeline(type: "sabidurian-timeline" | "sabidurian-sequence" = "sabidurian-timeline") {
+		const f = fixture(type), badge = document.createElementNS("http://www.w3.org/2000/svg", "g"); f.container.append(badge);
+		let alive = true, busy = false;
+		const target = { type: "cell", file: f.a, property: "formula.total" }, handle = { target, element: badge, current: () => alive && badge.isConnected };
+		const remote = { protocolVersion: 1, owner: f.renderer, root: f.scroll, capabilities: ["item", "cell", "geometry", "reveal", "annotation"],
+			current: () => alive, handles: () => [handle], viewport: () => f.scroll, hit: jest.fn(() => handle), reveal: jest.fn(() => "revealed"),
+			beginAnnotation: jest.fn((_select: (value: unknown) => void, _stopped: () => void) => () => {}) };
+		const listeners = new Set<() => void>(), bridge = { protocolVersion: 1, available: true, viewTypes: ["sabidurian-timeline", "sabidurian-sequence"],
+			getSurfaces: () => [remote], canNavigate: () => !busy, onChange: (callback: () => void) => { listeners.add(callback); return () => listeners.delete(callback); } };
+		const workspace = { on: () => ({}), offref() {}, trigger: (_name: string, receive: (value: unknown) => void) => receive(bridge) };
+		const client = new TimelineBridgeClient(workspace as unknown as Workspace, () => {}); client.start();
+		// Community Bases views expose ownership through their bridge, not the
+		// built-in renderer's private container/queryController properties.
+		Object.assign(f.renderer, { containerEl: undefined, queryController: undefined });
+		return { ...f, badge, remote, handle, client, bridge,
+			inspect: () => NativeBasesSurface.inspect(f.host, "1.13.7", true, client),
+			busy: () => { busy = true; }, stale: () => { alive = false; },
+			unload: () => { bridge.available = false; for (const listener of [...listeners]) listener(); },
+			close: () => { client.close(); f.root.remove(); } };
+	}
+	test.each(["sabidurian-timeline", "sabidurian-sequence"] as const)("%s binds exact saved bytes before mapping SVG property targets", async type => {
+		const f = timeline(type);
+		try {
+			const surface = f.inspect()!; expect(surface).toBeDefined(); expect(surface.annotationSupported).toBe(true);
+			const binding = await surface.bind(await registry(f.source), id(2), async () => f.source, () => true);
+			expect(binding?.viewId).toBe(id(4)); expect(binding?.current()).toBe(true);
+			const handle = surface.hit(f.badge, { clientX: 20, clientY: 30 })!;
+			expect(handle.target).toEqual({ type: "cell", file: f.a, property: { source: "formula", name: "total" } });
+			expect(handle.element).toBe(f.badge); expect(surface.viewport()).toBe(f.scroll);
+			expect(await surface.reveal(handle.target, () => true)).toBe("revealed");
+			expect(f.remote.reveal).toHaveBeenCalledWith(f.handle.target); expect(f.host.data).toBe(f.source);
+			f.unload(); expect(handle.current()).toBe(false); expect(binding?.current()).toBe(false); expect(surface.handles()).toEqual([]);
+		} finally { f.close(); }
+	});
+	test.each(["owner", "root", "dirty", "bytes", "config", "query"])("bridge discovery cannot bypass %s source ownership checks", kind => {
+		const f = timeline();
+		try {
+			if (kind === "owner") f.controller.view = { ...f.renderer };
+			if (kind === "root") document.body.append(f.scroll);
+			if (kind === "dirty") f.host.dirty = true;
+			if (kind === "bytes") f.host.lastSavedData += "\n";
+			if (kind === "config") f.serial.views[0].order.reverse();
+			if (kind === "query") f.config.query = { ...f.query };
+			expect(f.inspect()).toBeUndefined();
+		} finally { f.close(); }
+	});
+	test("a registered bridge does not expand the verified Obsidian version boundary", () => {
+		const f = timeline();
+		try { expect(NativeBasesSurface.inspect(f.host, "1.15.0", true, f.client)).toBeUndefined(); expect(f.inspect()).toBeDefined(); }
+		finally { f.close(); }
+	});
+	test("saved source, permission and result replacement invalidate selected targets and annotation callbacks", async () => {
+		const f = timeline(); let deliver: ((value: unknown) => void) | undefined;
+		f.remote.beginAnnotation.mockImplementation((select) => { deliver = select; return () => {}; });
+		try {
+			const surface = f.inspect()!, handle = surface.handles()[1], selected = jest.fn();
+			expect(await surface.bind(await registry(f.source), id(2), async () => f.source + "\n", () => true)).toBeUndefined();
+			expect(await surface.reveal(handle.target, () => false)).toBe("unavailable"); expect(f.remote.reveal).not.toHaveBeenCalled();
+			surface.beginAnnotation(selected, jest.fn());
+			f.renderer.data = { ...f.renderer.data }; deliver?.(f.handle);
+			expect(selected).not.toHaveBeenCalled(); expect(handle.current()).toBe(false);
+		} finally { f.close(); }
+	});
+	test("dirty inspectors prevent activation from built-in views and timeline annotation or reveal", async () => {
+		const f = timeline(), table = fixture();
+		try {
+			const surface = f.inspect()!, selectView = jest.fn(); Object.assign(table.controller, { selectView });
+			const builtIn = NativeBasesSurface.inspect(table.host, "1.13.7", true, f.client)!;
+			const binding = (await builtIn.bind(await registry(table.source), id(2), async () => table.source, () => true))!;
+			f.busy(); expect(builtIn.activateView(id(4), binding)).toBe(false); expect(selectView).not.toHaveBeenCalled();
+			expect(await surface.reveal({ type: "item", file: f.a }, () => true)).toBe("busy");
+			expect(surface.beginAnnotation(jest.fn(), jest.fn())).toBeUndefined();
+			expect(f.remote.reveal).not.toHaveBeenCalled(); expect(f.remote.beginAnnotation).not.toHaveBeenCalled();
+		} finally { f.close(); table.root.remove(); }
 	});
 });
 

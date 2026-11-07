@@ -50,7 +50,7 @@ export function nativeBaseProperty(value: unknown): BaseDefinitionProperty | und
 
 export type NativeBaseTarget = { type: "view" } | { type: "item"; file: TFile } |
 	{ type: "cell"; file: TFile; property: BaseDefinitionProperty } | { type: "property"; property: BaseDefinitionProperty };
-export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement; current(): boolean }
+export interface NativeBaseHandle { target: NativeBaseTarget; element: HTMLElement | SVGElement; current(): boolean }
 export interface NativeBaseGroupTarget { type: "group"; property: BaseDefinitionProperty; value: NativeBaseGroupValue }
 export interface NativeBaseGroupHandle {
 	target: NativeBaseGroupTarget; element: HTMLElement;
@@ -60,7 +60,18 @@ export interface NativeBaseGroupHandle {
 	/** Bounded, current source candidates for this exact typed value. */
 	members(): TFile[];
 }
-export type NativeBaseReveal = "revealed" | "hidden" | "property-hidden" | "unavailable";
+export type NativeBaseReveal = "revealed" | "hidden" | "property-hidden" | "unavailable" | "busy" | "ambiguous";
+export interface NativeBasesExtension {
+	owner: unknown; root: HTMLElement; current(): boolean; viewport(): HTMLElement | undefined;
+	handles(): NativeBaseHandle[]; hit(node: Node, point?: { clientX: number; clientY: number }): NativeBaseHandle | undefined;
+	reveal(target: NativeBaseTarget): NativeBaseReveal;
+	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void): (() => void) | undefined;
+}
+export interface NativeBasesIntegrations {
+	find(owner: unknown): NativeBasesExtension | undefined;
+	supports(type: string): boolean;
+	canNavigate(document: Document): boolean;
+}
 export interface NativeBaseBinding {
 	snapshot: BaseRegistrySnapshot; viewId: string; name: string; type: string; current(): boolean;
 }
@@ -75,19 +86,20 @@ export class NativeBasesSurface {
 	readonly file: TFile;
 	readonly root: HTMLElement;
 	readonly name: string;
-	readonly type: "table" | "cards" | "list";
+	readonly type: "table" | "cards" | "list" | "sabidurian-timeline" | "sabidurian-sequence";
 	readonly slot: number;
 	readonly source: string;
 	private readonly key: string;
 	private readonly data: unknown;
 	private bindings = new WeakSet<NativeBaseBinding>();
 	private constructor(private host: ObjectValue, private controller: ObjectValue, private renderer: ObjectValue, private query: ObjectValue,
-		private config: ObjectValue, file: TFile, slot: number, key: string) {
+		private config: ObjectValue, file: TFile, slot: number, key: string,
+		private integrations?: NativeBasesIntegrations, private external?: NativeBasesExtension) {
 		this.file = file; this.root = host.contentEl as HTMLElement; this.name = config.name as string;
 		this.type = renderer.type as NativeBasesSurface["type"]; this.slot = slot; this.source = host.data as string; this.key = key;
 		this.data = renderer.data;
 	}
-	static inspect(host: unknown, version: string, enabled = true): NativeBasesSurface | undefined {
+	static inspect(host: unknown, version: string, enabled = true, integrations?: NativeBasesIntegrations): NativeBasesSurface | undefined {
 		if (!enabled || !NATIVE_BASES_VERSIONS.includes(version)) return;
 		try {
 			if (!object(host) || !callable(host.getViewType) || host.getViewType() !== "bases" || !(host.file instanceof TFile) ||
@@ -96,8 +108,13 @@ export class NativeBasesSurface {
 			const controller = host.controller, query = host.query;
 			if (!object(controller) || controller.initialScan !== false || !object(query) || controller.query !== query || query.file !== host.file || !callable(query.getSerializable)) return;
 			const renderer = controller.view;
-			if (!object(renderer) || !["table", "cards", "list"].includes(String(renderer.type)) || renderer.queryController !== controller ||
-				!object(renderer.config) || !object(renderer.data) || !list(renderer.data.groupedData, 256) || !element(renderer.containerEl) || !host.contentEl.contains(renderer.containerEl)) return;
+			if (!object(renderer)) return;
+			const builtin = ["table", "cards", "list"].includes(String(renderer.type));
+			const external = !builtin && integrations?.supports(String(renderer.type)) ? integrations.find(renderer) : undefined;
+			const container = external?.root ?? renderer.containerEl;
+			if (((!builtin || renderer.queryController !== controller) && !external) ||
+				!object(renderer.config) || !object(renderer.data) || !list(renderer.data.groupedData, 256) || !element(container) || !host.contentEl.contains(container) ||
+				external && (external.owner !== renderer || !external.current())) return;
 			const config = renderer.config, views = list(query.views, 64), slot = views?.indexOf(config) ?? -1;
 			if (slot < 0 || !views || views.filter(view => object(view) && view.name === config.name).length !== 1 ||
 				config.query !== query || config.type !== renderer.type || config.name !== controller.viewName || typeof config.name !== "string") return;
@@ -112,7 +129,7 @@ export class NativeBasesSurface {
 			const normalized = parse.call(queryType, parsed);
 			if (!object(normalized) || normalized === query || normalized.file !== undefined || normalized.saveFn !== undefined ||
 				!callable(normalized.getSerializable) || baseConfigurationKey(normalized.getSerializable()) !== key) return;
-			return new NativeBasesSurface(host, controller, renderer, query, config, host.file, slot, key);
+			return new NativeBasesSurface(host, controller, renderer, query, config, host.file, slot, key, integrations, external);
 		} catch { return; }
 	}
 	/** Cheap ownership checks plus bounded semantic comparison at action/render boundaries. */
@@ -122,7 +139,7 @@ export class NativeBasesSurface {
 				this.controller.initialScan === false && this.controller.query === this.query && this.controller.view === this.renderer && this.renderer.config === this.config && this.renderer.data === this.data &&
 				this.config.name === this.name && this.config.type === this.type && this.controller.viewName === this.name &&
 				this.host.data === this.source && this.host.lastSavedData === this.source && this.host.dirty === false &&
-				this.root.isConnected && element(this.renderer.containerEl) && this.root.contains(this.renderer.containerEl) &&
+				this.root.isConnected && (this.external ? this.external.current() && this.external.owner === this.renderer && this.root.contains(this.external.root) : element(this.renderer.containerEl) && this.root.contains(this.renderer.containerEl)) &&
 				list(this.query.views, 64)?.[this.slot] === this.config && callable(this.query.getSerializable) && baseConfigurationKey(this.query.getSerializable()) === this.key;
 		} catch { return false; }
 	}
@@ -144,13 +161,18 @@ export class NativeBasesSurface {
 	}
 	activateView(viewId: string, binding: NativeBaseBinding): boolean {
 		try {
-			if (!this.bindings.has(binding) || !binding.current() || !this.current() || !callable(this.controller.selectView)) return false;
+			if (!this.bindings.has(binding) || !binding.current() || !this.current() || !callable(this.controller.selectView) || this.integrations?.canNavigate(this.root.ownerDocument) === false) return false;
 			const next = binding.snapshot.views.find(view => view.id === viewId);
-			if (!next || !["table", "cards", "list"].includes(next.type)) return false;
+			if (!next || !["table", "cards", "list"].includes(next.type) && !this.integrations?.supports(next.type)) return false;
 			this.controller.selectView(next.name); return true;
 		} catch { return false; }
 	}
 	viewport(): HTMLElement | undefined { return this.current() ? this.scrollElement() : undefined; }
+	get annotationSupported(): boolean { return !!this.external; }
+	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void): (() => void) | undefined {
+		if (!this.current()) return;
+		return this.external?.beginAnnotation(handle => { if (this.current() && handle.current()) select(handle); }, stopped);
+	}
 	private rows(): ObjectValue[] | undefined {
 		if (this.type === "table" || this.type === "cards") {
 			const rows = list(this.type === "table" ? this.renderer.rows : this.renderer.items);
@@ -168,6 +190,11 @@ export class NativeBasesSurface {
 	/** Only mounted models produce handles. Text, CSS order and row indexes are never identities. */
 	handles(): NativeBaseHandle[] {
 		if (!this.current()) return [];
+		if (this.external) {
+			const root = this.external.root;
+			return [{ target: { type: "view" }, element: root, current: () => this.current() },
+				...this.external.handles().map(handle => ({ ...handle, current: () => this.current() && handle.current() }))];
+		}
 		const output: NativeBaseHandle[] = [], container = this.renderer.containerEl as HTMLElement;
 		const add = (target: NativeBaseTarget, node: unknown, live: () => boolean) => {
 			if (!element(node) || !node.isConnected || !this.root.contains(node)) return;
@@ -205,7 +232,12 @@ export class NativeBasesSurface {
 		}
 		return output.length <= MAX_HANDLES ? output : [];
 	}
-	hit(node: Node): NativeBaseHandle | undefined {
+	hit(node: Node, point?: { clientX: number; clientY: number }): NativeBaseHandle | undefined {
+		if (!this.current()) return;
+		if (this.external) {
+			const handle = this.external.hit(node, point);
+			return handle ? { ...handle, current: () => this.current() && handle.current() } : undefined;
+		}
 		// Group headings have their own typed capture API. A header that is not
 		// wired/supported must not silently become a whole-view discussion.
 		const grouped = this.groups(), models = list(this.renderer.groups, 256);
@@ -257,7 +289,7 @@ export class NativeBasesSurface {
 	 * neither exports member values nor treats local membership as authority. */
 	groupHandles(resolve: NativeGroupLinkResolver): NativeBaseGroupHandle[] {
 		try {
-			if (!this.current()) return [];
+			if (!this.current() || this.external) return [];
 			const property = this.groupingProperty(), groups = this.groups(), models = list(this.renderer.groups, 256);
 			if (!property || !groups || !models || groups.length !== models.length || !this.entries()) return [];
 			const handles: NativeBaseGroupHandle[] = [], budget = nativeGroupValueBudget();
@@ -335,6 +367,7 @@ export class NativeBasesSurface {
 		return list(properties, 256)?.includes(property.source + "." + property.name) === true;
 	}
 	private scrollElement(): HTMLElement | undefined {
+		if (this.external) return this.external.viewport();
 		const scroll = this.type === "list" && element(this.renderer.containerEl) ? this.renderer.containerEl.parentElement : this.renderer.scrollEl;
 		return element(scroll) && this.root.contains(scroll) ? scroll : undefined;
 	}
@@ -386,6 +419,8 @@ export class NativeBasesSurface {
 		let restore: (() => void) | undefined;
 		try {
 			if (!current()) return "unavailable";
+			if (this.integrations?.canNavigate(this.root.ownerDocument) === false) return "busy";
+			if (this.external) return this.external.reveal(target);
 			const groups = this.groups(); if (!groups) return "unavailable";
 			if ("file" in target && !groups.some(group => (group.entries as unknown[]).some(entry => object(entry) && entry.file === target.file))) return "hidden";
 			if ("property" in target && !this.propertyDisplayed(target.property)) return "property-hidden";

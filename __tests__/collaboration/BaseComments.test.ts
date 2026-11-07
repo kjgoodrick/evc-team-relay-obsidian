@@ -2,7 +2,7 @@
 import type { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments";
 import type { FileView } from "obsidian";
 import { BaseCommentPane } from "../../src/collaboration/BaseComments";
-import { NativeBasesSurface, type NativeBaseTarget, type NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
+import { NativeBasesSurface, type NativeBaseTarget, type NativeBaseGroupHandle, type NativeBaseHandle } from "../../src/bases/NativeBasesSurface";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
@@ -75,6 +75,53 @@ test("inline cell and record controls preserve exact semantic targets and marker
 		f.buttons()[2].click(); expect(f.host.commentBaseHandle).toHaveBeenLastCalledWith(f.contexts[0], f.cellHandle, { type: "item", file: f.cellHandle.target.file });
 		f.root.querySelector<HTMLButtonElement>(".relay-base-comment-marker")!.click(); expect(f.host.openBaseThread).toHaveBeenCalledWith(f.contexts[0], id(7));
 		f.buttons()[0].click(); expect(f.host.openBaseView).toHaveBeenCalledWith(f.contexts[0]);
+	} finally { f.close(); }
+});
+
+function annotation(f: ReturnType<typeof fixture>) {
+	let select: (handle: NativeBaseHandle) => void = () => {}, stopped: () => void = () => {};
+	const stop = jest.fn(() => stopped());
+	const begin = jest.fn((chosen: typeof select, finished: typeof stopped): (() => void) | undefined => { select = chosen; stopped = finished; return stop; });
+	Object.assign(f.surface, { type: "sabidurian-timeline", annotationSupported: true, beginAnnotation: begin });
+	return { begin, stop, deliver: () => select(f.cellHandle as NativeBaseHandle), finish: () => { stop(); select(f.cellHandle as NativeBaseHandle); } };
+}
+
+test("timeline annotation requires explicit entry, preserves selection identity and reuses cached discussions while panning", async () => {
+	const f = fixture(), a = annotation(f);
+	try {
+		await settle(); f.cell.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		expect(f.buttons().some(button => button.textContent === "Comment on cell · note.status")).toBe(false);
+		f.buttons().find(button => button.textContent === "Select timeline target")!.click();
+		expect(a.begin).toHaveBeenCalledTimes(1); expect(f.root.querySelector('[role="status"]')?.textContent).toContain("Touch drag pans");
+		for (let n = 0; n < 10; n++) f.root.dispatchEvent(new Event("scroll")); await settle();
+		expect(f.session.anchorThreads).toHaveBeenCalledTimes(1); expect(f.host.baseCommentContext).toHaveBeenCalledTimes(1);
+		a.finish();
+		f.buttons().find(button => button.textContent === "Comment on cell · note.status")!.click();
+		expect(f.host.commentBaseHandle).toHaveBeenCalledWith(f.contexts[0], f.cellHandle);
+		expect(f.buttons().some(button => button.textContent === "Cancel target selection")).toBe(false);
+	} finally { f.close(); }
+});
+
+test.each(["readOnly", "disable", "revoke", "close"] as const)("timeline annotation stops on %s and late selection cannot create a comment", async action => {
+	const f = fixture(), a = annotation(f);
+	try {
+		await settle(); f.buttons().find(button => button.textContent === "Select timeline target")!.click();
+		f[action](); await settle(); expect(a.stop).toHaveBeenCalledTimes(1);
+		a.deliver(); f.pane.comment(); expect(f.host.commentBaseHandle).not.toHaveBeenCalled();
+		expect(f.buttons().some(button => button.textContent === "Cancel target selection")).toBe(false);
+	} finally { f.close(); }
+});
+
+test("timeline entry refusal and explicit cancellation leave ordinary comment controls usable", async () => {
+	const f = fixture(), a = annotation(f);
+	try {
+		a.begin.mockImplementationOnce(() => undefined);
+		await settle(); f.buttons().find(button => button.textContent === "Select timeline target")!.click();
+		expect(f.buttons().some(button => button.textContent === "Cancel target selection")).toBe(false);
+		f.buttons().find(button => button.textContent === "Select timeline target")!.click();
+		f.buttons().find(button => button.textContent === "Cancel target selection")!.click();
+		expect(a.stop).toHaveBeenCalledTimes(1);
+		f.buttons().find(button => button.textContent === "Comment on view")!.click(); expect(f.host.commentBaseHandle).toHaveBeenCalledTimes(1);
 	} finally { f.close(); }
 });
 
