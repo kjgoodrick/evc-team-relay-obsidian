@@ -356,6 +356,30 @@ test("a mixed group header offers typed choices and never falls back to a record
 	} finally { f.close(); }
 });
 
+test.each(["cell", "group"] as const)("native container focus during a %s pointer gesture retains the exact target, while later focus changes clear it", async kind => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0];
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Ready" } },
+			element: f.row, ambiguous: false, current: () => true, members: () => [] };
+		context.groups = { hit: (node: Node) => node === f.row && kind === "group" ? [handle] : [], handles: () => [handle], canCapture: () => true } as unknown as NativeBaseGroupComments;
+		const target = kind === "group" ? f.row : f.cell;
+		const selected = () => f.buttons().find(button => button.textContent?.startsWith(kind === "group" ? "Comment on group" : "Comment on cell"));
+		target.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		f.root.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+		expect(selected()).toBeDefined(); selected()!.click();
+		if (kind === "group") expect(f.host.commentBaseGroupHandle).toHaveBeenCalledWith(context, handle);
+		else expect(f.host.commentBaseHandle).toHaveBeenCalledWith(context, f.cellHandle);
+		window.dispatchEvent(new Event("pointerup"));
+		f.root.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+		expect(selected()).toBeUndefined();
+		target.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		f.root.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+		f.root.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+		expect(selected()).toBeUndefined();
+	} finally { f.close(); }
+});
+
 test("group markers deduplicate target verification, share a header badge and navigate through the group adapter", async () => {
 	const f = fixture();
 	try {

@@ -116,10 +116,14 @@ export class DiscussionDrafts {
 				if (anchor.structure) prefix = "Blocks";
 			} else if (anchor.type === "image") { prefix = "Image " + (anchor.geometry.type === "whole" ? "discussion" : anchor.geometry.type); label = anchor.occurrence.context.quote.slice(0, 80); }
 			else if (anchor.type === "image_file") { prefix = "Image file"; label = anchor.geometry.type === "whole" ? "Whole image" : anchor.geometry.type === "pin" ? "Pin" : "Region"; }
-			else if (anchor.type === "base_group_pending") { prefix = anchor.range ? "Range in lane" : "Group"; label = this.targetLabel?.(anchor) ?? (anchor.range ? timelineRangeLabel(anchor.range.range) + " · " : "") + anchor.property.name + " (verification pending)"; }
+			else if (anchor.type === "base_group_pending") {
+				const described = this.targetLabel?.(anchor);
+				prefix = described ? "" : anchor.range ? "Range in lane" : "Group";
+				label = described ?? (anchor.range ? timelineRangeLabel(anchor.range.range) + " · " : "") + anchor.property.name + " (verification pending)";
+			}
 			else if (anchor.type === "base") { prefix = "Saved view"; label = this.targetLabel?.(anchor) ?? (anchor.target.type === "view" ? "Entire view" : anchor.target.type === "item" ? "Record" : anchor.target.type === "timeline_marker" ? "Marker: " + anchor.target.content.label : anchor.target.type === "timeline_range" ? timelineRangeLabel(anchor.target.range) : anchor.target.property.name); }
 			} catch { /* Keep damaged drafts discoverable. */ }
-			options.push([draft.id, prefix + ": " + label]);
+			options.push([draft.id, prefix ? prefix + ": " + label : label]);
 		}
 		const signature = JSON.stringify(options);
 		if (this.select.dataset.options !== signature) {

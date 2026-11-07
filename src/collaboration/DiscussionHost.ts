@@ -7,7 +7,7 @@ import { TimelineMarkerManager } from "./ui/TimelineMarkerManager";
 import { timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { NativeBaseGroupComments, nativeGroupTargetKey } from "./NativeBaseGroupComments";
 import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
-import { baseGroupValueLabel } from "./BaseGroupValueBridge";
+import { sharedBaseGroupLabel } from "./BaseGroupValueBridge";
 import { isDocument } from "../Document";
 import { pendingRangeLocation, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { Component, FileView, MarkdownView, Notice, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
@@ -904,15 +904,15 @@ export class DiscussionHost extends Component {
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
 	targetLabel(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): string | undefined {
-		if (anchor.type === "base_group_pending") return (anchor.range ? timelineRangeLabel(anchor.range.range) + " · lane: " : "Group: ") + anchor.property.name + " · " + baseGroupValueLabel(anchor.capture.value) + " (verification pending)";
+		if (anchor.type === "base_group_pending") return (anchor.range ? timelineRangeLabel(anchor.range.range) + " · lane: " : "Group: ") + sharedBaseGroupLabel(anchor.property, anchor.capture.value) + " (verification pending)";
 		if (anchor.type !== "base" || parseDiscussionScope(entryId)?.viewId !== anchor.view_id) return;
 		const target = anchor.target;
 		if (target.type === "view") return "Entire saved view";
 		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
 		if (target.type === "formula") return "Formula definition: " + target.property.name;
 		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
-		if (target.type === "group") return "Group: " + target.property.name + " · " + baseGroupValueLabel(target.value);
-		if (target.type === "timeline_range") return timelineRangeLabel(target.range) + (target.lane ? " · lane: " + target.lane.property.name + " · " + baseGroupValueLabel(target.lane.value) : "");
+		if (target.type === "group") return "Group: " + sharedBaseGroupLabel(target.property, target.value);
+		if (target.type === "timeline_range") return timelineRangeLabel(target.range) + (target.lane ? " · lane: " + sharedBaseGroupLabel(target.lane.property, target.lane.value) : "");
 		if (target.type === "timeline_marker") return "Marker: " + target.content.label + " · " + timelineRangeLabel(target.content.range);
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);

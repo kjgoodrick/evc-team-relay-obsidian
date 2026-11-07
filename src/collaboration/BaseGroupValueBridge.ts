@@ -21,6 +21,12 @@ export function baseGroupValueLabel(value: BaseGroupValue | NativeBaseGroupValue
 	return label.slice(0, 160) + " (" + value.type.replace(/_/g, " ") + ")";
 }
 
+/** Wire folder values are share-relative; empty text denotes the share root. */
+export function sharedBaseGroupLabel(property: { source: string; name: string }, value: BaseGroupValue): string {
+	return property.name + " · " + (property.source === "file" && property.name === "folder" && value.type === "text" && value.value === "" ?
+		"Shared folder root" : baseGroupValueLabel(value));
+}
+
 /** Freeze the entire bounded tree before the first asynchronous identity read.
  * File objects remain local; paths are only guards and never become record IDs. */
 export async function captureBaseGroupValue(value: NativeBaseGroupValue, refs: CaptureReferences): Promise<BaseGroupValue> {

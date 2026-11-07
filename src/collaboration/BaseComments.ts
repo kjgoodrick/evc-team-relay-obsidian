@@ -155,16 +155,26 @@ export class BaseCommentPane {
 		const listen = (target: EventTarget, event: string, fn: EventListener, capture = false) => {
 			target.addEventListener(event, fn, capture); this.cleanup.push(() => target.removeEventListener(event, fn, capture));
 		};
+		let focusFromPointer: Node | undefined;
+		const clearPointerFocus = () => { focusFromPointer = undefined; };
 		const select = (event: Event) => {
 			const node = event.target as Node | null;
 			if (!node || !Number.isInteger(node.nodeType) || this.owns(node)) return;
+			// Native table/cards/list focus their surrounding container after a
+			// pointer selects a more precise target. Preserve that gesture only;
+			// later keyboard focus must still select or clear its own target.
+			if (event.type === "focusin" && focusFromPointer && node.contains(focusFromPointer)) return;
+			clearPointerFocus();
 			if (this.context?.surface.annotationSupported && event.type === "pointerdown") { this.action++; return; }
 			this.action++; this.unavailableGroup = false; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
-			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node, event as PointerEvent); this.renderTools();
+			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node, event as PointerEvent);
+			if (event.type === "pointerdown" && (this.chosen || this.chosenGroups.length)) focusFromPointer = node;
+			this.renderTools();
 		};
 		listen(root, "pointerdown", select, true); listen(root, "focusin", select, true);
+		listen(this.win, "pointerup", clearPointerFocus, true); listen(this.win, "pointercancel", clearPointerFocus, true); listen(this.win, "blur", clearPointerFocus);
 		listen(root, "wheel", () => { this.action++; }, true);
-		listen(root, "keydown", event => { if (!this.owns(event.target as Node)) this.action++; }, true);
+		listen(root, "keydown", event => { clearPointerFocus(); if (!this.owns(event.target as Node)) this.action++; }, true);
 		listen(root, "scroll", () => this.invalidate(false), true); listen(this.win, "resize", () => this.invalidate(false));
 		listen(doc, "visibilitychange", () => this.invalidate(true, true));
 		const observer = new MutationObserver(records => {
