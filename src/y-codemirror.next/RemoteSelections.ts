@@ -26,6 +26,7 @@ import * as Y from "yjs";
 import type { RelativePosition } from "yjs";
 import type { Awareness } from "y-protocols/awareness.js";
 import { presenceColorForUser } from "../presenceColor";
+import { presencePeers } from "../collaboration/presence/PresencePeers";
 
 interface AwarenessCursor {
 	anchor: RelativePosition;
@@ -103,6 +104,12 @@ export const yRemoteSelectionsTheme = EditorView.baseTheme({
 		opacity: 1,
 		transitionDelay: "0s",
 	},
+	".cm-yReadingSelection": { position: "relative", display: "inline", userSelect: "none" },
+	".cm-yReadingSelection > span": {
+		position: "absolute", top: "-1.2em", left: "0", maxWidth: "160px", padding: "1px 3px",
+		whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontSize: ".75em",
+		backgroundColor: "var(--background-primary)", color: "var(--text-normal)", border: "1px solid", borderRadius: "3px", zIndex: "101",
+	},
 });
 
 /**
@@ -164,6 +171,18 @@ export class YRemoteCaretWidget extends WidgetType {
 	ignoreEvent() {
 		return true;
 	}
+}
+
+/** A reader's selected text is not an editing caret. Keep its identity label
+ * separate while reusing the same viewport-clipped selection decorations. */
+class YRemoteReadingWidget extends WidgetType {
+	constructor(private color: string, private name: string) { super(); }
+	toDOM(editor: EditorView): HTMLElement {
+		const root = editor.dom.ownerDocument.createElement("span"); root.className = "cm-yReadingSelection"; root.setAttribute("aria-hidden", "true");
+		const label = root.createSpan({ text: `${this.name} · Reading` }); label.style.borderColor = this.color; return root;
+	}
+	eq(other: YRemoteReadingWidget): boolean { return this.color === other.color && this.name === other.name; }
+	ignoreEvent(): boolean { return true; }
 }
 
 type AwarenessChangeEvent = {
@@ -354,13 +373,14 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 		this.renderDirty = false;
 
 		// update decorations (remote selections)
+		const reading = new Map(presencePeers(awareness).filter(peer => peer.surface === "reading").map(peer => [peer.clientId, peer]));
 		awareness.getStates().forEach((rawState, clientid) => {
 			if (!rawState || typeof rawState !== "object") return;
 			const state = rawState as AwarenessState;
 			if (clientid === awareness.clientID) {
 				return;
 			}
-			const cursor = state.cursor;
+			const cursor = state.surface === "reading" ? reading.get(clientid)?.selection : state.cursor;
 			if (cursor == null || cursor.anchor == null || cursor.head == null) {
 				return;
 			}
@@ -401,6 +421,7 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 			const { color, light: colorLight } = presenceColorForUser(user);
 			const start = math.min(anchor.index, head.index);
 			const end = math.max(anchor.index, head.index);
+			if (state.surface === "reading" && start === end) return;
 			for (const visible of update.view.visibleRanges) {
 				const visibleStart = Math.max(start, visible.from), visibleEnd = Math.min(end, visible.to);
 				if (visibleStart >= visibleEnd) continue;
@@ -464,7 +485,7 @@ export class YRemoteSelectionsPluginValue implements PluginValue {
 					value: Decoration.widget({
 						side: head.index - anchor.index > 0 ? -1 : 1, // the local cursor should be rendered outside the remote selection
 						block: false,
-						widget: new YRemoteCaretWidget(color, name),
+						widget: state.surface === "reading" ? new YRemoteReadingWidget(color, name) : new YRemoteCaretWidget(color, name),
 					}),
 				});
 			}

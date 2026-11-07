@@ -701,6 +701,10 @@
 .relay-presence-follow { position: absolute; top: 42px; inset-inline-end: 12px; z-index: 10; display: flex; align-items: center; flex-wrap: wrap; gap: var(--size-4-2); max-width: calc(100% - 24px); padding: var(--size-4-2); border: 1px solid var(--interactive-accent); border-radius: var(--radius-m); background: var(--background-primary); }
 .relay-presence-session button, .relay-presence-follow button { min-height: 32px; height: auto; }
 .is-mobile .relay-presence-session button, .is-mobile .relay-presence-follow button { min-height: 44px; }
+.relay-reading-presence-root { position: relative; }
+.relay-reading-presence { position: absolute; inset: 0; pointer-events: none; user-select: none; overflow: hidden; z-index: 4; }
+.relay-reading-presence-selection, .relay-reading-presence-caret, .relay-reading-presence-name { position: absolute; pointer-events: none; }
+.relay-reading-presence-name { max-width: min(160px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 20px; line-height: 18px; padding: 0 4px; border: 1px solid var(--relay-presence-color); border-radius: 3px; background: var(--background-primary); color: var(--text-normal); font: var(--font-ui-smaller) var(--font-interface); }
 
 .relay-image-comment-modes, .relay-image-comment-fields { display: flex; flex-wrap: wrap; gap: var(--size-4-2); margin-block: var(--size-4-3); }
 .relay-image-comment-modes [aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }

@@ -4,7 +4,7 @@ type Syntax = ReturnType<typeof readingMarkdownParser.parse>["topNode"];
 type Point = { node: Text; offset: number };
 type Atom<T> = { char: string; start: T; end: T; verbatim: boolean };
 type Projection = { kind: string; atoms: Atom<number>[]; generated?: boolean };
-type Mapped = { source: Atom<number>[]; dom: Atom<Point>[] };
+type Mapped = { source: Atom<number>[]; dom: Atom<Point>[]; element: Element };
 const LEAVES = "p,h1,h2,h3,h4,h5,h6,td,th,pre,li,.callout-title-inner";
 const EXCLUDED = "button,input,svg,script,style,img,.copy-code-button,.relay-reading-comment-controls";
 
@@ -255,17 +255,45 @@ export class ReadingSectionMap {
 		const splitSurrogate = (index: number) => /[\uD800-\uDBFF]/.test(this.source[index - 1] ?? "") && /[\uDC00-\uDFFF]/.test(this.source[index] ?? "");
 		return from !== undefined && to !== undefined && to > from && !splitSurrogate(from) && !splitSurrogate(to) ? { from, to } : undefined;
 	}
-	domRanges(from: number, to: number): Range[] {
+	/** A viewport key changes when a long table/list reveals different leaves,
+	 * while scrolling within the same paragraph can reuse its native ranges. */
+	visibleContent(include: (element: Element) => boolean): string {
+		return this.leaves.filter(leaf => include(leaf.element)).map(leaf => `${leaf.source[0]?.start}:${leaf.source[leaf.source.length - 1]?.end}`).join("|");
+	}
+	domRanges(from: number, to: number, options?: { include?: (element: Element) => boolean; limit?: number; exact?: boolean }): Range[] {
 		const result: Range[] = [];
 		if (!this.isCurrent()) return result;
+		const split = (index: number) => /[\uD800-\uDBFF]/.test(this.source[index - 1] ?? "") && /[\uDC00-\uDFFF]/.test(this.source[index] ?? "");
+		if (options?.exact && (split(from) || split(to))) return result;
 		for (const leaf of this.leaves) {
-			const first = leaf.source.findIndex(atom => atom.end > from && atom.start < to);
+			if (result.length >= (options?.limit ?? Infinity)) break;
+			if (options?.include && !options.include(leaf.element)) continue;
+			let first = leaf.source.findIndex(atom => atom.end > from && atom.start < to);
 			if (first < 0) continue;
 			let last = first; while (last + 1 < leaf.source.length && leaf.source[last + 1].start < to) last++;
+			if (options?.exact) {
+				while (first <= last && leaf.source[first].start < from) first++;
+				while (last >= first && leaf.source[last].end > to) last--;
+				if (first > last) continue;
+			}
 			const range = this.document.createRange(); range.setStart(leaf.dom[first].start.node, leaf.dom[first].start.offset);
 			range.setEnd(leaf.dom[last].end.node, leaf.dom[last].end.offset); result.push(range);
 		}
 		return result;
+	}
+	/** Map only an actual rendered source boundary. Positions inside markup,
+	 * entities or surrogate pairs have no invented visible caret. */
+	domCaret(offset: number, assoc = 0): Range | undefined {
+		if (!Number.isSafeInteger(offset) || offset < this.from || offset > this.to || !this.isCurrent() ||
+			/[\uD800-\uDBFF]/.test(this.source[offset - 1] ?? "") && /[\uDC00-\uDFFF]/.test(this.source[offset] ?? "")) return;
+		let before: Point | undefined, after: Point | undefined;
+		for (const leaf of this.leaves) for (let index = 0; index < leaf.source.length; index++) {
+			const atom = leaf.source[index];
+			if (atom.end === offset) before = leaf.dom[index].end;
+			if (atom.start === offset && !after) after = leaf.dom[index].start;
+		}
+		const point = assoc < 0 ? before ?? after : after ?? before; if (!point) return;
+		const range = this.document.createRange(); range.setStart(point.node, point.offset); range.collapse(true); return range;
 	}
 }
 
@@ -288,7 +316,7 @@ export function mapReadingSection(root: HTMLElement, source: string, from: numbe
 		if (projection.generated) continue;
 		const dom = domAtoms(element);
 		if (dom.map(atom => atom.char).join("") !== projection.atoms.map(atom => atom.char).join("")) return undefined;
-		leaves.push({ source: projection.atoms, dom });
+		leaves.push({ source: projection.atoms, dom, element });
 	}
 	return new ReadingSectionMap(root, source, leaves, from, to);
 }

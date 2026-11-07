@@ -12,6 +12,28 @@ function range(node: Node, from = 0, to = node.textContent!.length) {
 }
 afterEach(() => document.body.replaceChildren());
 
+test("caret projection requires exact visible boundaries and rejects hidden syntax, partial entities and surrogate splits", () => {
+	const source = "a **b** &amp; 🙂", { root, map } = fixture(source, "<p>a <strong>b</strong> &amp; 🙂</p>");
+	const b = map.domCaret(source.indexOf("b"))!;
+	expect(b.collapsed).toBe(true); expect(b.startContainer).toBe(root.querySelector("strong")!.firstChild); expect(b.startOffset).toBe(0);
+	expect(map.domCaret(source.indexOf("b") + 1)?.startOffset).toBe(1);
+	expect(map.domCaret(source.indexOf("**") + 1)).toBeUndefined(); expect(map.domCaret(source.indexOf("&amp;") + 1)).toBeUndefined();
+	expect(map.domCaret(source.indexOf("🙂") + 1)).toBeUndefined(); expect(map.domCaret(source.length)).toBeDefined();
+	expect(map.domRanges(source.indexOf("&amp;") + 1, source.indexOf("&amp;") + 3, { exact: true })).toEqual([]);
+	expect(map.domRanges(source.indexOf("&amp;"), source.indexOf("&amp;") + 5, { exact: true }).map(range => range.toString())).toEqual(["&"]);
+	expect(map.domRanges(source.indexOf("🙂"), source.indexOf("🙂") + 1, { exact: true })).toEqual([]);
+	root.querySelector("strong")!.textContent = "replacement"; expect(map.domCaret(source.indexOf("b"))).toBeUndefined();
+});
+
+test("viewport projection skips offscreen leaves before constructing bounded native ranges", () => {
+	const lines = Array.from({ length: 100 }, (_, index) => "row" + index), source = lines.join("\n\n");
+	const { map, root } = fixture(source, lines.map(line => `<p>${line}</p>`).join(""));
+	const visible = new Set(Array.from(root.children).slice(98)), include = (element: Element) => visible.has(element);
+	expect(map.visibleContent(include)).toContain(String(source.indexOf("row98")));
+	expect(map.domRanges(0, source.length, { include, limit: 1 }).map(range => range.toString())).toEqual(["row98"]);
+	expect(map.domRanges(0, source.length, { include, limit: 2 }).map(range => range.toString())).toEqual(["row98", "row99"]);
+});
+
 test("Reading selections use ordered source positions through emphasis, links, escapes and entities", () => {
 	const source = "# Heading #\n\nrepeat **repeat** [label](https://example.test) \\* &amp; end";
 	const { root, map } = fixture(source, '<h1>Heading</h1><p>repeat <strong>repeat</strong> <a href="https://example.test">label</a> * &amp; end</p>');

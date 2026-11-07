@@ -142,6 +142,32 @@ test("only the active bound note publishes; private views and unloaded bindings 
 	} finally { f.close(); }
 });
 
+test("all authorized Reading panes gain remote observers while only the active pane publishes", async () => {
+	const f = fixture(), stops: (() => void)[] = [];
+	try {
+		for (const note of f.notes) {
+			note.mode("preview"); stops.push(bindReadingComments(note.view, () => ({ documentId: note.doc.entityGuid, text: note.text })));
+		}
+		f.controller.refresh(); expect(document.querySelectorAll(".relay-reading-presence")).toHaveLength(2);
+		expect(f.notes[0].doc._liveProvider.awareness.getLocalState()?.surface).toBe("reading"); expect(f.notes[1].doc._liveProvider.awareness.getLocalState()).toBeNull();
+		await f.controller.setVisible(false); expect(document.querySelectorAll(".relay-reading-presence")).toHaveLength(2);
+		expect(f.notes.every(note => note.doc._liveProvider.awareness.getLocalState() === null)).toBe(true);
+		f.notes[1].binding.connectionAllowed = false; f.viewListeners.forEach(fn => fn()); expect(document.querySelectorAll(".relay-reading-presence")).toHaveLength(1);
+		f.logout(); expect(document.querySelectorAll(".relay-reading-presence")).toHaveLength(0);
+	} finally { stops.forEach(stop => stop()); f.close(); }
+});
+
+test("inactive Reading panes retain an observer across disconnect and remove it when their binding closes", () => {
+	const f = fixture(); const note = f.notes[1]; note.mode("preview"); note.doc._liveProvider.wsconnected = false;
+	const stop = bindReadingComments(note.view, () => ({ documentId: note.doc.entityGuid, text: note.text }));
+	try {
+		f.controller.refresh(); expect(note.view.contentEl.querySelector(".relay-reading-presence")).not.toBeNull();
+		note.doc._liveProvider.wsconnected = true; note.doc._liveProvider.emit("status", [{ status: "connected", intent: "connected" }]);
+		expect(note.view.contentEl.querySelector(".relay-reading-presence")).not.toBeNull(); expect(note.doc._liveProvider.awareness.getLocalState()).toBeNull();
+		stop(); expect(note.view.contentEl.querySelector(".relay-reading-presence")).toBeNull();
+	} finally { stop(); f.close(); }
+});
+
 async function settled() { await new Promise(resolve => setTimeout(resolve, 240)); }
 function remotePeer(f: ReturnType<typeof fixture>, index = 0) {
 	const doc = new Y.Doc(), awareness = new Awareness(doc), target = f.notes[index].doc._liveProvider.awareness;

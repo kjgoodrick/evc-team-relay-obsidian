@@ -13,6 +13,7 @@ import type { NotePresenceSurface, PresenceSettings } from "./PresenceSettings";
 import { NotePresenceSurfaces } from "./NotePresenceSurfaces";
 import { peerLocation, presencePeers, type PresenceLocation, type PresencePeer } from "./PresencePeers";
 import { PresenceRoster } from "./PresenceRoster";
+import type { ReadingPresenceScope } from "./ReadingPresenceLayer";
 
 type Binding = DocumentViewBinding<MarkdownView>;
 export type PresenceStatus = "hidden" | "idle" | "waiting" | "offline" | "ready" | "recovering" | "capacity" | "unavailable";
@@ -198,6 +199,7 @@ export class PresenceController extends Component {
 			const navigable = candidate && bound && currentAccount && candidate.connectionAllowed && candidate.wantsConnection &&
 				candidate.boundDocument.vaultShare.wantsConnection && view?.containerEl.isConnected && owner?.hasFocus() && !owner.hidden && !this.blurred.has(owner);
 			this.surfaces.setActive(navigable ? view! : undefined, navigable ? candidate.boundDocument.crdtText : undefined, navigable ? candidate.boundDocument.entityGuid : undefined);
+			this.refreshReaders();
 			if (!foreground || !this.crossFollow && (!navigable || !this.observed?.wsconnected)) this.stopFollowing("Location unavailable.");
 			const provider = this.observed;
 			this.status = !this.visible ? "hidden" : !candidate || !owner?.hasFocus() || this.blurred.has(owner) || owner.hidden ? "idle" :
@@ -208,6 +210,25 @@ export class PresenceController extends Component {
 		} finally { this.refreshing = false; }
 	}
 
+	private refreshReaders(): void {
+		const scopes: ReadingPresenceScope[] = [];
+		for (const binding of this.registry.trackedViews) {
+			if (!(binding instanceof DocumentViewBinding) || !binding.boundDocument) continue;
+			const view = binding.hostView as MarkdownView, doc = binding.boundDocument, provider = doc._liveProvider;
+			if (!view || view.getMode() !== "preview") continue;
+			const permitted = () => {
+				const owner = view.containerEl.ownerDocument, reading = readingCommentBinding(view);
+				return !this.stopped && !this.registry.isShutDown && this.registry.trackedViews.includes(binding) && binding.boundDocument === doc &&
+					binding.connectionAllowed && binding.wantsConnection && doc.vaultShare.wantsConnection && doc.hasCurrentPresenceAccount() &&
+					!!this.auth.getCurrentUserForServer(doc.vaultShare.config.onpremServerId) && view.containerEl.isConnected && owner.hasFocus() && !owner.hidden && !this.blurred.has(owner) &&
+					view.getMode() === "preview" && !!view.file && view.file.extension === "md" && doc._obsidianFile === view.file &&
+					this.plugin.app.vault.getFileByPath(view.file.path) === view.file && this.registry.shareRegistry.shareFor(view.file.path) === doc.vaultShare &&
+					reading?.documentId === doc.entityGuid && reading.text === doc.crdtText;
+			};
+			if (permitted()) scopes.push({ view, text: doc.crdtText, id: doc.entityGuid, provider, current: () => permitted() && provider.wsconnected });
+		}
+		this.surfaces.setReaders(scopes);
+	}
 	private notify(): void { for (const listener of this.listeners) { try { listener(); } catch { /* Isolate UI. */ } } }
 	private publishLocation(location: PresenceLocation): void {
 		const active = this.active, provider = active?.binding.boundDocument._liveProvider, state = provider?.awareness.getLocalState();

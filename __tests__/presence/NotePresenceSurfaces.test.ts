@@ -104,3 +104,47 @@ test("cancelled or unloaded navigation cannot complete after a delayed Reading r
 		f.surfaces.unload(); expect(await unloading).toBe(false);
 	} finally { f.close(); jest.useRealTimers(); }
 });
+
+test("Reading preserves the direction of a backward native selection", () => {
+	const f = fixture();
+	try {
+		const text = f.roots[0].querySelector("strong")!.firstChild!, selection = document.getSelection()!;
+		selection.setBaseAndExtent(text, 6, text, 0);
+		const location = f.surfaces.capture();
+		expect(Y.createAbsolutePositionFromRelativePosition(location.selection!.anchor, f.doc)?.index).toBe(15);
+		expect(Y.createAbsolutePositionFromRelativePosition(location.selection!.head, f.doc)?.index).toBe(9);
+	} finally { f.close(); }
+});
+
+test("Jump centers the exact rendered text inside a long block without changing native selection", async () => {
+	const f = fixture(), original = Range.prototype.getClientRects;
+	try {
+		Range.prototype.getClientRects = () => [{ top: 1200, bottom: 1218, left: 40, right: 100, height: 18, width: 60 }] as unknown as DOMRectList;
+		f.root.style.overflowY = "auto"; Object.defineProperties(f.root, { scrollHeight: { value: 2400 }, clientHeight: { value: 600 } });
+		f.root.scrollBy = jest.fn(); const range = document.createRange(); range.selectNodeContents(f.roots[1]); document.getSelection()!.addRange(range);
+		const selected = document.getSelection()!.toString(); expect(await f.surfaces.reveal(9, 15)).toBe(true);
+		expect(f.root.scrollBy).toHaveBeenCalledWith({ top: 909, left: 0, behavior: "auto" }); expect(f.roots[0].scrollIntoView).not.toHaveBeenCalled();
+		expect(document.getSelection()!.toString()).toBe(selected);
+	} finally { Range.prototype.getClientRects = original; f.close(); }
+});
+
+test("Reading can reveal an end-of-note caret and rejects invalid numeric navigation", async () => {
+	const f = fixture();
+	try {
+		expect(await f.surfaces.reveal(f.text.length, f.text.length)).toBe(true); expect(f.roots[1].scrollIntoView).toHaveBeenCalledTimes(1);
+		expect(await f.surfaces.reveal(NaN, NaN)).toBe(false); expect(await f.surfaces.reveal(0.5, 1)).toBe(false);
+	} finally { f.close(); }
+});
+
+test("Jump scrolls both a nested horizontal container and its outer vertical pane", async () => {
+	const f = fixture(), original = Range.prototype.getClientRects;
+	try {
+		Range.prototype.getClientRects = () => [{ top: 1200, bottom: 1218, left: 650, right: 710, height: 18, width: 60 }] as unknown as DOMRectList;
+		f.root.style.overflowY = "auto"; Object.defineProperties(f.root, { scrollHeight: { value: 2400 }, clientHeight: { value: 600 } }); f.root.scrollBy = jest.fn();
+		const inner = f.roots[0]; inner.style.overflowX = "auto"; Object.defineProperties(inner, { scrollWidth: { value: 800 }, clientWidth: { value: 400 } });
+		inner.getBoundingClientRect = () => ({ top: 1100, bottom: 1200, left: 0, right: 400, height: 100, width: 400 }) as DOMRect; inner.scrollBy = jest.fn();
+		expect(await f.surfaces.reveal(9, 15)).toBe(true);
+		expect(inner.scrollBy).toHaveBeenCalledWith({ top: 0, left: 310, behavior: "auto" });
+		expect(f.root.scrollBy).toHaveBeenCalledWith({ top: 909, left: 0, behavior: "auto" });
+	} finally { Range.prototype.getClientRects = original; f.close(); }
+});

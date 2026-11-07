@@ -135,3 +135,32 @@ test("long remote selections render only the visible range and malformed peers d
 		expect(f.editor.plugin(yRemoteSelections)!.decorations.size).toBeGreaterThan(0);
 	} finally { f.close(); }
 });
+
+test("authenticated Reading selections render in editors with a reading label and no invented editing caret", () => {
+	const f = cursorFixture(), peer = f.doc.clientID + 1;
+	const position = (index: number) => Y.createRelativePositionFromTypeIndex(f.text, index);
+	try {
+		const local = f.editor.state.selection.toJSON();
+		f.awareness.states.set(peer, { surface: "reading", user: { id: "reader", name: "Reader" }, sessionId: "a".repeat(32),
+			selection: { anchor: position(8), head: position(2) }, cursor: { anchor: position(0), head: position(0) } });
+		f.editor.dispatch({});
+		expect(f.editor.dom.querySelector(".cm-ySelection")?.textContent).toBe("shared");
+		expect(f.editor.dom.querySelector(".cm-yReadingSelection")?.textContent).toBe("Reader · Reading");
+		expect(f.editor.dom.querySelector(".cm-ySelectionCaret")).toBeNull(); expect(f.editor.state.selection.toJSON()).toEqual(local);
+		f.awareness.states.get(peer)!.selection = { anchor: position(2), head: position(2) };
+		f.awareness.emit("change", [{ added: [], updated: [peer], removed: [] }, "test"]);
+		expect(f.editor.dom.querySelector(".cm-yReadingSelection")).toBeNull(); expect(f.editor.dom.querySelector(".cm-ySelection")).toBeNull();
+	} finally { f.close(); }
+});
+
+test("Reading selection rendering rejects missing session identity and malformed positions", () => {
+	const f = cursorFixture(), peer = f.doc.clientID + 1;
+	try {
+		const selection = { anchor: Y.createRelativePositionFromTypeIndex(f.text, 2), head: Y.createRelativePositionFromTypeIndex(f.text, 8) };
+		f.awareness.states.set(peer, { surface: "reading", user: { id: "reader", name: "Reader" }, selection }); f.editor.dispatch({});
+		expect(f.editor.dom.querySelector(".cm-ySelection")).toBeNull();
+		Object.assign(f.awareness.states.get(peer)!, { sessionId: "a".repeat(32), selection: { anchor: { tname: "private" }, head: selection.head } });
+		f.awareness.emit("change", [{ added: [], updated: [peer], removed: [] }, "test"]);
+		expect(f.editor.dom.querySelector(".cm-ySelection")).toBeNull();
+	} finally { f.close(); }
+});

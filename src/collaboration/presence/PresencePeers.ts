@@ -41,14 +41,19 @@ export function presencePeers(awareness: Awareness): PresencePeer[] {
 	return peers.sort((a, b) => a.name.localeCompare(b.name) || a.userId.localeCompare(b.userId) || a.sessionId.localeCompare(b.sessionId) || a.clientId - b.clientId);
 }
 
+export function resolvePresenceRange(target: PresenceRange, text: Y.Text): { anchor: number; head: number } | undefined {
+	if (!text.doc) return;
+	try {
+		const anchor = Y.createAbsolutePositionFromRelativePosition(target.anchor, text.doc), head = Y.createAbsolutePositionFromRelativePosition(target.head, text.doc);
+		if (!anchor || !head || anchor.type !== text || head.type !== text || anchor.index < 0 || head.index < 0 || anchor.index > text.length || head.index > text.length) return;
+		return { anchor: anchor.index, head: head.index };
+	} catch { return; }
+}
+
 export function peerLocation(peer: PresencePeer, text: Y.Text, follow: boolean): { from: number; to: number } | undefined {
 	const selection = peer.surface === "reading" ? peer.selection : peer.cursor;
 	const target = follow && peer.viewport ? { anchor: peer.viewport, head: peer.viewport } : selection ??
 		(peer.viewport ? { anchor: peer.viewport, head: peer.viewport } : undefined);
-	if (!target || !text.doc) return undefined;
-	try {
-		const anchor = Y.createAbsolutePositionFromRelativePosition(target.anchor, text.doc), head = Y.createAbsolutePositionFromRelativePosition(target.head, text.doc);
-		if (!anchor || !head || anchor.type !== text || head.type !== text) return undefined;
-		return { from: Math.min(anchor.index, head.index), to: Math.max(anchor.index, head.index) };
-	} catch { return undefined; }
+	const resolved = target && resolvePresenceRange(target, text);
+	return resolved ? { from: Math.min(resolved.anchor, resolved.head), to: Math.max(resolved.anchor, resolved.head) } : undefined;
 }
