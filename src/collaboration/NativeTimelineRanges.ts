@@ -20,13 +20,13 @@ export async function readNativeTimelineAxis(context: BaseCommentContext, native
 	if (!timelineAxisMatches(context, proof, native)) throw new Error("This timeline axis does not match the saved view. Finish synchronization and try again.");
 	return proof;
 }
-export function rangeMatchesAxis(context: BaseCommentContext, anchor: BaseAnchor, proof: TimelineAxisContext): boolean {
+export function timelineTargetMatchesAxis(context: BaseCommentContext, anchor: BaseAnchor, proof: TimelineAxisContext): boolean {
 	const native = context.surface.rangeContext();
-	return !!native && timelineAxisMatches(context, proof, native) && rangeTargetMatchesProof(anchor, proof);
+	return !!native && timelineAxisMatches(context, proof, native) && timelineTargetMatchesProof(anchor, proof);
 }
-export function rangeTargetMatchesProof(anchor: BaseAnchor, proof: TimelineAxisContext): boolean {
+export function timelineTargetMatchesProof(anchor: BaseAnchor, proof: TimelineAxisContext): boolean {
 	const target = anchor.target;
-	return target.type === "timeline_range" &&
+	return (target.type === "timeline_range" || target.type === "timeline_marker") &&
 		anchor.definition_id === proof.definition_id && anchor.generation === proof.generation && anchor.view_id === proof.view_id &&
 		anchor.registry_revision <= proof.registry_revision && target.axis_definition_id === proof.axis.id &&
 		target.axis_definition_revision === proof.axis.revision && sameTimelineAxis(target.axis, proof.axis.axis);

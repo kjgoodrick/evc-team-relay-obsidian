@@ -26,8 +26,20 @@ outside disposable tests until the remaining interface and renderer work lands.
   queueing, exact retries and historical reads/replies preserve the original
   target. Existing comments do not follow a marker to its new position.
 - Composer/draft/thread labels identify marker targets. Thread status distinguishes
-  changed or archived markers from the captured revision. Inline marker navigation
-  is still unavailable; no marker is treated as a record or ordinary range target.
+  changed or archived markers from the captured revision. The saved-view toolbar
+  opens a Shared markers picker with explicit marker selection, refresh, position
+  inspection and comment capture. Refresh retains an exact selected revision;
+  an edit/archive/detachment clears the selection for explicit review. Read-only
+  members can inspect positions without gaining comment permission.
+- Existing marker discussions project onto their captured coordinates using the
+  verified axis. Their overlays identify the captured label and preserve marker
+  identity/revision, separately from ordinary ranges. Opening a thread or its
+  captured position rechecks saved-view/axis authority. Navigation reuses the
+  provider's guarded range reveal and temporary focus; dirty inspector changes
+  stop navigation. Changed axes retain the discussion without guessed placement.
+- Projection uses cached discussion data and performs no network work on scroll.
+  Cancellation, closing, account/access changes and async completion are guarded;
+  the picker releases its host reference and loaded metadata on close.
 - Cache version 19 preserves all stores and fences older workers that cannot
   decode marker targets. Revocation clears cached marker metadata while retaining
   unsent local work for recovery.
@@ -53,10 +65,23 @@ historical replies and stale new-capture rejection. The `.base` state is unchang
 by marker metadata and comments. This is not native Obsidian or server-restart
 acceptance; the separate server PostgreSQL tests cover transaction serialization.
 
+The interface increment passes **2,439 plugin tests in 204 suites**, the preview
+build/main types, changed-source lint (five existing warnings), whitespace and
+the frozen test-type gate. Eight interoperability cases bundle both plugins'
+actual source under the synthetic Obsidian host, in both load orders and with/
+without lanes. They exercise the real picker, point-marker geometry, selected
+position reveal, and captured-discussion controls for Timeline and Sequence.
+Focused tests also cover refresh/cancellation, read-only access, distinct marker
+revisions, exact host capture and dirty inspectors at every navigation stage.
+The native availability check encountered a locked Mac; this is not native
+desktop/mobile or physical keyboard/touch acceptance.
+
 ## Remaining work
 
-Native marker selection and rendering, current-versus-captured navigation,
-metadata refresh/change delivery, online management receipts/UI, local marker
-promotion and explicit matching remain. The Time & Line fork has not changed in
-this increment. Native desktop/mobile, accessibility, recovery UI and resource
-acceptance remain before enabling this feature for users.
+Current-marker overlays independent of discussion presence, side-by-side
+current-versus-captured position UI, automatic metadata refresh/change delivery,
+online management receipts/UI, local marker promotion and explicit matching
+remain. The picker provides explicit refresh; it does not yet subscribe to live
+metadata changes. Overlapping overlay polish also remains. The Time & Line fork
+has not changed in this increment. Native desktop/mobile, accessibility, recovery
+UI and resource acceptance remain before enabling this feature for users.

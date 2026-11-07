@@ -12,7 +12,9 @@ import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface.ts";
 import { sha256Hex } from "../../src/contentDigest.ts";
 import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments.ts";
 import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeWorkflow.ts";
-import { renderTimelineRangeMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
+import { renderTimelineDiscussionMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
+import { TimelineMarkerPicker } from "../../src/collaboration/ui/TimelineMarkerPicker.ts";
+import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol.ts";
 
 const win = new Window();
 Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS });
@@ -193,10 +195,39 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const rangeAnchor = { version: 1, type: "base", definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1,
 			target: { type: "timeline_range", axis_definition_id: uuid(40), axis_definition_revision: 1, axis: rangeContext.axis, range: savedRange, ...(savedLaneTarget ? { lane: savedLaneTarget } : {}) } };
 		const marks = document.createElement("div"); root.append(marks); let markerOpened = false;
-		assert.equal(renderTimelineRangeMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(41), anchor: rangeAnchor }],
+		assert.equal(renderTimelineDiscussionMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(41), anchor: rangeAnchor }],
 			lanes: new Map(savedLane ? [[uuid(41), savedLane.target]] : []), root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks, limit: 128,
 			open: (_threads, _button, current) => { assert.ok(current()); markerOpened = true; } }), 1);
 		marks.querySelector("button").click(); assert.ok(markerOpened); marks.remove();
+		// Shared-marker identity survives the real picker, geometry and range
+		// reveal bridge. Server authority/offline delivery have HTTP evidence.
+		const sharedContent = { kind: "point", label: "Shared launch", color: "#123abc", range: { ...savedRange,
+			end: savedRange.start, start_inclusive: true, end_inclusive: true } };
+		const markerTarget = { type: "timeline_marker", marker_id: uuid(60), marker_revision: 1,
+			axis_definition_id: uuid(40), axis_definition_revision: 1, axis: axisProof.axis.axis, content: sharedContent };
+		const markerCatalog = parseTimelineMarkerCatalog({ protocol_version: 1, entry_id: uuid(2), definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1,
+			catalog_revision: 1, markers: [{ id: uuid(60), revision: 1, active: true, content: sharedContent,
+				placement: { view_id: uuid(4), active: true, axis_definition_id: uuid(40), axis_definition_revision: 1, axis: axisProof.axis.axis }, target: markerTarget }] }, uuid(2), uuid(4));
+		rangeCommentContext.session.readTimelineMarkers = async () => markerCatalog;
+		let capturedMarker, shownMarker = false;
+		const pickerActions = { write: async (catalog, id, current) => {
+			assert.ok(current()); assert.equal(id, uuid(60)); capturedMarker = timelineMarkerAnchor(catalog, catalog.markers[0]); return true;
+		}, show: async (catalog, id, current) => {
+			assert.ok(current()); assert.equal(id, uuid(60)); const marker = catalog.markers[0];
+			assert.equal(surface.revealRange(marker.content.range, marker.target.axis, current), "revealed"); shownMarker = true; return true;
+		} };
+		for (const action of ["Write comment", "Show selected position"]) {
+			const picker = new TimelineMarkerPicker(plugin.app, rangeCommentContext, () => surface.current(), pickerActions); picker.open();
+			for (let i = 0; i < 12; i++) await Promise.resolve();
+			const choice = document.querySelector('.relay-timeline-marker-dialog [aria-label="Marker"]'); assert.ok(choice); choice.value = uuid(60); choice.dispatchEvent(new win.Event("change"));
+			const button = [...document.querySelectorAll(".relay-timeline-marker-dialog button")].find(button => button.textContent === action); assert.equal(button.disabled, false); button.click();
+			for (let i = 0; i < 12; i++) await Promise.resolve(); picker.close();
+		}
+		assert.equal(capturedMarker.target.type, "timeline_marker"); assert.equal(capturedMarker.target.marker_id, uuid(60)); assert.ok(shownMarker);
+		const sharedMarks = document.createElement("div"); root.append(sharedMarks);
+		assert.equal(renderTimelineDiscussionMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(61), anchor: capturedMarker }], lanes: new Map(),
+			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks: sharedMarks, limit: 128, open: threads => assert.equal(threads[0].anchor.target.marker_id, uuid(60)) }), 1);
+		assert.ok(sharedMarks.querySelector("button").getAttribute("aria-label").includes("Captured marker: Shared launch")); sharedMarks.querySelector("button").click(); sharedMarks.remove();
 		// A discussion outside the data-derived domain opens a temporary range
 		// viewport through the actual provider/consumer, preserving the saved view.
 		const farRange = { ...savedRange, start: sequence ? "-100" : "1800-01-01", end: sequence ? "-50" : "1800-01-02" };
@@ -211,7 +242,7 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const focusedGeometry = surface.rangeGeometry(farRange, rangeContext.axis, focusedLane?.element);
 		assert.ok(focusedGeometry?.current()); assert.ok(focusedGeometry.startX >= 100 && focusedGeometry.endX <= 900);
 		const focusedMarks = document.createElement("div"); root.append(focusedMarks);
-		assert.equal(renderTimelineRangeMarkers({ context: rangeCommentContext, proof: axisProof,
+		assert.equal(renderTimelineDiscussionMarkers({ context: rangeCommentContext, proof: axisProof,
 			threads: [{ id: uuid(41), anchor: { ...rangeAnchor, target: { ...rangeAnchor.target, range: farRange } } }],
 			lanes: new Map(savedLane ? [[uuid(41), savedLane.target]] : []), root: { left: 0, right: 1000, top: 0, bottom: 600 },
 			viewport: focusedViewport.getBoundingClientRect(), marks: focusedMarks, limit: 128, open: () => {} }), 1);
@@ -258,10 +289,10 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const emptyMarkerOptions = { context: emptyCommentContext, proof: axisProof, lanes: new Map(),
 			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: emptyFocusedBody.getBoundingClientRect(), marks: emptyMarks, limit: 128, open: () => {} };
 		const wholeTarget = { ...rangeAnchor.target, range: farRange }; delete wholeTarget.lane;
-		assert.equal(renderTimelineRangeMarkers({ ...emptyMarkerOptions, threads: [{ id: uuid(41), anchor: { ...rangeAnchor, target: wholeTarget } }] }), 1);
+		assert.equal(renderTimelineDiscussionMarkers({ ...emptyMarkerOptions, threads: [{ id: uuid(41), anchor: { ...rangeAnchor, target: wholeTarget } }] }), 1);
 		trace("empty range marker");
 		if (grouped) {
-			assert.equal(renderTimelineRangeMarkers({ ...emptyMarkerOptions, threads: [{ id: uuid(41), anchor: rangeAnchor }] }), 0);
+			assert.equal(renderTimelineDiscussionMarkers({ ...emptyMarkerOptions, threads: [{ id: uuid(41), anchor: rangeAnchor }] }), 0);
 			assert.equal(emptySurface.revealRange(farRange, axisProof.axis.axis, () => true, laneElement), "unavailable");
 		}
 		emptyMarks.remove(); root.querySelector(".sabidurian-comment-range-focus button").click();

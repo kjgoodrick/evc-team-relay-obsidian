@@ -1,7 +1,9 @@
 import { timelineRangeLabel, type TimelineRange } from "./TimelineRange";
 import type { TimelineAxisContext } from "./TimelineRangeProtocol";
-import { rangeLane, rangeMatchesAxis, readNativeTimelineAxis, timelineAxisMatches } from "./NativeTimelineRanges";
+import { rangeLane, timelineTargetMatchesAxis, readNativeTimelineAxis, timelineAxisMatches } from "./NativeTimelineRanges";
 import { TimelineRangeWorkflow } from "./ui/TimelineRangeWorkflow";
+import { TimelineMarkerPicker } from "./ui/TimelineMarkerPicker";
+import { timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { NativeBaseGroupComments, nativeGroupTargetKey } from "./NativeBaseGroupComments";
 import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
 import { baseGroupValueLabel } from "./BaseGroupValueBridge";
@@ -62,6 +64,7 @@ export class DiscussionHost extends Component {
 	private baseSelections = new WeakMap<DiscussionSession, Map<string, { choice?: BaseDiscussionChoice }>>();
 	private baseAction = 0;
 	private rangeWorkflow?: TimelineRangeWorkflow;
+	private markerPicker?: TimelineMarkerPicker;
 	private inboxAction = 0;
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
@@ -114,7 +117,7 @@ export class DiscussionHost extends Component {
 		this.reconcile();
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-	private notify(): void { this.rangeWorkflow?.validate(); for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
+	private notify(): void { this.rangeWorkflow?.validate(); this.markerPicker?.validate(); for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } } }
 	private key(serverUrl: string, accountId: string, shareId: string): string {
 		return JSON.stringify([serverUrl.replace(/\/+$/, ""), accountId, shareId]);
 	}
@@ -421,11 +424,40 @@ export class DiscussionHost extends Component {
 		} catch (error) { new Notice(error instanceof Error ? error.message : "The group selection could not be saved. Existing drafts are retained."); return false; }
 	}
 	chooseTimelineRange(context: BaseCommentContext): void {
+		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.rangeWorkflow?.close();
 		const action = ++this.baseAction;
 		const workflow = new TimelineRangeWorkflow(this.plugin.app, context, () => !this.stopped && action === this.baseAction,
 			(proof, range, current, lane) => this.commentTimelineRange(context, proof, range, current, lane));
 		this.rangeWorkflow = workflow; void workflow.open();
+	}
+	chooseTimelineMarker(context: BaseCommentContext, markerId?: string): void {
+		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined; this.markerPicker?.close();
+		const action = ++this.baseAction, active = () => !this.stopped && action === this.baseAction;
+		const picker = new TimelineMarkerPicker(this.plugin.app, context, active, {
+			write: (catalog, id, current) => this.commentTimelineMarker(context, catalog, id, current),
+			show: async (catalog, id, alive) => {
+				const marker = catalog.markers.find(item => item.id === id); if (!marker) return false;
+				const anchor = timelineMarkerAnchor(catalog, marker), proof = await readNativeTimelineAxis(context);
+				const current = () => active() && alive() && context.session.permission(context.entryId)?.read === true && timelineTargetMatchesAxis(context, anchor, proof);
+				if (!current()) return false;
+				const result = await context.surface.revealRange(marker.content.range, marker.target.axis, current);
+				if (result === "busy") throw new Error("Save or discard the task inspector changes before navigating to this marker.");
+				return result === "revealed";
+			},
+		}, markerId, () => { if (this.markerPicker === picker) this.markerPicker = undefined; });
+		this.markerPicker = picker; picker.open();
+	}
+	async commentTimelineMarker(context: BaseCommentContext, catalog: TimelineMarkerCatalog, markerId: string, alive: () => boolean): Promise<boolean> {
+		const action = this.baseAction;
+		const current = () => !this.stopped && action === this.baseAction && alive() && context.current() && context.session.canAnchorBase("timeline_marker") && context.session.permission(context.entryId)?.comment === true;
+		if (!current()) return false;
+		const anchor = await context.session.captureTimelineMarker(context.entryId, catalog, markerId);
+		if (!current()) return false;
+		const proof = await readNativeTimelineAxis(context);
+		if (!current() || !timelineTargetMatchesAxis(context, anchor, proof) || anchor.registry_revision !== context.binding.snapshot.revision) return false;
+		if (!await this.pinBaseContext(context, current)) return false;
+		return this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
 	}
 	async commentTimelineRange(context: BaseCommentContext, proof: TimelineAxisContext, range: TimelineRange, alive: () => boolean, lane?: NativeBaseGroupHandle): Promise<boolean> {
 		const native = context.surface.rangeContext(), action = this.baseAction;
@@ -437,7 +469,7 @@ export class DiscussionHost extends Component {
 		if (!current()) return false;
 		const anchor = pending ? await context.session.captureTimelineRange(context.entryId, proof, range, pending) : await context.session.captureTimelineRange(context.entryId, proof, range);
 		const location = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor;
-		if (!current() || !location || !rangeMatchesAxis(context, location, proof) || location.registry_revision !== context.binding.snapshot.revision) return false;
+		if (!current() || !location || !timelineTargetMatchesAxis(context, location, proof) || location.registry_revision !== context.binding.snapshot.revision) return false;
 		if (!await this.pinBaseContext(context, current)) return false;
 		return this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
 	}
@@ -446,7 +478,7 @@ export class DiscussionHost extends Component {
 		try {
 			const thread = await context.session.cachedThread(context.entryId, threadId);
 			if (!current() || thread?.anchor?.type !== "base") return;
-			if (thread.anchor.target.type !== "timeline_range" && (thread.anchor.target.type === "group" ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor))) return;
+			if (thread.anchor.target.type !== "timeline_range" && thread.anchor.target.type !== "timeline_marker" && (thread.anchor.target.type === "group" ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor))) return;
 			if (!await this.verifyBaseTarget(context, thread.anchor) || !current()) return;
 			if (await this.pinBaseContext(context, current)) await this.openThread(context.file, context.session, context.entryId, threadId);
 		} catch { new Notice("This discussion is no longer available in the current view."); }
@@ -460,9 +492,9 @@ export class DiscussionHost extends Component {
 		if (!context.current()) return false;
 		const target = anchor?.target, recordId = target && "record_id" in target ? target.record_id : undefined;
 		const proof = await context.session.readBaseContext(context.entryId, recordId);
-		if (anchor && target?.type === "timeline_range") {
+		if (anchor && (target?.type === "timeline_range" || target?.type === "timeline_marker")) {
 			const axis = await readNativeTimelineAxis(context);
-			if (!rangeMatchesAxis(context, anchor, axis) || target.lane && !await rangeLane(context, anchor)) return false;
+			if (!timelineTargetMatchesAxis(context, anchor, axis) || target.type === "timeline_range" && target.lane && !await rangeLane(context, anchor)) return false;
 		}
 		if (target && "definition_id" in target) {
 			const catalog = await context.session.readBaseDefinitions(context.entryId);
@@ -733,6 +765,7 @@ export class DiscussionHost extends Component {
 	onunload(): void {
 		this.stopped = true;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
+		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.focus = undefined; this.editors.clear();
 		for (const slot of this.slots.values()) { slot.cancelled = true; void slot.session?.close(); }
 		for (const unsubscribe of this.folderListeners.values()) unsubscribe();

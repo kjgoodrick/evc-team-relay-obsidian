@@ -2,14 +2,16 @@
 import type { App } from "obsidian";
 import { TimelineRangeModal } from "../../src/collaboration/ui/TimelineRangeModal";
 import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeWorkflow";
-import { readNativeTimelineAxis, rangeMatchesAxis } from "../../src/collaboration/NativeTimelineRanges";
-import { renderTimelineRangeMarkers } from "../../src/collaboration/TimelineRangeMarkers";
+import { readNativeTimelineAxis, timelineTargetMatchesAxis } from "../../src/collaboration/NativeTimelineRanges";
+import { renderTimelineDiscussionMarkers } from "../../src/collaboration/TimelineRangeMarkers";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import type { NativeTimelineContext, NativeTimelineSelection } from "../../src/bases/NativeBasesSurface";
 import type { AnchoredThread } from "../../src/collaboration/DiscussionSession";
 import type { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments";
+import { TimelineMarkerPicker } from "../../src/collaboration/ui/TimelineMarkerPicker";
+import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol";
 
 jest.mock("obsidian", () => ({ TFile: class {}, Notice: jest.fn(), Modal: class {
 	contentEl = document.createElement("div"); titleEl = document.createElement("h2");
@@ -133,7 +135,7 @@ test.each(["axis", "view", "generation", "revision", "stale"])("%s mismatch refu
 	if (reason === "generation") f.proof.generation = id(9);
 	if (reason === "revision") f.proof.registry_revision = 2;
 	if (reason === "stale") f.stale();
-	await expect(readNativeTimelineAxis(f.context)).rejects.toThrow(); expect(rangeMatchesAxis(f.context, f.anchor, f.proof)).toBe(false);
+	await expect(readNativeTimelineAxis(f.context)).rejects.toThrow(); expect(timelineTargetMatchesAxis(f.context, f.anchor, f.proof)).toBe(false);
 });
 
 test("range markers clip geometry, aggregate exact targets and never reload the axis on scroll", () => {
@@ -141,10 +143,10 @@ test("range markers clip geometry, aggregate exact targets and never reload the 
 	const thread = { id: id(10), anchor: f.anchor } as AnchoredThread;
 	const options = { context: f.context, proof: f.proof, threads: [thread, { ...thread, id: id(11) }], lanes: new Map(),
 		root: { left: 0, right: 500, top: 0, bottom: 400 } as DOMRect, viewport: { left: 50, right: 250, top: 0, bottom: 200 } as DOMRect, marks, limit: 128, open };
-	expect(renderTimelineRangeMarkers(options)).toBe(1); expect(marks.querySelector("button")!.textContent).toBe("2");
+	expect(renderTimelineDiscussionMarkers(options)).toBe(1); expect(marks.querySelector("button")!.textContent).toBe("2");
 	expect(marks.querySelector<HTMLElement>(".relay-timeline-range-mark")!.style.width).toBe("200px");
 	marks.querySelector("button")!.click(); expect(open).toHaveBeenCalledTimes(1);
-	marks.replaceChildren(); renderTimelineRangeMarkers(options); expect(f.readAxis).not.toHaveBeenCalled();
+	marks.replaceChildren(); renderTimelineDiscussionMarkers(options); expect(f.readAxis).not.toHaveBeenCalled();
 	f.stale(); marks.querySelector("button")!.click(); expect(open).toHaveBeenCalledTimes(1);
 });
 
@@ -153,8 +155,82 @@ test("historical axes and unresolved lane targets retain discussions without mis
 	if (f.anchor.target.type !== "timeline_range") throw new Error("fixture");
 	f.anchor.target.axis_definition_revision = 2;
 	const options = { context: f.context, proof: f.proof, threads: [{ id: id(10), anchor: f.anchor } as AnchoredThread], lanes: new Map(), root: rect, viewport: rect, marks, limit: 128, open: jest.fn() };
-	expect(renderTimelineRangeMarkers(options)).toBe(0);
+	expect(renderTimelineDiscussionMarkers(options)).toBe(0);
 	f.anchor.target.axis_definition_revision = 1;
 	f.anchor.target.lane = { type: "group", definition_id: id(20), definition_revision: 1, property: { source: "note", name: "status" }, group_id: id(21), witness_id: id(22), value: { type: "text", value: "Ready" } };
-	expect(renderTimelineRangeMarkers(options)).toBe(0); expect(f.context.surface.rangeGeometry).not.toHaveBeenCalled();
+	expect(renderTimelineDiscussionMarkers(options)).toBe(0); expect(f.context.surface.rangeGeometry).not.toHaveBeenCalled();
+});
+
+function markerFixture() {
+	const f = fixture(), { axis, ...context } = f.proof;
+	const content = { kind: "range", label: "Launch", color: "#aabbcc", range: calendar };
+	const catalog = parseTimelineMarkerCatalog({ ...context, catalog_revision: 1, markers: [{ id: id(60), revision: 1, active: true, content,
+		placement: { view_id: id(3), active: true, axis_definition_id: axis.id, axis_definition_revision: axis.revision, axis: axis.axis },
+		target: { type: "timeline_marker", marker_id: id(60), marker_revision: 1, content, axis_definition_id: axis.id, axis_definition_revision: axis.revision, axis: axis.axis } }] }, id(1), id(3));
+	const read = jest.fn().mockResolvedValue(catalog), write = jest.fn().mockResolvedValue(true), show = jest.fn().mockResolvedValue(true);
+	Object.assign(f.context.session, { readTimelineMarkers: read });
+	const picker = new TimelineMarkerPicker({} as App, f.context, () => true, { write, show });
+	return { ...f, catalog, read, write, show, picker, anchor: timelineMarkerAnchor(catalog, catalog.markers[0]) };
+}
+function selectMarker(id: string) { const field = document.querySelector<HTMLSelectElement>('[aria-label="Marker"]')!; field.value = id; field.dispatchEvent(new Event("change")); return field; }
+
+test("marker picker saves an explicit marker identity/revision and allows read-only position inspection", async () => {
+	const f = markerFixture(); f.picker.open(); await flush();
+	expect(button("Write comment").disabled).toBe(true); selectMarker(id(60));
+	button("Write comment").click(); await flush();
+	expect(f.write).toHaveBeenCalledWith(f.catalog, id(60), expect.any(Function)); expect(document.querySelector(".relay-timeline-marker-dialog")).toBeNull();
+	const reader = markerFixture(); reader.revoke(); reader.picker.open(); await flush(); selectMarker(id(60));
+	expect(button("Write comment").disabled).toBe(true); expect(button("Show selected position").disabled).toBe(false);
+	button("Show selected position").click(); await flush(); expect(reader.show).toHaveBeenCalledWith(reader.catalog, id(60), expect.any(Function));
+});
+
+test.each(["edit", "archive", "detach"])("marker refresh clears a changed selection (%s) instead of adopting its replacement", async change => {
+	const f = markerFixture(); f.picker.open(); await flush(); selectMarker(id(60));
+	const newer = parseTimelineMarkerCatalog(f.catalog, id(1), id(3)); newer.catalog_revision = 2; newer.markers[0].revision = 2; newer.markers[0].target.marker_revision = 2;
+	if (change === "edit") { newer.markers[0].content.label = "Moved"; newer.markers[0].target.content.label = "Moved"; }
+	if (change === "archive") newer.markers[0].active = false;
+	if (change === "detach") newer.markers[0].placement.active = false;
+	f.read.mockResolvedValue(newer); button("Refresh markers").click(); await flush();
+	expect(document.querySelector<HTMLSelectElement>('[aria-label="Marker"]')!.value).toBe("");
+	expect(button("Write comment").disabled).toBe(true); expect(document.body.textContent).toContain("selected marker changed"); f.picker.close();
+});
+
+test("unchanged refresh preserves keyboard selection, and failed capture retains a visible recoverable choice", async () => {
+	const f = markerFixture(); f.picker.open(); await flush(); selectMarker(id(60)); button("Refresh markers").click(); await flush();
+	expect(document.querySelector<HTMLSelectElement>('[aria-label="Marker"]')!.value).toBe(id(60));
+	f.write.mockRejectedValue(new Error("Marker changed. Refresh before continuing.")); button("Write comment").click(); await flush();
+	expect(document.body.textContent).toContain("Marker changed"); expect(document.querySelector<HTMLSelectElement>('[aria-label="Marker"]')!.value).toBe(id(60));
+	expect(button("Refresh markers").disabled).toBe(false); f.picker.close();
+});
+
+test("picker closes on authority loss and ignores catalog delivery after cancellation", async () => {
+	const f = markerFixture(); let finish!: (value: typeof f.catalog) => void;
+	f.read.mockImplementation(() => new Promise(resolve => { finish = resolve; })); f.picker.open(); await flush(); f.picker.close(); finish(f.catalog); await flush();
+	expect(document.querySelector(".relay-timeline-marker-dialog")).toBeNull(); expect(f.write).not.toHaveBeenCalled();
+	const second = markerFixture(); second.picker.open(); await flush(); selectMarker(id(60)); second.stale(); second.picker.validate();
+	expect(document.querySelector(".relay-timeline-marker-dialog")).toBeNull(); expect(second.write).not.toHaveBeenCalled();
+});
+
+test("closing during axis verification prevents the later marker catalog request", async () => {
+	const f = markerFixture(); let finish!: (value: TimelineAxisContext) => void;
+	f.readAxis.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+	f.picker.open(); f.picker.close(); finish(f.proof); await flush();
+	expect(f.read).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled();
+	expect(document.querySelector(".relay-timeline-marker-dialog")).toBeNull();
+});
+
+test("captured marker overlays retain identity, revision, label and coordinates without merging ordinary ranges", () => {
+	const f = markerFixture(), marks = document.createElement("div"), open = jest.fn(), rect = { left: 0, right: 500, top: 0, bottom: 400 } as DOMRect;
+	const marker = f.anchor; if (marker.target.type !== "timeline_marker") throw new Error("fixture");
+	const other = { ...marker, target: { ...marker.target, marker_id: id(61) } }, edited = { ...marker, target: { ...marker.target, marker_revision: 2, content: { ...marker.target.content, label: "Later launch" } } };
+	const ordinary = { ...marker, target: { type: "timeline_range", axis_definition_id: marker.target.axis_definition_id, axis_definition_revision: 1, axis: marker.target.axis, range: calendar } };
+	const threads = [marker, marker, other, edited, ordinary].map((anchor, i) => ({ id: id(70 + i), anchor }) as AnchoredThread);
+	const options = { context: f.context, proof: f.proof, threads, lanes: new Map(), root: rect, viewport: rect, marks, limit: 128, open };
+	expect(renderTimelineDiscussionMarkers(options)).toBe(4);
+	expect([...marks.querySelectorAll("button")].map(button => button.textContent)).toEqual(["2", "1", "1", "1"]);
+	expect(marks.querySelector("button")!.getAttribute("aria-label")).toContain("Captured marker: Launch");
+	expect(marks.querySelectorAll(".relay-timeline-captured-marker")).toHaveLength(3);
+	marks.querySelector("button")!.click(); expect(open.mock.calls[0][0]).toEqual(threads.slice(0, 2));
+	marks.replaceChildren(); renderTimelineDiscussionMarkers(options); expect(f.read).not.toHaveBeenCalled(); expect(f.readAxis).not.toHaveBeenCalled();
+	f.stale(); marks.querySelector("button")!.click(); expect(open).toHaveBeenCalledTimes(1);
 });

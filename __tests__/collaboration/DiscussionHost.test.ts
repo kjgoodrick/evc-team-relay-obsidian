@@ -18,6 +18,7 @@ import * as retainedSources from "../../src/collaboration/RetainedBaseGroupSourc
 import type { NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
 import type { InboxItem } from "../../src/collaboration/InboxProtocol";
 import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
+import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol";
 import type { TimelineRange } from "../../src/collaboration/TimelineRange";
 import { pendingRangeLocation, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 
@@ -209,6 +210,39 @@ test("an initializing native document cannot be replaced by its older retained c
 			element: document.createElement("div"), ambiguous: false, current: () => true, members: () => [file] })).rejects.toThrow("synchronized source");
 		expect(discover).toHaveBeenCalledTimes(1); context.release();
 	} finally { discover.mockRestore(); s.close(); }
+});
+
+test.each(["success", "revoked", "changed-axis", "cancelled"])("native marker capture preserves its exact target and guards async completion: %s", async outcome => {
+	const s = await nativeBaseFixture(), saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+	try {
+		const context = (await s.context())!; context.binding.type = "sabidurian-sequence";
+		const axis = { version: 1 as const, renderer: "sabidurian-sequence" as const, start_property: { source: "note" as const, name: "order" }, end_property: null, time_zone: null };
+		const proof: TimelineAxisContext = { protocol_version: 1, entry_id: id(3), definition_id: id(6), generation: id(7), view_id: id(4), registry_revision: 1,
+			axis: { id: id(40), kind: "axis", revision: 1, fingerprint: "a".repeat(64), axis } };
+		const native = { axis, kinds: ["ordinal"], current: () => true }; Object.assign(s.surface, { rangeContext: () => native });
+		const content = { kind: "point", label: "Exact launch", color: "#123abc", range: { version: 1, kind: "ordinal", start: "9.00000001", end: "9.00000001", start_inclusive: true, end_inclusive: true, unit: "property-value" } };
+		const catalog = parseTimelineMarkerCatalog({ protocol_version: 1, entry_id: id(3), definition_id: id(6), generation: id(7), view_id: id(4), registry_revision: 1,
+			catalog_revision: 1, markers: [{ id: id(50), revision: 1, active: true, content,
+				placement: { view_id: id(4), active: true, axis_definition_id: id(40), axis_definition_revision: 1, axis },
+				target: { type: "timeline_marker", marker_id: id(50), marker_revision: 1, axis_definition_id: id(40), axis_definition_revision: 1, axis, content } }] }, id(3), id(4));
+		const anchor = timelineMarkerAnchor(catalog, catalog.markers[0]); let finish!: (value: BaseAnchor) => void, alive = true;
+		const capture = jest.fn(() => new Promise<BaseAnchor>(resolve => { finish = resolve; }));
+		Object.assign(s.session, { captureTimelineMarker: capture, readTimelineAxis: jest.fn().mockResolvedValue(proof) });
+		const pending = s.host.commentTimelineMarker(context, catalog, id(50), () => alive);
+		if (outcome === "revoked") s.readOnly();
+		if (outcome === "cancelled") alive = false;
+		if (outcome === "changed-axis") native.axis = { ...axis, start_property: { source: "note", name: "other" } };
+		finish(anchor);
+		if (outcome === "changed-axis") await expect(pending).rejects.toThrow("axis");
+		else expect(await pending).toBe(outcome === "success");
+		expect(capture).toHaveBeenCalledWith(s.scope, catalog, id(50));
+		if (outcome === "success") {
+			expect(saved).toHaveBeenCalledWith({ file: s.file, session: s.session, entryId: s.scope, anchor });
+			expect(await s.host.verifyBaseTarget(context, anchor)).toBe(true); proof.axis.revision = 2;
+			expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false);
+		} else { expect(saved).not.toHaveBeenCalled(); expect(s.savedPreference).not.toHaveBeenCalled(); }
+		context.release();
+	} finally { s.close(); }
 });
 
 test("native Bases discovery does not pin the sidebar; explicit capture pins and saves the exact cell", async () => {

@@ -10,9 +10,9 @@ import type { BaseAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 import { TimelineBridgeClient } from "../bases/TimelineBridgeClient";
 import type { NativeBasesIntegrations } from "../bases/NativeBasesSurface";
-import { rangeLane, rangeLaneHandle, rangeMatchesAxis, readNativeTimelineAxis } from "./NativeTimelineRanges";
+import { rangeLane, rangeLaneHandle, timelineTargetMatchesAxis, readNativeTimelineAxis } from "./NativeTimelineRanges";
 import type { TimelineAxisContext } from "./TimelineRangeProtocol";
-import { renderTimelineRangeMarkers } from "./TimelineRangeMarkers";
+import { renderTimelineDiscussionMarkers } from "./TimelineRangeMarkers";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -86,14 +86,14 @@ export class BaseComments extends Component {
 		if (!context || context.session !== session || context.baseEntryId !== scope.entryId || !context.current() ||
 			context.binding.snapshot.definition_id !== placement.definition_id || context.binding.snapshot.generation !== placement.generation) return false;
 		if (!context || context.entryId !== entryId || context.session !== session || !context.current()) return false;
-		const rangeLocation = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor.target.type === "timeline_range" ? anchor : undefined;
+		const rangeLocation = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor.target.type === "timeline_range" || anchor.target.type === "timeline_marker" ? anchor : undefined;
 		if (rangeLocation) {
 			try {
 				if (!await this.host.verifyBaseTarget(context, rangeLocation)) throw new Error("Timeline axis changed");
 				if (interrupted() || !navigating()) return true;
 				const result = await pane.revealRange(context, anchor, navigating);
 				if (result !== "revealed") new Notice(result === "busy" ? "Save or discard the task inspector changes before navigating to this discussion." :
-					"This range or lane is outside the current rendered view. Its original target and discussion are retained.");
+					"This captured position or lane is unavailable in the current view. Its original target and discussion are retained.");
 			} catch { new Notice("The timeline axis or your access changed. The original range and discussion are retained."); }
 			return true;
 		}
@@ -226,13 +226,13 @@ export class BaseCommentPane {
 				const groupTargets = new Map<string, NativeBaseGroupTarget>(), groups = new Map<string, Promise<NativeBaseGroupTarget | undefined>>();
 				let rangeAxis: TimelineAxisContext | undefined;
 				const rangeLanes = new Map<string, NativeBaseGroupTarget>();
-				if (threads.some(thread => thread.anchor?.type === "base" && thread.anchor.target.type === "timeline_range")) {
+				if (threads.some(thread => thread.anchor?.type === "base" && (thread.anchor.target.type === "timeline_range" || thread.anchor.target.type === "timeline_marker"))) {
 					try { rangeAxis = await readNativeTimelineAxis(context); } catch { /* Retain discussions without projecting a guessed axis. */ }
 				}
 				for (let offset = 0; offset < threads.length; offset += 8) {
 					await Promise.all(threads.slice(offset, offset + 8).map(async thread => {
 						if (thread.anchor?.type === "base" && thread.anchor.target.type === "timeline_range") {
-							if (rangeAxis && rangeMatchesAxis(context, thread.anchor, rangeAxis) && thread.anchor.target.lane) {
+							if (rangeAxis && timelineTargetMatchesAxis(context, thread.anchor, rangeAxis) && thread.anchor.target.lane) {
 								const lane = await rangeLane(context, thread.anchor); if (lane) rangeLanes.set(thread.id, lane);
 							}
 							return;
@@ -275,7 +275,8 @@ export class BaseCommentPane {
 		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
 		const commentRecord = !!item && context.canComment(item);
 		const rangeAvailable = !!context.surface.rangeContext?.()?.current() && context.session.canAnchorBase("timeline_range") && context.session.permission(context.entryId)?.comment === true;
-		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup, rangeAvailable]);
+		const markerAvailable = !!context.surface.rangeContext?.()?.current() && context.session.canAnchorBase("timeline_marker") && context.session.permission(context.entryId)?.read === true;
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target)), this.annotating, !!context.surface.annotationSupported, this.unavailableGroup, rangeAvailable, markerAvailable]);
 		// Preserve live buttons through scroll, polling and unrelated thread updates.
 		// A new handle/context must still replace callbacks, even for the same label.
 		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
@@ -284,6 +285,7 @@ export class BaseCommentPane {
 		this.toolbar.replaceChildren();
 		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
 		if (rangeAvailable) this.button(this.toolbar, "Comment on range", () => { this.cancelAnnotation(); if (context.current()) this.host.chooseTimelineRange(context); });
+		if (markerAvailable) this.button(this.toolbar, "Shared markers", () => { this.cancelAnnotation(); if (context.current()) this.host.chooseTimelineMarker(context); });
 		if (context.surface.annotationSupported && view && context.canComment(view.target)) {
 			this.button(this.toolbar, this.annotating ? "Cancel target selection" : "Select timeline target", () => this.toggleAnnotation());
 			if (this.annotating) { const hint = this.toolbar.ownerDocument.createElement("span"); hint.textContent = "Tap or click a task, property badge, or lane header. Touch drag pans; Escape cancels."; hint.setAttribute("role", "status"); this.toolbar.append(hint); }
@@ -343,7 +345,7 @@ export class BaseCommentPane {
 		const markers = new Map<string, Marker>();
 		for (const thread of this.threads) {
 			if (thread.anchor?.type !== "base") continue;
-			if (thread.anchor.target.type === "timeline_range") continue;
+			if (thread.anchor.target.type === "timeline_range" || thread.anchor.target.type === "timeline_marker") continue;
 			if (thread.anchor.target.type === "group") {
 				const target = this.groupTargets.get(thread.id); if (!target) continue;
 				const key = nativeGroupTargetKey(target), handle = byKey.get(key); if (!handle) continue;
@@ -368,7 +370,7 @@ export class BaseCommentPane {
 				existing.marker.hiddenProperty ||= marker.hiddenProperty;
 			} else presentations.set(element, { key, marker });
 		}
-		let count = renderTimelineRangeMarkers({ context, threads: this.threads, proof: this.rangeAxis, lanes: this.rangeLanes, root, viewport, marks: this.marks, limit: 128,
+		let count = renderTimelineDiscussionMarkers({ context, threads: this.threads, proof: this.rangeAxis, lanes: this.rangeLanes, root, viewport, marks: this.marks, limit: 128,
 			open: (threads, button, current) => {
 				if (threads.length === 1) { void this.host.openBaseThread(context, threads[0].id); return; }
 				const menu = new Menu();
@@ -409,12 +411,12 @@ export class BaseCommentPane {
 	async revealRange(context: BaseCommentContext, anchor: BaseAnchor | PendingBaseGroupAnchor, navigating = this.navigationGuard()) {
 		const current = () => navigating() && this.context === context && context.current();
 		const location = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor;
-		if (!current() || location?.target.type !== "timeline_range") return "unavailable";
-		const needsLane = anchor.type === "base_group_pending" || !!location.target.lane;
+		if (!current() || (location?.target.type !== "timeline_range" && location?.target.type !== "timeline_marker")) return "unavailable";
+		const needsLane = anchor.type === "base_group_pending" || location.target.type === "timeline_range" && !!location.target.lane;
 		const lane = needsLane ? await rangeLane(context, anchor) : undefined;
 		const handle = lane ? rangeLaneHandle(context, lane) : undefined;
 		if (!current() || needsLane && !handle) return "hidden";
-		return context.surface.revealRange(location.target.range, location.target.axis, current, handle?.element);
+		return context.surface.revealRange(location.target.type === "timeline_marker" ? location.target.content.range : location.target.range, location.target.axis, current, handle?.element);
 	}
 	close(): void {
 		if (this.closed) return; this.closed = true; this.action++;

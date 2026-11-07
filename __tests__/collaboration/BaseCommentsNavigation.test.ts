@@ -85,3 +85,16 @@ test.each((["never", "verify"] as const).flatMap(stage => [false, true].map(pend
 		if (stage === "never") expect(revealRange).toHaveBeenCalledWith(expect.anything(), selected, expect.any(Function));
 	} finally { f.close(); }
 });
+
+test.each(["before", "open", "reveal", "activate", "ready", "verify", "never"] as const)("captured marker navigation retains its original target and stops at dirty inspector stage %s", async stage => {
+	const f = fixture(stage), revealRange = jest.fn().mockResolvedValue("revealed");
+	try {
+		f.anchor.target = { type: "timeline_marker", marker_id: id(20), marker_revision: 1, axis_definition_id: id(21), axis_definition_revision: 1,
+			axis: { version: 1, renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null },
+			content: { kind: "point", label: "Original launch", color: "#abcdef", range: { version: 1, kind: "ordinal", start: "99.000001", end: "99.000001", unit: "property-value", start_inclusive: true, end_inclusive: true } } };
+		Object.assign(f.pane, { revealRange });
+		expect(await f.comments.reveal(f.session, f.scope, f.anchor)).toBe(true);
+		expect(f.pane.reveal).not.toHaveBeenCalled(); expect(revealRange).toHaveBeenCalledTimes(stage === "never" ? 1 : 0);
+		if (stage === "never") expect(revealRange).toHaveBeenCalledWith(expect.anything(), f.anchor, expect.any(Function));
+	} finally { f.close(); }
+});
