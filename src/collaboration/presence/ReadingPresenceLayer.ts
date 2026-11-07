@@ -10,7 +10,7 @@ export type ReadingPresenceSection = { root: HTMLElement; from: number; to: numb
 type HighlightHost = { Highlight?: new (...ranges: Range[]) => unknown; CSS?: { highlights?: { set(name: string, value: unknown): void; delete(name: string): void } } };
 type MappedPeer = { signature: string; ranges: Range[]; caret?: Range };
 let nextLayer = 0;
-const owned = ".relay-reading-presence,.relay-reading-comment-controls,.relay-reading-comment-overlay,.relay-rendered-images";
+const owned = ".relay-image-presence,.relay-reading-presence,.relay-reading-comment-controls,.relay-reading-comment-overlay,.relay-rendered-images";
 
 /** Display-only observer of an already bound/authorized document. It never
  * publishes awareness, loads a note or changes native selection/Markdown. */

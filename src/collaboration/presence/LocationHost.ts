@@ -10,6 +10,12 @@ import { LocationChannel, type LocationChannelStatus, type LocationIdentity } fr
 import { locationId, type LocationEvent, type NoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 import type { ActivePresencePeer, SurfacePresencePeer } from "./PresencePeers";
 import type { ImagePresenceState, ImageStatesEvent } from "./LocationProtocol";
+import type * as Y from "yjs";
+import { EmbeddedImageSurface } from "./EmbeddedImageSurface";
+import type { EmbeddedImagesEvent } from "./EmbeddedImageProtocol";
+import type { ImageOccurrence } from "../anchors/images";
+import type { RenderedImageTarget } from "../anchors/renderedImages";
+import type { PresencePeer } from "./PresencePeers";
 
 type Context = { key: string; serverId: string; identity: LocationIdentity; file: TFile; folder: VaultShare; id: string; kind: "note" | "image"; location?: NoteLocation };
 type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void; interacted?: () => void; positions?: () => void };
@@ -23,6 +29,11 @@ export class LocationHost extends Component {
 	private image?: ImagePresenceSurface;
 	private roster?: SurfaceRosterEvent;
 	private imageStates?: ImageStatesEvent;
+	private embedded?: EmbeddedImageSurface;
+	private embeds?: EmbeddedImagesEvent;
+	private embedMode?: string;
+	private embedDenied = false;
+	private notePeers: readonly PresencePeer[] = [];
 	private visible = true;
 	private assets: ImageAssets;
 	private folders = new Map<VaultShare, () => void>();
@@ -42,6 +53,7 @@ export class LocationHost extends Component {
 	get currentLocation(): SurfaceLocation | undefined { return this.context?.kind === "image" ? this.image?.location : this.context?.location; }
 	get ready(): boolean { return this.channel?.ready === true; }
 	get supportsImages(): boolean { return this.channel?.supportsImageContext === true && this.channel.supportsSurfaceRoster; }
+	get embeddedUnavailable(): boolean { return this.embedDenied || this.embedded?.unavailable === true; }
 	get imageActive(): boolean { return this.context?.kind === "image"; }
 	get imageState(): ImagePresenceSurface["state"] { return this.image?.state ?? "waiting"; }
 	get imagePeers(): SurfacePresencePeer[] {
@@ -53,7 +65,7 @@ export class LocationHost extends Component {
 			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: "image" as const, location: scope, imageState: positions?.get(JSON.stringify(peer.target)) }))
 			.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 	}
-	retry(): void { this.channel?.retry(); this.image?.retry(); }
+	retry(): void { this.embedDenied = false; this.channel?.retry(); this.image?.retry(); this.embedded?.retry(); }
 	unfollow(): void { this.channel?.unfollow(); }
 	follow(peer: ActivePresencePeer): string | undefined {
 		const location = this.currentLocation;
@@ -62,6 +74,35 @@ export class LocationHost extends Component {
 		catch { return; }
 	}
 	revealImage(current: () => boolean, state?: ImagePresenceState, follow = false): boolean { return this.image?.reveal(current, state, follow) === true; }
+	embedPosition(peer: PresencePeer, follow = false): ReturnType<EmbeddedImageSurface["position"]> { return this.embedded?.position(peer, follow); }
+	revealEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): boolean { return this.embedded?.reveal(peer, follow, current) === true; }
+	async materializeEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): Promise<boolean> { return await this.embedded?.revealAfterLayout(peer, follow, current) === true; }
+	refreshEmbeds(): void { this.embedded?.refresh(); }
+	setNotePeers(peers: readonly PresencePeer[]): void {
+		this.notePeers = peers;
+		const scope = this.currentLocation, event = this.embeds;
+		this.embedded?.setPeers(scope?.kind === "note" && event?.status === "available" &&
+			event.scope?.share_id === scope.share_id && event.scope.entry_id === scope.entry_id ? event.peers : [], peers);
+	}
+	setNoteSurface(view: MarkdownView | undefined, text: Y.Text | undefined, targets: (images: ImageOccurrence[]) => RenderedImageTarget[], permitted: () => boolean): void {
+		const context = this.context, mode = view?.getMode();
+		if (this.embedded && (this.embedded.view !== view || this.embedded.text !== text || this.embedMode !== mode || !permitted() || !this.channel?.supportsEmbeddedImages)) {
+			this.embedded.close(); this.embedded = undefined;
+		}
+		if (!context || context.kind !== "note" || !view?.file || !text || !permitted() || this.embedDenied || !this.channel?.supportsEmbeddedImages) {
+			if (context?.kind === "note") this.channel?.watchEmbeds(null);
+			return;
+		}
+		if (!this.embedded) {
+			this.embedMode = mode;
+			this.embedded = new EmbeddedImageSurface(view, text, this.assets, {
+				current: () => !this.closed && this.context?.key === context.key && this.context.id === context.id && this.view === view && view.getMode() === mode && permitted() && this.channel?.supportsEmbeddedImages === true,
+				publishing: () => this.visible, targets, read: entryId => this.channel!.readImageLocation(context.folder.entityGuid, entryId),
+				publish: embed => this.channel?.publishEmbeddedImage(this.visible ? embed : null), changed: () => { this.callbacks.positions?.(); this.callbacks.changed(); },
+			});
+		}
+		this.channel.watchEmbeds(context.location!); this.setNotePeers(this.notePeers); this.embedded.refresh();
+	}
 	private watchFolders(): void {
 		const wanted = new Set(this.shares.toArray());
 		for (const [folder, stop] of this.folders) if (!wanted.has(folder)) { stop(); this.folders.delete(folder); }
@@ -101,6 +142,7 @@ export class LocationHost extends Component {
 		const context = foreground ? this.identify(view) : undefined;
 		if (this.context?.key !== context?.key || this.view !== view || this.context?.file !== context?.file || this.context?.id !== context?.id) {
 			this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
+			this.embedded?.close(); this.embedded = undefined; this.embeds = undefined; this.notePeers = []; this.embedDenied = false;
 		}
 		if (this.context?.key !== context?.key) {
 			const previous = this.channel; this.channel = undefined; this.context = undefined; previous?.stop();
@@ -129,6 +171,14 @@ export class LocationHost extends Component {
 						if (event.scope && event.status === "unavailable" && JSON.stringify(event.scope) === JSON.stringify(this.currentLocation)) { this.image?.deny(); this.callbacks.stopped(); this.callbacks.changed(); }
 						else this.callbacks.positions?.();
 					},
+					imageEmbeds: event => {
+						if (!current()) return;
+						this.embeds = event; this.setNotePeers(this.notePeers);
+						if (event.scope && event.status === "unavailable" && event.scope.entry_id === this.context?.id && event.scope.share_id === this.context.folder.entityGuid) {
+							this.embedDenied = true; this.embedded?.close(); this.embedded = undefined; this.callbacks.stopped(); this.callbacks.changed();
+						}
+						this.callbacks.positions?.();
+					},
 				});
 			} catch { return; }
 		}
@@ -145,7 +195,8 @@ export class LocationHost extends Component {
 		}
 		const location = this.currentLocation;
 		this.channel.start(context.folder.entityGuid, visible ? location ?? null : null);
-		this.channel.watch(location?.kind === "image" ? location : null);
+		if (location?.kind === "image") this.channel.watch(location);
+		else if (!this.embedded) this.channel.watch(null);
 		this.image?.refreshMovement();
 		this.image?.setPeers(this.imagePeers);
 	}
@@ -166,6 +217,7 @@ export class LocationHost extends Component {
 	}
 	onunload(): void {
 		this.closed = true; this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
+		this.embedded?.close(); this.embedded = undefined; this.embeds = undefined; this.notePeers = [];
 		this.channel?.stop(); this.channel = undefined; this.context = undefined; this.view = undefined;
 		for (const stop of this.folders.values()) stop(); this.folders.clear();
 	}

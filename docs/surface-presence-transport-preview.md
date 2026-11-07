@@ -5,8 +5,9 @@ surface-roster protocol. The foreground `LocationHost` now opts in and connects
 directly opened managed image files to the existing participant controls and
 Jump/Follow. Notes and images reuse one socket per foreground host/account.
 Direct-image pointer overlays and position-aware Jump/Follow are also connected.
-This has automated host evidence; native image acceptance, embedded-image presence
-and Bases/timeline bindings remain unfinished.
+Embedded-image capture, overlays and Jump/Follow are connected in the foreground
+note as well. These have automated host evidence; native image acceptance,
+visible split-pane image observation and Bases/timeline bindings remain unfinished.
 
 ## Transport contract
 
@@ -111,7 +112,7 @@ text nodes and continue to enforce local surface/account ownership.
 
 ## Validation
 
-The full plugin suite passes **2,608 tests in 214 suites**; 17 opt-in tests in 16
+The full plugin suite passes **2,623 tests in 215 suites**; 17 opt-in tests in 16
 suites are skipped in that default run. Preview build/main types and changed
 source/test lint pass. The build retains 15 existing Svelte warnings. The frozen
 test-type gate passes with 206 known errors/45 signatures, below its 207/46
@@ -185,9 +186,50 @@ without guessing another image. Asset and renderer verification remain separate
 requirements. `NotePresenceSurfaces.imageTargets` exposes the already verified
 CodeMirror/Reading mapping and rejects stale or ambiguous sections.
 
-The native `LocationHost` does **not yet opt into this stream**. Pointer capture,
-local image verification, overlay rendering, identity joining, and image-aware
-Jump/Follow inside a note remain the next integration work. No new native or
-mobile embedded-image behavior is claimed by the transport tests. The real HTTP/
-WebSocket fixture covers transport across editor/Reading descriptors, transitions
-back to directly opened images, explicit clearing and asset-denied observation.
+The foreground `LocationHost` now opts into this stream when the server supports
+it and the active note has a current, authorized shared-text binding. The real
+HTTP/WebSocket fixture covers transport across editor/Reading descriptors,
+transitions back to directly opened images, explicit clearing and asset-denied
+observation. Native host behavior is covered separately by the tests below.
+
+
+## Embedded-image host and navigation
+
+`EmbeddedImageSurface` joins movement with authenticated note awareness by the
+complete user/public-session/instance tuple. It resolves the exact source
+occurrence, checks the locally authorized asset against fresh image-context
+metadata, and verifies existing rendered bytes through `ImageAssets`. Remote
+geometry also requires matching intrinsic dimensions. External images reuse the
+native renderer's exact URL and advertise only its hash with unknown version
+evidence. No second image decode, attachment upload, discussion permission or
+extra socket is needed.
+
+Only a hovered/touched image or an image with remote participants acquires an
+overlay. Metadata, source hashes and file digests are bounded/reused. Geometry
+updates reuse existing image mappings; they do not reread file bytes or rebuild
+the participant list. Reading/comment/presence UI mutations are excluded from
+source observation, preventing one overlay from repeatedly invalidating another.
+Multiple image overlays share ownership of their positioning root.
+
+Pointer motion is normalized through the existing crop/scale/clipping adapter.
+Departure, touch release, scroll, source/render changes, privacy changes and
+loss of the current source binding clear local image publication. Hidden users
+can still observe. Connection loss, backgrounding, account/context changes and
+unload clear overlays and fence pending verification. Failed image/metadata
+checks expose the existing Retry control and do not poll on ordinary movement.
+Retry refreshes observation without reviving an old pointer or restarting Follow.
+
+Jump uses the image pointer; Follow prefers its viewport when supplied. Both
+preserve local selection, zoom and editing/Reading mode. Offscreen navigation
+first reveals the exact source occurrence, then waits briefly for the native
+image to materialize before applying coordinates. Source mode retains exact
+Markdown-occurrence navigation. Cancelled navigation/unload releases these waits.
+
+Automated evidence includes a real CodeMirror replacement widget (the Live
+Preview mapping), Reading postprocessor sections, two repeated embeds, managed
+and external images, Source-mode fallback, image-aware Jump/Follow, touch-release
+clearing, hidden observation, access denial, explicit retry and reconnect without
+replay. The host/geometry tests simulate native layout; they are **not** an
+Obsidian desktop/mobile acceptance run. Native pointer/touch/crop/zoom behavior,
+visible split panes, full syntax/format/large-file support and resource/latency
+measurements remain required. The latest computer-use check found the Mac locked.

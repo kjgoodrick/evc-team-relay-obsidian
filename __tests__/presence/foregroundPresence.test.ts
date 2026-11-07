@@ -1,6 +1,6 @@
 /** @jest-environment jsdom */
 /* eslint-disable @typescript-eslint/no-require-imports -- Jest's hoisted host mocks require their dependencies inside the factory. */
-import { FileView, MarkdownView, type Plugin, type TFile, type WorkspaceLeaf } from "obsidian";
+import { FileView, MarkdownView, type Plugin, type TFile, type WorkspaceLeaf, type MarkdownPostProcessorContext } from "obsidian";
 import { createHash, webcrypto } from "node:crypto";
 import type { AuthSession } from "../../src/AuthSession";
 import { Account } from "../../src/Account";
@@ -13,12 +13,14 @@ import { PresenceController } from "../../src/collaboration/presence/PresenceCon
 import type { PresenceSettings } from "../../src/collaboration/presence/PresenceSettings";
 import { bindReadingComments } from "../../src/collaboration/ReadingTextBinding";
 import * as Y from "yjs";
-import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorState, StateEffect, type Extension } from "@codemirror/state";
+import { EditorView, Decoration, WidgetType } from "@codemirror/view";
 import { editorInfoField } from "obsidian";
 import { bindCommentEditor } from "../../src/collaboration/EditorTextBinding";
 import { applyAwarenessUpdate, encodeAwarenessUpdate, Awareness } from "y-protocols/awareness";
 import { platformFetch } from "../../src/platformFetch";
+import { EmbeddedImageAnchors } from "../../src/collaboration/presence/EmbeddedImageAnchors";
+import type { EmbeddedImage } from "../../src/collaboration/presence/EmbeddedImageProtocol";
 import type { RelayOnPremSettings } from "../../src/RelayOnPremConfig";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
@@ -35,7 +37,7 @@ jest.mock("obsidian", () => {
 		register(stop: () => void) { this.stops.push(stop); }
 		registerEvent(stop: () => void) { this.register(stop); }
 		addChild(child: { onload(): void; unload(): void }) { child.onload(); this.register(() => child.unload()); return child; }
-		unload() { (this as unknown as { onunload(): void }).onunload(); this.stops.splice(0).forEach(stop => stop()); }
+		unload() { (this as unknown as { onunload?: () => void }).onunload?.(); this.stops.splice(0).forEach(stop => stop()); }
 	}
 	class FileView {}
 	return { ...jest.requireActual("obsidian"), Component,
@@ -116,7 +118,7 @@ function fixture(crossNote = false, withImage = false) {
 	const vault = { on: workspace.on, getFileByPath: (path: string) => deleted ? null : withImage && path === imageFile.path ? imageFile : notes.find(note => note.view.file?.path === path)?.view.file,
 		getResourcePath: () => "app://local/Picture.png", readBinary: jest.fn(async () => bytes.buffer) };
 	Object.assign(imageView, { app: { vault } });
-	const extensions: Extension[] = [];
+	const extensions: Extension[] = [], processors: Parameters<Plugin["registerMarkdownPostProcessor"]>[0][] = [];
 	const select = (view: FileView | null) => { active = view; events.get("active-leaf-change")?.forEach(fn => fn()); };
 	const openFile = jest.fn(async (file: TFile) => {
 		const view = file === imageFile ? imageView : notes.find(note => note.view.file === file)!.view;
@@ -126,7 +128,7 @@ function fixture(crossNote = false, withImage = false) {
 	for (const note of notes) note.view.leaf = { view: note.view, openFile, getViewState: () => ({ type: "markdown", state: { mode: note.view.getMode(), source: true } }) } as unknown as WorkspaceLeaf;
 	imageView.leaf = { view: imageView, openFile, getViewState: () => ({ type: "image", state: {} }) } as unknown as WorkspaceLeaf;
 	const serverSettings = { readValue: () => ({ enabled: true, servers: [{ id: "server", controlPlaneUrl: "https://relay.example" }] }), subscribe: () => () => {} };
-	const controller = new PresenceController({ app: { workspace, vault }, addCommand: jest.fn(), registerMarkdownPostProcessor: jest.fn(), registerEditorExtension: (extension: Extension) => extensions.push(extension) } as unknown as Plugin,
+	const controller = new PresenceController({ app: { workspace, vault, metadataCache: { getFirstLinkpathDest: () => imageFile } }, addCommand: jest.fn(), registerMarkdownPostProcessor: (processor: Parameters<Plugin["registerMarkdownPostProcessor"]>[0]) => processors.push(processor), registerEditorExtension: (extension: Extension) => extensions.push(extension) } as unknown as Plugin,
 		registry as unknown as ViewBindingRegistry, auth, settings as unknown as SettingsScope<PresenceSettings>, crossNote ? serverSettings as unknown as SettingsScope<RelayOnPremSettings> : undefined);
 	controller.onload();
 	const editors = notes.map(note => {
@@ -135,7 +137,7 @@ function fixture(crossNote = false, withImage = false) {
 		const stop = bindCommentEditor(editor, () => ({ documentId: note.doc.entityGuid, text: note.text }));
 		return { editor, stop };
 	});
-	return { controller, notes, editors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select,
+	return { controller, notes, editors, processors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select,
 		image: { file: imageFile, view: imageView, element: imageElement, record: imageRecord, location: imageLocation }, vault,
 		logout: () => { account = undefined; authListeners.forEach(fn => fn()); },
 		fileEvent: (event: "rename" | "delete") => { if (event === "delete") deleted = true; events.get(event)?.forEach(fn => fn()); },
@@ -288,7 +290,7 @@ test("status and explicit retry reflect the active provider; unload removes stat
 	} finally { f.close(); }
 });
 
-function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>) {
+function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>, embeds = false) {
 	const sockets: ReturnType<typeof makeSocket>[] = [];
 	function makeSocket() {
 		const socket = { readyState: 0, bufferedAmount: 0, onopen: null as WebSocket["onopen"], onmessage: null as WebSocket["onmessage"],
@@ -313,7 +315,7 @@ function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<u
 		return socket;
 	}
 	jest.mocked(platformFetch).mockImplementation(async url => ({ status: 200, ok: true, text: async () => JSON.stringify(String(url).includes("/capabilities?") ?
-		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true } : {}) } } :
+		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true, presence_embedded_images_preview: embeds } : {}) } } :
 		String(url).includes("/image-location?") ? { protocol_version: 1, location: await imageContext?.() } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
 	const mock = jest.spyOn(window, "WebSocket").mockImplementation(url => {
 		expect(String(url)).toBe("wss://relay.example/v1/collaboration/events");
@@ -476,4 +478,113 @@ test("verified host publishes image geometry and renders peers while privacy wit
 		expect(f.image.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent).toBe("Peer");
 		f.logout(); expect(f.image.view.contentEl.querySelector(".relay-image-presence")).toBeNull(); expect(f.controller.peers).toEqual([]);
 	} finally { f.close(); network.close(); }
+});
+
+
+test("Reading embedded-image capture, identity overlays and Jump/Follow share the note socket", async () => {
+    const network = crossNetwork(true, () => f.image.location, true), f = fixture(true, true), first = f.notes[0];
+    const stops: (() => void)[] = [], anchors = new EmbeddedImageAnchors(first.text);
+    let remote: ReturnType<typeof remotePeer> | undefined;
+    const box = (element: HTMLElement, top = 0, width = 400, height = 250) => {
+        Object.defineProperties(element, { offsetWidth: { configurable: true, value: width }, offsetHeight: { configurable: true, value: height }, clientWidth: { configurable: true, value: width }, clientHeight: { configurable: true, value: height } });
+        element.getBoundingClientRect = () => ({ x: 0, y: top, left: 0, top, right: width, bottom: top + height, width, height, toJSON: () => ({}) });
+    };
+    try {
+        first.text.delete(0, first.text.length); first.text.insert(0, "![[Picture.png]]\n\n![[Picture.png]]");
+        first.mode("preview"); stops.push(bindReadingComments(first.view, () => ({ documentId: first.doc.entityGuid, text: first.text })));
+        box(first.view.contentEl, 0, 400, 600);
+        const images = [0, 300].map((top, index) => {
+            const section = first.view.contentEl.appendChild(document.createElement("div")); box(section, top);
+            const image = section.appendChild(document.createElement("img")); image.src = "app://local/Picture.png"; box(image, top);
+            Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
+            section.scrollIntoView = jest.fn(); image.scrollIntoView = jest.fn();
+            const context = { sourcePath: first.view.file!.path, getSectionInfo: () => ({ text: first.text.toString(), lineStart: index * 2, lineEnd: index * 2 }),
+                addChild: (child: { onload(): void; unload(): void }) => { child.onload(); stops.push(() => child.unload()); } } as unknown as MarkdownPostProcessorContext;
+            f.processors.forEach(processor => processor(section, context)); return image;
+        });
+        remote = remotePeer(f); f.controller.refresh();
+        await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+        await until(() => socket.frames.some(frame => frame.type === "watch_embeds"));
+        images[1].dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 425 }));
+        await until(() => socket.frames.some(frame => frame.type === "image_embed" && frame.embed));
+        const captured = socket.frames.filter(frame => frame.type === "image_embed" && frame.embed).at(-1)!.embed as EmbeddedImage;
+        expect(await anchors.resolve(captured)).toEqual(anchors.images[1]); expect(captured.state.pointer).toEqual({ x: 0.25, y: 0.5 });
+        const send = (embed: EmbeddedImage) => socket.message({ type: "image_embeds", subscription_id: socket.frames.filter(frame => frame.type === "watch_embeds").at(-1)!.subscription_id, status: "available", peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, embed }] });
+        send(captured); await until(() => f.controller.peers.length === 1);
+        first.view.contentEl.querySelectorAll<HTMLElement>(".relay-image-presence").forEach(layer => box(layer, 0, 400, 600));
+        send({ ...captured, state: { ...captured.state, pointer: { x: 0.5, y: 0.5 } } });
+        await until(() => first.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent === "Peer");
+        const marker = first.view.contentEl.querySelector<HTMLElement>(".relay-image-presence-pointer")!;
+        expect(marker.style.top).toBe("425px");
+        const original = first.text.toString(), selection = f.editors[0].editor.state.selection.toJSON();
+        expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+        expect(socket.frames.filter(frame => frame.type === "follow")).toHaveLength(1);
+        expect(f.controller.following?.name).toBe("Peer"); expect(first.text.toString()).toBe(original);
+        expect(f.editors[0].editor.state.selection.toJSON()).toEqual(selection);
+        const reads = f.vault.readBinary.mock.calls.length;
+        for (let x = 0; x < 10; x++) send({ ...captured, state: { pointer: { x: x / 10, y: 0.5 }, viewport: null } });
+        await settled(); expect(f.vault.readBinary).toHaveBeenCalledTimes(reads);
+        await f.controller.setVisible(false); expect(socket.frames.filter(frame => frame.type === "presence").at(-1)).toEqual({ type: "presence", location: null });
+        expect(first.view.contentEl.querySelector(".relay-image-presence-pointer")).not.toBeNull();
+        expect(network.sockets).toHaveLength(1);
+        // Source mode navigates to the exact Markdown occurrence without
+        // switching mode or replacing the user's selection.
+        const editor = f.editors[0].editor;
+        editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: first.text.toString() } });
+        first.mode("source"); f.controller.refresh(); send(captured); await settled();
+        const dispatch = jest.spyOn(editor, "dispatch"), sourceSelection = editor.state.selection.toJSON();
+        expect(await f.controller.navigate(f.controller.peers[0].key, false)).toBe(true);
+        expect(dispatch).toHaveBeenCalled(); expect(editor.state.selection.toJSON()).toEqual(sourceSelection);
+        expect(first.view.getMode()).toBe("source");
+        socket.message({ type: "image_embeds", subscription_id: socket.frames.filter(frame => frame.type === "watch_embeds").at(-1)!.subscription_id, status: "unavailable" });
+        expect(f.controller.canRetry).toBe(true); expect(f.controller.following).toBeUndefined();
+        const start = socket.frames.length;
+        f.controller.retry(); await until(() => socket.frames.slice(start).some(frame => frame.type === "watch_embeds"));
+        expect(network.sockets).toHaveLength(1); expect(socket.frames.slice(start).some(frame => frame.type === "image_embed" || frame.type === "follow")).toBe(false);
+        socket.readyState = 3; socket.onclose?.call(socket as unknown as WebSocket, { code: 1006 } as CloseEvent);
+        await until(() => network.sockets.length === 2); const next = network.sockets[1]; next.ready();
+        await until(() => next.frames.some(frame => frame.type === "watch_embeds"));
+        expect(next.frames.some(frame => frame.type === "image_embed" || frame.type === "follow")).toBe(false);
+        f.logout(); expect(first.view.contentEl.querySelector(".relay-image-presence")).toBeNull(); expect(f.controller.following).toBeUndefined();
+    } finally { stops.forEach(stop => stop()); anchors.close(); remote?.close(); f.close(); network.close(); }
+});
+
+
+test("Live Preview widget maps image presence to the exact bound CodeMirror occurrence", async () => {
+    const previousRects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects"), previousBounds = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+    // jsdom has no text layout; CodeMirror still needs its measurement APIs
+    // while mounting the real widget. Image geometry is supplied separately.
+    Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [] });
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 0, 8, 14) });
+    const network = crossNetwork(true, () => f.image.location, true), f = fixture(true, true), note = f.notes[0], editor = f.editors[0].editor;
+    const anchors = new EmbeddedImageAnchors(note.text);
+    const box = (element: HTMLElement) => {
+        Object.defineProperties(element, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: 250 }, clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: 250 } });
+        element.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 400, bottom: 250, width: 400, height: 250, toJSON: () => ({}) });
+    };
+    try {
+        note.text.delete(0, note.text.length); note.text.insert(0, "Prefix\n\n![[Picture.png]]\n\nEnd");
+        editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: note.text.toString() } });
+        const image = document.createElement("img"); image.src = "app://local/Picture.png";
+        Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
+        const occurrence = anchors.images[0];
+        editor.dispatch({ effects: StateEffect.appendConfig.of(EditorView.decorations.of(Decoration.set([
+            Decoration.replace({ widget: new class extends WidgetType { toDOM() { return image; } }() }).range(occurrence.from, occurrence.to),
+        ]))) });
+        for (let element: HTMLElement | null = image; element && note.view.contentEl.contains(element); element = element.parentElement) box(element);
+        f.controller.refresh(); await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+        await until(() => socket.frames.some(frame => frame.type === "watch_embeds"));
+        image.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 300, clientY: 125 }));
+        await until(() => socket.frames.some(frame => frame.type === "image_embed" && frame.embed));
+        const embed = socket.frames.filter(frame => frame.type === "image_embed" && frame.embed).at(-1)!.embed as EmbeddedImage;
+        expect(await anchors.resolve(embed)).toEqual(occurrence); expect(embed.state.pointer).toEqual({ x: 0.75, y: 0.5 });
+        expect(editor.state.doc.toString()).toBe(note.text.toString());
+        // A stale renderer binding cannot keep publishing the widget.
+        f.editors[0].stop(); f.controller.refresh(); image.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 125 }));
+        await settled(); expect(socket.frames.filter(frame => frame.type === "image_embed").at(-1)).toMatchObject({ embed: null });
+    } finally {
+        anchors.close(); f.close(); network.close();
+        if (previousRects) Object.defineProperty(Range.prototype, "getClientRects", previousRects); else Reflect.deleteProperty(Range.prototype, "getClientRects");
+        if (previousBounds) Object.defineProperty(Range.prototype, "getBoundingClientRect", previousBounds); else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+    }
 });

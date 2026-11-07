@@ -4,7 +4,9 @@ import { presenceColorForUser } from "../../presenceColor";
 import type { ImagePoint, ImagePresenceState } from "./LocationProtocol";
 import type { SurfacePresencePeer } from "./PresencePeers";
 
-type Options = { current: () => boolean; publishing: () => boolean; publish: (state: ImagePresenceState | null) => void };
+export type ImagePointerPeer = Pick<SurfacePresencePeer, "key" | "name" | "userId" | "imageState">;
+type Options = { current: () => boolean; publishing: () => boolean; publish: (state: ImagePresenceState | null) => void; externalPointer?: boolean };
+const rootOwners = new WeakMap<HTMLElement, number>();
 const rounded = (value: number) => Math.round(value * 10000) / 10000;
 const center = (state?: ImagePresenceState, follow = false): ImagePoint | undefined => {
 	const viewport = state?.viewport, point = state?.pointer;
@@ -16,7 +18,7 @@ const center = (state?: ImagePresenceState, follow = false): ImagePoint | undefi
 export class ImagePresenceMotion {
 	private win: Window;
 	private layer: HTMLDivElement;
-	private peers: readonly SurfacePresencePeer[] = [];
+	private peers: readonly ImagePointerPeer[] = [];
 	private markers = new Map<string, { element: HTMLDivElement; label: HTMLSpanElement }>();
 	private pointer?: { x: number; y: number };
 	private captureTimer?: number;
@@ -28,18 +30,20 @@ export class ImagePresenceMotion {
 	constructor(private root: HTMLElement, private image: HTMLImageElement, private options: Options) {
 		const doc = root.ownerDocument; this.win = doc.defaultView ?? window;
 		this.layer = doc.createElement("div"); this.layer.className = "relay-image-presence"; this.layer.setAttribute("aria-hidden", "true");
+		rootOwners.set(root, (rootOwners.get(root) ?? 0) + 1);
 		root.classList.add("relay-image-presence-root"); root.append(this.layer);
 		const listen = (target: EventTarget, name: string, listener: EventListener, capture = false) => {
 			target.addEventListener(name, listener, { capture, passive: true }); this.stops.push(() => target.removeEventListener(name, listener, capture));
 		};
 		const move = (event: Event) => {
 			const pointer = event as PointerEvent;
-			this.pointer = event.target === image ? { x: pointer.clientX, y: pointer.clientY } : undefined;
-			this.scheduleCapture();
+			this.point(event.target === image ? { x: pointer.clientX, y: pointer.clientY } : undefined);
 		};
-		const leave = () => { this.pointer = undefined; this.capture(); };
-		listen(root, "pointermove", move); listen(root, "pointerdown", move); listen(root, "pointerleave", leave);
-		listen(root, "pointercancel", leave); listen(root, "pointerup", event => { if ((event as PointerEvent).pointerType === "touch") leave(); });
+		const leave = () => { this.point(undefined); };
+		if (!options.externalPointer) {
+			listen(root, "pointermove", move); listen(root, "pointerdown", move); listen(root, "pointerleave", leave);
+			listen(root, "pointercancel", leave); listen(root, "pointerup", event => { if ((event as PointerEvent).pointerType === "touch") leave(); });
+		}
 		const layout = () => { this.pointer = undefined; this.scheduleCapture(); this.paint(); };
 		listen(doc, "scroll", layout, true); listen(this.win, "resize", layout);
 		if (typeof ResizeObserver !== "undefined") { const observer = new ResizeObserver(layout); observer.observe(root); observer.observe(image); this.stops.push(() => observer.disconnect()); }
@@ -52,7 +56,12 @@ export class ImagePresenceMotion {
 		const publishing = !this.closed && this.options.publishing();
 		if (publishing !== this.publishing) { this.publishing = publishing; this.pointer = undefined; this.capture(); this.paint(); }
 	}
-	setPeers(peers: readonly SurfacePresencePeer[]): void {
+	point(point: { x: number; y: number } | undefined): void {
+		if (this.closed) return;
+		this.pointer = point;
+		if (point) this.scheduleCapture(); else this.capture();
+	}
+	setPeers(peers: readonly ImagePointerPeer[]): void {
 		const signature = JSON.stringify(peers.map(peer => [peer.key, peer.name, peer.imageState]));
 		if (signature === this.signature) return;
 		this.signature = signature; this.peers = peers; this.paint();
@@ -117,10 +126,13 @@ export class ImagePresenceMotion {
 		return current() && this.options.current() && !!fit && !!imagePoint(fit.frame, fit.content.left + point.x * fit.content.width, fit.content.top + point.y * fit.content.height);
 	}
 	close(): void {
+		if (this.closed) return;
 		this.closed = true; this.stops.splice(0).forEach(stop => stop());
 		if (this.captureTimer !== undefined) this.win.clearTimeout(this.captureTimer);
 		if (this.frame !== undefined) this.win.cancelAnimationFrame(this.frame);
-		this.layer.remove(); this.root.classList.remove("relay-image-presence-root"); this.markers.clear(); this.peers = [];
+		this.layer.remove(); const owners = (rootOwners.get(this.root) ?? 1) - 1;
+		if (owners) rootOwners.set(this.root, owners); else { rootOwners.delete(this.root); this.root.classList.remove("relay-image-presence-root"); }
+		this.markers.clear(); this.peers = [];
 		this.options.publish(null);
 	}
 }

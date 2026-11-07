@@ -82,3 +82,15 @@ test("unsupported transforms withdraw geometry and close cancels pending paint a
 		expect(f.publish.mock.calls).toHaveLength(count); expect(f.root.querySelector(".relay-image-presence")).toBeNull(); expect(jest.getTimerCount()).toBe(0);
 	} finally { f.close(); }
 });
+
+test("closing one image overlay preserves the shared note positioning root for the other", async () => {
+	const f = fixture(), image = f.root.appendChild(document.createElement("img"));
+	box(image, 100, 100); Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 100 }, naturalHeight: { value: 100 } });
+	const second = new ImagePresenceMotion(f.root, image, { current: () => true, publishing: () => false, publish: jest.fn(), externalPointer: true });
+	try {
+		f.motion.close(); f.motion.close(); expect(f.root.classList.contains("relay-image-presence-root")).toBe(true);
+		expect(f.root.querySelectorAll(".relay-image-presence")).toHaveLength(1);
+		second.close(); expect(f.root.classList.contains("relay-image-presence-root")).toBe(false);
+	} finally { second.close(); f.close(); }
+	expect(jest.getTimerCount()).toBe(0);
+});

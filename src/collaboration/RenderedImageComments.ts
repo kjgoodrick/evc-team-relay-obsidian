@@ -15,7 +15,7 @@ type OpenImage = (context: ImageCommentContext, image: ImageOccurrence, surface?
 type Marker = { thread: AnchoredThread; anchor: ImageAnchor };
 type Record = { target: RenderedImageTarget; key: string; attempt: number; element: HTMLDivElement; clip: HTMLDivElement; controls: HTMLDivElement;
 	evidence?: RenderedImageEvidence; signature?: string; markers: { button: HTMLButtonElement; value: Marker }[]; current: () => boolean };
-const owned = ".relay-rendered-images";
+const owned = ".relay-rendered-images,.relay-image-presence";
 
 /** One controller per live Markdown pane. It uses source mappings supplied by
  * the existing CM/Reading adapters, never filename searches or DOM ordinals

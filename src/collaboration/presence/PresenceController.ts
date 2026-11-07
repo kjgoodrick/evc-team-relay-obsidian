@@ -11,7 +11,7 @@ import type { YSweetProvider } from "../../client/provider";
 import { readingCommentBinding, onReadingBindingChange } from "../ReadingTextBinding";
 import type { NotePresenceSurface, PresenceSettings } from "./PresenceSettings";
 import { NotePresenceSurfaces } from "./NotePresenceSurfaces";
-import { isNotePeer, peerLocation, presencePeers, type ActivePresencePeer, type PresenceLocation } from "./PresencePeers";
+import { isNotePeer, peerLocation, presencePeers, type ActivePresencePeer, type PresenceLocation, type PresencePeer } from "./PresencePeers";
 import { PresenceRoster } from "./PresenceRoster";
 import type { ReadingPresenceScope } from "./ReadingPresenceLayer";
 
@@ -74,11 +74,11 @@ export class PresenceController extends Component {
 				stopped: () => this.stopFollowing("Following stopped because the connection changed."),
 				interacted: () => this.stopFollowing("Following stopped because you interacted with the image."),
 				positions: () => {
-					if (!this.canObserveImage()) return;
-					this.peers = this.locations!.imagePeers;
+					if (this.canObserveImage()) this.peers = this.locations!.imagePeers;
+					else if (!this.canNavigate()) return;
 					// Pointer motion updates the overlay and Follow, not roster labels
 					// or the complete note/host lifecycle.
-					if (this.crossFollow) this.scheduleFollow();
+					if (this.following) this.scheduleFollow();
 				} }));
 		this.register(this.registry.onViewsChanged(() => this.refresh()));
 		this.register(this.auth.on(() => this.refresh()));
@@ -90,7 +90,7 @@ export class PresenceController extends Component {
 		this.registerEvent(workspace.on("layout-change", () => this.refresh()));
 		this.registerEvent(this.plugin.app.vault.on("rename", () => this.refresh()));
 		this.registerEvent(this.plugin.app.vault.on("delete", () => this.refresh()));
-		this.registerEvent(this.plugin.app.vault.on("modify", () => { if (this.locations?.imageActive) this.refresh(); }));
+		this.registerEvent(this.plugin.app.vault.on("modify", () => { if (this.locations?.imageActive) this.refresh(); else this.locations?.refreshEmbeds(); }));
 		this.registerEvent(workspace.on("window-open", () => this.refresh()));
 		this.registerEvent(workspace.on("window-close", (_host, win) => {
 			this.blurred.add(win.document); this.clearActive(win.document);
@@ -108,7 +108,7 @@ export class PresenceController extends Component {
 	get surfaceName(): "note" | "image" { return this.locations?.imageActive ? "image" : "note"; }
 	get description(): string { return this.surfaceName === "image" && this.status !== "idle" ? descriptions[this.status].replace(/\bnote\b/g, "image") : descriptions[this.status]; }
 	get canRetry(): boolean { return this.visible && !!this.active && ["unavailable", "capacity"].includes(this.status) ||
-		!!this.locations && (["authentication", "unavailable", "unsupported"].includes(this.locations.status) || this.locations.imageActive && this.locations.imageState === "unavailable"); }
+		!!this.locations && (["authentication", "unavailable", "unsupported"].includes(this.locations.status) || this.locations.imageActive && this.locations.imageState === "unavailable" || this.locations.embeddedUnavailable); }
 	get navigationDescription(): string {
 		return this.locations?.ready ? (this.locations.supportsImages ? "Follow can move between shared notes and images." : "Follow can move between shared notes.") : this.locations?.status === "connecting" || this.locations?.status === "reconnecting" ?
 			"Connecting across notes. Current-note navigation is available." : "Follow is currently limited to this note.";
@@ -214,6 +214,8 @@ export class PresenceController extends Component {
 			const navigable = candidate && bound && currentAccount && candidate.connectionAllowed && candidate.wantsConnection &&
 				candidate.boundDocument.vaultShare.wantsConnection && view?.containerEl.isConnected && owner?.hasFocus() && !owner.hidden && !this.blurred.has(owner);
 			this.surfaces.setActive(navigable ? noteView! : undefined, navigable ? candidate.boundDocument.crdtText : undefined, navigable ? candidate.boundDocument.entityGuid : undefined);
+			this.locations?.setNoteSurface(navigable ? noteView! : undefined, navigable ? candidate.boundDocument.crdtText : undefined,
+				images => this.surfaces.imageTargets(images), () => this.canNavigate() && this.surfaces.hasCurrentBinding());
 			this.refreshReaders();
 			if (!foreground || !this.crossFollow && !this.canObserveImage() && (!navigable || !this.observed?.wsconnected)) this.stopFollowing("Location unavailable.");
 			const provider = this.observed;
@@ -253,6 +255,7 @@ export class PresenceController extends Component {
 			provider.awareness.setLocalState({ ...state, viewport: location.viewport ?? null, selection: active.surface === "reading" ? location.selection ?? null : null });
 		}
 		this.scheduleFollow();
+		this.locations?.refreshEmbeds();
 	}
 	private canNavigate(): boolean {
 		const candidate = this.candidate, view = candidate?.hostView, owner = view?.containerEl.ownerDocument;
@@ -267,6 +270,7 @@ export class PresenceController extends Component {
 	}
 	private refreshPeers(): void {
 		this.peers = this.canObserveImage() ? this.locations!.imagePeers : this.canNavigate() && this.observed ? presencePeers(this.observed.awareness) : [];
+		this.locations?.setNotePeers(this.peers.filter(isNotePeer));
 		if (this.following) {
 			const cross = this.crossFollow;
 			const current = cross ? this.peers.find(peer => this.atFollowDestination() && this.sameParticipant(peer, cross.peer)) : this.peers.find(peer => peer.key === this.following!.key);
@@ -282,14 +286,25 @@ export class PresenceController extends Component {
 			this.locations?.ready === true && this.locations.currentLocation?.kind === "image";
 	}
 	canLocate(peer: ActivePresencePeer): boolean {
-		return isNotePeer(peer) ? this.canNavigate() && !!this.candidate && !!peerLocation(peer, this.candidate.boundDocument.crdtText, false) :
+		return isNotePeer(peer) ? this.canNavigate() && !!this.notePosition(peer, false) :
 			peer.surface === "image" && this.canObserveImage() && JSON.stringify(peer.location) === JSON.stringify(this.locations?.currentLocation) && this.peers.some(item => item.key === peer.key);
+	}
+	private notePosition(peer: PresencePeer, follow: boolean): { from: number; to: number; signature?: string } | undefined {
+		return this.locations?.embedPosition(peer, follow) ?? (this.candidate ? peerLocation(peer, this.candidate.boundDocument.crdtText, follow) : undefined);
+	}
+	private async revealNote(peer: PresencePeer, position: { from: number; to: number }, follow: boolean, current: () => boolean): Promise<boolean> {
+		if (this.locations?.revealEmbed(peer, follow, current)) return true;
+		if (!await this.surfaces.reveal(position.from, position.to, current) || !current()) return false;
+		// Materialize an offscreen widget/Reading section before applying image
+		// coordinates. Source view keeps the exact Markdown occurrence fallback.
+		if (this.locations?.embedPosition(peer)) await this.locations.materializeEmbed(peer, follow, current);
+		return current();
 	}
 	/** Re-read the selected peer at click time; stale UI cannot navigate. */
 	async navigate(key: string, follow: boolean): Promise<boolean> {
 		this.refresh();
 		this.stopFollowing(); const version = ++this.navigationVersion, candidate = this.candidate;
-		const peer = this.peers.find(peer => peer.key === key), text = this.candidate?.boundDocument.crdtText;
+		const peer = this.peers.find(peer => peer.key === key);
 		if (peer && !isNotePeer(peer)) {
 			const view = this.plugin.app.workspace.getActiveViewOfType(FileView);
 			const current = () => version === this.navigationVersion && this.plugin.app.workspace.getActiveViewOfType(FileView) === view && this.canLocate(peer);
@@ -301,10 +316,10 @@ export class PresenceController extends Component {
 			this.navigationMessage = follow ? `Following ${peer.name}.` : `Jumped to ${peer.name}.`;
 			this.updateFollowBar(); this.notify(); this.scheduleFollow(); return true;
 		}
-		const position = peer && isNotePeer(peer) && text && this.canNavigate() ? peerLocation(peer, text, follow) : undefined;
+		const position = peer && isNotePeer(peer) && this.canNavigate() ? this.notePosition(peer, follow) : undefined;
 		const current = () => version === this.navigationVersion && candidate === this.candidate && this.canNavigate() && this.peers.some(item => item.key === key);
 		let revealed = false;
-		try { revealed = !!position && await this.surfaces.reveal(position.from, position.to, current); } catch { /* Unsupported/unmounted surface. */ }
+		try { revealed = !!position && !!peer && isNotePeer(peer) && await this.revealNote(peer, position, follow, current); } catch { /* Unsupported/unmounted surface. */ }
 		if (version !== this.navigationVersion) return false;
 		if (!peer || !position || !revealed || !current()) {
 			this.navigationMessage = "Location unavailable or still synchronizing."; this.notify(); return false;
@@ -351,7 +366,7 @@ export class PresenceController extends Component {
 			}
 		}
 		if (!this.following || !isNotePeer(this.following) || !this.candidate || !this.canNavigate()) { this.stopFollowing("Location unavailable."); return; }
-		const position = peerLocation(this.following, this.candidate.boundDocument.crdtText, true);
+		const position = this.notePosition(this.following, true);
 		if (!position) {
 			const cross = this.crossFollow;
 			if (cross) {
@@ -366,14 +381,14 @@ export class PresenceController extends Component {
 		const current = () => version === this.navigationVersion && this.following?.key === key && this.canNavigate();
 		this.followBusy = true;
 		try {
-			const revealed = await this.surfaces.reveal(position.from, position.to, current);
+			const revealed = await this.revealNote(this.following, position, true, current);
 			if (!current()) return;
 			if (!revealed) { this.stopFollowing("Location unavailable or still synchronizing."); return; }
 			this.lastFollowPosition = JSON.stringify(position);
 		} catch { if (current()) this.stopFollowing("Location unavailable."); }
 		finally {
 			this.followBusy = false;
-			if (this.following && isNotePeer(this.following) && this.candidate && JSON.stringify(peerLocation(this.following, this.candidate.boundDocument.crdtText, true)) !== this.lastFollowPosition) this.scheduleFollow();
+			if (this.following && isNotePeer(this.following) && this.candidate && JSON.stringify(this.notePosition(this.following, true)) !== this.lastFollowPosition) this.scheduleFollow();
 		}
 	}
 	private sameParticipant(a: ActivePresencePeer, b: ActivePresencePeer): boolean {

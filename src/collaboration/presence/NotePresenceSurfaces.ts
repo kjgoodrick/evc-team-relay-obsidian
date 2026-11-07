@@ -131,6 +131,12 @@ export class NotePresenceSurfaces extends Component {
 		}
 		return this.editorContent.matches;
 	}
+	hasCurrentBinding(): boolean {
+		const active = this.active; if (!active || this.closed || active.view.getMode() !== active.mode) return false;
+		if (active.mode !== "preview") { const editor = this.editor(); return !!editor && this.editorMatches(editor); }
+		const binding = readingCommentBinding(active.view);
+		return binding?.documentId === active.id && binding.text === active.text && active.view.getViewData() === this.sourceFor(active.text).source;
+	}
 	/** Reuse the actual source-bound editor/Reading renderer; URL order alone
 	 * cannot identify repeated embeds or images inside transcluded notes. */
 	imageTargets(occurrences: ImageOccurrence[]): RenderedImageTarget[] {
