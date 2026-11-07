@@ -181,6 +181,27 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 			lanes: new Map(savedLane ? [[uuid(41), savedLane.target]] : []), root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks, limit: 128,
 			open: (_threads, _button, current) => { assert.ok(current()); markerOpened = true; } }), 1);
 		marks.querySelector("button").click(); assert.ok(markerOpened); marks.remove();
+		// A discussion outside the data-derived domain opens a temporary range
+		// viewport through the actual provider/consumer, preserving the saved view.
+		const farRange = { ...savedRange, start: sequence ? "-100" : "1800-01-01", end: sequence ? "-50" : "1800-01-02" };
+		assert.equal(surface.revealRange(farRange, rangeContext.axis, () => true, laneElement), "revealed");
+		assert.ok(root.querySelector(".sabidurian-comment-range-focus")); assert.equal(rangeContext.current(), false);
+		const focusedContext = surface.rangeContext(); assert.ok(focusedContext.current()); assert.deepEqual(focusedContext.axis, rangeContext.axis);
+		const focusedViewport = view.timelineRenderer.element, focusedSvg = view.timelineRenderer.svgElement;
+		focusedViewport.getBoundingClientRect = () => ({ left: 100, right: 900, top: 50, bottom: 250, width: 800, height: 200 });
+		focusedSvg.getBoundingClientRect = () => ({ left: 100, right: 900, top: 50, bottom: 450, width: 800, height: 400 });
+		const focusedLane = grouped ? surface.groupHandles(() => null)[0] : undefined;
+		if (focusedLane) focusedLane.element.getBoundingClientRect = () => ({ left: 100, right: 900, top: 100, bottom: 128, width: 800, height: 28 });
+		const focusedGeometry = surface.rangeGeometry(farRange, rangeContext.axis, focusedLane?.element);
+		assert.ok(focusedGeometry?.current()); assert.ok(focusedGeometry.startX >= 100 && focusedGeometry.endX <= 900);
+		const focusedMarks = document.createElement("div"); root.append(focusedMarks);
+		assert.equal(renderTimelineRangeMarkers({ context: rangeCommentContext, proof: axisProof,
+			threads: [{ id: uuid(41), anchor: { ...rangeAnchor, target: { ...rangeAnchor.target, range: farRange } } }],
+			lanes: new Map(savedLane ? [[uuid(41), savedLane.target]] : []), root: { left: 0, right: 1000, top: 0, bottom: 600 },
+			viewport: focusedViewport.getBoundingClientRect(), marks: focusedMarks, limit: 128, open: () => {} }), 1);
+		focusedMarks.remove(); root.querySelector(".sabidurian-comment-range-focus button").click();
+		for (const callback of [...frames.values()]) callback(0); frames.clear();
+		assert.equal(root.querySelector(".sabidurian-comment-range-focus"), null); assert.equal(focusedContext.current(), false);
 		assert.equal(host.data, source); assert.deepEqual(writes, []);
 		const captured = surface.handles()[1]; view.onDataUpdated(); assert.equal(captured.current(), false);
 		assert.equal(rangeContext.current(), false); assert.equal(selectedRange.current(), false); assert.equal(geometry.current(), false);

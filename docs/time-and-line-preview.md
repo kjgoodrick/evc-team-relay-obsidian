@@ -6,8 +6,8 @@ The bridge must advertise version one, `available`, both registered view types,
 pre-navigation checks and the `annotation` capability. The initial bridge without
 those additions is insufficient. Both plugins must be updated together.
 
-This is a development preview. Native Obsidian validation, outside-axis range
-navigation, shared milestones and timeline presence remain unfinished. It does not establish
+This is a development preview. Native Obsidian validation, shared milestones
+and timeline presence remain unfinished. It does not establish
 the complete desktop/mobile collaboration release.
 
 ## Supported behavior
@@ -80,14 +80,21 @@ aggregate identical ranges, clip to the viewport, distinguish included/excluded
 endpoints and flag civil-axis DST discontinuities. Geometry refresh uses cached
 threads/axis proofs and does not fetch them on scroll. Changed-axis targets stay
 in discussions without misleading placement. Navigation respects dirty inspectors
-and the original saved-view identity; outside-axis reveal currently reports hidden.
+and the original saved-view identity. The updated fork can temporarily focus a
+range outside the data-derived axis, retain its exact lane, and return to the
+original data viewport. Dense Sequence shows original property values while
+focused. These local navigation changes preserve schedules and saved settings;
+old range geometry must be reacquired after the renderer rebuilds. Empty or
+invalid queries without a live axis still cannot place a range.
+This behavior requires the fork's **`4678bf0`** implementation or later; see its
+[navigation contract](https://github.com/kjgoodrick/obsidian-time-and-line-planning/blob/4678bf0/COLLABORATION.md).
 
 Validation: **2,401 plugin tests in 203 suites** pass (15 opt-in tests skipped),
 with preview build/main types, changed-source lint (five existing warnings),
 whitespace checks and the frozen test-type gate (no new errors).
 Eight source interoperability cases exercise both real renderers, plugin load
-orders and grouping modes, including lane choice, endpoint picking, confirmation
-and saved lane markers. Their session port supplies a verified axis. Separate
+orders and grouping modes, including lane choice, endpoint picking, confirmation,
+saved lane markers, outside-axis focus/markers and return. Their session port supplies a verified axis. Separate
 actual Python/Rust/client fixtures for Timeline and Sequence cover fresh
 unverified offline lane captures, both lost accepted responses, cache reopen,
 exact retries and relay restart. These are not native Obsidian tests.
