@@ -1,12 +1,13 @@
 import { Modal, type App } from "obsidian";
 import type { DiscussionSession } from "../DiscussionSession";
 import { DiscussionFailure } from "../DiscussionTransport";
-import { isRecord, protocolJson, type MessageBody } from "../DiscussionProtocol";
+import { isRecord, parseBody, protocolJson, type MessageBody } from "../DiscussionProtocol";
 import { parseDiscussionScope } from "../DiscussionScope";
 import type { LocalDiscussionAnchor } from "../LocalDiscussionAnchor";
-import type { Draft, OutboxOperation } from "../storage/DiscussionStore";
+import type { Draft, OutboxOperation, ReviewedAbandonment } from "../storage/DiscussionStore";
 import { CommentComposer, type ComposerCommand } from "./CommentComposer";
 import { editableCommentDraft, readCommentDraft } from "./CommentDraft";
+import { commentBodyText } from "./CommentBody";
 
 type Editable = Extract<Awaited<ReturnType<DiscussionSession["recoverSavedCommand"]>>, { status: "editable" }>;
 type Hooks = { current(): boolean; choose(operation: OutboxOperation, draft: Draft): void;
@@ -42,6 +43,8 @@ export class RecoverCommentModal extends Modal {
 	private editor?: HTMLElement;
 	private actions?: HTMLElement;
 	private editReviewed = false;
+	private discardReview?: ReviewedAbandonment;
+	private discardPanel?: HTMLElement;
 	constructor(app: App, private session: DiscussionSession, private operation: OutboxOperation, private hooks: Hooks) { super(app); }
 	private current = () => this.live && this.hooks.current() && this.session.status !== "closed" && this.session.permission(this.operation.scopeId)?.read === true;
 	validate(): void { if (this.live && !this.current()) this.close(); }
@@ -49,7 +52,7 @@ export class RecoverCommentModal extends Modal {
 		this.setTitle("Review saved comment");
 		this.contentEl.createEl("p", { text: "Delivery is checked before editing. Your saved text, pictures and waiting replies are retained. Send explicitly when your changes are ready." });
 		this.issue = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
-		this.actions = this.contentEl.createDiv(); this.editor = this.contentEl.createDiv();
+		this.actions = this.contentEl.createDiv(); this.discardPanel = this.contentEl.createDiv(); this.editor = this.contentEl.createDiv();
 		this.stop = this.session.onChange(() => { this.validate(); if (this.live) { this.composer?.update(); this.updateActions(); } });
 		await this.load();
 	}
@@ -77,8 +80,8 @@ export class RecoverCommentModal extends Modal {
 		this.composer = new CommentComposer(this.editor, this.session, this.operation.scopeId, this.recovered.draft.id,
 			(body, anchor, revision) => recoveredCommand(this.operation, body, anchor, revision), "Recovered comment", initial, () => this.close());
 		this.composer.onRevealTarget(this.hooks.reveal, this.hooks.label);
-		this.composer.setEditingAvailable(() => this.current() && !this.busy);
-		this.composer.setSendAvailable(() => this.current() && !this.busy && (this.operation.type !== "message.edit" || this.editReviewed));
+		this.composer.setEditingAvailable(() => this.current() && !this.busy && !this.discardReview);
+		this.composer.setSendAvailable(() => this.current() && !this.busy && !this.discardReview && (this.operation.type !== "message.edit" || this.editReviewed));
 	}
 	private async reviewEdit(): Promise<void> {
 		if (!this.recovered || this.busy || !this.current() || !this.session.online || !isRecord(this.operation.payload)) return;
@@ -99,13 +102,14 @@ export class RecoverCommentModal extends Modal {
 	private updateActions(): void {
 		if (!this.actions || !this.live) return;
 		// Keep focused controls across routine session notifications.
-		const signature = JSON.stringify([!!this.recovered, this.busy, this.session.online, this.session.canRecoverSavedCommand, this.session.permission(this.operation.scopeId)?.comment]);
+		const signature = JSON.stringify([!!this.recovered, !!this.discardReview, this.busy, this.session.online, this.session.canRecoverSavedCommand, this.session.permission(this.operation.scopeId)?.comment]);
 		if (this.actions.dataset.state === signature) return;
 		this.actions.dataset.state = signature; this.actions.empty();
 		const button = (label: string, run: () => void, disabled = false) => {
 			const item = this.actions!.createEl("button", { text: label, attr: { type: "button" } }); item.disabled = this.busy || disabled;
 			item.onclick = () => { if (this.current() && !this.busy) run(); };
 		};
+		if (this.discardReview) { button("Cancel discard review", () => this.cancelDiscard()); return; }
 		if (!this.recovered) button("Check delivery again", () => { void this.load(); }, !this.session.canRecoverSavedCommand);
 		else if (this.operation.type === "message.edit") button("Review current comment", () => { void this.reviewEdit(); }, !this.session.online);
 		else if (this.operation.type === "thread.create" || this.operation.type === "base.group.create") {
@@ -115,7 +119,50 @@ export class RecoverCommentModal extends Modal {
 				button(base ? "Use entire saved view" : "Use entire note", () => { void this.whole(); }, !this.session.permission(this.operation.scopeId)?.comment || base && !this.session.online);
 			}
 		}
+		if (this.recovered) button("Review discard", () => { void this.reviewDiscard(); });
 		button("Close", () => this.close());
+	}
+	private cancelDiscard(): void {
+		if (this.busy) return;
+		this.discardReview = undefined; this.discardPanel?.empty(); this.composer?.update(); this.updateActions();
+	}
+	private async reviewDiscard(): Promise<void> {
+		if (!this.recovered || this.busy || !this.current()) return;
+		this.busy = true; this.composer?.update(); this.updateActions();
+		try {
+			if (!await this.composer?.flush()) throw new Error("Save this draft before reviewing what to discard.");
+			const review = await this.session.reviewAbandonment(this.operation.operationId);
+			if (!this.current() || !this.discardPanel) return;
+			const previews = review.operations.map(operation => {
+				const draft = review.drafts.find(item => item.id === operation.reviewDraftId);
+				if (draft) return readCommentDraft(draft.body).text;
+				if (operation.type === "reaction.set") return "Waiting reaction change";
+				if (!isRecord(operation.payload)) throw new Error("Saved content could not be displayed. Save a recovery copy before discarding.");
+				return commentBodyText(parseBody(operation.payload.body), id => this.session.displayName(operation.scopeId, id));
+			});
+			this.discardReview = review; this.discardPanel.empty();
+			this.discardPanel.createEl("h3", { text: "Review local work to discard" });
+			this.discardPanel.createEl("p", { text: `This removes ${review.drafts.length} recovered draft(s) and cancels ${review.operations.length} saved change(s), including waiting replies shown below. The original send was already cancelled. Posted comments are unchanged.` });
+			this.discardPanel.createEl("p", { text: "This cannot be undone here. You can save a recovery copy from the storage panel before continuing. Pictures still used by other saved work or a retained export stay available." });
+			for (const [index, preview] of previews.entries()) this.discardPanel.createEl("p", { text: `${index + 1}. ${preview.slice(0, 1000)}${preview.length > 1000 ? "… (preview shortened)" : ""}` });
+			const label = this.discardPanel.createEl("label"), checkbox = label.createEl("input", { attr: { type: "checkbox" } });
+			label.createSpan({ text: " I want to discard all of the local work listed above." });
+			const discard = this.discardPanel.createEl("button", { text: "Discard reviewed local work", attr: { type: "button" } }); discard.disabled = true;
+			checkbox.onchange = () => { discard.disabled = this.busy || !checkbox.checked; };
+			discard.onclick = () => { if (checkbox.checked) void this.discard(discard, checkbox); };
+		} catch (error) { if (this.current()) this.issue?.setText(error instanceof Error ? error.message : "Could not review saved work. Nothing was discarded."); }
+		finally { this.busy = false; if (this.current()) { this.composer?.update(); this.updateActions(); } }
+	}
+	private async discard(button: HTMLButtonElement, checkbox: HTMLInputElement): Promise<void> {
+		if (!this.current() || !this.discardReview || this.busy) return;
+		this.busy = true; button.disabled = true; checkbox.disabled = true; this.updateActions();
+		try { await this.session.abandonReviewedWork(this.discardReview, this.current); if (this.current()) this.close(); }
+		catch (error) {
+			if (this.current()) {
+				this.discardReview = undefined; this.discardPanel?.empty();
+				this.issue?.setText(error instanceof Error ? error.message : "Saved work changed. Nothing was discarded; review it again.");
+			}
+		} finally { this.busy = false; if (this.current()) { this.composer?.update(); this.updateActions(); } }
 	}
 	private async whole(): Promise<void> {
 		if (!this.recovered || this.busy) return;

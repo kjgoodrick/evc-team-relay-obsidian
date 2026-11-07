@@ -8,6 +8,7 @@ import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { DiscussionReattachment } from "./DiscussionReattachment";
 import { saveLocalWorkRecovery, type LocalWorkIO } from "./LocalWorkRecovery";
+import type { ReviewedAbandonment } from "./storage/DiscussionStore";
 import { editableCommentDraft } from "./ui/CommentDraft";
 import { parseBody } from "./DiscussionProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
@@ -1056,6 +1057,16 @@ export class DiscussionSession {
 			const draft = await this.store.restoreCommandForReview(saved, protocolJson(body), unprepared);
 			return { status: "editable" as const, draft, operation: { ...saved, state: "review" as const, reviewDraftId: draft.id } };
 		})().finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
+	}
+	async reviewAbandonment(operationId: string): Promise<ReviewedAbandonment> {
+		if (this.closed) throw new Error("This discussion account is closed.");
+		return this.trackLocal(this.store.reviewAbandonment(operationId));
+	}
+	async abandonReviewedWork(review: ReviewedAbandonment, visible: () => boolean): Promise<void> {
+		const epoch = this.authenticationEpoch, current = () => !this.closed && visible() && epoch === this.authenticationEpoch;
+		if (!current()) throw new Error("This discussion account is closed.");
+		return this.trackLocal(this.store.abandonReviewedWork(review, current)
+			.finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
 	}
 	async repairPictures(operation: OutboxOperation): Promise<"accepted" | "requeued"> {
 		if (!this.canRepairPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect with picture and comment permission before repairing uploads.");

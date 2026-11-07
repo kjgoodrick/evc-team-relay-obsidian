@@ -71,9 +71,14 @@ a thread. Prepared group requests require normal server cancellation.
 
 ## Remaining work
 
-This is an implemented preview, not full recovery/release acceptance. Explicit
-abandonment and dependent-work review, inaccessible/deleted-target recovery,
-cache and backup/export/restore controls, native interrupted-response and
+The [reviewed-discard preview](reviewed-comment-discard-preview.md) now adds
+explicit abandonment of cancelled body commands and their unsent dependents.
+The [storage controls](comment-storage-preview.md) and [local recovery copies](local-comment-recovery-copy-preview.md)
+also have implemented previews.
+
+Full recovery/release acceptance is unfinished. Standalone reaction and ordinary
+draft cleanup, inaccessible/deleted-target recovery, broader cache controls,
+reviewed import, coherent service backup/restore, native interrupted-response and
 multiwindow/picture/target/mobile cases, and resource/accessibility validation
 remain. Picture refresh can retain shared originals intentionally. A large
 dependency fan-out above the bounded recovery limit is retained for further

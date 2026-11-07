@@ -34,6 +34,7 @@ export interface CachedEntity { id: string; revision: number; value: Json }
 export interface ScopeCheckpoint { cursor?: string; generation: number }
 export interface PreferenceVerification { token: string; generation: number; previous?: Json }
 export interface CachePurge { prefix: string; throughRevision: number }
+export interface ReviewedAbandonment { operationId: string; scopeId: string; operations: OutboxOperation[]; drafts: Draft[] }
 
 function ordered(entity: CachedEntity): { collection: string; position: number } {
 	const value = entity.value;
@@ -558,6 +559,88 @@ export class DiscussionStore {
 
 	async getOperation(id: string): Promise<OutboxOperation | undefined> {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
+	}
+	/** A reviewed root has already been fenced on the server. Only never-attempted
+	 * or independently fenced dependents may be discarded with it. */
+	private async abandonmentInTransaction(tx: IDBTransaction, operationId: string): Promise<ReviewedAbandonment> {
+		const outbox = tx.objectStore("outbox"), drafts = tx.objectStore("drafts"), preferences = tx.objectStore("preferences");
+		const root: OutboxOperation | undefined = await request(outbox.get(operationId));
+		if (!root || root.state !== "review") throw new Error("Check delivery and cancel the original send before discarding this change");
+		const result: ReviewedAbandonment = { operationId, scopeId: root.scopeId, operations: [], drafts: [] }, queue = [root], seen = new Set<string>(), discovered = new Set([operationId]);
+		let reviewSize = 0;
+		const account = (value: unknown) => {
+			reviewSize += canonical(value as Json).length;
+			if (reviewSize > 8 * 1024 * 1024) throw new Error("Saved changes exceed the review limit; review smaller groups first");
+		};
+		account(root);
+		while (queue.length) {
+			const operation = queue.shift()!; if (seen.has(operation.operationId)) continue;
+			seen.add(operation.operationId);
+			if (seen.size > 100) throw new Error("Too many dependent changes; review and discard smaller groups first");
+			if (operation.scopeId !== root.scopeId || operation.type === "picture.upload" ||
+				(operation.state !== "review" && (operation.state !== "queued" || operation.attempt !== 0 || operation.lease !== undefined))) throw new Error("A dependent change needs its own delivery review before discarding");
+			result.operations.push(operation);
+			if (operation.state === "review") {
+				const draft: Draft | undefined = operation.reviewDraftId ? await request(drafts.get(operation.reviewDraftId)) : undefined;
+				if (!draft || draft.scopeId !== root.scopeId || await request(preferences.get("recovery:" + draft.id)) !== operation.operationId ||
+					await request(preferences.get("online:" + draft.id))) throw new Error("A recovered draft changed; review its delivery before discarding");
+				account(draft); result.drafts.push(draft);
+			}
+			// Read only active dependents. Terminal receipts can be numerous over
+			// time; bound the traversal without cloning an unbounded history.
+			const dependents = outbox.index("dependency").openCursor(IDBKeyRange.only(operation.operationId));
+			await new Promise<void>((resolve, reject) => {
+				dependents.onerror = () => reject(dependents.error);
+				dependents.onsuccess = () => {
+					try {
+						const cursor = dependents.result; if (!cursor) { resolve(); return; }
+						const dependent = cursor.value as OutboxOperation;
+						if (dependent.state !== "accepted" && dependent.state !== "withdrawn" && !discovered.has(dependent.operationId)) {
+							account(dependent); discovered.add(dependent.operationId); queue.push(dependent);
+						}
+						if (discovered.size > 100) throw new Error("Too many dependent changes; review smaller groups first");
+						cursor.continue();
+					} catch (error) { reject(error); }
+				};
+			});
+		}
+		result.operations.sort((a, b) => a.operationId.localeCompare(b.operationId)); result.drafts.sort((a, b) => a.id.localeCompare(b.id));
+		if (canonical(result as unknown as Json).length > 8 * 1024 * 1024) throw new Error("Saved changes exceed the review limit; review smaller groups first");
+		return result;
+	}
+	async reviewAbandonment(operationId: string): Promise<ReviewedAbandonment> {
+		requiredId(operationId);
+		return this.transaction(["outbox", "drafts", "preferences"], "readonly", tx => this.abandonmentInTransaction(tx, operationId));
+	}
+	async abandonReviewedWork(review: ReviewedAbandonment, current: () => boolean = () => true): Promise<void> {
+		const expected = canonical(review as unknown as Json);
+		if (expected.length > 8 * 1024 * 1024) throw new Error("Saved changes exceed the review limit");
+		await this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
+			const actual = await this.abandonmentInTransaction(tx, review.operationId);
+			if (!current() || canonical(actual as unknown as Json) !== expected) throw new Error("Saved work changed after review. Nothing was discarded; review it again");
+			const outbox = tx.objectStore("outbox"), preferences = tx.objectStore("preferences"), pictures = new Set<string>();
+			for (const draft of actual.drafts) {
+				for (const id of pictureIds(draft.body, true)) pictures.add(id);
+				await request(tx.objectStore("drafts").delete(draft.id)); await request(preferences.delete("recovery:" + draft.id));
+				await setPictureReferences(tx, "draft", draft.id, actual.scopeId, []);
+			}
+			for (const operation of actual.operations) {
+				for (const id of commandPictures(operation.payload)) pictures.add(id);
+				operation.state = "withdrawn"; delete operation.reviewDraftId; delete operation.lease; delete operation.error;
+				await request(outbox.put(operation)); await setPictureReferences(tx, "outbox", operation.operationId, actual.scopeId, []);
+			}
+			for (const id of pictures) {
+				const upload: OutboxOperation | undefined = await request(outbox.get(id));
+				if (!upload || upload.type !== "picture.upload" || upload.scopeId !== actual.scopeId) continue;
+				const refs = await request(tx.objectStore("pictureReferences").index("picture").getAll(id, 101)) as { kind: string; ownerId: string }[];
+				const dependents: OutboxOperation[] = await request(outbox.index("dependency").getAll(id, 101));
+				if (refs.length > 100 || dependents.length > 100 || refs.some(ref => ref.kind !== "export" && (ref.kind !== "outbox" || ref.ownerId !== id)) ||
+					dependents.some(op => op.state !== "accepted" && op.state !== "withdrawn")) continue;
+				if (upload.state !== "accepted") { upload.state = "withdrawn"; delete upload.lease; delete upload.error; await request(outbox.put(upload)); }
+				await setPictureReferences(tx, "outbox", id, actual.scopeId, []);
+			}
+			if (!current()) throw new Error("The review window changed. Nothing was discarded");
+		});
 	}
 
 	/** Call only after server withdrawal of the exact wire command. An unprepared

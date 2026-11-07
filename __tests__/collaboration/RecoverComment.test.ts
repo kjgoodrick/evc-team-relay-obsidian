@@ -3,7 +3,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { TextEncoder, TextDecoder } from "node:util";
 import { serialize, deserialize } from "node:v8";
 import type { App } from "obsidian";
-import { DiscussionStore, type QueuedCommand, type OutboxOperation, type Json } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionStore, type QueuedCommand, type OutboxOperation, type Json, type ReviewedAbandonment } from "../../src/collaboration/storage/DiscussionStore";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
@@ -39,6 +39,8 @@ async function fixture(type: "thread.create" | "reply.create" | "message.edit" =
 		recoverSavedCommand: jest.fn(async () => ({ status: "editable", draft: await store.restoreCommandForReview(original, protocolJson(draft)),
 			operation: { ...original, state: "review", reviewDraftId: "recovery:" + original.operationId } })),
 		queue: jest.fn(async (command: QueuedCommand, saved?: { id: string; revision: number }) => { await store.enqueue(command, Date.now(), saved); }),
+		reviewAbandonment: jest.fn((id: string) => store.reviewAbandonment(id)),
+		abandonReviewedWork: jest.fn((review: ReviewedAbandonment, current: () => boolean) => store.abandonReviewedWork(review, current)),
 		linkedThread: jest.fn().mockResolvedValue({ thread: { removed: false }, message: { id: id(6), author_id: id(1), deleted: false, revision: 2, body: bodyFromText("Current server comment") } }),
 	};
 	const hooks = { current: () => true, choose: jest.fn(), reveal: jest.fn(), label: commentTargetDescription };
@@ -58,6 +60,39 @@ test.each(["thread.create", "reply.create"] as const)("reviewed %s sends explici
 		f.button("Send").click(); await until(() => f.modal.contentEl.textContent === "");
 		expect(f.session.queue).toHaveBeenCalledWith(expect.objectContaining({ type, payload: expect.objectContaining({ thread_id: id(5), message_id: id(6) }) }), expect.any(Object));
 		expect((await f.store.getOperation(id(4)))?.state).toBe("withdrawn");
+	} finally { f.close(); }
+});
+
+test("discard review lists the dependent work, pauses editing and requires explicit confirmation", async () => {
+	const f = await fixture();
+	try {
+		await f.store.enqueue({ operationId: id(7), scopeId: scope, type: "reply.create", dependsOn: [id(4)], payload: { type: "reply.create", thread_id: id(5), message_id: id(8), body: protocolJson(bodyFromText("Dependent reply")) } });
+		await f.modal.onOpen(); await until(() => !!f.button("Send") && !f.button("Send").disabled);
+		f.button("Review discard").click(); await until(() => !!f.button("Discard reviewed local work"));
+		expect(f.modal.contentEl.textContent).toContain("Dependent reply"); expect(f.button("Discard reviewed local work").disabled).toBe(true);
+		expect(f.button("Send").disabled).toBe(true); expect(f.modal.contentEl.querySelector('[contenteditable="true"]')).toBeNull();
+		expect(f.session.abandonReviewedWork).not.toHaveBeenCalled();
+		const checkbox = f.modal.contentEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+		checkbox.checked = true; checkbox.dispatchEvent(new Event("change")); f.button("Discard reviewed local work").click();
+		await until(() => f.modal.contentEl.textContent === "");
+		expect((await f.store.getOperation(id(7)))?.state).toBe("withdrawn"); expect(await f.store.getDraft("recovery:" + id(4))).toBeUndefined();
+		expect(f.session.queue).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
+test("cancel and stale discard preserve local content and require a fresh review", async () => {
+	const f = await fixture();
+	try {
+		await f.modal.onOpen(); await until(() => !!f.button("Send") && !f.button("Send").disabled);
+		f.button("Review discard").click(); await until(() => !!f.button("Discard reviewed local work"));
+		f.button("Cancel discard review").click(); expect(f.button("Send").disabled).toBe(false); expect(f.session.abandonReviewedWork).not.toHaveBeenCalled();
+		f.button("Review discard").click(); await until(() => !!f.button("Discard reviewed local work"));
+		const draft = (await f.store.getDraft("recovery:" + id(4)))!;
+		await f.store.saveDraft({ ...draft, revision: draft.revision + 1, body: protocolJson(editableCommentDraft(bodyFromText("Newer correction"), () => "Alice")) }, draft.revision);
+		const checkbox = f.modal.contentEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+		checkbox.checked = true; checkbox.dispatchEvent(new Event("change")); f.button("Discard reviewed local work").click();
+		await until(() => f.modal.contentEl.textContent!.includes("Nothing was discarded"));
+		expect(f.button("Discard reviewed local work")).toBeUndefined(); expect((await f.store.getDraft(draft.id))?.body).toMatchObject({ text: "Newer correction" });
 	} finally { f.close(); }
 });
 

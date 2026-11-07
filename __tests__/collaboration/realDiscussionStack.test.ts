@@ -260,5 +260,19 @@ integration("withdrawn comments recover as edited drafts without duplicate sends
 		await session.queue({ ...stale, operationId: randomUUID(), payload: { ...(stale.payload as object), expected_revision: 2 } }, edit.draft);
 		session.outbox.resume(); await session.outbox.settled();
 		expect((await transport.message(fixture.entry, thread, message)).message).toMatchObject({ revision: 3, body: bodyFromText("My offline edit") });
+		// Explicit local discard follows an actual server fence and includes
+		// unsent dependents. A delayed original can never create the thread.
+		session.outbox.stop(); await session.outbox.settled();
+		const discardedThread = randomUUID();
+		const abandoned = await store.enqueue({ operationId: randomUUID(), scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
+			type: "thread.create", thread_id: discardedThread, message_id: randomUUID(), anchor: { version: 1, type: "note" }, body: protocolJson(bodyFromText("Discard after review")) } });
+		const waiting = await store.enqueue({ operationId: randomUUID(), scopeId: fixture.entry, type: "reply.create", dependsOn: [abandoned.operationId], payload: {
+			type: "reply.create", thread_id: discardedThread, message_id: randomUUID(), body: protocolJson(bodyFromText("Dependent local reply")) } });
+		expect((await session.recoverSavedCommand(abandoned)).status).toBe("editable");
+		const discardReview = await session.reviewAbandonment(abandoned.operationId); expect(discardReview.operations).toHaveLength(2);
+		await session.abandonReviewedWork(discardReview, () => true);
+		expect(await store.getOperation(waiting.operationId)).toMatchObject({ state: "withdrawn" });
+		await expect(transport.send(abandoned)).rejects.toMatchObject({ code: "operation_withdrawn" });
+		await expect(transport.thread(fixture.entry, discardedThread)).rejects.toMatchObject({ status: 404 });
 	} finally { stop?.(); await session.close(); }
 }, 30_000);
