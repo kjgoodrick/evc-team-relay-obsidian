@@ -7,6 +7,7 @@ import { parseDiscussionScope } from "../DiscussionScope";
 import { INBOX_KEY, parseInboxLocalState, forgetInboxScope, type InboxLocalState } from "./InboxRecords";
 import { pictureCacheLimit, validPictureCacheLimit, type DiscussionStorageUsage } from "./CachePolicy";
 import { LOCAL_WORK_STORE, captureLocalWork, releaseLocalWork, type LocalWorkSnapshot, type LocalWorkSummary } from "./LocalWorkRecords";
+import { localDraftPage, waitingWorkPage, type WaitingCursor } from "./LocalWorkPage";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -174,7 +175,7 @@ export class DiscussionStore {
 		}
 	}
 
-	async saveDraft(draft: Draft, expectedRevision?: number | null, pictures: LocalPicture[] = []): Promise<void> {
+	async saveDraft(draft: Draft, expectedRevision?: number | null, pictures: LocalPicture[] = [], currentContext: () => boolean = () => true): Promise<void> {
 		requiredId(draft.id); requiredId(draft.scopeId); boundedJson(draft.body);
 		if (!Number.isSafeInteger(draft.revision) || draft.revision < 0) throw new Error("Invalid draft revision");
 		draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
@@ -186,6 +187,7 @@ export class DiscussionStore {
 			return prepared;
 		}));
 		await this.transaction(["drafts", "outbox", ...PICTURE_STORES], "readwrite", async tx => {
+			if (!currentContext()) throw new Error("The draft account changed.");
 			if (await request(tx.objectStore("preferences").get("online:" + draft.id))) throw new Error("Review the unconfirmed online action before editing this draft");
 			const store = tx.objectStore("drafts"), current: Draft | undefined = await request(store.get(draft.id));
 			if (current && canonical(current.target ?? null) !== canonical(draft.target ?? null)) throw new Error("Draft target changed; preserve the original draft and start another selection");
@@ -197,6 +199,7 @@ export class DiscussionStore {
 			await request(store.put(draft));
 			await setPictureReferences(tx, "draft", draft.id, draft.scopeId, ids);
 			await putPictureSources(tx, sources, draft.scopeId, ids);
+			if (!currentContext()) throw new Error("The draft account changed.");
 		});
 	}
 
@@ -295,6 +298,13 @@ export class DiscussionStore {
 			const generations = tx.objectStore("generations");
 			await request(generations.put((await request(generations.get(scopeId)) ?? 0) + 1, scopeId));
 		});
+	}
+
+	localDraftPage(after?: string, limit = 10) {
+		return this.transaction(["drafts", "preferences"], "readonly", tx => localDraftPage(tx, after, limit));
+	}
+	waitingWorkPage(after?: WaitingCursor, limit = 10) {
+		return this.transaction(["outbox"], "readonly", tx => waitingWorkPage(tx, after, limit));
 	}
 
 	async getDraft(id: string): Promise<Draft | undefined> {

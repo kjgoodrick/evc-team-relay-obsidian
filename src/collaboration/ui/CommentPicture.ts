@@ -18,7 +18,7 @@ export class CommentPicture {
 	private visible = true;
 	private variant: PictureVariant = "thumbnail";
 	private localContent?: boolean;
-	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private picture: PictureBlock, private local = false) {
+	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private picture: PictureBlock, private local: boolean | "only" = false) {
 		this.el = parent.createEl("figure", { cls: "relay-comment-picture" });
 		this.frame = this.el.createDiv({ cls: "relay-comment-picture-frame" });
 		this.image = this.frame.createEl("img", { attr: { alt: picture.alt || "Picture attached to comment", decoding: "async" } });
@@ -77,7 +77,7 @@ export class CommentPicture {
 				this.variant = "thumbnail"; this.button.hidden = false; this.button.disabled = false; this.button.setText("Retry full size");
 				this.status.setText("Full size could not be loaded. The saved preview is shown."); return;
 			}
-			this.clear(); this.status.setText("Picture unavailable. Reconnect or check access, then retry.");
+			this.clear(); this.status.setText(this.local === "only" ? "Original picture not available on this device. Open the discussion to check its shared picture." : "Picture unavailable. Reconnect or check access, then retry.");
 		}
 	}
 	dispose(): void { this.disposed = true; this.observer?.disconnect(); this.stopWatching(); this.clear(); this.el.remove(); }

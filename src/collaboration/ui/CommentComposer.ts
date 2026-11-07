@@ -68,7 +68,7 @@ export class CommentComposer {
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private draftId: string,
 		private command: (body: MessageBody, anchor?: LocalDiscussionAnchor, editBaseRevision?: number) => ComposerCommand, label = "Comment", initialText: string | CommentDraft = "",
-		private onSent: () => void = () => {}) {
+		private onSent: () => void = () => {}, private localOptions?: { current: () => boolean }) {
 		this.el = parent.createEl("form", { cls: "relay-comment-composer" });
 		const inputLabel = this.el.createEl("label", { text: label, attr: { for: draftId } });
 		inputLabel.onclick = event => { if (this.rich) { event.preventDefault(); this.rich.focus(); } };
@@ -147,6 +147,7 @@ export class CommentComposer {
 		});
 		this.ready = session.trackLocal(session.store.getDraft(draftId).then(async draft => {
 			if (this.disposed) return;
+			if (this.localOptions && (!draft || draft.scopeId !== this.entryId || !this.localOptions.current())) throw new Error("Saved draft unavailable");
 			this.revision = draft?.revision ?? -1;
 			const restored = readCommentDraft(draft?.body ?? initialText);
 			this.savedValue = JSON.stringify(restored); this.mentions = restored.mentions;
@@ -192,7 +193,7 @@ export class CommentComposer {
 		this.rich = new RichCommentEditor(this.richHost, this.session, this.entryId, body, () => {
 			const draft = this.rich!.draft(); this.textarea.value = this.previousText = draft.text; this.pictures = draft.pictures ?? [];
 			this.persist(); this.update();
-		}, message => this.status.setText(message), () => { void this.submit(); }, files => { void this.addPictures(files); }, label);
+		}, message => this.status.setText(message), () => { void this.submit(); }, files => { void this.addPictures(files); }, label, !!this.localOptions);
 		this.rich.setEditable(!this.busy && !this.onlinePending && !this.textarea.disabled && !this.saveFailed);
 	}
 	private snapshot(): CommentDraft {
@@ -212,16 +213,17 @@ export class CommentComposer {
 	}
 	update(): void {
 		if (this.disposed) return;
-		const paused = !this.editingAvailable() || !!this.discardReview || this.retiredTarget;
+		const paused = !!this.localOptions && !this.localOptions.current() || !this.editingAvailable() || !!this.discardReview || this.retiredTarget;
 		const blocked = paused || this.busy || this.saveFailed || !this.session.canQueue || !this.session.permission(this.entryId)?.comment;
-		this.send.disabled = blocked || this.textarea.disabled || this.onlinePending || this.needsEditReview || !this.sendAvailable();
+		this.send.hidden = !!this.localOptions;
+		this.send.disabled = !!this.localOptions || blocked || this.textarea.disabled || this.onlinePending || this.needsEditReview || !this.sendAvailable();
 		this.textarea.readOnly = paused || this.busy || this.onlinePending || this.saveFailed;
 		this.formatting.disabled = paused || this.busy || this.onlinePending || this.textarea.disabled || this.saveFailed;
 		this.rich?.setEditable(!paused && !this.busy && !this.onlinePending && !this.textarea.disabled && !this.saveFailed);
 		if (this.reviewButton) this.reviewButton.disabled = paused || this.busy || this.onlinePending || this.saveFailed;
 		if (this.extra) { this.extra.hidden = !this.extraAvailable(); this.extra.disabled = blocked || !this.session.online || !this.extraAvailable();
 			this.extra.setText(this.onlinePending ? "Retry send and reopen" : "Send and reopen"); }
-		const people = this.session.participants(this.entryId), signature = JSON.stringify(people);
+		const people = this.localOptions ? [] : this.session.participants(this.entryId), signature = JSON.stringify(people);
 		if (signature !== this.peopleSignature) {
 			const selected = this.people.value; this.peopleSignature = signature;
 			this.people.empty(); this.people.createEl("option", { text: "Mention…", attr: { value: "" } });
@@ -229,11 +231,12 @@ export class CommentComposer {
 			this.people.value = selected;
 		}
 		this.people.disabled = paused || this.busy || this.onlinePending || this.saveFailed || this.textarea.disabled || !people.length;
-		this.attach.hidden = !this.session.canAttachPictures;
+		this.people.hidden = !!this.localOptions;
+		this.attach.hidden = !!this.localOptions || !this.session.canAttachPictures;
 		this.attach.disabled = blocked || this.onlinePending || this.textarea.disabled || this.pictures.length >= 10;
-		this.refreshPictures.hidden = !this.pictures.length || this.onlinePending;
+		this.refreshPictures.hidden = !!this.localOptions || !this.pictures.length || this.onlinePending;
 		this.refreshPictures.disabled = blocked || this.textarea.disabled || !this.session.canAttachPictures;
-		this.recoverSend.hidden = !this.onlinePending;
+		this.recoverSend.hidden = !!this.localOptions || !this.onlinePending;
 		this.recoverSend.disabled = blocked || !this.session.canRecoverOnlineDraft;
 		this.discardButton.hidden = this.revision < 0 || this.onlinePending || this.recoveryDraft;
 		this.discardButton.disabled = paused || this.busy || this.saveFailed || this.textarea.disabled;
@@ -247,6 +250,7 @@ export class CommentComposer {
 			if (label) {
 				this.targetEl.createEl("p", { text: label });
 				const reveal = this.targetEl.createEl("button", { text: (this.target?.type === "base" || this.target?.type === "base_group_pending") ? "Target details" : "Show selection", attr: { type: "button" } });
+				reveal.hidden = !!this.localOptions;
 				reveal.onclick = () => { if (this.target) this.reveal?.(this.target); };
 			}
 		}
@@ -263,10 +267,11 @@ export class CommentComposer {
 	}
 	private async recover(pictures: boolean): Promise<void> {
 		await this.ready;
-		if (this.disposed || this.busy || this.saveFailed || this.composing || this.rich?.composing || !this.session.permission(this.entryId)?.comment ||
+		if (this.localOptions || this.disposed || this.busy || this.saveFailed || this.composing || this.rich?.composing || !this.session.permission(this.entryId)?.comment ||
 			(pictures ? this.onlinePending || !this.session.canAttachPictures : !this.onlinePending || !this.session.canRecoverOnlineDraft)) return;
 		if (pictures) this.persist();
 		this.busy = true; this.textarea.readOnly = true; this.update();
+		let completion: string | undefined;
 		try {
 			await this.chain; if (this.saveFailed) return;
 			const draft = { id: this.draftId, scopeId: this.entryId, revision: this.revision };
@@ -275,7 +280,7 @@ export class CommentComposer {
 				const refreshed = await this.session.refreshDraftPictures(draft);
 				if (this.disposed) return;
 				this.restoreRecoveredDraft(refreshed);
-				this.status.setText("Pictures refreshed. Your draft is saved; send it when ready.");
+				completion = "Pictures refreshed. Your draft is saved; send it when ready.";
 			} else {
 				const result = await this.session.recoverOnlineDraft(draft);
 				if (this.disposed) return;
@@ -283,20 +288,21 @@ export class CommentComposer {
 				if (result.status === "accepted") {
 					this.revision = -1; this.savedValue = ""; this.textarea.value = this.previousText = ""; this.mentions = []; this.pictures = [];
 					this.rich?.setBody();
-					this.status.setText("Your reply was already sent. The saved draft has been cleared."); this.onSent();
+					this.retiredTarget = !!this.target;
+					completion = "Your reply was already sent. The saved draft has been cleared."; this.onSent();
 				} else {
 					this.restoreRecoveredDraft(result.draft);
-					this.status.setText("Your draft is ready to edit. Review it and send again when ready.");
+					completion = "Your draft is ready to edit. Review it and send again when ready.";
 				}
 			}
 		} catch (error) {
-			if (!this.disposed) this.status.setText(error instanceof Error && error.message.includes("100 MiB") ?
+			completion = error instanceof Error && error.message.includes("100 MiB") ?
 				"Local picture storage is full. Your draft is retained. Send or remove other draft pictures, or finish a retained recovery copy in the storage panel, before retrying." :
 				error instanceof Error && error.message.includes("No saved picture originals") ? "No saved originals are available. Remove and add the affected pictures again." :
-				"Recovery was not confirmed. Your draft is retained. Check the connection and permissions, or reopen it if another window changed it.");
+				"Recovery was not confirmed. Your draft is retained. Check the connection and permissions, or reopen it if another window changed it.";
 		} finally {
 			try { this.onlinePending = !!await this.session.store.preference("online:" + this.draftId); } catch { /* Keep locked if storage/account is unavailable. */ }
-			this.busy = false; this.textarea.readOnly = this.onlinePending; if (!this.disposed) this.update();
+			this.busy = false; this.textarea.readOnly = this.onlinePending; if (!this.disposed) { this.update(); if (completion) this.status.setText(completion); }
 		}
 	}
 	private renderPictures(): void {
@@ -308,7 +314,7 @@ export class CommentComposer {
 			let card = this.pictureViews.get(picture.picture_id);
 			if (!card) {
 				const el = this.pictureList.createDiv({ cls: "relay-comment-draft-picture" });
-				const view = new CommentPicture(el, this.session, this.entryId, picture, true);
+				const view = new CommentPicture(el, this.session, this.entryId, picture, this.localOptions ? "only" : true);
 				const alt = el.createEl("input", { attr: { type: "text", maxlength: "1024", placeholder: "Picture description", "aria-label": "Picture description" } });
 				alt.value = picture.alt ?? "";
 				alt.oninput = () => { picture.alt = alt.value; view.setAlt(alt.value); this.persist(); };
@@ -327,7 +333,7 @@ export class CommentComposer {
 	 */
 	async addPictures(files: readonly File[]): Promise<void> {
 		await this.ready;
-		if (!files.length || this.disposed || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed || this.composing || this.rich?.composing || !this.session.canAttachPictures || !this.session.permission(this.entryId)?.comment) return;
+		if (this.localOptions || !files.length || this.disposed || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed || this.composing || this.rich?.composing || !this.session.canAttachPictures || !this.session.permission(this.entryId)?.comment) return;
 		if (files.length + this.pictures.length > 10) { this.status.setText("A comment can contain at most ten pictures."); return; }
 		this.busy = true; this.textarea.readOnly = true; this.update();
 		this.attachmentFlight = this.session.trackLocal((async () => {
@@ -362,7 +368,7 @@ export class CommentComposer {
 		await this.attachmentFlight;
 	}
 	private persist(): void {
-		if (this.disposed || this.textarea.disabled || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed) return;
+		if (this.localOptions && !this.localOptions.current() || this.disposed || this.textarea.disabled || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed) return;
 		const text = this.textarea.value;
 		const draft = this.snapshot(), value = JSON.stringify(draft);
 		this.status.setText("Saving draft…");
@@ -370,7 +376,7 @@ export class CommentComposer {
 			if (this.saveFailed) return;
 			if (value !== this.savedValue || this.revision < 0) {
 				await this.session.store.saveDraft({ id: this.draftId, scopeId: this.entryId, revision: this.revision + 1, body: protocolJson(draft),
-					...(this.target ? { target: protocolJson(this.target) } : {}) }, this.revision < 0 ? null : this.revision);
+					...(this.target ? { target: protocolJson(this.target) } : {}) }, this.revision < 0 ? null : this.revision, [], this.localOptions?.current);
 				this.revision++; this.savedValue = value;
 			}
 			if (!this.disposed && this.textarea.value === text) this.status.setText("Draft saved on this device");
@@ -380,7 +386,7 @@ export class CommentComposer {
 		}).finally(() => { if (!this.disposed) this.update(); }));
 	}
 	async submit(onlineAction?: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>): Promise<void> {
-		if (this.busy || this.disposed || this.discardReview || this.retiredTarget || this.composing || this.rich?.composing || this.needsEditReview || !this.sendAvailable()) return;
+		if (this.localOptions || this.busy || this.disposed || this.discardReview || this.retiredTarget || this.composing || this.rich?.composing || this.needsEditReview || !this.sendAvailable()) return;
 		await this.ready;
 		if (this.busy || this.disposed || this.saveFailed || this.composing || this.rich?.composing || this.needsEditReview || !this.session.canQueue || !this.session.permission(this.entryId)?.comment) return;
 		if (this.onlinePending && !onlineAction) return;
@@ -430,7 +436,7 @@ export class CommentComposer {
 		const draft = this.discardReview; if (!draft || this.disposed || this.busy || this.saveFailed) return;
 		this.busy = this.discarding = true; keep.disabled = discard.disabled = true; this.update();
 		try {
-			await this.session.discardDraft(draft, () => !this.disposed && this.discardReview === draft);
+			await this.session.discardDraft(draft, () => !this.disposed && this.discardReview === draft && (!this.localOptions || this.localOptions.current()));
 			if (this.disposed) return;
 			this.discardReview = undefined; this.discardPanel.empty();
 			this.revision = -1; this.savedValue = ""; this.textarea.value = this.previousText = ""; this.mentions = []; this.pictures = [];

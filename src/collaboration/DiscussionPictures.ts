@@ -13,7 +13,7 @@ export class DiscussionPictures {
 	private active = 0;
 	private waiting: (() => void)[] = [];
 	constructor(private session: DiscussionSession) {}
-	load(entryId: string, pictureId: string, variant: PictureVariant = "thumbnail", local = false): Promise<PictureContent> {
+	load(entryId: string, pictureId: string, variant: PictureVariant = "thumbnail", local: boolean | "only" = false): Promise<PictureContent> {
 		const key = JSON.stringify([entryId, pictureId, variant, local]);
 		const previous = this.flights.get(key); if (previous) return previous;
 		if (this.flights.size >= 32) return Promise.reject(new Error("Other pictures are loading. Retry in a moment."));
@@ -41,7 +41,7 @@ export class DiscussionPictures {
 			return { bytes: row.bytes, ...rendition, offline: true, local: false };
 		} catch { return undefined; }
 	}
-	private async read(entryId: string, pictureId: string, variant: PictureVariant, local: boolean): Promise<PictureContent> {
+	private async read(entryId: string, pictureId: string, variant: PictureVariant, local: boolean | "only"): Promise<PictureContent> {
 		const { session } = this;
 		if (this.closed()) throw new Error("This discussion account is closed.");
 		if (local) {
@@ -53,6 +53,7 @@ export class DiscussionPictures {
 				return { bytes: source.bytes, ...info, offline: !session.online, local: true };
 			}
 		}
+		if (local === "only") throw new PictureOfflineError("The original picture is not retained on this device.");
 		if (!this.allowed(entryId)) throw new Error("Reconnect and check access to view this picture.");
 		const checkpoint = await session.store.checkpoint(entryId);
 		const cachePolicy = await session.store.pictureCachePolicy();

@@ -131,3 +131,15 @@ test("forgetting a denied picture fences other in-flight variants in another win
 		expect(await store.cachePicture(entry, id(5), "content", rendition, bytes(), generation)).toBe(false);
 	} finally { other.close(); }
 });
+
+test("local-only recovery reads never fetch a missing original or fall back to a downloaded rendition", async () => {
+	const { loader, transport, session } = setup();
+	await loader.load(entry, id(5)); transport.picture.mockClear(); transport.pictureContent.mockClear();
+	await expect(loader.load(entry, id(5), "thumbnail", "only")).rejects.toThrow("not retained");
+	expect(transport.picture).not.toHaveBeenCalled(); expect(transport.pictureContent).not.toHaveBeenCalled();
+	const source = await prepareLocalPicture(id(6), entry, bytes());
+	await store.saveDraft({ id: "local", scopeId: entry, revision: 0, body: { text: "", mentions: [], pictures: [{ type: "picture", picture_id: source.id }] } }, null, [source]);
+	session.permission = () => ({ read: false });
+	await expect(loader.load(entry, id(6), "thumbnail", "only")).resolves.toMatchObject({ local: true });
+	expect(transport.picture).not.toHaveBeenCalled();
+});

@@ -2,6 +2,7 @@ import { Modal, TFolder, type App } from "obsidian";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { DiscussionStorageUsage } from "../storage/CachePolicy";
 import type { LocalWorkSummary } from "../storage/LocalWorkRecords";
+import { CommentLocalWorkModal } from "./CommentLocalWork";
 import type { LocalWorkIO } from "../LocalWorkRecovery";
 
 const mib = 1024 * 1024;
@@ -10,6 +11,7 @@ const size = (bytes: number) => `${(bytes / mib).toLocaleString(undefined, { max
 /** Account/share-local controls operate offline. Drafts, queued work and their
  * originals have independent ownership and are never disposable cache data. */
 export class CommentStorageModal extends Modal {
+	private work?: CommentLocalWorkModal;
 	private live = true;
 	private busy = false;
 	private loading = false;
@@ -31,10 +33,15 @@ export class CommentStorageModal extends Modal {
 	private retained?: LocalWorkSummary;
 	constructor(app: App, private session: DiscussionSession, private context: () => boolean, private recoveryIO?: LocalWorkIO) { super(app); }
 	private current = () => this.live && this.context() && this.session.status !== "closed";
-	validate(): void { if (this.live && !this.current()) this.close(); }
+	validate(): void { if (this.live && !this.current()) this.close(); else this.work?.validate(); }
 	async onOpen(): Promise<void> {
 		this.setTitle("Comment storage on this device");
 		this.contentEl.createEl("p", { text: "Applies to this shared folder in this vault for the signed-in account. Saved drafts, queued changes and their original pictures are retained separately from downloaded pictures." });
+		const browse = this.contentEl.createEl("button", { text: "Browse saved work", attr: { type: "button" } });
+		browse.onclick = () => {
+			if (!this.current()) return;
+			this.work?.close(); this.work = new CommentLocalWorkModal(this.app, this.session, this.context); this.work.open();
+		};
 		this.summary = this.contentEl.createDiv();
 		this.status = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
 		const label = this.contentEl.createEl("label", { text: "Downloaded picture limit " });
@@ -143,7 +150,7 @@ export class CommentStorageModal extends Modal {
 		finally { this.busy = false; if (this.current()) { await this.refresh(); this.controls(); } }
 	}
 	onClose(): void {
-		this.live = false; this.stop?.(); this.stop = undefined;
+		this.live = false; this.work?.close(); this.work = undefined; this.stop?.(); this.stop = undefined;
 		if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearTimeout(this.timer);
 		this.timer = undefined; this.contentEl.empty();
 	}

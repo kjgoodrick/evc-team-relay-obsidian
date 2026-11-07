@@ -36,8 +36,8 @@ export class RichCommentEditor {
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private scopeId: string, body: MessageBody,
 		private change: () => void, private error: (message: string) => void, private send: () => void,
-		private attach: (files: File[]) => void, label: string) {
-		this.original = readRichDraftBody(body); this.originalDoc = bodyToCommentDoc(body, id => session.displayName(scopeId, id));
+		private attach: (files: File[]) => void, label: string, private localOnly = false) {
+		this.original = readRichDraftBody(body); this.originalDoc = bodyToCommentDoc(body, id => this.localOnly ? "Member" : session.displayName(scopeId, id));
 		this.remember(this.original);
 		this.el = parent.createDiv({ cls: "relay-comment-rich" });
 		this.toolbar = this.el.createDiv({ cls: "relay-comment-formatting", attr: { role: "group", "aria-label": "Comment formatting" } });
@@ -219,10 +219,10 @@ export class RichCommentEditor {
 	private draftFor(rich: MessageBody): CommentDraft {
 		const pictures = rich.blocks.filter((block): block is PictureBlock => block.type === "picture"), active = new Set(pictures.map(picture => picture.picture_id));
 		const undoPictures = [...this.remembered.values()].filter(picture => !active.has(picture.picture_id));
-		return { text: commentBodyText(rich, id => this.session.displayName(this.scopeId, id)), mentions: [], rich, pictures, ...(undoPictures.length ? { undoPictures } : {}) };
+		return { text: commentBodyText(rich, id => this.localOnly ? "Member" : this.session.displayName(this.scopeId, id)), mentions: [], rich, pictures, ...(undoPictures.length ? { undoPictures } : {}) };
 	}
 	setBody(body: MessageBody = emptyBody()): void {
-		this.original = readRichDraftBody(body); this.originalDoc = bodyToCommentDoc(body, id => this.session.displayName(this.scopeId, id));
+		this.original = readRichDraftBody(body); this.originalDoc = bodyToCommentDoc(body, id => this.localOnly ? "Member" : this.session.displayName(this.scopeId, id));
 		this.remembered.clear(); this.remember(body); this.linkBookmark = undefined; this.linkPanel.hidden = true;
 		this.view.updateState(this.state(this.originalDoc)); this.update();
 	}
@@ -249,7 +249,7 @@ export class RichCommentEditor {
 	private picture(initial: EditorNode, position: () => number | undefined): NodeView {
 		let node = initial;
 		const dom = this.el.ownerDocument.createElement("div"); dom.className = "relay-comment-rich-picture"; dom.contentEditable = "false";
-		const picture = new CommentPicture(dom, this.session, this.scopeId, { type: "picture", picture_id: node.attrs.picture_id, alt: node.attrs.alt }, true);
+		const picture = new CommentPicture(dom, this.session, this.scopeId, { type: "picture", picture_id: node.attrs.picture_id, alt: node.attrs.alt }, this.localOnly ? "only" : true);
 		const alt = dom.createEl("input", { attr: { type: "text", maxlength: "1024", "aria-label": "Picture description", placeholder: "Picture description" } }); alt.value = node.attrs.alt;
 		alt.oninput = () => { const pos = position(); if (this.enabled && pos !== undefined) this.view.dispatch(this.view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, alt: alt.value })); };
 		const remove = dom.createEl("button", { text: "Remove picture", attr: { type: "button" } });
