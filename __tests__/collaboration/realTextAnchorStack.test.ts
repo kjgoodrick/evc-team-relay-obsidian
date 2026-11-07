@@ -37,7 +37,7 @@ run("real selected-text comments wait for delete-only edits, survive lost replie
 		type: "thread.create", dependsOn: [], payload: { type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(),
 			anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Review this selection")) } });
 	try {
-		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false, imageFiles: false, pictures: false, recovery: true });
+		expect(await transport.capabilities()).toEqual({ discussions: true, textAnchors: true, blockAnchors: true, imageOccurrences: false, imageFiles: false, pictures: false, recovery: true, baseTargets: [], baseRecordTypes: [] });
 		expect(await transport.permissions(fixture.note)).toEqual({ read: true, comment: true, edit: false, moderate: false });
 		const owner = await peer(fixture.ownerToken, "write"); owner.text.insert(0, "alpha beta gamma");
 		const reviewer = await peer(fixture.bobToken, "read");
@@ -46,9 +46,11 @@ run("real selected-text comments wait for delete-only edits, survive lost replie
 		const original = wireTextAnchor(captureTextAnchor(reviewer.text, fixture.note, context.generation, 6, 10));
 		const first = command(original), accepted = await transport.send(first);
 		expect(accepted.message_revision).toBe(1);
-		const forbidden = await fetch(fixture.relay.replace("ws:", "http:") + "/internal/collaboration/validate", {
-			method: "POST", headers: { Authorization: "Bearer " + owner.auth.token, "Content-Type": "application/json" }, body: "{}" });
-		expect([401, 403]).toContain(forbidden.status); // A write-capable document token is never a private server credential.
+		for (const route of ["validate", "source"]) {
+			const forbidden = await fetch(fixture.relay.replace("ws:", "http:") + "/internal/collaboration/" + route, {
+				method: "POST", headers: { Authorization: "Bearer " + owner.auth.token, "Content-Type": "application/json" }, body: "{}" });
+			expect([401, 403]).toContain(forbidden.status); // A write-capable document token is never a private server credential.
+		}
 		owner.provider.disconnect();
 		owner.text.delete(0, 6); // Does not advance the state vector: deletion evidence is required.
 		const afterDeletion = wireTextAnchor(captureTextAnchor(owner.text, fixture.note, context.generation, 0, 4));
