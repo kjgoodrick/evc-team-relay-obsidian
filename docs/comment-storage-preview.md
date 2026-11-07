@@ -43,7 +43,11 @@ full suite preceded a final label-only count wording adjustment, covered by the
 focused UI check. The run did not exercise clearing nonempty picture storage;
 automated store/loader tests cover that behavior.
 
-Broader discussion-metadata cache policy/cleanup, local-work export and deliberate
+The panel now also supports [verified local-work recovery copies](local-comment-recovery-copy-preview.md),
+including offline capture, interruption/retry and retained original pictures.
+Storage version 23 preserves the settings described above.
+
+Broader discussion-metadata cache policy/cleanup, reviewed import and deliberate
 abandonment, coherent service backup/restore, native nonempty picture cleanup,
 mobile/touch and resource/battery acceptance remain separate unfinished work.
 This panel does not represent a backup or a production rollout.

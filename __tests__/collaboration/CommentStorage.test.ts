@@ -9,6 +9,7 @@ import type { DiscussionSession } from "../../src/collaboration/DiscussionSessio
 import type { DiscussionStorageUsage } from "../../src/collaboration/storage/CachePolicy";
 import { CommentStorageModal } from "../../src/collaboration/ui/CommentStorage";
 import { pictureHash } from "../../src/collaboration/PictureProtocol";
+import { saveLocalWorkRecovery, type LocalWorkIO } from "../../src/collaboration/LocalWorkRecovery";
 jest.mock("obsidian", () => ({ Modal: class {
 	contentEl = document.createElement("div"); setTitle() {}
 	close() { (this as unknown as { onClose(): void }).onClose(); }
@@ -22,12 +23,14 @@ async function until(check: () => boolean): Promise<void> {
 	for (let attempt = 0; attempt < 200; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
 	throw new Error("Storage view did not settle");
 }
-async function fixture() {
+async function fixture(io?: LocalWorkIO) {
 	const store = await DiscussionStore.open({ serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "cache-ui" }, new IDBFactory());
 	const listeners = new Set<() => void>(); let current = true;
 	const session = { status: "offline", store, onChange: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-		setPictureCacheLimit: jest.fn(async (value: number) => store.setPictureCacheLimit(value)), clearDownloadedPictures: jest.fn(async () => store.clearDownloadedPictures()) };
-	const modal = new CommentStorageModal({} as App, session as unknown as DiscussionSession, () => current); document.body.append(modal.contentEl);
+		setPictureCacheLimit: jest.fn(async (value: number) => store.setPictureCacheLimit(value)), clearDownloadedPictures: jest.fn(async () => store.clearDownloadedPictures()),
+		saveLocalWorkRecovery: jest.fn((output: LocalWorkIO, visible: () => boolean, retained?: string, progress?: (text: string) => void) => saveLocalWorkRecovery(store, output, visible, retained, progress)),
+		releaseLocalWorkRecovery: jest.fn(async (id: string) => { if (!await store.releaseLocalWork(id)) throw new Error("Capture changed"); }) };
+	const modal = new CommentStorageModal({} as App, session as unknown as DiscussionSession, () => current, io); document.body.append(modal.contentEl);
 	const button = (label: string) => Array.from(modal.contentEl.querySelectorAll("button")).find(item => item.textContent === label)!;
 	return { store, session, modal, button, listeners, invalidate: () => { current = false; modal.validate(); }, close: () => { modal.onClose(); modal.contentEl.remove(); store.close(); } };
 }
@@ -82,5 +85,47 @@ test("account loss clears the panel and late reads cannot restore its content", 
 		jest.spyOn(f.store, "storageUsage").mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
 		const opening = f.modal.onOpen(); f.invalidate(); finish(usage); await opening;
 		expect(f.modal.contentEl.textContent).toBe(""); expect(f.listeners.size).toBe(0);
+	} finally { f.close(); }
+});
+
+function recoveryDisk() {
+	const files = new Map<string, string>();
+	const io: LocalWorkIO = { mkdir: async () => {}, write: async (path, value) => { files.set(path, value); }, read: async path => files.get(path)!,
+		writeBinary: async () => { throw new Error("Unexpected picture"); }, readBinary: async () => { throw new Error("Unexpected picture"); } };
+	return { files, io };
+}
+
+test("offline recovery control writes a verified copy and preserves saved drafts", async () => {
+	const disk = recoveryDisk(), f = await fixture(disk.io);
+	try {
+		await f.store.saveDraft({ id: "keep", scopeId: id(3), revision: 0, body: "Offline text" });
+		await f.modal.onOpen(); f.button("Save recovery copy").click();
+		await until(() => f.modal.contentEl.textContent!.includes("Recovery copy verified"));
+		expect([...disk.files.keys()].some(path => path.endsWith("COMPLETE.json"))).toBe(true);
+		expect(await f.store.getDraft("keep")).toMatchObject({ revision: 0, body: "Offline text" });
+		expect(await f.store.localWorkSummary()).toBeUndefined();
+	} finally { f.close(); }
+});
+
+test("failed copies can retry their original capture and release requires explicit acknowledgement", async () => {
+	const disk = recoveryDisk(), f = await fixture(disk.io);
+	try {
+		await f.store.saveDraft({ id: "keep", scopeId: id(3), revision: 0, body: "Captured text" });
+		jest.spyOn(disk.io, "write").mockRejectedValueOnce(new Error("Disk full"));
+		await f.modal.onOpen(); f.button("Save recovery copy").click();
+		await until(() => !!f.button("Retry retained recovery copy") && !f.button("Retry retained recovery copy").disabled);
+		expect(f.modal.contentEl.textContent).toContain("Disk full");
+		expect(f.button("Release retained capture").disabled).toBe(true);
+		await f.store.saveDraft({ id: "keep", scopeId: id(3), revision: 1, body: "Later text" }, 0);
+		f.button("Retry retained recovery copy").click();
+		await until(() => f.modal.contentEl.textContent!.includes("Recovery copy verified"));
+		const manifest = [...disk.files].find(([path]) => path.endsWith("manifest.json"))![1];
+		expect(manifest).toContain("Captured text"); expect(manifest).not.toContain("Later text");
+		await f.store.captureLocalWork(id(30)); f.button("Refresh storage usage").click();
+		await until(() => !!f.button("Retry retained recovery copy"));
+		const check = f.modal.contentEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+		check.checked = true; check.dispatchEvent(new Event("change")); f.button("Release retained capture").click();
+		await until(() => f.modal.contentEl.textContent!.includes("Retained capture released"));
+		expect(await f.store.localWorkSummary()).toBeUndefined(); expect(await f.store.getDraft("keep")).toMatchObject({ body: "Later text" });
 	} finally { f.close(); }
 });

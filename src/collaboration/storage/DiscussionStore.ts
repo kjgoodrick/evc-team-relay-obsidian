@@ -6,6 +6,7 @@ import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGr
 import { parseDiscussionScope } from "../DiscussionScope";
 import { INBOX_KEY, parseInboxLocalState, forgetInboxScope, type InboxLocalState } from "./InboxRecords";
 import { pictureCacheLimit, validPictureCacheLimit, type DiscussionStorageUsage } from "./CachePolicy";
+import { LOCAL_WORK_STORE, captureLocalWork, releaseLocalWork, type LocalWorkSnapshot, type LocalWorkSummary } from "./LocalWorkRecords";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -90,9 +91,9 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 22 fences older workers that ignore picture cache limits/epochs.
+		// Version 23 adds retained recovery captures and fences older cleanup code.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 22);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 23);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -130,6 +131,7 @@ export class DiscussionStore {
 			// Existing previews used a fixed 50 MiB cache. Preserve that budget;
 			// newly created databases use the agreed 100 MiB default.
 			if (event.oldVersion > 0 && event.oldVersion < 22) open.transaction!.objectStore("preferences").put(50 * 1024 * 1024, "pictureCacheLimit");
+			if (event.oldVersion < 23 && !db.objectStoreNames.contains(LOCAL_WORK_STORE)) db.createObjectStore(LOCAL_WORK_STORE);
 		};
 		const db = await request(open);
 		db.onversionchange = () => db.close();
@@ -137,6 +139,23 @@ export class DiscussionStore {
 	}
 
 	close(): void { this.db.close(); }
+
+	async captureLocalWork(id: string, now = Date.now()): Promise<LocalWorkSnapshot> {
+		if (!isId(id) || !Number.isSafeInteger(now) || now < 0) throw new Error("Invalid recovery capture identity");
+		return this.transaction([LOCAL_WORK_STORE, "drafts", "outbox", ...PICTURE_STORES], "readwrite", tx => captureLocalWork(tx, this.identity, id, now));
+	}
+	async localWorkSummary(): Promise<LocalWorkSummary | undefined> {
+		return this.transaction([LOCAL_WORK_STORE], "readonly", tx => request(tx.objectStore(LOCAL_WORK_STORE).get("summary")));
+	}
+	async localWorkSnapshot(id: string): Promise<LocalWorkSnapshot | undefined> {
+		return this.transaction([LOCAL_WORK_STORE], "readonly", async tx => {
+			const snapshot: LocalWorkSnapshot | undefined = await request(tx.objectStore(LOCAL_WORK_STORE).get("snapshot"));
+			return snapshot?.id === id ? snapshot : undefined;
+		});
+	}
+	async releaseLocalWork(id: string): Promise<boolean> {
+		return this.transaction([LOCAL_WORK_STORE, ...PICTURE_STORES], "readwrite", tx => releaseLocalWork(tx, id));
+	}
 
 	private async transaction<T>(stores: string[], mode: IDBTransactionMode,
 		work: (tx: IDBTransaction) => Promise<T>): Promise<T> {
@@ -526,7 +545,7 @@ export class DiscussionStore {
 					const dependencies: OutboxOperation[] = await request(store.index("dependency").getAll(oldId, 101));
 					const upload: OutboxOperation | undefined = await request(store.get(oldId));
 					if (upload?.type === "picture.upload" && upload.scopeId === command.scopeId && references.length <= 100 && dependencies.length <= 100 &&
-						!references.some(ref => ref.kind !== "outbox" || ref.ownerId !== oldId) &&
+						!references.some(ref => ref.kind !== "export" && (ref.kind !== "outbox" || ref.ownerId !== oldId)) &&
 						!dependencies.some(op => op.state !== "accepted" && op.state !== "withdrawn")) {
 						if (upload.state !== "accepted") { upload.state = "withdrawn"; delete upload.lease; delete upload.error; await request(store.put(upload)); }
 						await setPictureReferences(tx, "outbox", oldId, command.scopeId, []);
@@ -655,7 +674,7 @@ export class DiscussionStore {
 				const dependencies: OutboxOperation[] = await request(outbox.index("dependency").getAll(oldId));
 				const upload: OutboxOperation | undefined = await request(outbox.get(oldId));
 				if (upload?.type === "picture.upload" && upload.scopeId === original.scopeId &&
-					!refs.some(ref => ref.kind !== "outbox" || ![oldId, replacementId].includes(ref.ownerId)) &&
+					!refs.some(ref => ref.kind !== "export" && (ref.kind !== "outbox" || ![oldId, replacementId].includes(ref.ownerId))) &&
 					!dependencies.some(op => op.state !== "accepted" && op.state !== "withdrawn")) {
 					if (upload.state !== "accepted") { upload.state = "withdrawn"; delete upload.lease; delete upload.error; await request(outbox.put(upload)); }
 					await setPictureReferences(tx, "outbox", oldId, original.scopeId, []);
@@ -761,8 +780,8 @@ export class DiscussionStore {
 
 	/** Explicit local account cleanup; callers must stop workers first. */
 	async clearAll(): Promise<void> {
-		await this.transaction(["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", "preferences", ...PICTURE_STORES], "readwrite", async tx => {
-			for (const name of ["drafts", "outbox", "entities", "cursors", "generations", "pictureCache", ...PICTURE_STORES]) await request(tx.objectStore(name).clear());
+		await this.transaction([LOCAL_WORK_STORE, "drafts", "outbox", "entities", "cursors", "generations", "pictureCache", "preferences", ...PICTURE_STORES], "readwrite", async tx => {
+			for (const name of [LOCAL_WORK_STORE, "drafts", "outbox", "entities", "cursors", "generations", "pictureCache", ...PICTURE_STORES]) await request(tx.objectStore(name).clear());
 			await request(tx.objectStore("preferences").delete(INBOX_KEY));
 			await request(tx.objectStore("preferences").delete("inbox:recovery"));
 		});

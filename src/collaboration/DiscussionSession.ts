@@ -7,6 +7,7 @@ import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { DiscussionReattachment } from "./DiscussionReattachment";
+import { saveLocalWorkRecovery, type LocalWorkIO } from "./LocalWorkRecovery";
 import { editableCommentDraft } from "./ui/CommentDraft";
 import { parseBody } from "./DiscussionProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
@@ -123,6 +124,16 @@ export class DiscussionSession {
 	async clearDownloadedPictures(): Promise<void> {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		await this.trackLocal(this.store.clearDownloadedPictures());
+		if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); }
+	}
+	async saveLocalWorkRecovery(io: LocalWorkIO, visible: () => boolean, retainedId?: string, progress?: (text: string) => void): Promise<string> {
+		if (this.closed) throw new Error("This discussion account is closed.");
+		return this.trackLocal(saveLocalWorkRecovery(this.store, io, () => !this.closed && visible(), retainedId, progress)
+			.finally(() => { if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); } }));
+	}
+	async releaseLocalWorkRecovery(id: string): Promise<void> {
+		if (this.closed) throw new Error("This discussion account is closed.");
+		if (!await this.trackLocal(this.store.releaseLocalWork(id))) throw new Error("The retained capture changed in another window. Refresh before reviewing it.");
 		if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); }
 	}
 	get status(): SessionStatus { return this.statusValue; }

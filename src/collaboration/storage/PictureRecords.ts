@@ -1,7 +1,7 @@
 import { PICTURE_SOURCE_QUOTA, pictureIds, type LocalPicture } from "../PictureProtocol";
 
 export const PICTURE_STORES = ["pictureSources", "pictureReferences", "preferences"];
-type Reference = { pictureId: string; kind: "draft" | "outbox"; ownerId: string; scopeId: string };
+type Reference = { pictureId: string; kind: "draft" | "outbox" | "export"; ownerId: string; scopeId: string };
 function request<T>(operation: IDBRequest<T>): Promise<T> {
 	return new Promise((resolve, reject) => {
 		operation.onsuccess = () => resolve(operation.result);
@@ -29,7 +29,7 @@ export async function putPictureSources(tx: IDBTransaction, sources: LocalPictur
 			continue;
 		}
 		bytes += source.size;
-		if (bytes > PICTURE_SOURCE_QUOTA) throw new Error("Unsent pictures exceed 100 MiB on this device. Send or remove pictures before adding more.");
+		if (bytes > PICTURE_SOURCE_QUOTA) throw new Error("Unsent pictures exceed 100 MiB on this device. Send or remove pictures, or finish a retained recovery copy, before adding more.");
 		await request(store.add(source));
 	}
 	await request(tx.objectStore("preferences").put(bytes, "pictureSourceBytes"));
