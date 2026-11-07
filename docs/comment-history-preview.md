@@ -71,6 +71,11 @@ build/main types, changed-file lint and the frozen test-type gate pass, with the
 existing 15 Svelte warnings, test lint warnings and 206 known test-type errors
 across 45 signatures.
 
-Native desktop/mobile, popout, touch, screen-reader and resource acceptance
-remain required. The fresh native availability check reports a locked Mac.
+Native desktop Obsidian 1.13.7 with plugin `076ffe3` now verifies adjacent
+revision comparison (Removed “Native” / Added “Updated”), complete bold/link
+rendering, Previous revision to the original, and Latest revision back to the
+edited message. Independent temporary-service readback confirms both immutable
+rich bodies. No code change was needed for this native increment. The Mac is
+available; broader desktop cases, mobile/popout, touch, screen-reader and resource
+acceptance remain required.
 No live-vault installation or production deployment occurred.

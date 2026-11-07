@@ -1,7 +1,8 @@
 # Discussion links preview
 
-Updated November 7, 2026. This is a development preview. Native URI dispatch,
-clipboard behavior, popout windows and mobile acceptance remain required.
+Updated November 7, 2026. This is a development preview. Native desktop copy,
+paste-command opening and exact-message focus have evidence below. External OS
+URI dispatch, broader clipboard cases, popout and mobile acceptance remain.
 
 Saved threads expose **Copy discussion link**, and individual saved messages
 expose **Copy comment link**. The plugin registers the public Obsidian protocol
@@ -73,7 +74,12 @@ authorized path, but linking does not require the inbox feature.
 
 No server protocol, database migration or Time & Line implementation changed.
 No live-vault installation or production deployment was performed. Native
-desktop/mobile URI opening, two-user sharing, popout interaction, unavailable
-targets, accessibility and clipboard acceptance remain unverified while the Mac
-is locked. Rich editing, final history/permission UI, search/filtering and the
-remaining collaboration release scope are separate unfinished work.
+Obsidian 1.13.7 with plugin `076ffe3`, in a fresh disposable vault with actual
+local services, verifies Copy comment link, native clipboard paste into Open
+comment link, and focus on the exact edited rich message. After stopping both
+temporary services, the same link opens that cached message offline; History,
+Resolve and Remove are disabled. External operating-
+system URI dispatch, two-user sharing, mobile/popout, unavailable targets,
+accessibility and broader clipboard cases remain. Rich editing, history,
+permissions, search/filtering and other release work have separate acceptance
+records; the Mac is available.

@@ -124,3 +124,16 @@ availability check reports that the Mac is locked. No live vault installation or
 production deployment has occurred. Other release work—reattachment, remaining
 Bases/timeline targets, permission-management UI and complete recovery/backup—
 is tracked independently in the project status.
+
+
+## Native desktop increment, November 7
+
+Obsidian 1.13.7 on macOS, using the fresh disposable target-filter vault and
+actual local FastAPI/Rust services, verifies Format comment, selected bold text,
+selection-preserving link entry, send, reopening the structured edit and saving
+a second revision while keeping both marks. Independent server readback confirms
+`bold` marks, the link URL/children and both immutable rich revision bodies.
+The History view displays those marks/links and navigates between the original
+and edited revisions. This uses plugin `076ffe3`; no further code change was
+needed. Native mentions, lists/code, pictures, rich clipboard/IME, mobile/popout
+and resource acceptance still require their own checks.
