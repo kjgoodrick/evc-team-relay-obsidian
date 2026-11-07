@@ -1,8 +1,11 @@
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
-import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
+import { bodyFromText, protocolJson, wireTextAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import * as Y from "yjs";
+import { captureTextAnchor } from "../../src/collaboration/anchors/text";
+import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -146,4 +149,42 @@ test("version-20 upgrade preserves saved work and closes workers that cannot und
 			const request = factory.open(name, 20); request.onerror = () => reject(request.error); request.onsuccess = () => { request.result.close(); resolve(undefined); };
 		})).rejects.toMatchObject({ name: "VersionError" });
 	} finally { current.close(); old.close(); }
+});
+
+test("only reviewed creation drafts can change targets; body, operation and ordinary selection rules stay intact", async () => {
+	const f = await fixture(), document = new Y.Doc();
+	try {
+		const text = document.getText("contents"); text.insert(0, "alpha beta gamma");
+		const selected = protocolJson(wireTextAnchor(captureTextAnchor(text, scope, id(20), 6, 10)));
+		const draft = await f.store.restoreCommandForReview(f.original, initial);
+		await expect(f.store.saveDraft({ ...draft, revision: 1, target: selected }, 0)).rejects.toThrow("Draft target changed");
+		const moved = await f.store.retargetRecoveredDraft(draft.id, 0, selected);
+		expect(moved).toMatchObject({ revision: 1, body: initial, target: selected });
+		expect((await f.store.getOperation(id(4)))?.payload).toEqual(f.original.payload);
+		await expect(f.store.retargetRecoveredDraft(draft.id, 0, anchor)).rejects.toThrow("Draft changed");
+		await expect(f.store.retargetRecoveredDraft(draft.id, 1, protocolJson(wireTextAnchor(captureTextAnchor(text, id(99), id(20), 6, 10))))).rejects.toThrow("same note");
+		const whole = await f.store.retargetRecoveredDraft(draft.id, 1, anchor);
+		expect(whole).toMatchObject({ revision: 2, body: initial, target: anchor });
+		await f.store.enqueue(command(10), 2, whole);
+		await expect(f.store.retargetRecoveredDraft(draft.id, 2, selected)).rejects.toThrow("Draft changed");
+		await f.store.saveDraft({ id: "ordinary", scopeId: scope, revision: 0, body: initial, target: anchor }, null);
+		await expect(f.store.retargetRecoveredDraft("ordinary", 0, selected)).rejects.toThrow("Only a recovered");
+	} finally { document.destroy(); f.close(); }
+});
+
+test("recovered Bases targets stay within their saved view and replies cannot be retargeted", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory());
+	try {
+		const scopeId = baseDiscussionScope(id(3), id(4));
+		const target = { version: 1, type: "base", definition_id: id(20), view_id: id(4), generation: id(21), registry_revision: 1, target: { type: "view" } };
+		const original = await store.enqueue({ ...command(), scopeId, payload: { ...(command().payload as object), anchor: target } }, 1);
+		const draft = await store.restoreCommandForReview(original, initial);
+		const header = { ...target, target: { type: "property", property: { source: "note", name: "status" } } };
+		expect((await store.retargetRecoveredDraft(draft.id, 0, header)).target).toEqual(header);
+		await expect(store.retargetRecoveredDraft(draft.id, 1, { ...target, view_id: id(99) })).rejects.toThrow("same note");
+		await expect(store.retargetRecoveredDraft(draft.id, 1, anchor)).rejects.toThrow("same note");
+		const reply = await store.enqueue({ ...command(30), type: "reply.create", payload: { type: "reply.create", thread_id: id(5), message_id: id(6), body: protocolJson(body) } }, 2);
+		const replyDraft = await store.restoreCommandForReview(reply, initial);
+		await expect(store.retargetRecoveredDraft(replyDraft.id, 0, anchor)).rejects.toThrow("Only a recovered");
+	} finally { store.close(); }
 });

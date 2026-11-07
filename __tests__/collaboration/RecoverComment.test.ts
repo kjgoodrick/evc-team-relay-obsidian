@@ -3,7 +3,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { TextEncoder, TextDecoder } from "node:util";
 import { serialize, deserialize } from "node:v8";
 import type { App } from "obsidian";
-import { DiscussionStore, type QueuedCommand, type OutboxOperation } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionStore, type QueuedCommand, type OutboxOperation, type Json } from "../../src/collaboration/storage/DiscussionStore";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
@@ -24,13 +24,13 @@ async function until(check: () => boolean): Promise<void> {
 	for (let attempt = 0; attempt < 200; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
 	throw new Error("Recovery view did not settle");
 }
-async function fixture(type: "thread.create" | "reply.create" | "message.edit" = "thread.create") {
+async function fixture(type: "thread.create" | "reply.create" | "message.edit" = "thread.create", target: Json = { version: 1, type: "note" }) {
 	const store = await DiscussionStore.open(identity, new IDBFactory()), listeners = new Set<() => void>();
 	let readable = true;
 	const body = bodyFromText("My saved change"), draft = editableCommentDraft(body, () => "Alice");
 	if (type === "message.edit") draft.editBaseRevision = 1;
 	const original = await store.enqueue({ operationId: id(4), scopeId: scope, type, dependsOn: [], payload: { type,
-		thread_id: id(5), message_id: id(6), body: protocolJson(body), ...(type === "thread.create" ? { anchor: { version: 1, type: "note" } } : {}),
+		thread_id: id(5), message_id: id(6), body: protocolJson(body), ...(type === "thread.create" ? { anchor: target } : {}),
 		...(type === "message.edit" ? { expected_revision: 1 } : {}) } }, 1);
 	const session = { store, identity, status: "ready", online: true, canQueue: true, canRecoverSavedCommand: true,
 		permission: () => ({ read: readable, comment: readable }), participants: () => [], displayName: () => "Alice",
@@ -113,7 +113,8 @@ test("choosing a replacement target flushes the durable draft without enqueueing
 });
 
 test("whole-note recovery saves a reviewed target without changing or sending the body", async () => {
-	const f = await fixture();
+	const f = await fixture("thread.create", { version: 1, type: "text", document_id: scope, generation: id(30), start: "AA==", end: "AA==", dependency: "AAA=", selected_length: 4,
+		context: { quote: "beta", prefix: "", suffix: "", truncated: false } });
 	try {
 		await f.modal.onOpen(); await until(() => !!f.button("Send") && !f.button("Send").disabled);
 		f.button("Use entire note").click(); await until(() => f.modal.contentEl.textContent!.includes("Draft target updated"));

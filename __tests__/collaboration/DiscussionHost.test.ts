@@ -116,17 +116,17 @@ test("recovery target capture updates only its saved draft with CAS and never en
 	const typed = session as unknown as DiscussionSession, anchor = { version: 1 as const, type: "note" as const };
 	const operation = { operationId: id(30), scopeId: id(3), type: "thread.create", state: "review" } as OutboxOperation;
 	const draft = { id: "recovery:" + id(30), scopeId: id(3), revision: 4, body: { text: "Saved body", mentions: [] } };
-	const saveDraft = jest.fn().mockResolvedValue(undefined), setPreference = jest.fn(); Object.assign(s.store, { saveDraft, setPreference });
+	const retargetRecoveredDraft = jest.fn().mockResolvedValue(undefined), setPreference = jest.fn(); Object.assign(s.store, { retargetRecoveredDraft, setPreference });
 	try {
 		s.host.openCommandRecovery(typed, operation);
 		jest.mocked(RecoverCommentModal).mock.calls.at(-1)![3].choose(operation, draft);
 		expect(s.host.choosingCommandRecovery).toBe(true);
 		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(3), file: s.file, anchor })).toBe(true);
-		expect(saveDraft).toHaveBeenCalledWith({ ...draft, revision: 5, target: anchor }, 4);
+		expect(retargetRecoveredDraft).toHaveBeenCalledWith(draft.id, 4, anchor);
 		expect(setPreference).not.toHaveBeenCalled(); expect(s.host.choosingReattachment).toBe(false);
 		expect(jest.mocked(RecoverCommentModal).mock.calls.at(-1)!.slice(1, 3)).toEqual([typed, operation]);
 		jest.mocked(RecoverCommentModal).mock.calls.at(-1)![3].choose(operation, draft);
-		saveDraft.mockRejectedValueOnce(new Error("Draft changed in another window"));
+		retargetRecoveredDraft.mockRejectedValueOnce(new Error("Draft changed in another window"));
 		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(3), file: s.file, anchor })).toBe(false);
 		expect(s.host.choosingCommandRecovery).toBe(true);
 		s.account(id(90)); expect(s.host.choosingCommandRecovery).toBe(false);

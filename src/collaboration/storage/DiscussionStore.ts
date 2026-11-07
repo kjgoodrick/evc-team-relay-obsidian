@@ -1,8 +1,9 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
 import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
-import { isId, isRecord, parseBody, protocolJson } from "../DiscussionProtocol";
-import { parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "../LocalDiscussionAnchor";
+import { isId, isRecord, parseBody, protocolJson, sourceAnchor } from "../DiscussionProtocol";
+import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "../LocalDiscussionAnchor";
+import { parseDiscussionScope } from "../DiscussionScope";
 import { INBOX_KEY, parseInboxLocalState, forgetInboxScope, type InboxLocalState } from "./InboxRecords";
 import { pictureCacheLimit, validPictureCacheLimit, type DiscussionStorageUsage } from "./CachePolicy";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -573,6 +574,28 @@ export class DiscussionStore {
 			current.state = "review"; current.reviewDraftId = draftId; delete current.lease;
 			await request(outbox.put(current));
 			return draft;
+		});
+	}
+	/** Ordinary selection drafts are immutable. Only a withdrawn creation under
+	 * explicit review may replace its target, preserving its body and identities. */
+	async retargetRecoveredDraft(id: string, revision: number, target: Json): Promise<Draft> {
+		const anchor = parseLocalDiscussionAnchor(target), safe = JSON.parse(boundedJson(protocolJson(anchor))) as Json;
+		return this.transaction(["drafts", "outbox", "preferences"], "readwrite", async tx => {
+			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(id));
+			if (!draft || draft.revision !== revision || !Number.isSafeInteger(revision + 1)) throw new Error("Draft changed in another view");
+			const operationId = await request(tx.objectStore("preferences").get("recovery:" + id));
+			const operation: OutboxOperation | undefined = operationId ? await request(tx.objectStore("outbox").get(operationId)) : undefined;
+			if (!operation || operation.state !== "review" || operation.reviewDraftId !== id || operation.scopeId !== draft.scopeId ||
+				!["thread.create", "base.group.create"].includes(operation.type) || !isRecord(operation.payload)) throw new Error("Only a recovered new discussion can change target");
+			const scope = parseDiscussionScope(draft.scopeId), source = anchor.type === "base_group_pending" ? undefined : sourceAnchor(anchor);
+			const imageFile = isRecord(operation.payload.anchor) && operation.payload.anchor.type === "image_file";
+			if (!scope || (anchor.type === "base" || anchor.type === "base_group_pending") !== !!scope.viewId ||
+				(anchor.type === "base" && anchor.view_id !== scope.viewId) ||
+				(anchor.type === "base_group_pending" && (anchor.capture.view_id !== scope.viewId || anchor.entry_id !== scope.entryId)) ||
+				(source && source.document_id !== scope.entryId) || (anchor.type === "image_file") !== imageFile ||
+				(anchor.type === "image_file" && anchor.asset.entry_id !== scope.entryId)) throw new Error("Choose a target in the same note or saved view");
+			const updated = { ...draft, revision: revision + 1, target: safe }; boundedJson(updated as unknown as Json);
+			await request(drafts.put(updated)); return updated;
 		});
 	}
 

@@ -127,8 +127,7 @@ export class RecoverCommentModal extends Modal {
 			const anchor: LocalDiscussionAnchor = parseDiscussionScope(this.operation.scopeId)?.viewId ?
 				await this.session.captureBaseTarget(this.operation.scopeId, { type: "view" }) : { version: 1, type: "note" };
 			if (!this.current()) return;
-			const updated = { ...draft, revision: draft.revision + 1, target: protocolJson(anchor) };
-			await this.session.trackLocal(this.session.store.saveDraft(updated, draft.revision));
+			const updated = await this.session.trackLocal(this.session.store.retargetRecoveredDraft(draft.id, draft.revision, protocolJson(anchor)));
 			if (!this.current()) return;
 			this.recovered.draft = updated; this.showComposer();
 			this.issue?.setText("Draft target updated. Review the comment before sending.");

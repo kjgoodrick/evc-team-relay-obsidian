@@ -28,6 +28,15 @@ alternatives. Target capture changes only the saved draft, using a revision
 check; it cannot overwrite another window's draft or submit the comment.
 Replies and edits keep their original discussion.
 
+A follow-up correction adds a dedicated atomic target-change operation for
+recovered creation drafts. The ordinary draft-save path intentionally rejects
+target changes; using that path had blocked genuine recovery retargeting. The
+new path verifies the cancelled operation, current draft revision and same
+note/saved-view identity while preserving body and picture ownership. Text to
+whole-note and Bases property changes now have real-store regressions; the
+actual-service recovery fixture also changes a draft's target before sending.
+The focused follow-up suite passes 94 tests and all four HTTP fixture scenarios.
+
 Storage version 21 closes older database handles and prevents older workers from
 opening the new database. A `review` outbox state is not deliverable. The original
 wire payload remains immutable; late worker results cannot discard a review

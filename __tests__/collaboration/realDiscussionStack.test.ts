@@ -224,9 +224,12 @@ integration("withdrawn comments recover as edited drafts without duplicate sends
 		await expect(transport.send(original)).rejects.toMatchObject({ code: "operation_withdrawn" });
 		const recovered = await session.recoverSavedCommand(original);
 		if (recovered.status !== "editable") throw new Error("Expected editable recovery");
+		const selected = await store.retargetRecoveredDraft(recovered.draft.id, 0, { version: 1, type: "text", document_id: fixture.entry, generation: randomUUID(),
+			start: "AA==", end: "AA==", dependency: "AAA=", selected_length: 4, context: { quote: "beta", prefix: "", suffix: "", truncated: false } });
+		const whole = await store.retargetRecoveredDraft(selected.id, selected.revision, { version: 1, type: "note" });
 		const corrected = bodyFromText("Corrected before sending");
-		const draft = { ...recovered.draft, revision: 1, body: protocolJson(editableCommentDraft(corrected, () => "Owner")) };
-		await store.saveDraft(draft, 0);
+		const draft = { ...whole, revision: whole.revision + 1, body: protocolJson(editableCommentDraft(corrected, () => "Owner")) };
+		await store.saveDraft(draft, whole.revision);
 		const replacement = { ...original, operationId: randomUUID(), payload: { ...(original.payload as object), body: protocolJson(corrected) } };
 		await session.queue(replacement, draft); session.outbox.resume(); await session.outbox.settled();
 		expect(await store.getOperation(child.operationId)).toMatchObject({ state: "accepted", dependsOn: [replacement.operationId] });

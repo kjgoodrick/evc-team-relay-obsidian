@@ -784,7 +784,7 @@ export class DiscussionHost extends Component {
 			if (this.recoverySelection) {
 				const recovery = this.recoverySelection;
 				if (recovery.session !== session || recovery.entryId !== entryId) { new Notice("Return to the original note or saved view to recover this comment, or cancel target selection."); return false; }
-				await session.trackLocal(session.store.saveDraft({ ...recovery.draft, revision: recovery.draft.revision + 1, target: protocolJson(anchor) }, recovery.draft.revision));
+				await session.trackLocal(session.store.retargetRecoveredDraft(recovery.draft.id, recovery.draft.revision, protocolJson(anchor)));
 				if (this.recoverySelection !== recovery || !current()) return false;
 				this.recoverySelection = undefined;
 				this.lastFile = file; this.openCommandRecovery(session, recovery.operation); this.notify(); return true;
