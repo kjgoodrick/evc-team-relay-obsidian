@@ -11,6 +11,9 @@ export class DurationValue extends Value {
 export class TFile { path = ""; }
 export class FileValue extends Value { constructor(public file: TFile) { super(); } }
 export class UrlValue extends StringValue {}
+export class TagValue extends StringValue {
+	constructor(value: string) { super(value.startsWith("#") ? value : "#" + value); }
+}
 export class LinkValue extends StringValue { sourcePath = ""; display: unknown; }
 export class ListValue extends Value {
 	constructor(public data: unknown[]) { super(); }

@@ -1,5 +1,5 @@
 import { BooleanValue, DateValue, DurationValue, FileValue, LinkValue, ListValue, NullValue, NumberValue,
-	StringValue, TFile, UrlValue, Value, parseLinktext } from "obsidian";
+	StringValue, TagValue, TFile, UrlValue, Value, parseLinktext } from "obsidian";
 
 /** Local renderer evidence, not a wire anchor or an authorization proof. Files
  * must be converted to managed identities before any target leaves this device.
@@ -7,7 +7,7 @@ import { BooleanValue, DateValue, DurationValue, FileValue, LinkValue, ListValue
  */
 export type NativeBaseGroupValue =
 	| { type: "empty" }
-	| { type: "text" | "date" | "instant" | "url"; value: string }
+	| { type: "text" | "date" | "instant" | "url" | "tag"; value: string }
 	| { type: "number"; value: number }
 	| { type: "boolean"; value: boolean }
 	| { type: "duration"; value: number[] }
@@ -48,6 +48,7 @@ export function nativeBaseGroupValue(value: unknown, resolve: NativeGroupLinkRes
 			}
 			if (item.constructor === FileValue && fields.file instanceof TFile) return { type: "file", file: fields.file };
 			if (item.constructor === StringValue) return { type: "text", value: string(fields.data) };
+			if (item.constructor === TagValue) return { type: "tag", value: string(fields.data) };
 			if (item.constructor === UrlValue) return { type: "url", value: string(fields.data) };
 			if (item.constructor === NumberValue && typeof fields.data === "number" && Number.isFinite(fields.data)) return { type: "number", value: fields.data === 0 ? 0 : fields.data };
 			if (item.constructor === BooleanValue && typeof fields.data === "boolean") return { type: "boolean", value: fields.data };
@@ -67,7 +68,9 @@ export function nativeBaseGroupValue(value: unknown, resolve: NativeGroupLinkRes
 				// A month is not a fixed millisecond duration; preserve its components.
 				return { type: "duration", value: (values as number[]).map(n => n === 0 ? 0 : n) };
 			}
-			if (item.constructor === ListValue) {
+			if (item instanceof ListValue) {
+				// Native tag collections are a private ListValue subclass. Use the
+				// public bounded length/get contract and preserve each typed element.
 				const length = (item as ListValue).length();
 				if (!Number.isSafeInteger(length) || length < 0 || length > nodes) throw new Error("Group list exceeds capture limits");
 				return { type: "list", value: Array.from({ length }, (_, index) => read((item as ListValue).get(index), depth + 1)) };

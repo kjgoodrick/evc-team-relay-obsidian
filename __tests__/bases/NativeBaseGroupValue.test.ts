@@ -1,6 +1,6 @@
 import { nativeBaseGroupValue, nativeBaseGroupValueKey } from "../../src/bases/NativeBaseGroupValue";
 import { BooleanValue, DateValue, DurationValue, FileValue, LinkValue, ListValue, NullValue, NumberValue,
-	StringValue, TFile, UrlValue, Value } from "../mocks/nativeBaseValues";
+	StringValue, TagValue, TFile, UrlValue, Value } from "../mocks/nativeBaseValues";
 
 jest.mock("obsidian", () => jest.requireActual("../mocks/nativeBaseValues"));
 const read = (value: unknown) => nativeBaseGroupValue(value, () => null);
@@ -47,6 +47,16 @@ test("lists preserve order, nested types and empty/singleton distinctions", () =
 	expect(key(new ListValue([]))).not.toBe(key(null));
 	expect(key(new ListValue([new StringValue("a"), new StringValue("b")]))).not.toBe(key(new ListValue([new StringValue("b"), new StringValue("a")])));
 	expect(read(new ListValue([new ListValue([new BooleanValue(true)]), NullValue.value]))).toEqual({ type: "list", value: [{ type: "list", value: [{ type: "boolean", value: true }] }, { type: "empty" }] });
+});
+
+test("native tag-list subclasses preserve tag identity instead of disappearing or becoming text", () => {
+	class Tags extends ListValue {}
+	expect(read(new Tags([new TagValue("one"), new TagValue("#Two")]))).toEqual({ type: "list", value: [
+		{ type: "tag", value: "#one" }, { type: "tag", value: "#Two" },
+	] });
+	expect(key(new TagValue("one"))).not.toBe(key(new StringValue("#one")));
+	expect(key(new TagValue("one"))).not.toBe(key(new TagValue("One")));
+	expect(read(new Tags(Array(257).fill(new TagValue("one"))))).toBeUndefined();
 });
 
 test("unknown, malformed, cyclic, overlarge and throwing host values never fall back to labels", () => {
