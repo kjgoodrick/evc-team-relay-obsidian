@@ -10,6 +10,7 @@ import { parseTimelineMarkerCatalog, parseTimelineMarkerPage, type TimelineMarke
 import { parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMarkerReceipt, type TimelineMarkerCommand } from "./TimelineMarkerManagementProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
+import { parseSearchPage, searchEnvelope, searchRequest, type DiscussionSearchRequest } from "./DiscussionSearchProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -38,6 +39,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
+for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
 for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "timeline_axis_changed", "unsupported_timeline_time_zone"]) errorCodes.add(code);
@@ -179,11 +181,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_timeline_markers"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_timeline_markers"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -218,7 +220,12 @@ export class DiscussionTransport implements DiscussionSender {
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
+			...(value.features.discussion_search === undefined ? {} : { search: value.features.discussion_commands && value.features.discussion_search === true }),
 			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
+	}
+	async search(input: DiscussionSearchRequest) {
+		const request = searchRequest(input), envelope = searchEnvelope(request);
+		return this.parse(await this.request(`/shares/${this.identity.shareId}/search`, envelope, { responseLimit: 512 * 1024 }), value => parseSearchPage(value, request));
 	}
 
 	async inbox(cursor: string | null = null) {

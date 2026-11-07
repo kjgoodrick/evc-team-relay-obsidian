@@ -43,6 +43,7 @@ import { baseSelectionKey, type BaseCommentContext } from "./BaseCommentContext"
 import { BaseComments } from "./BaseComments";
 import { DISCUSSION_LINK_ACTION, discussionServerKey, discussionLinkScope, discussionLinkUrl, parseDiscussionLink } from "./DiscussionLinks";
 import { OpenDiscussionLink } from "./ui/OpenDiscussionLink";
+import { type DiscussionSearchItem } from "./DiscussionSearchProtocol";
 
 type Slot = { cancelled: boolean; session?: DiscussionSession; pending?: Promise<void>; failed?: boolean };
 export type CommentTarget = { path: string; kind?: "note" | "image" | "base"; entryId?: string; session?: DiscussionSession; message?: string;
@@ -246,6 +247,15 @@ export class DiscussionHost extends Component {
 			}
 			throw error;
 		} finally { stop(); }
+	}
+	async openSearchResult(session: DiscussionSession, item: DiscussionSearchItem, live: () => boolean = () => true): Promise<void> {
+		const current = () => this.sessionCurrent(session);
+		const action = ++this.linkAction, expectedFile = this.lastFile;
+		if (!current() || !live()) throw new Error("Discussion access changed.");
+		const server = await discussionServerKey(session.identity.serverId);
+		if (!current() || !live() || action !== this.linkAction || expectedFile !== this.lastFile) throw new Error("Opening this discussion was cancelled.");
+		return this.openDiscussionLink(discussionLinkUrl({ version: 1, server, shareId: session.identity.shareId, entryId: item.entry_id,
+			threadId: item.thread.id, messageId: item.message_id, kind: item.kind, ...(item.view_id ? { viewId: item.view_id } : {}) }), current);
 	}
 	inboxSources(): { session: DiscussionSession; label: string }[] {
 		const result: { session: DiscussionSession; label: string }[] = [];

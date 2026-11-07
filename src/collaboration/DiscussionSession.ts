@@ -10,6 +10,7 @@ import { parseBaseGroupValue } from "./BaseGroupValue";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionInbox } from "./DiscussionInbox";
 import { inboxScope, type InboxItem } from "./InboxProtocol";
+import { searchItemScope, searchRequest, type DiscussionSearchRequest, type DiscussionSearchPage } from "./DiscussionSearchProtocol";
 import { DiscussionDelivery } from "./DiscussionDelivery";
 import { DiscussionPictures } from "./DiscussionPictures";
 import { parsePictureUpload, pictureIds } from "./PictureProtocol";
@@ -70,6 +71,7 @@ export class DiscussionSession {
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
 	private inboxEnabled = false;
+	private searchEnabled = false;
 	private baseKinds: BaseTargetKind[] = [];
 	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
@@ -107,6 +109,26 @@ export class DiscussionSession {
 	get status(): SessionStatus { return this.statusValue; }
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
+	get canSearch(): boolean { return this.online && this.searchEnabled; }
+	async search(input: DiscussionSearchRequest): Promise<DiscussionSearchPage> {
+		const request = searchRequest(input);
+		if (!this.canSearch) throw new Error("Connect to a server with comment search enabled.");
+		return this.trackLocal((async () => {
+			try {
+				const page = await this.transport.search(request);
+				if (!this.canSearch) throw new Error("Search access changed. Search again after connecting.");
+				return { ...page, items: page.items.filter(item => {
+					const entry = this.entries.get(searchItemScope(item));
+					return !entry?.unavailable && entry?.permission?.read !== false;
+				}) };
+			} catch (error) {
+				if (!this.closed && error instanceof DiscussionFailure && error.action === "authenticate") {
+					this.statusValue = "authentication_required"; this.notify();
+				}
+				throw error;
+			}
+		})());
+	}
 	get canAnchorText(): boolean { return this.canQueue && this.textEnabled; }
 	get canAnchorImages(): boolean { return this.canAnchorText && this.imagesEnabled; }
 	get canAnchorImageFiles(): boolean { return this.canQueue && this.imageFilesEnabled; }
@@ -185,6 +207,7 @@ export class DiscussionSession {
 			this.picturesEnabled = capability.pictures === true;
 			this.recoveryEnabled = capability.recovery === true;
 			this.inboxEnabled = capability.inbox === true;
+			this.searchEnabled = capability.search === true;
 			this.baseKinds = capability.baseTargets ?? [];
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
 			this.baseFileGroupProperties = capability.baseFileGroupProperties ?? [];

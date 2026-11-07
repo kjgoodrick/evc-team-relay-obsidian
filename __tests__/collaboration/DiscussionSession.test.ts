@@ -109,6 +109,25 @@ test("a later message revision from synchronization wins over an older direct re
 	} finally { await f.close(); }
 });
 
+test("search is online and capability gated, rejects late account closure, and drops known revoked scopes", async () => {
+	const f = await fixture(), request = { query: "Saved", state: "all" as const, mine: false, mentions: false, cursor: null, limit: 30 };
+	const read = linkedRead(), item = { thread: read.thread, entry_id: entry, view_id: null, kind: "note", path: "Note.md", message_id: id(6), message_revision: 2, message_sequence: 801, excerpt: "Saved" };
+	const search = jest.fn().mockResolvedValue({ items: [item], next_cursor: null }); Object.assign(f.transport, { search });
+	try {
+		await expect(f.session.search(request)).rejects.toThrow("server"); expect(search).not.toHaveBeenCalled();
+		f.transport.capabilities.mockResolvedValue({ discussions: true, ...{ search: true } }); await f.session.start();
+		expect((await f.session.search(request)).items).toHaveLength(1);
+		f.session.setForeground(false); await expect(f.session.search(request)).rejects.toThrow("Connect"); f.session.setForeground(true); await f.session.refresh();
+		f.transport.permissions.mockResolvedValue({ read: false, comment: false, edit: false, moderate: false }); await f.session.refresh();
+		expect((await f.session.search(request)).items).toEqual([]);
+		let release!: (value: unknown) => void, entered!: () => void;
+		const begun = new Promise<void>(resolve => { entered = resolve; });
+		search.mockImplementationOnce(() => new Promise(resolve => { release = resolve; entered(); }));
+		const pending = f.session.search(request), rejected = expect(pending).rejects.toThrow("access changed"); await begun;
+		const closing = f.session.close(); release({ items: [item], next_cursor: null }); await rejected; await closing;
+	} finally { await f.close(); }
+});
+
 test("queues a comment-only user's draft atomically and does not require note-write access", async () => {
 	const { store, session, transport, close } = await fixture();
 	try {

@@ -25,6 +25,7 @@ import { TextEncoder } from "node:util";
 import { webcrypto } from "node:crypto";
 import { DISCUSSION_LINK_ACTION, discussionLinkUrl, discussionServerKey, parseDiscussionLink } from "../../src/collaboration/DiscussionLinks";
 import { DiscussionFailure } from "../../src/collaboration/DiscussionTransport";
+import type { DiscussionSearchItem } from "../../src/collaboration/DiscussionSearchProtocol";
 
 Object.assign(globalThis, { TextEncoder });
 Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
@@ -133,6 +134,18 @@ async function linkFixture() {
 	const link = { version: 1 as const, server: await discussionServerKey("https://one.test"), shareId: id(2), entryId: id(3), threadId: id(30), kind: "note" as const, messageId: id(31) };
 	return { ...s, session, typed: session as unknown as DiscussionSession, link, url: discussionLinkUrl(link) };
 }
+
+test.each([false, true])("search navigation reuses the authorized link path and cancels a disposed result (cancel: %s)", async cancel => {
+	const s = await linkFixture(); let live = true;
+	const item: DiscussionSearchItem = { thread: { id: id(30), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1,
+		removed: false, created_sequence: 1, activity_sequence: 801, created_at: "2026-11-07T00:00:00Z" }, entry_id: id(3), view_id: null,
+		kind: "note", path: "Old mount/Old name.md", message_id: id(31), message_revision: 1, message_sequence: 801, excerpt: "Matched" };
+	try {
+		const opening = s.host.openSearchResult(s.typed, item, () => live); if (cancel) live = false;
+		if (cancel) { await expect(opening).rejects.toThrow("cancelled"); expect(s.session.linkedThread).not.toHaveBeenCalled(); }
+		else { await opening; expect(s.session.linkedThread).toHaveBeenCalledWith(id(3), id(30), id(31)); expect(s.host.current().path).toBe(s.file.path); }
+	} finally { s.close(); }
+});
 
 test("direct links use stable IDs across file renames, focus an older reply and register a native URI handler", async () => {
 	const s = await linkFixture(); s.file.path = "Different mount/Renamed.md";

@@ -625,6 +625,14 @@
 /* Native discussion sidebar: use host theme tokens and keep touch controls reachable. */
 .relay-comments-view { padding: var(--size-4-3); overflow: auto; }
 .relay-comments-view h2 { margin-top: 0; font-size: var(--font-ui-large); overflow-wrap: anywhere; }
+.relay-comment-search { margin-block: var(--size-4-3); padding: var(--size-4-2); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.relay-comment-search-form { display: grid; gap: var(--size-4-2); }
+.relay-comment-search-form > label { display: grid; gap: var(--size-2-2); }
+.relay-comment-search-form input[type="search"], .relay-comment-search-form select { width: 100%; min-width: 0; }
+.relay-comment-search-filters, .relay-comment-search-pages { display: flex; flex-wrap: wrap; gap: var(--size-4-2); }
+.relay-comment-search-filters label { display: flex; align-items: center; gap: var(--size-2-2); }
+.relay-comment-search-result { border-top: 1px solid var(--background-modifier-border); padding-block: var(--size-4-2); overflow-wrap: anywhere; }
+.relay-comment-search-excerpt { white-space: pre-wrap; }
 .relay-comment-status, .relay-comment-save-status, .relay-comment-muted, .relay-comment-author {
 	color: var(--text-muted); font-size: var(--font-ui-smaller); line-height: 1.5;
 }

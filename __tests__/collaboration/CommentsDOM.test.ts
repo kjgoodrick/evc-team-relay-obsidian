@@ -16,6 +16,7 @@ import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import type { OnlineOperation } from "../../src/collaboration/DiscussionTransport";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import * as clipboard from "../../src/utils/clipboard";
+jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 
 jest.mock("obsidian", () => ({
 	ItemView: class {

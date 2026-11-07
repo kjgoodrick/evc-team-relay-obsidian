@@ -12,6 +12,7 @@ import { ThreadSubscription } from "./ThreadSubscription";
 import { CommentPicture } from "./CommentPicture";
 import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
 import { copyToClipboard } from "../../utils/clipboard";
+import { DiscussionSearchPanel } from "./DiscussionSearchPanel";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 
@@ -254,6 +255,7 @@ export class CommentsView extends ItemView {
 	private watch?: () => void;
 	private unsubscribe?: () => void;
 	private drafts?: DiscussionDrafts;
+	private search?: DiscussionSearchPanel;
 	private focusedSerial = 0;
 	private cards = new Map<string, ThreadCard>();
 	private generation = 0;
@@ -291,6 +293,7 @@ export class CommentsView extends ItemView {
 		this.timer = window.setTimeout(() => { this.timer = undefined; void this.render().catch(() => { this.status?.setText("Comments could not be loaded. Refresh to retry."); }); }, 50);
 	}
 	private reset(): void {
+		this.search?.dispose(); this.search = undefined;
 		this.generation++; this.session = undefined; this.entryId = undefined;
 		const watch = this.watch; this.watch = undefined; watch?.(); this.drafts?.dispose(); this.drafts = undefined; this.focusedSerial = 0;
 		for (const card of this.cards.values()) card.dispose(); this.cards.clear();
@@ -318,6 +321,13 @@ export class CommentsView extends ItemView {
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Comments" });
 			if (target.message) this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message });
 			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
+			const search = this.contentEl.createEl("button", { text: "Search and filter comments", attr: { "aria-expanded": "false" } });
+			const searchContainer = this.contentEl.createDiv();
+			search.onclick = () => {
+				if (this.search) { this.search.dispose(); this.search = undefined; }
+				else if (this.session && this.entryId) this.search = new DiscussionSearchPanel(searchContainer, this.session, this.entryId, this.host);
+				search.setAttribute("aria-expanded", String(!!this.search));
+			};
 			if (target.kind === "base") {
 				this.contentEl.createEl("p", { cls: "relay-comment-base-view", text: "Discussion view: " + target.baseViewName });
 				const choose = this.contentEl.createEl("button", { text: "Change discussion view" }); choose.onclick = () => this.host.chooseBaseView();
