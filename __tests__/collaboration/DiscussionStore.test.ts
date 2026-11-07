@@ -4,6 +4,27 @@ import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/sto
 
 const identity = { serverId: "server", accountId: "alice", vaultId: "vault", shareId: "share" };
 
+test.each([0, 1, 2])("a local marker match preserves the previous association when review ends at stage %i", async stage => {
+	const store = await DiscussionStore.open(identity, new IDBFactory());
+	try {
+		const previous = { version: 1, marker_id: "original" }; await store.setPreference("marker-match", previous); let checks = 0;
+		const writing = store.comparePreference("marker-match", previous, { version: 1, marker_id: "replacement" }, () => checks++ < stage);
+		if (stage === 2) await expect(writing).rejects.toThrow("no longer active"); else expect(await writing).toBe(false);
+		expect(await store.preference("marker-match")).toEqual(previous);
+	} finally { store.close(); }
+});
+test("local marker matches survive reopening and only one competing reviewer can replace a match", async () => {
+	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
+	const other = await DiscussionStore.open(identity, factory);
+	try {
+		const results = await Promise.all([store.comparePreference("marker-match", undefined, "first"), other.comparePreference("marker-match", undefined, "second")]);
+		expect(results.filter(Boolean)).toHaveLength(1); const accepted = await store.preference("marker-match");
+		store.close(); store = await DiscussionStore.open(identity, factory); expect(await store.preference("marker-match")).toBe(accepted);
+		const isolated = await DiscussionStore.open({ ...identity, accountId: "bob" }, factory);
+		try { expect(await isolated.preference("marker-match")).toBeUndefined(); } finally { isolated.close(); }
+	} finally { other.close(); store.close(); }
+});
+
 test("targeted inbox reads preserve the event checkpoint, newer entities and revocation fences", async () => {
 	const store = await DiscussionStore.open(identity, new IDBFactory());
 	try {

@@ -365,13 +365,16 @@ export class DiscussionStore {
 		});
 	}
 	/** Retiring a sent draft must not replace a newer choice in another pane. */
-	async comparePreference(key: string, expected: Json | undefined, value: Json): Promise<boolean> {
+	async comparePreference(key: string, expected: Json | undefined, value: Json, live: () => boolean = () => true): Promise<boolean> {
 		requiredId(key); const previous = expected === undefined ? undefined : boundedJson(expected);
 		value = JSON.parse(boundedJson(value)) as Json;
 		return this.transaction(["preferences"], "readwrite", async tx => {
+			if (!live()) return false;
 			const store = tx.objectStore("preferences"), current: Json | undefined = await request(store.get(key));
-			if ((current === undefined ? undefined : canonical(current)) !== previous) return false;
-			await request(store.put(value, key)); return true;
+			if (!live() || (current === undefined ? undefined : canonical(current)) !== previous) return false;
+			await request(store.put(value, key));
+			if (!live()) throw new Error("The preference review is no longer active");
+			return true;
 		});
 	}
 	async removeDraft(id: string, revision: number, expected?: Draft, current: () => boolean = () => true): Promise<boolean> {

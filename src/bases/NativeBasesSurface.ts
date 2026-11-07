@@ -2,6 +2,7 @@ import { parseYaml, TFile } from "obsidian";
 import { sha256Hex } from "../contentDigest";
 import { isBaseDefinitionProperty, type BaseDefinitionProperty, type TimelineAxis } from "../collaboration/DiscussionProtocol";
 import type { HistoricalPoint, TimelineRange } from "../collaboration/TimelineRange";
+import type { NativeLocalMarker } from "./TimelineLocalMarkerBridge";
 import { parseBaseRegistry, type BaseRegistrySnapshot } from "./BaseRegistryProtocol";
 import { parseBasePresenceContext, type BasePresenceContext } from "../collaboration/presence/BasePresenceProtocol";
 import { nativeBaseGroupValue, nativeBaseGroupValueKey, nativeGroupValueBudget, type NativeBaseGroupValue, type NativeGroupLinkResolver } from "./NativeBaseGroupValue";
@@ -85,6 +86,7 @@ export interface NativeBasesExtension {
 	reveal(target: NativeBaseTarget): NativeBaseReveal;
 	groups?(): NativeBaseGroupLocation[];
 	rangeContext?(): NativeTimelineContext | undefined;
+	localMarkers?(): NativeLocalMarker[];
 	rangeGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): NativeTimelineGeometry | undefined;
 	revealRange?(range: TimelineRange, axis: TimelineAxis, group?: unknown): NativeBaseReveal;
 	rangePresence?(point?: { clientX: number; clientY: number }): NativeTimelinePresence | undefined;
@@ -232,6 +234,10 @@ export class NativeBasesSurface {
 	viewport(): HTMLElement | undefined { return this.current() ? this.scrollElement() : undefined; }
 	canNavigate(): boolean { try { return this.current() && this.integrations?.canNavigate(this.root.ownerDocument) !== false; } catch { return false; } }
 	get annotationSupported(): boolean { return !!this.external; }
+	localMarkers(): NativeLocalMarker[] {
+		if (!this.current()) return [];
+		return (this.external?.localMarkers?.() ?? []).map(marker => ({ ...marker, current: () => this.current() && marker.current() }));
+	}
 	rangeContext(): NativeTimelineContext | undefined {
 		const context = this.current() ? this.external?.rangeContext?.() : undefined;
 		return context?.current() ? { ...context, current: () => this.current() && context.current() } : undefined;

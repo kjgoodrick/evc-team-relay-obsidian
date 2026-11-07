@@ -20,6 +20,7 @@ import { TimelineMarkerComparisonModal } from "../../src/collaboration/ui/Timeli
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope.ts";
 import { parseTimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol.ts";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol.ts";
+import { promotedMarkerId } from "../../src/collaboration/LocalTimelineMarkers.ts";
 
 const win = new Window();
 Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS, MutationObserver: win.MutationObserver });
@@ -261,14 +262,17 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		// own real-stack fixtures; this port verifies the native source seam.
 		const { view_id: _markerView, markers: _markers, ...markerIdentity } = markerCatalog;
 		const markerDetail = { ...markerIdentity, marker: { id: uuid(60), revision: 1, active: true, content: sharedContent, placements: [markerCatalog.markers[0].placement] } };
-		let managementState, managementRequest;
+		let managementState, managementRequest; const localMatches = new Map();
 		Object.assign(rangeCommentContext.session, { online: true, permission: () => ({ read: true, comment: true, edit: true }),
 			status: "ready", knownDocumentGeneration: () => uuid(3), onChange: () => () => {},
+			trackLocal: promise => promise, store: { preference: async key => localMatches.get(key), comparePreference: async (key, expected, value, current) => {
+				if (!current() || JSON.stringify(localMatches.get(key)) !== JSON.stringify(expected)) return false; localMatches.set(key, value); return true;
+			} },
 			readTimelineMarkerInventory: async () => ({ ...markerIdentity, markers: [markerDetail.marker] }), readTimelineMarkerDetail: async () => markerDetail,
 			markerManagement: { state: async () => managementState, save: async (_scope, request) => {
 				managementRequest = request;
 				const receipt = parseTimelineMarkerReceipt({ ...markerIdentity, operation_id: request.operation_id, catalog_revision: 2,
-					marker: { ...markerDetail.marker, revision: 2, content: request.command.content } }, uuid(2), request);
+					marker: { ...markerDetail.marker, id: request.command.marker_id, revision: request.command.expected_marker_revision + 1, content: request.command.content } }, uuid(2), request);
 				managementState = { version: 1, scope_id: "synthetic-scope", status: "accepted", request, receipt }; return receipt;
 			} } });
 		const settleManagement = async () => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
@@ -287,6 +291,26 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		assert.deepEqual(managementRequest.command.placements, [{ view_id: uuid(4), axis_definition_id: uuid(40), axis_definition_revision: 1 }]);
 		assert.ok(document.body.textContent.includes("Marker save confirmed")); assert.equal(managementButton("Save marker").disabled, true);
 		manager.close(); assert.equal(document.querySelector(".relay-timeline-marker-dialog"), null); assert.deepEqual(writes, []);
+		if (!sequence) {
+			const origin = { id: uuid(70), label: "Local origin", color: "#112233", date: "2026-11-26", enabled: true };
+			plugin.settings.markers.push(origin); const original = JSON.stringify(origin);
+			assert.equal(surface.localMarkers()[0].id, uuid(70)); managementState = undefined; managementRequest = undefined;
+			const copyManager = new TimelineMarkerManager(plugin.app, rangeCommentContext, () => surface.current(), () => {}); copyManager.open(); await settleManagement();
+			managementButton("Local markers…").click();
+			const localChoice = document.querySelector('[aria-label="Local marker"]'); localChoice.value = uuid(70); localChoice.dispatchEvent(new win.Event("change")); await settleManagement();
+			managementButton("Prepare shared copy").click(); await settleManagement(); assert.equal(managementRequest, undefined);
+			assert.equal(managementButton("Save marker").disabled, false); managementButton("Save marker").click(); await settleManagement();
+			assert.equal(managementRequest.command.marker_id, promotedMarkerId(uuid(1), uuid(3), uuid(70)));
+			assert.equal(managementRequest.command.expected_marker_revision, 0); assert.equal(managementRequest.command.content.range.start, "2026-11-26"); copyManager.close();
+			managementState = undefined; managementRequest = undefined;
+			const matchManager = new TimelineMarkerManager(plugin.app, rangeCommentContext, () => surface.current(), () => {}); matchManager.open(); await settleManagement();
+			managementButton("Local markers…").click();
+			const matchLocal = document.querySelector('[aria-label="Local marker"]'); matchLocal.value = uuid(70); matchLocal.dispatchEvent(new win.Event("change")); await settleManagement();
+			const sharedChoice = document.querySelector('[aria-label="Shared marker to match"]'); sharedChoice.value = uuid(60); sharedChoice.dispatchEvent(new win.Event("change"));
+			managementButton("Check shared marker").click(); await settleManagement(); assert.equal(localMatches.size, 0);
+			managementButton("Confirm local match").click(); await settleManagement(); assert.equal([...localMatches.values()][0].marker_id, uuid(60));
+			assert.equal(managementRequest, undefined); assert.equal(JSON.stringify(origin), original); assert.deepEqual(writes, []); matchManager.close();
+		} else assert.deepEqual(surface.localMarkers(), []);
 		const currentMarks = document.createElement("div"); root.append(currentMarks); let openedCurrent = false;
 		assert.equal(renderTimelineSharedMarkers({ context: rangeCommentContext, proof: axisProof, catalog: markerCatalog,
 			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks: currentMarks, limit: 64,

@@ -1,6 +1,7 @@
 import { TFile, type EventRef, type Workspace } from "obsidian";
 import { nativeBaseProperty, type NativeBaseHandle, type NativeBaseGroupLocation, type NativeBaseReveal, type NativeBaseTarget, type NativeBasesExtension, type NativeBasesIntegrations } from "./NativeBasesSurface";
 import { timelineRangeBridge, type RemoteTimelineRanges } from "./TimelineRangeBridge";
+import { timelineLocalMarkers, type RemoteLocalMarkers } from "./TimelineLocalMarkerBridge";
 
 declare module "obsidian" {
 	interface Workspace {
@@ -17,7 +18,7 @@ interface RemoteBridge {
 	protocolVersion: number; available: boolean; viewTypes: string[];
 	getSurfaces(): unknown; onChange(callback: () => void): unknown; canNavigate(document: Document): unknown;
 }
-interface RemoteSurface extends RemoteTimelineRanges {
+interface RemoteSurface extends RemoteTimelineRanges, RemoteLocalMarkers {
 	protocolVersion: number; owner: ObjectValue; root: HTMLElement; capabilities: string[];
 	current(): unknown; viewport(): unknown; handles(): unknown; hit(node: Node, point?: { clientX: number; clientY: number }): unknown;
 	reveal(target: unknown): unknown; beginAnnotation(select: (handle: unknown) => void, stopped: () => void): unknown;
@@ -119,6 +120,7 @@ export class TimelineBridgeClient implements NativeBasesIntegrations {
 			} };
 		};
 		return { source, owner, root, current,
+			localMarkers: () => timelineLocalMarkers(source, current),
 			...timelineRangeBridge(source, String(owner.type), current, () => this.canNavigate(root.ownerDocument), {
 				cancel: () => this.annotations.get(owner)?.(),
 				register: stop => { this.annotations.set(owner, stop); },

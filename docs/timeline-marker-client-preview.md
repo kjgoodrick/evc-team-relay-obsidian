@@ -308,10 +308,76 @@ native Sequence, broader recovery, popout/mobile, touch or resource acceptance.
 
 ## Remaining work
 
-Local marker promotion/matching, direct point picking and
-broader recovery controls remain. The picker and management form still use explicit refresh so
+Direct point picking and broader recovery controls remain. The picker and management form still use explicit refresh so
 an in-progress selection/edit is never silently replaced; the timeline overlays
 refresh automatically through active discussion polling. Overlapping overlay
 polish and native layout/resource measurements remain. The Time & Line fork
 has not changed in this increment. Native desktop/mobile, accessibility, recovery
 UI and resource acceptance remain before enabling this feature for users.
+
+## Local marker promotion and explicit matching
+
+**Local markers…** in Manage markers reads a bounded snapshot of Time & Line's
+calendar markers. It previews the label, original date/range, local color and
+enabled state. **Prepare shared copy** creates an editable form; the separate
+**Save marker** remains the only shared write. A local marker's settings are not
+removed, disabled or synchronized by promotion. Local and shared edits remain
+independent and the interface says so.
+
+The companion Time & Line build adds persistent random origin IDs to legacy
+markers before exposing its bridge. Edits preserve them; reordering is not
+identity. Duplicate/invalid IDs are repaired without changing existing marker
+values. A stale settings editor cannot overwrite a different marker after list
+reordering. The optional `local-markers` capability returns at most 256 immutable
+snapshots; deletion, edits, duplicated IDs, provider unload and host replacement
+invalidate captures. Sequence has no local calendar markers.
+
+Promotion derives a namespaced shared UUID from the base definition, generation
+and persistent local origin ID. The server's existing expected-marker-revision
+zero comparison permits only one creation for that identity. An independently
+repeated promotion, including after a lost response, cannot create a second
+marker or overwrite the first. Ordinary management recovery still retains the
+exact request. No new server protocol or schema is needed.
+
+Two devices with different local origin IDs require explicit matching. Choose a
+shared marker, **Check shared marker**, compare its current values with the local
+source, then **Confirm local match**. Confirmation rechecks the shared revision
+and local source; a guarded IndexedDB compare-and-swap preserves another window's
+newer match. The mapping is account/vault/share/base-generation scoped and survives
+reload. It grants no permissions and changes no shared marker or discussion.
+Readers may match; only enabled online editors may prepare/save a shared copy.
+An existing promoted or explicitly matched source cannot create another copy.
+
+Strict calendar days and astronomical historical year/month/day values prefill
+their original precision. Local bands end at the start of their last coordinate,
+so their shared drafts initially exclude that endpoint. Reversed/invalid dates,
+time strings and uncertain syntax require the existing explicit position picker.
+Theme colors receive readable labels; non-hex colors require reviewing a fixed
+shared color, with a visibly explained purple starting value. These cases are
+never silently parsed as local midnight or converted into another axis type.
+
+November 7 verification: the full plugin run passes **3,197 tests / 249 suites**,
+with 22 opt-in tests / 17 suites skipped. Final UI/format follow-ups pass the **89-test /
+4-suite** focused set. Build/main types, frozen test types and changed-source lint
+pass. The provider's package/type/build run passes all **257 tests**. All eight
+source interoperability cases pass; the four calendar cases exercise both actual
+plugins' local snapshot bridge, preparation and explicit matching in both load
+orders with/without groups. Seven actual HTTP tests in six suites pass, including
+duplicate promotion after a lost accepted response with unchanged catalog data.
+
+Native Obsidian 1.13.7 on macOS in
+`/private/tmp/evc-local-markers-native-20261107` verifies legacy ID persistence,
+source preview, separate preparation/save, duplicate-copy refusal, checked-value
+matching and keyboard confirmation. A full reload retains both IDs, the explicit
+match and recognition of the promoted marker. The final readable theme-color
+label is verified natively. Independent HTTP readback confirms exactly one new
+marker, unchanged original revisions, immutable discussion target and unchanged
+`.base` bytes. Original local marker values are unchanged apart from new IDs.
+The fixture services are stopped and the original Knowledge Base window restored.
+
+Evidence: `/private/tmp/local-marker-native-evidence.json` and
+`/private/tmp/local-marker-*.log`. Native historical/band/time-picker, settings-edit
+races, mobile/popout, broader recovery and resource acceptance remain. Older
+Time & Line builds lack this capability; downgrading and editing with a build
+that drops local IDs requires explicit matching after upgrade. This does not
+change the existing shared marker or its history.

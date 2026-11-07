@@ -10,6 +10,9 @@ import type { TimelineMarkerPlacement } from "../TimelineMarkerProtocol";
 import type { TimelineAxisContext } from "../TimelineRangeProtocol";
 import { timelineRangeLabel, type TimelineRange } from "../TimelineRange";
 import { TimelineRangeWorkflow } from "./TimelineRangeWorkflow";
+import { TimelineLocalMarkerPicker } from "./TimelineLocalMarkerPicker";
+import type { NativeLocalMarker } from "../../bases/TimelineLocalMarkerBridge";
+import { localMarkerColorLabel, localMarkerRange } from "../LocalTimelineMarkers";
 
 type Draft = { id: string; label: string; color: string; kind: "point" | "range"; range?: TimelineRange; placements: TimelineMarkerPlacement[] };
 
@@ -43,6 +46,9 @@ export class TimelineMarkerManager extends Modal {
 	private status!: HTMLElement;
 	private refreshButton!: HTMLButtonElement;
 	private newButton!: HTMLButtonElement;
+	private localButton!: HTMLButtonElement;
+	private localPicker?: TimelineLocalMarkerPicker;
+	private localOrigin?: NativeLocalMarker;
 	private fields: (HTMLInputElement | HTMLSelectElement | HTMLButtonElement)[] = [];
 	private saveButton?: HTMLButtonElement;
 	private archiveButton?: HTMLButtonElement;
@@ -71,6 +77,7 @@ export class TimelineMarkerManager extends Modal {
 		this.select.onchange = () => { if (!this.dirty && !this.busy && !this.recovery) void this.load(this.select.value); };
 		this.refreshButton = this.button(this.contentEl, "Refresh marker list", () => { void this.refresh(); });
 		this.newButton = this.button(this.contentEl, "New shared marker", () => this.newDraft());
+		this.localButton = this.button(this.contentEl, "Local markers…", () => this.chooseLocal());
 		this.form = this.contentEl.createDiv(); this.status = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
 		this.button(this.contentEl, "Close", () => this.close());
 		this.renderChoices(); this.renderForm(); this.renderRecovery(); this.updateControls();
@@ -140,7 +147,7 @@ export class TimelineMarkerManager extends Modal {
 			try { proof = await readNativeTimelineAxis(this.context); } catch { /* Archiving and recovery do not require a projectable axis. */ }
 			if (!this.current() || serial !== this.serial) return;
 			this.proof = proof;
-			this.detail = undefined; this.draft = undefined; this.checkedPlacement = undefined; this.renderChoices(); this.renderForm();
+			this.detail = undefined; this.draft = undefined; this.localOrigin = undefined; this.checkedPlacement = undefined; this.renderChoices(); this.renderForm();
 			this.status.textContent = this.proof ? "Showing markers from every saved view in this base. Select one or create a new marker." : "The saved axis is unavailable. Existing markers can still be reviewed or archived.";
 		} catch (error) { if (this.current() && serial === this.serial) this.status.textContent = this.error(error); }
 		finally { this.loading = false; if (this.current()) this.updateControls(); }
@@ -163,12 +170,27 @@ export class TimelineMarkerManager extends Modal {
 	}
 	private newDraft(): void {
 		if (!this.canSave() || !this.axisCurrent() || this.dirty || this.busy || this.loading || this.recovery) return;
-		this.detail = undefined; this.draft = { id: uuid(), label: "", color: "#7c3aed", kind: "point", placements: [this.currentPlacement()!] };
+		this.detail = undefined; this.localOrigin = undefined; this.draft = { id: uuid(), label: "", color: "#7c3aed", kind: "point", placements: [this.currentPlacement()!] };
 		this.checkedPlacement = undefined;
 		this.select.value = ""; this.renderForm(); this.updateControls(); this.form.querySelector("input")?.focus();
 	}
+	private chooseLocal(): void {
+		if (!this.current() || !this.catalog || this.localButton.disabled || this.localPicker) return;
+		const live = () => this.current() && !this.busy && !this.loading && !this.recovery && !this.dirty;
+		this.localPicker = new TimelineLocalMarkerPicker(this.app, this.context, this.catalog, live, (source, id) => {
+			if (!live() || !this.canSave() || !this.axisCurrent() || !source.current()) return false;
+			const native = this.context.surface.rangeContext();
+			this.detail = undefined; this.localOrigin = source; this.checkedPlacement = undefined;
+			this.draft = { id, label: source.label, color: /^#[a-f0-9]{6}$/i.test(source.color) ? source.color.toLowerCase() : "#7c3aed",
+				kind: source.date ? "point" : "range", range: localMarkerRange(source, native?.effectiveTimeZone ?? null), placements: [this.currentPlacement()!] };
+			this.dirty = true; this.select.value = ""; this.renderForm(); this.updateControls(); this.form.querySelector("input")?.focus();
+			this.status.textContent = "Review the shared copy, then save it. Nothing has been sent yet.";
+			return true;
+		}, async id => { await this.load(id); if (this.current() && this.detail?.marker.id === id) this.status.textContent = "Local match saved on this device. Shared marker values are unchanged."; }, () => { this.localPicker = undefined; });
+		this.localPicker.open();
+	}
 	private resetDraft(): void {
-		const marker = this.detail?.marker; this.dirty = false; this.checkedPlacement = undefined;
+		const marker = this.detail?.marker; this.dirty = false; this.localOrigin = undefined; this.checkedPlacement = undefined;
 		this.draft = marker ? { id: marker.id, ...marker.content, placements: marker.placements.filter(placement => placement.active).map(placement => ({ ...placement })) } : undefined;
 		if (marker && !marker.active && this.draft && this.currentPlacement()) this.draft.placements = [this.currentPlacement()!];
 		this.renderForm(); this.updateControls();
@@ -177,6 +199,12 @@ export class TimelineMarkerManager extends Modal {
 		this.form.replaceChildren(); this.fields = []; this.saveButton = undefined; this.archiveButton = undefined; this.positionButton = undefined; this.validation = undefined;
 		this.placementSelect = undefined; this.placementCheck = undefined; this.placementAdd = undefined;
 		const draft = this.draft; if (!draft) return;
+		if (this.localOrigin) {
+			this.form.createEl("p", { text: "Shared copy of local marker: " + this.localOrigin.label + ". Review its dates, bounds, color and selected views before saving. The local marker stays unchanged." });
+			if (!/^#[a-f0-9]{6}$/i.test(this.localOrigin.color)) this.form.createEl("p", { text: "The local marker uses " + localMarkerColorLabel(this.localOrigin.color) + ". Choose a fixed shared color below; purple is the starting value." });
+			if (!draft.range) this.form.createEl("p", { text: "These local coordinates need explicit review. Choose the shared position below; no date conversion has been assumed." });
+			else this.form.createEl("p", { text: draft.kind === "range" ? "Shared bounds: " + (draft.range.start_inclusive ? "includes" : "excludes") + " the start; " + (draft.range.end_inclusive ? "includes" : "excludes") + " the end. Local bands originally exclude their last coordinate." : "Review the shared point's date precision." });
+		}
 		const changed = () => { this.dirty = true; this.updateControls(); };
 		const input = (label: string, value: string, type = "text") => {
 			const field = this.form.createEl("label", { text: label }).createEl("input", { attr: { "aria-label": label, type } }); field.value = value; this.fields.push(field); return field;
@@ -271,6 +299,7 @@ export class TimelineMarkerManager extends Modal {
 	}
 	private request(archive: boolean, operationId = "00000000-0000-4000-8000-000000000000"): TimelineMarkerCommand {
 		const catalog = this.catalog, draft = this.draft; if (!catalog || !draft) throw new Error("Load a marker or start a new one first.");
+		if (this.localOrigin && !this.localOrigin.current()) throw new Error("The local marker changed. Discard this form and review it again.");
 		let command: TimelineMarkerCommand["command"];
 		if (archive) {
 			if (!this.detail?.marker.active || !this.archiveConfirmation?.checked) throw new Error("Confirm archiving in every view first.");
@@ -326,6 +355,7 @@ export class TimelineMarkerManager extends Modal {
 		this.select.disabled = blocked || this.dirty || !this.context.session.online;
 		this.refreshButton.disabled = this.busy || this.loading || this.dirty;
 		this.newButton.disabled = blocked || this.dirty || !this.canSave() || !this.axisCurrent();
+		this.localButton.disabled = blocked || this.dirty || !this.catalog || !this.context.session.online;
 		for (const field of this.fields) field.disabled = blocked || !this.canSave();
 		if (this.placementCheck) this.placementCheck.disabled = blocked || !this.canSave() || !this.placementSelect?.value || !this.draft?.range;
 		if (this.placementAdd) {
@@ -348,12 +378,12 @@ export class TimelineMarkerManager extends Modal {
 	}
 	validate(): void {
 		if (!this.current()) { this.close(); return; }
-		this.position?.validate(); this.updateControls(); void this.checkRecovery();
+		this.position?.validate(); this.localPicker?.validate(); this.updateControls(); void this.checkRecovery();
 	}
 	close(): void {
 		if (this.closed) return; this.closed = true; this.serial++;
 		const position = this.position; this.position = undefined; position?.close(); super.close(); this.finish();
 	}
-	private finish(): void { this.stopListening?.(); this.stopListening = undefined; this.checkedPlacement = undefined; this.catalog = undefined; this.proof = undefined; this.detail = undefined; this.draft = undefined; this.recovery = undefined; this.fields = []; this.contentEl.empty(); this.closedCallback(); }
+	private finish(): void { this.localPicker?.close(); this.localPicker = undefined; this.localOrigin = undefined; this.stopListening?.(); this.stopListening = undefined; this.checkedPlacement = undefined; this.catalog = undefined; this.proof = undefined; this.detail = undefined; this.draft = undefined; this.recovery = undefined; this.fields = []; this.contentEl.empty(); this.closedCallback(); }
 	onClose(): void { if (this.transitioning) { this.contentEl.empty(); return; } if (!this.closed) { this.closed = true; this.serial++; this.finish(); } }
 }

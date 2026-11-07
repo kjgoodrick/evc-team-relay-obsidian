@@ -11,6 +11,7 @@ import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { bodyFromText, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { parseTimelineMarkerCommand } from "../../src/collaboration/TimelineMarkerManagementProtocol";
+import { promotedMarkerId } from "../../src/collaboration/LocalTimelineMarkers";
 
 Object.assign(globalThis, { IDBKeyRange });
 const run = process.env.EVC_BASE_CONTENT_FIXTURE ? test : test.skip;
@@ -58,7 +59,8 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Review milestone")) } });
 		try {
 			await start(); expect(session.permission(scope)).toEqual({ read: true, comment: true, edit: false, moderate: false });
-			const axis = await session.readTimelineAxis(scope), initial = await session.readTimelineMarkers(scope), markerId = randomUUID();
+			const axis = await session.readTimelineAxis(scope), initial = await session.readTimelineMarkers(scope), localId = randomUUID();
+			const markerId = promotedMarkerId(initial.definition_id, initial.generation, localId);
 			const range = index === 0 ? { version: 1, kind: "calendar", start: "2026-11-07", end: "2026-11-07", time_zone: "America/Denver", start_inclusive: true, end_inclusive: true } :
 				{ version: 1, kind: "ordinal", start: "999999999999999.000000001", end: "999999999999999.000000001", unit: "property-value", start_inclusive: true, end_inclusive: true };
 			const put = parseTimelineMarkerCommand({ operation_id: randomUUID(), definition_id: initial.definition_id, generation: initial.generation, registry_revision: initial.registry_revision,
@@ -73,6 +75,12 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			expect(await ownerSession.markerManagement.acknowledge(scope, put.operation_id)).toBe(false);
 			await ownerSession.close(); ownerStore = await DiscussionStore.open(ownerIdentity, ownerFactory); ownerSession = new DiscussionSession(ownerStore, ownerTransport);
 			const selected = await session.readTimelineMarkers(scope), captured = await session.captureTimelineMarker(scope, selected, markerId);
+			// Another device/window derives the same origin identity even after the
+			// first response was lost. Expected revision zero cannot create it twice.
+			const duplicate = await manage({ ...put, operation_id: randomUUID(), expected_catalog_revision: selected.catalog_revision,
+				command: { ...put.command, marker_id: promotedMarkerId(initial.definition_id, initial.generation, localId), content: { ...put.command.content, label: "Competing promotion" } } });
+			expect(duplicate.status).toBe(409);
+			expect(await session.readTimelineMarkers(scope)).toEqual(selected);
 			expect(captured.target).toMatchObject({ marker_id: markerId, marker_revision: 1, content: { label: "Original launch", color: "#abcdef", range } });
 			await store.saveDraft({ id: "marker", scopeId: scope, revision: 1, body: "Offline milestone", target: protocolJson(captured) });
 			await session.close(); connected = false;

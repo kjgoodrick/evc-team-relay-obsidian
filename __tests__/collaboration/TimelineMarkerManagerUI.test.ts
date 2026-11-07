@@ -8,6 +8,8 @@ import type { TimelineMarkerManagementState } from "../../src/collaboration/Time
 import type { TimelineMarkerCommand, TimelineMarkerDetail, TimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import type { NativeTimelineSelection } from "../../src/bases/NativeBasesSurface";
+import type { NativeLocalMarker } from "../../src/bases/TimelineLocalMarkerBridge";
+import { promotedMarkerId } from "../../src/collaboration/LocalTimelineMarkers";
 
 jest.mock("obsidian", () => ({ TFile: class {}, Notice: jest.fn(), Modal: class {
 	contentEl = document.createElement("div"); titleEl = document.createElement("h2");
@@ -15,7 +17,8 @@ jest.mock("obsidian", () => ({ TFile: class {}, Notice: jest.fn(), Modal: class 
 	open() { document.body.append(this.titleEl, this.contentEl); this.onOpen(); }
 	close() { this.onClose(); this.titleEl.remove(); this.contentEl.remove(); }
 } }));
-Object.assign(HTMLElement.prototype, { empty(this: HTMLElement) { this.replaceChildren(); } });
+Object.assign(HTMLElement.prototype, { empty(this: HTMLElement) { this.replaceChildren(); },
+	addClass(this: HTMLElement, name: string) { this.classList.add(name); }, setText(this: HTMLElement, text: string) { this.textContent = text; } });
 const flush = async () => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
 const id = (n: number) => `71000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const scope = baseDiscussionScope(id(1), id(3));
@@ -31,6 +34,13 @@ function confirmation(text: string) {
 	const field = label.querySelector<HTMLInputElement>("input")!; field.checked = true; field.dispatchEvent(new Event("change"));
 }
 function fixture() {
+	const local: NativeLocalMarker = { id: id(60), label: "Local launch", color: "var(--color-blue)", date: "2026-11-07", enabled: true, current: () => true };
+	let preference: unknown;
+	const readPreference = jest.fn(async () => preference);
+	const comparePreference = jest.fn(async (_key: string, expected: unknown, value: unknown, current: () => boolean) => {
+		if (!current() || JSON.stringify(expected) !== JSON.stringify(preference)) return false;
+		preference = value; return true;
+	});
 	const access = { current: true, read: true, edit: true, online: true, enabled: true, status: "ready", generation: id(4) };
 	const proof: TimelineAxisContext = { protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 2,
 		axis: { id: id(5), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "America/Denver" } } };
@@ -58,19 +68,83 @@ function fixture() {
 		binding: { name: "Planning", type: "sabidurian-timeline", viewId: id(3), snapshot: { definition_id: id(2), generation: id(4), revision: 2,
 			views: [{ id: id(3), name: "Planning", type: "sabidurian-timeline" }, { id: id(30), name: "Roadmap", type: "sabidurian-timeline" },
 				{ id: id(40), name: "Schedule", type: "sabidurian-timeline" }, { id: null, name: "Unmatched", type: "sabidurian-timeline" }, { id: id(50), name: "Table", type: "table" }] } },
-		session: { get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
+		session: { trackLocal: <T>(promise: Promise<T>) => promise, store: { preference: readPreference, comparePreference }, get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
 			onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
 			permission: () => ({ read: access.read, edit: access.edit, comment: true }), canAnchorBase: () => access.enabled, readTimelineAxis: readAxis,
 			readTimelineMarkerInventory: readCatalog, readTimelineMarkerDetail: readDetail, readTimelineMarkerPlacementAxis: readPlacementAxis, markerManagement: { state, save, retry, acknowledge } },
-		surface: { rangeContext: () => native, beginRange: jest.fn((_kind, _precision, callback, end) => { select = callback; stopped = end; return stop; }) },
+		surface: { localMarkers: () => [local], rangeContext: () => native, beginRange: jest.fn((_kind, _precision, callback, end) => { select = callback; stopped = end; return stop; }) },
 	} as unknown as BaseCommentContext;
 	const manager = new TimelineMarkerManager({} as App, context, () => true, closed);
-	return { access, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners,
+	return { access, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners, local, readPreference, comparePreference,
 		setRecovery: (value: TimelineMarkerManagementState | undefined) => { recovery = value; },
 		pick: () => { stopped?.(); select?.({ context: native as NativeTimelineSelection["context"], draft: { ...range, end: "2026-11-09" }, current: () => access.current }); } };
 }
 afterEach(() => { document.body.replaceChildren(); jest.restoreAllMocks(); });
 async function loaded(f = fixture()) { f.manager.open(); await flush(); input("Shared marker", id(20)); await flush(); return f; }
+
+async function chooseLocal(f = fixture()) {
+	f.manager.open(); await flush(); button("Local markers…").click(); input("Local marker", f.local.id); await flush(); return f;
+}
+test("local promotion prepares a stable shared identity and requires the separate reviewed save", async () => {
+	const f = await chooseLocal();
+	expect(f.save).not.toHaveBeenCalled(); button("Prepare shared copy").click(); await flush();
+	expect(document.body.textContent).toContain("The local marker uses theme blue");
+	expect(f.save).not.toHaveBeenCalled(); expect(f.local.color).toBe("var(--color-blue)");
+	button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ type: "marker.put", marker_id: promotedMarkerId(id(2), id(4), id(60)), expected_marker_revision: 0,
+		content: { label: "Local launch", range: { kind: "calendar", start: "2026-11-07", end_inclusive: true } } });
+	f.manager.close();
+});
+test("source edits before the shared save refuse promotion", async () => {
+	const f = await chooseLocal(); button("Prepare shared copy").click(); f.local.current = () => false;
+	f.manager.validate(); button("Save marker").click(); await flush(); expect(f.save).not.toHaveBeenCalled(); f.manager.close();
+});
+test("an unavailable axis explains why a local shared copy cannot be prepared", async () => {
+	const f = fixture(); f.readAxis.mockRejectedValue(new Error("Axis unavailable")); await chooseLocal(f);
+	button("Prepare shared copy").click(); await flush(); expect(document.body.textContent).toContain("saved axis is unavailable");
+	expect(document.querySelector('[aria-label="Local marker"]')).not.toBeNull(); expect(f.save).not.toHaveBeenCalled(); f.manager.close();
+});
+test("an existing deterministic promotion cannot become a second shared copy", async () => {
+	const f = fixture(); f.catalog.markers.push({ ...f.catalog.markers[0], id: promotedMarkerId(id(2), id(4), id(60)) });
+	await chooseLocal(f); expect(button("Prepare shared copy").disabled).toBe(true);
+	expect(document.body.textContent).toContain("already has a shared association"); f.manager.close();
+});
+test("matching previews the checked marker and stores only the explicit local association", async () => {
+	const f = await chooseLocal(); input("Shared marker to match", id(20)); button("Check shared marker").click(); await flush();
+	expect(document.body.textContent).toContain("Checked shared marker"); expect(f.comparePreference).not.toHaveBeenCalled();
+	button("Confirm local match").click(); await flush();
+	expect(f.comparePreference).toHaveBeenCalledWith(expect.any(String), undefined, { version: 1, marker_id: id(20) }, expect.any(Function));
+	expect(f.save).not.toHaveBeenCalled(); expect(document.querySelector('[aria-label="Marker label"]')).not.toBeNull();
+	button("Local markers…").click(); input("Local marker", f.local.id); await flush(); expect(button("Prepare shared copy").disabled).toBe(true); f.manager.close();
+});
+test("readers can explicitly match without shared edit permission", async () => {
+	const f = fixture(); f.access.edit = false; await chooseLocal(f);
+	expect(button("Prepare shared copy").disabled).toBe(true);
+	input("Shared marker to match", id(20)); button("Check shared marker").click(); await flush();
+	expect(button("Confirm local match").disabled).toBe(false); button("Confirm local match").click(); await flush();
+	expect(f.comparePreference).toHaveBeenCalledTimes(1); expect(f.save).not.toHaveBeenCalled(); f.manager.close();
+});
+test("a shared marker edited after matching review must be checked again", async () => {
+	const f = await chooseLocal(); input("Shared marker to match", id(20)); button("Check shared marker").click(); await flush();
+	f.readDetail.mockResolvedValueOnce({ ...f.detail, marker: { ...f.detail.marker, revision: 2 } });
+	button("Confirm local match").click(); await flush(); expect(f.comparePreference).not.toHaveBeenCalled();
+	expect(document.body.textContent).toContain("changed after review"); f.manager.close();
+});
+test("a competing local match cannot be overwritten from an older review", async () => {
+	const f = await chooseLocal(); input("Shared marker to match", id(20)); button("Check shared marker").click(); await flush();
+	f.comparePreference.mockResolvedValueOnce(false); button("Confirm local match").click(); await flush();
+	expect(document.body.textContent).toContain("Another window changed"); f.manager.close();
+});
+test.each(["source", "closed", "permission", "offline"])("a pending match check fences %s changes", async kind => {
+	const f = await chooseLocal(); let resolve!: (value: TimelineMarkerDetail) => void;
+	f.readDetail.mockImplementationOnce(() => new Promise(value => { resolve = value; }));
+	input("Shared marker to match", id(20)); button("Check shared marker").click(); await flush();
+	if (kind === "source") f.local.current = () => false;
+	if (kind === "closed") f.manager.close();
+	if (kind === "permission") f.access.read = false;
+	if (kind === "offline") f.access.online = false;
+	resolve(f.detail); await flush(); expect(f.comparePreference).not.toHaveBeenCalled(); expect(document.body.textContent).not.toContain("Checked shared marker"); f.manager.close();
+});
 
 test("editing preserves every active saved-view placement and requires reviewing the result before another save", async () => {
 	const f = await loaded(); input("Marker label", "Revised launch"); expect(button("Refresh marker list").disabled).toBe(true);
