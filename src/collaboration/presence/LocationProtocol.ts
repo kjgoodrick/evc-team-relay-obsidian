@@ -12,6 +12,34 @@ export type LocationEvent = { subscriptionId: string; location: SurfaceLocation 
 export type NoteLocationEvent = { subscriptionId: string; location: NoteLocation | null };
 export type SurfacePeer = Readonly<{ target: LocationTarget; name: string }>;
 export type SurfaceRosterEvent = Readonly<{ scope: NonNoteLocation | null; status: "available" | "unavailable"; peers: readonly SurfacePeer[] }>;
+export type ImagePoint = Readonly<{ x: number; y: number }>;
+export type ImageViewport = ImagePoint & Readonly<{ width: number; height: number }>;
+export type ImagePresenceState = Readonly<{ pointer: ImagePoint | null; viewport: ImageViewport | null }>;
+export type ImagePeerState = Readonly<{ target: LocationTarget; state: ImagePresenceState }>;
+export type ImageStatesEvent = Readonly<{ scope: ImageLocation | null; status: "available" | "unavailable"; peers: readonly ImagePeerState[] }>;
+
+const unit = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+export function parseImageState(value: unknown): ImagePresenceState {
+	if (!isRecord(value) || !exactFields(value, ["pointer", "viewport"])) throw new Error("Invalid image state");
+	const point = (item: unknown, viewport: boolean): ImagePoint | ImageViewport | null => {
+		if (item === null) return null;
+		if (!isRecord(item) || !exactFields(item, viewport ? ["x", "y", "width", "height"] : ["x", "y"]) || !unit(item.x) || !unit(item.y)) throw new Error("Invalid image point");
+		if (!viewport) return Object.freeze({ x: item.x, y: item.y });
+		if (!unit(item.width) || !unit(item.height) || item.width === 0 || item.height === 0 || item.x + item.width > 1 || item.y + item.height > 1) throw new Error("Invalid image viewport");
+		return Object.freeze({ x: item.x, y: item.y, width: item.width, height: item.height });
+	};
+	return Object.freeze({ pointer: point(value.pointer, false), viewport: point(value.viewport, true) as ImageViewport | null });
+}
+export function parseImagePeers(value: unknown): readonly ImagePeerState[] {
+	if (!Array.isArray(value) || value.length > 127) throw new Error("Invalid image participants");
+	const keys = new Set<string>();
+	return Object.freeze(value.map((item: unknown) => {
+		if (!isRecord(item) || !exactFields(item, ["target", "state"])) throw new Error("Invalid image participant");
+		const target = parseLocationTarget(item.target), key = JSON.stringify(target);
+		if (keys.has(key)) throw new Error("Duplicate image participant"); keys.add(key);
+		return Object.freeze({ target, state: parseImageState(item.state) });
+	}));
+}
 
 export function exactFields(value: Record<string, unknown>, fields: string[]): boolean {
 	return Object.keys(value).length === fields.length && fields.every(key => Object.prototype.hasOwnProperty.call(value, key));

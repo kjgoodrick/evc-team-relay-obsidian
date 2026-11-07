@@ -72,7 +72,14 @@ export class PresenceController extends Component {
 		if (this.serverSettings) this.locations = this.addChild(new LocationHost(this.plugin, this.registry.shareRegistry, this.auth,
 			this.serverSettings, this.instanceId, { changed: () => this.refresh(), location: event => this.remoteLocation(event),
 				stopped: () => this.stopFollowing("Following stopped because the connection changed."),
-				interacted: () => this.stopFollowing("Following stopped because you interacted with the image.") }));
+				interacted: () => this.stopFollowing("Following stopped because you interacted with the image."),
+				positions: () => {
+					if (!this.canObserveImage()) return;
+					this.peers = this.locations!.imagePeers;
+					// Pointer motion updates the overlay and Follow, not roster labels
+					// or the complete note/host lifecycle.
+					if (this.crossFollow) this.scheduleFollow();
+				} }));
 		this.register(this.registry.onViewsChanged(() => this.refresh()));
 		this.register(this.auth.on(() => this.refresh()));
 		this.register(this.auth.onTokenRefreshed(() => this.refresh()));
@@ -286,10 +293,10 @@ export class PresenceController extends Component {
 		if (peer && !isNotePeer(peer)) {
 			const view = this.plugin.app.workspace.getActiveViewOfType(FileView);
 			const current = () => version === this.navigationVersion && this.plugin.app.workspace.getActiveViewOfType(FileView) === view && this.canLocate(peer);
-			if (!view?.file || !current() || !this.locations?.revealImage(current)) { this.navigationMessage = "Location unavailable or still synchronizing."; this.notify(); return false; }
+			if (!view?.file || !current() || !this.locations?.revealImage(current, peer.imageState, follow)) { this.navigationMessage = "Location unavailable or still synchronizing."; this.notify(); return false; }
 			const location = this.locations.currentLocation, subscriptionId = follow ? this.locations.follow(peer) : undefined;
 			if (follow && (!subscriptionId || !location)) { this.navigationMessage = "Following is unavailable."; this.notify(); return false; }
-			this.following = follow ? peer : undefined; this.followingMode = undefined; this.lastFollowPosition = JSON.stringify(location);
+			this.following = follow ? peer : undefined; this.followingMode = undefined; this.lastFollowPosition = JSON.stringify([location, peer.imageState?.viewport ?? peer.imageState?.pointer]);
 			if (subscriptionId && location) this.crossFollow = { subscriptionId, peer, location, file: view.file, leaf: view.leaf, busy: false, waitUntil: 0 };
 			this.navigationMessage = follow ? `Following ${peer.name}.` : `Jumped to ${peer.name}.`;
 			this.updateFollowBar(); this.notify(); this.scheduleFollow(); return true;
@@ -338,8 +345,8 @@ export class PresenceController extends Component {
 			this.following = peer;
 			if (!isNotePeer(peer)) {
 				const version = this.navigationVersion, current = () => version === this.navigationVersion && this.crossFollow === cross && this.canLocate(peer);
-				const position = JSON.stringify(peer.location);
-				if (position !== this.lastFollowPosition && !this.locations?.revealImage(current)) { this.stopFollowing("Location unavailable."); return; }
+				const position = JSON.stringify([peer.location, peer.imageState?.viewport ?? peer.imageState?.pointer]);
+				if (position !== this.lastFollowPosition && !this.locations?.revealImage(current, peer.imageState, true)) { this.stopFollowing("Location unavailable."); return; }
 				this.lastFollowPosition = position; cross.waitUntil = 0; return;
 			}
 		}

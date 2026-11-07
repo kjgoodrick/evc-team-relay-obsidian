@@ -305,13 +305,15 @@ function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<u
 					...(index === undefined ? {} : { location: { kind: "note", share_id: f.folder.entityGuid, entry_id: f.notes[index].doc.entityGuid, surface: "reading" } }) });
 			},
 			imageLocation: (f: ReturnType<typeof fixture>) => socket.message({ type: "location", subscription_id: socket.frames.filter(frame => frame.type === "follow").at(-1)!.subscription_id, status: "available", location: f.image.location }),
+			imageState: () => socket.message({ type: "image_states", subscription_id: socket.frames.filter(frame => frame.type === "watch").at(-1)!.subscription_id, status: "available",
+				peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, state: { pointer: { x: 0.25, y: 0.75 }, viewport: { x: 0, y: 0, width: 1, height: 1 } } }] }),
 			roster: (available = true) => socket.message({ type: "roster", subscription_id: socket.frames.filter(frame => frame.type === "watch").at(-1)!.subscription_id,
 				status: available ? "available" : "unavailable", ...(available ? { peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, name: "Peer" }] } : {}) }),
 		};
 		return socket;
 	}
 	jest.mocked(platformFetch).mockImplementation(async url => ({ status: 200, ok: true, text: async () => JSON.stringify(String(url).includes("/capabilities?") ?
-		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true } : {}) } } :
+		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true } : {}) } } :
 		String(url).includes("/image-location?") ? { protocol_version: 1, location: await imageContext?.() } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
 	const mock = jest.spyOn(window, "WebSocket").mockImplementation(url => {
 		expect(String(url)).toBe("wss://relay.example/v1/collaboration/events");
@@ -446,5 +448,32 @@ test("an image context response after logout cannot publish or restore participa
 		await until(() => !!finish); f.logout(); finish(f.image.location); await settled();
 		expect(f.controller.peers).toEqual([]); expect(socket.readyState).toBe(3);
 		expect(socket.frames.some(frame => frame.type === "watch")).toBe(false);
+	} finally { f.close(); network.close(); }
+});
+
+test("verified host publishes image geometry and renders peers while privacy withdraws only local state", async () => {
+	const network = crossNetwork(true, () => f.image.location), f = fixture(true, true);
+	const layout = (element: HTMLElement) => {
+		Object.defineProperties(element, { offsetWidth: { value: 400 }, offsetHeight: { value: 250 }, clientWidth: { value: 400 }, clientHeight: { value: 250 } });
+		element.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 400, bottom: 250, width: 400, height: 250, toJSON: () => ({}) });
+	};
+	try {
+		layout(f.image.view.contentEl); layout(f.image.element);
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(f.image.view);
+		await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster();
+		layout(f.image.view.contentEl.querySelector<HTMLElement>(".relay-image-presence")!); socket.imageState();
+		await until(() => f.image.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent === "Peer");
+		expect(f.controller.peers[0]).toMatchObject({ imageState: { pointer: { x: 0.25, y: 0.75 } } });
+		await until(() => socket.frames.some(frame => frame.type === "image_state"));
+		expect(socket.frames.filter(frame => frame.type === "image_state").at(-1)).toMatchObject({ state: { pointer: null, viewport: { x: 0, y: 0, width: 1, height: 1 } } });
+		f.image.element.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 125 }));
+		await until(() => ((socket.frames.filter(frame => frame.type === "image_state").at(-1)?.state as { pointer?: { x: number } })?.pointer?.x) === 0.25);
+		expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(true);
+		expect(f.openFile).not.toHaveBeenCalled();
+		await f.controller.setVisible(false); const count = socket.frames.filter(frame => frame.type === "image_state").length;
+		f.image.element.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 200, clientY: 125 })); await settled(); await settled();
+		expect(socket.frames.filter(frame => frame.type === "image_state")).toHaveLength(count);
+		expect(f.image.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent).toBe("Peer");
+		f.logout(); expect(f.image.view.contentEl.querySelector(".relay-image-presence")).toBeNull(); expect(f.controller.peers).toEqual([]);
 	} finally { f.close(); network.close(); }
 });

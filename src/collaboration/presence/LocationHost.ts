@@ -9,9 +9,10 @@ import { ImagePresenceSurface } from "./ImagePresenceSurface";
 import { LocationChannel, type LocationChannelStatus, type LocationIdentity } from "./LocationChannel";
 import { locationId, type LocationEvent, type NoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 import type { ActivePresencePeer, SurfacePresencePeer } from "./PresencePeers";
+import type { ImagePresenceState, ImageStatesEvent } from "./LocationProtocol";
 
 type Context = { key: string; serverId: string; identity: LocationIdentity; file: TFile; folder: VaultShare; id: string; kind: "note" | "image"; location?: NoteLocation };
-type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void; interacted?: () => void };
+type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void; interacted?: () => void; positions?: () => void };
 
 /** One foreground connection across notes and image files. Inventory and local
  * rendering are verified independently of discussions and comment permission. */
@@ -21,6 +22,8 @@ export class LocationHost extends Component {
 	private view?: FileView;
 	private image?: ImagePresenceSurface;
 	private roster?: SurfaceRosterEvent;
+	private imageStates?: ImageStatesEvent;
+	private visible = true;
 	private assets: ImageAssets;
 	private folders = new Map<VaultShare, () => void>();
 	private closed = false;
@@ -44,8 +47,10 @@ export class LocationHost extends Component {
 	get imagePeers(): SurfacePresencePeer[] {
 		const scope = this.currentLocation, roster = this.roster;
 		if (scope?.kind !== "image" || roster?.status !== "available" || JSON.stringify(scope) !== JSON.stringify(roster.scope)) return [];
+		const positions = this.imageStates?.status === "available" && JSON.stringify(this.imageStates.scope) === JSON.stringify(scope) ?
+			new Map(this.imageStates.peers.map(peer => [JSON.stringify(peer.target), peer.state])) : undefined;
 		return roster.peers.map(peer => ({ key: JSON.stringify(["surface", peer.target.user_id, peer.target.session_id, peer.target.instance_id]),
-			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: "image" as const, location: scope }))
+			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: "image" as const, location: scope, imageState: positions?.get(JSON.stringify(peer.target)) }))
 			.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 	}
 	retry(): void { this.channel?.retry(); this.image?.retry(); }
@@ -56,7 +61,7 @@ export class LocationHost extends Component {
 		try { return this.channel?.follow({ user_id: peer.userId, session_id: peer.sessionId, instance_id: peer.instanceId }, location); }
 		catch { return; }
 	}
-	revealImage(current: () => boolean): boolean { return this.image?.reveal(current) === true; }
+	revealImage(current: () => boolean, state?: ImagePresenceState, follow = false): boolean { return this.image?.reveal(current, state, follow) === true; }
 	private watchFolders(): void {
 		const wanted = new Set(this.shares.toArray());
 		for (const [folder, stop] of this.folders) if (!wanted.has(folder)) { stop(); this.folders.delete(folder); }
@@ -92,9 +97,10 @@ export class LocationHost extends Component {
 	}
 	update(view: FileView | null | undefined, foreground: boolean, visible: boolean): void {
 		if (this.closed) return;
+		this.visible = visible;
 		const context = foreground ? this.identify(view) : undefined;
 		if (this.context?.key !== context?.key || this.view !== view || this.context?.file !== context?.file || this.context?.id !== context?.id) {
-			this.image?.close(); this.image = undefined; this.roster = undefined;
+			this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
 		}
 		if (this.context?.key !== context?.key) {
 			const previous = this.channel; this.channel = undefined; this.context = undefined; previous?.stop();
@@ -117,6 +123,12 @@ export class LocationHost extends Component {
 						if (event.scope && event.status === "unavailable" && JSON.stringify(event.scope) === JSON.stringify(this.currentLocation)) { this.image?.deny(); this.callbacks.stopped(); }
 						this.callbacks.changed();
 					},
+					imageStates: event => {
+						if (!current()) return;
+						this.imageStates = event; this.image?.setPeers(this.imagePeers);
+						if (event.scope && event.status === "unavailable" && JSON.stringify(event.scope) === JSON.stringify(this.currentLocation)) { this.image?.deny(); this.callbacks.stopped(); this.callbacks.changed(); }
+						else this.callbacks.positions?.();
+					},
 				});
 			} catch { return; }
 		}
@@ -126,12 +138,16 @@ export class LocationHost extends Component {
 				connected: () => this.ready, supported: () => this.supportsImages,
 				read: () => this.channel!.readImageLocation(context.folder.entityGuid, context.id),
 				changed: this.callbacks.changed, interacted: () => this.callbacks.interacted?.(),
+				motion: { publishing: () => this.visible && this.channel?.supportsImageStates === true,
+					publish: state => this.channel?.publishImageState(this.visible ? state : null) },
 			});
 			this.image.refresh();
 		}
 		const location = this.currentLocation;
 		this.channel.start(context.folder.entityGuid, visible ? location ?? null : null);
 		this.channel.watch(location?.kind === "image" ? location : null);
+		this.image?.refreshMovement();
+		this.image?.setPeers(this.imagePeers);
 	}
 	/** Resolve only a unique authorized local entry. Remote events never provide
 	 * paths, and images must match the advertised synchronized content hash. */
@@ -149,7 +165,7 @@ export class LocationHost extends Component {
 		return matches.length === 1 ? matches[0] : undefined;
 	}
 	onunload(): void {
-		this.closed = true; this.image?.close(); this.image = undefined; this.roster = undefined;
+		this.closed = true; this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
 		this.channel?.stop(); this.channel = undefined; this.context = undefined; this.view = undefined;
 		for (const stop of this.folders.values()) stop(); this.folders.clear();
 	}

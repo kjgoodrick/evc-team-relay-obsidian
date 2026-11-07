@@ -4,8 +4,9 @@ The client transport supports the server's optional version-two location and
 surface-roster protocol. The foreground `LocationHost` now opts in and connects
 directly opened managed image files to the existing participant controls and
 Jump/Follow. Notes and images reuse one socket per foreground host/account.
-This has automated host evidence; native image acceptance, image pointers,
-embedded-image presence and Bases/timeline bindings remain unfinished.
+Direct-image pointer overlays and position-aware Jump/Follow are also connected.
+This has automated host evidence; native image acceptance, embedded-image presence
+and Bases/timeline bindings remain unfinished.
 
 ## Transport contract
 
@@ -27,7 +28,8 @@ Exact location shapes are defined in
   metadata; a display name or DOM index is not identity.
 
 The parser copies and freezes these descriptors. It rejects arbitrary fields,
-external URLs, computed results, pointers and not-yet-supported subtargets.
+external URLs, computed results and not-yet-supported subtargets. Image movement
+uses a separate typed message rather than changing the room descriptor.
 Revisions must be positive safe integers. Embedded-image occurrence and
 fine-grained Bases/timeline state still need typed extensions and authorization.
 
@@ -47,11 +49,45 @@ change. Source changes, late callbacks, account changes and unload cannot restor
 stale participants. Large files currently remain unavailable for this presence
 binding; native resource measurements and the large-file path remain release work.
 
-Participants appear as viewing the whole image, without an invented pointer.
-Jump centers it. Follow can start there or cross from a shared note, and can
+Participants appear as viewing the image. When current geometry is available,
+Jump uses the remote pointer (or viewport center), and Follow uses the remote
+viewport center (or pointer). It does not change local zoom or selection. Without
+geometry the existing whole-image navigation remains available. Follow can start
+there or cross from a shared note, and can
 continue into an authorized note on the same pane/socket. User interaction,
 navigation, backgrounding and access loss interrupt Follow. Hiding one's own
 presence preserves authorized observation. No discussion session is created.
+
+## Pointer and viewport movement
+
+`presence_image_states_preview` enables image-only `watch` requests with
+`image_states: true`, plus `publishImageState({pointer, viewport})`. Coordinates
+are finite normalized fractions of the orientation-corrected intrinsic image;
+the pointer is `{x,y}` or null and the viewport is `{x,y,width,height}` or null.
+Zero-area/out-of-bounds viewports, extra identity fields and malformed numbers
+reject. Publication must match the visible image generation/hash exactly.
+
+The native binding maps actual object-fit, object-position, axis-aligned scale,
+scroll and clipping. It publishes only visible geometry; letterbox padding is
+not part of the image. Rotation/reflection/perspective remain unsupported and
+withdraw coordinates rather than placing a guessed pointer. Pointers have
+authenticated names and stable user colors. Their noninteractive overlay is
+clipped and excluded from accessibility announcements; the normal participant
+controls remain accessible. Pointer exit/cancel and touch release clear the
+pointer; scrolling clears a stationary pointer and updates the viewport.
+
+Capture is coalesced to 125 ms; transport sends at most eight ordinary movement
+updates per second with immediate clearing. The server batches movement for
+16 ms and holds only the latest state. Movement does not change membership
+revision, refetch the roster or rebuild participant controls. Separate bounded
+`image_states` snapshots contain only authorized identity tuples and geometry;
+names come from the roster. A viewer's updates and the publisher's read access
+are checked on each delivery. Snapshot guards cover delayed socket writes.
+
+Scope/privacy changes, revocation, disconnect and unload clear geometry. Cached
+movement is not replayed on reconnect. Neither coordinates nor viewports are
+written to the outbox or database. Existing single-process/capacity limits apply;
+these bounds are not a measured mobile/battery or production-load result.
 
 ## Observation and privacy
 
@@ -74,7 +110,7 @@ text nodes and continue to enforce local surface/account ownership.
 
 ## Validation
 
-The full plugin suite passes **2,562 tests in 210 suites**; 17 opt-in tests in 16
+The full plugin suite passes **2,582 tests in 212 suites**; 17 opt-in tests in 16
 suites are skipped in that default run. Preview build/main types and changed
 source/test lint pass. The build retains 15 existing Svelte warnings. The frozen
 test-type gate passes with 206 known errors/45 signatures, below its 207/46
@@ -88,9 +124,11 @@ separation, same-socket renewal, reconnect, no automatic Follow restart, idle
 read revocation and socket cleanup. It also reads current image context using
 the read-only reviewer's session and rejects that read after revocation.
 The service/database are removed afterward.
+The fixture also delivers actual image pointer/viewport updates without roster
+churn, clears them on surface departure and denies them after read revocation.
 The broader runner also retains the existing Bases/discussion recovery checks.
 
-The server regression set passes 191 tests across location, managed-awareness
+The server regression set passes 211 tests across location, managed-awareness
 protocol, collaboration-policy and Bases-registry suites. Controlled async tests
 cover authorization becoming stale while waiting for the shared socket writer,
 1,000 pending membership changes and an old denial completing after a new watch.
@@ -99,12 +137,17 @@ note→image→note Follow, unchanged local note selections, replacement, explic
 retry and delayed responses after logout. Binding fixtures cover unloaded and
 ambiguous images, replacement during verification, synchronous/asynchronous
 failure and unload. These use mocked native image layout and are not native tests.
+Geometry/host fixtures cover letterboxing, off-center crops, pointer departure,
+hidden observation, exact scroll positions for Jump/Follow, unchanged zoom,
+unsafe transforms, malformed state, late subscriptions and cancellation. Server
+tests cover geometry validation, legacy watchers, read-only publishers, changed
+context during socket waits and 1,001 coalesced movements without roster work.
 
 ## Required next work
 
 Connect Bases/timeline bindings to this transport, including permission/version
 refresh independent of whether discussions are open. Extend image presence to
-embeds and coordinates. Add semantic Jump/Follow and typed cell, row,
+embeds. Complete transformed-image and large-file coverage. Add semantic Jump/Follow and typed cell, row,
 header, group, lane and timeline targets. Preserve a single foreground publisher
 and local interaction interruption across all surfaces and popouts. Separate
 high-frequency movement from membership snapshots and measure its authorization,

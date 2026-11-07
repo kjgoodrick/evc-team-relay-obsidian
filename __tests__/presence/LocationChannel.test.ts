@@ -27,16 +27,18 @@ class Socket {
 	ready(expiresIn = 3600, protocolVersion = 1) { this.message({ type: "ready", protocol_version: protocolVersion, session_id: "b".repeat(32), instance_id: id(3), expires_at: Math.floor(Date.now() / 1000) + expiresIn }); }
 	disconnect(code = 1006) { this.readyState = 3; this.onclose?.call(this as unknown as WebSocket, { code } as CloseEvent); }
 }
-function fixture(surfaceLocations = false, serverSupports = surfaceLocations) {
+function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false) {
 	const sockets: Socket[] = [], status = jest.fn(), location = jest.fn(), followStopped = jest.fn(), roster = jest.fn();
+	const imageStates = jest.fn();
 	let counter = 0;
 	const fetcher = jest.fn(async (url: string) => url.includes("/capabilities?") ? response({ protocol_version: 1, features: { presence_locations_preview: true,
-		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true } : {}) } }) :
+		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement } : {}) } }) :
 		response({ protocol_version: 1, ticket: "ticket_" + String(++counter).padStart(32, "0"), expires_in: 30, socket_path: "/v1/collaboration/events" }));
 	const options = { credential: jest.fn(credentials), fetcher, status, location, followStopped, roster, surfaceLocations, random: () => 0.5,
+		imageStates: movement ? imageStates : undefined,
 		socket: (url: string) => { const socket = new Socket(url); sockets.push(socket); return socket as unknown as WebSocket; } };
 	const channel = new LocationChannel(identity, options);
-	return { channel, options, sockets, fetcher, status, location, followStopped, roster, serverSupports };
+	return { channel, options, sockets, fetcher, status, location, followStopped, roster, serverSupports, imageStates };
 }
 const flush = () => jest.advanceTimersByTimeAsync(0);
 async function ready(f: ReturnType<typeof fixture>, expiresIn = 3600) {
@@ -45,6 +47,45 @@ async function ready(f: ReturnType<typeof fixture>, expiresIn = 3600) {
 }
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
+
+test("image movement coalesces, follows the visible publication and is not replayed after reconnect", async () => {
+	const f = fixture(true, true, true);
+	try {
+		const socket = await ready(f); f.channel.publish(picture());
+		for (let x = 0; x <= 1000; x++) f.channel.publishImageState({ pointer: { x: x / 1000, y: 0.5 }, viewport: null });
+		expect(socket.frames.filter(value => value.type === "image_state")).toHaveLength(0);
+		await jest.advanceTimersByTimeAsync(125);
+		expect(socket.frames.slice(-2)).toEqual([{ type: "presence", location: picture() }, { type: "image_state", location: picture(), state: { pointer: { x: 1, y: 0.5 }, viewport: null } }]);
+		f.channel.publishImageState(null); expect(socket.frames.at(-1)).toMatchObject({ type: "image_state", state: null });
+		f.channel.publishImageState({ pointer: { x: 0, y: 0 }, viewport: null }); f.channel.publish(null);
+		await jest.advanceTimersByTimeAsync(125); expect(socket.frames.at(-1)).toEqual({ type: "presence", location: null });
+		f.channel.publish(picture()); f.channel.publishImageState({ pointer: { x: 0, y: 0 }, viewport: null }); await jest.advanceTimersByTimeAsync(125);
+		socket.disconnect(); await jest.advanceTimersByTimeAsync(1000); const next = f.sockets.at(-1)!; next.open(); next.ready(3600, 2);
+		expect(next.frames.some(frame => frame.type === "image_state")).toBe(false);
+	} finally { f.channel.stop(); }
+	expect(jest.getTimerCount()).toBe(0);
+});
+
+test("image snapshots are separate from rosters, clear on scope change, and ignore stale subscriptions", async () => {
+	const f = fixture(true, true, true), state = { pointer: { x: 0.1, y: 0.5 }, viewport: null };
+	try {
+		const socket = await ready(f); f.channel.watch(picture()); const watch = socket.frames.at(-1)!;
+		expect(watch).toMatchObject({ type: "watch", image_states: true });
+		const frame = { type: "image_states", subscription_id: watch.subscription_id, status: "available", peers: [{ target, state }] };
+		const rosterCalls = f.roster.mock.calls.length; socket.message(frame);
+		expect(f.imageStates).toHaveBeenLastCalledWith({ scope: picture(), status: "available", peers: [{ target, state }] });
+		expect(f.roster.mock.calls).toHaveLength(rosterCalls);
+		f.channel.watch(base()); expect(socket.frames.at(-1)).not.toHaveProperty("image_states");
+		expect(f.imageStates).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
+		const count = f.imageStates.mock.calls.length; socket.message(frame); expect(f.imageStates.mock.calls).toHaveLength(count);
+	} finally { f.channel.stop(); }
+});
+
+test.each([false, true])("unnegotiated image movement is withheld on legacy capability %s", async extended => {
+	const f = fixture(true, extended);
+	try { const socket = await ready(f); f.channel.publish(picture()); f.channel.publishImageState({ pointer: { x: 0, y: 0 }, viewport: null }); await jest.advanceTimersByTimeAsync(125); expect(socket.frames.some(frame => frame.type === "image_state")).toBe(false); }
+	finally { f.channel.stop(); }
+});
 
 test("image context uses the session credential and returns only the requested current image", async () => {
 	const f = fixture(true);

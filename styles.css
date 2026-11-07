@@ -722,6 +722,10 @@
 
 .relay-image-comment-stage canvas.is-unavailable, .relay-image-comment-overlay.is-unavailable { display: none; }
 .relay-rendered-image-root { position: relative; }
+.relay-image-presence-root { position: relative; }
+.relay-image-presence { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 4; }
+.relay-image-presence-pointer { position: absolute; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 15px solid var(--presence-color); transform: rotate(-35deg); transform-origin: top center; filter: drop-shadow(0 0 1px var(--background-primary)); }
+.relay-image-presence-pointer span { position: absolute; display: block; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-smallest); color: var(--text-normal); background: var(--background-primary); border: 1px solid var(--presence-color); border-radius: 3px; padding: 1px 4px; rotate: 35deg; transform-origin: top left; }
 .relay-rendered-images { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
 .relay-rendered-image, .relay-rendered-image-mark { position: absolute; }
 .relay-rendered-image[hidden] { display: none; }

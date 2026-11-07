@@ -1,10 +1,13 @@
 import type { FileView } from "obsidian";
 import { ImageAssets, type RenderedImageEvidence } from "../ImageAssets";
-import type { ImageLocation } from "./LocationProtocol";
+import type { ImageLocation, ImagePresenceState } from "./LocationProtocol";
+import type { SurfacePresencePeer } from "./PresencePeers";
+import { ImagePresenceMotion } from "./ImagePresenceMotion";
 
 type Options = {
 	current: () => boolean; connected: () => boolean; supported: () => boolean;
 	read: () => Promise<ImageLocation>; changed: () => void; interacted: () => void;
+	motion?: { publishing: () => boolean; publish: (state: ImagePresenceState | null) => void };
 };
 
 /** A directly opened image uses its actual native resource and synchronized
@@ -19,6 +22,8 @@ export class ImagePresenceSurface {
 	private closed = false;
 	private version = 0;
 	private stops: (() => void)[] = [];
+	private motion?: ImagePresenceMotion;
+	private peers: readonly SurfacePresencePeer[] = [];
 	state: "waiting" | "ready" | "unavailable" = "waiting";
 	constructor(readonly view: FileView, private assets: ImageAssets, private options: Options) {
 		const root = view.contentEl;
@@ -50,6 +55,7 @@ export class ImagePresenceSurface {
 	private clear(state: ImagePresenceSurface["state"]): void {
 		const changed = !!this.proof || this.state !== state;
 		this.proof = undefined; this.evidence = undefined; this.state = state;
+		this.motion?.close(); this.motion = undefined;
 		if (changed && !this.closed) this.options.changed();
 	}
 	refresh(): void {
@@ -76,7 +82,9 @@ export class ImagePresenceSurface {
 			const [proof, evidence] = await Promise.all([this.options.read(), this.assets.verifyRenderedFile(file, image, current)]);
 			if (!current()) return;
 			if (!evidence.valid() || evidence.asset.kind !== "managed" || evidence.asset.entry_id !== proof.entry_id || evidence.asset.sha256 !== proof.content_sha256) throw new Error("Image version changed");
-			this.proof = proof; this.evidence = evidence; this.state = "ready"; this.options.changed();
+			this.proof = proof; this.evidence = evidence; this.state = "ready";
+			this.options.changed();
+			if (current() && this.options.motion) { this.motion = new ImagePresenceMotion(this.view.contentEl, image, { ...this.options.motion, current: () => !!this.location }); this.motion.setPeers(this.peers); }
 		}).catch(() => { if (current()) this.clear("unavailable"); }).finally(() => {
 			this.pending = false;
 			if (!this.closed && this.version !== version) this.refresh();
@@ -84,10 +92,13 @@ export class ImagePresenceSurface {
 	}
 	deny(): void { this.version++; this.attempted = this.key; this.clear("unavailable"); }
 	retry(): void { this.version++; this.attempted = undefined; this.clear("waiting"); this.refresh(); }
-	reveal(current: () => boolean): boolean {
+	setPeers(peers: readonly SurfacePresencePeer[]): void { this.peers = peers; this.motion?.setPeers(peers); }
+	refreshMovement(): void { this.motion?.refresh(); }
+	reveal(current: () => boolean, state?: ImagePresenceState, follow = false): boolean {
 		if (!current() || !this.location || !this.image) return false;
+		if (this.motion && (state?.pointer || state?.viewport)) return this.motion.reveal(state, follow, current);
 		this.image.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
 		return current() && !!this.location;
 	}
-	close(): void { this.closed = true; this.version++; this.stops.splice(0).forEach(stop => stop()); this.proof = undefined; this.evidence = undefined; this.image = undefined; }
+	close(): void { this.closed = true; this.version++; this.stops.splice(0).forEach(stop => stop()); this.motion?.close(); this.motion = undefined; this.peers = []; this.proof = undefined; this.evidence = undefined; this.image = undefined; }
 }

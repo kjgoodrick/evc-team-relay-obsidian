@@ -3,6 +3,7 @@ import { v4 as uuid } from "uuid";
 import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
 import { parseRetryAfterMs, RelayHttpError } from "../../relayRequestErrors";
 import { isRecord } from "../DiscussionProtocol";
+import { parseImageState, parseImagePeers, type ImagePresenceState, type ImageStatesEvent } from "./LocationProtocol";
 import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type ImageLocation, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 
 export type LocationChannelStatus = "idle" | "connecting" | "ready" | "reconnecting" | "unsupported" | "authentication" | "unavailable";
@@ -16,6 +17,7 @@ type Options = {
 	/** Enable only when the host has adapters for the extended location model. */
 	surfaceLocations?: boolean;
 	roster?: (event: SurfaceRosterEvent) => void;
+	imageStates?: (event: ImageStatesEvent) => void;
 	fetcher?: (url: string, init: PlatformRequestInit) => Promise<Response>;
 	socket?: (url: string) => WebSocket;
 	random?: () => number;
@@ -37,6 +39,11 @@ export class LocationChannel {
 	private protocolVersion: 1 | 2 = 1;
 	private rosterSupported = false;
 	private imageContextSupported = false;
+	private imageStatesSupported = false;
+	private desiredImageState: ImagePresenceState | null = null;
+	private sentImageState?: string;
+	private imageTimer?: number;
+	private lastImageSent = 0;
 	private desiredWatch: NonNoteLocation | null = null;
 	private watching?: { id: string; scope: NonNoteLocation };
 	private sentWatch?: string;
@@ -67,6 +74,20 @@ export class LocationChannel {
 	get supportsSurfaceLocations(): boolean { return this.ready && this.protocolVersion === 2; }
 	get supportsSurfaceRoster(): boolean { return this.supportsSurfaceLocations && this.rosterSupported; }
 	get supportsImageContext(): boolean { return this.supportsSurfaceLocations && this.imageContextSupported; }
+	get supportsImageStates(): boolean { return this.supportsSurfaceRoster && this.imageStatesSupported; }
+	/** Latest state only; never persisted or replayed after reconnect. */
+	publishImageState(state: ImagePresenceState | null): void {
+		const next = state === null ? null : parseImageState(state);
+		if (JSON.stringify(next) === JSON.stringify(this.desiredImageState)) return;
+		this.desiredImageState = next;
+		if (!this.supportsImageStates || this.desired?.kind !== "image") return;
+		if (next === null) { if (this.imageTimer !== undefined) window.clearTimeout(this.imageTimer); this.imageTimer = undefined; this.flushImageState(); }
+		else if (this.imageTimer === undefined) {
+			const delay = Math.max(0, 125 - (Date.now() - this.lastImageSent));
+			if (!delay) this.flushImageState();
+			else this.imageTimer = window.setTimeout(() => { this.imageTimer = undefined; this.flushImageState(); }, delay);
+		}
+	}
 	async readImageLocation(shareId: string, entryId: string): Promise<ImageLocation> {
 		if (!this.supportsImageContext || !locationId(shareId) || !locationId(entryId)) throw new Error("Image presence unavailable");
 		const version = this.version, value = await this.request(`/image-location?share_id=${shareId}&entry_id=${entryId}`, version);
@@ -86,6 +107,8 @@ export class LocationChannel {
 	publish(location: SurfaceLocation | null): void {
 		const next = location === null ? null : this.options.surfaceLocations ? parseSurfaceLocation(location) : parseNoteLocation(location);
 		if (JSON.stringify(this.desired) === JSON.stringify(next)) return;
+		this.desiredImageState = null; this.sentImageState = undefined; this.lastImageSent = 0;
+		if (this.imageTimer !== undefined) window.clearTimeout(this.imageTimer); this.imageTimer = undefined;
 		this.desired = next;
 		if (this.publishTimer !== undefined) window.clearTimeout(this.publishTimer);
 		this.publishTimer = undefined;
@@ -139,7 +162,8 @@ export class LocationChannel {
 	}
 	private current(version: number): boolean { return this.active && version === this.version; }
 	private drop(): void {
-		for (const timer of [this.retryTimer, this.heartbeat, this.refreshTimer, this.deadline, this.publishTimer]) if (timer !== undefined) window.clearTimeout(timer);
+		for (const timer of [this.retryTimer, this.heartbeat, this.refreshTimer, this.deadline, this.publishTimer, this.imageTimer]) if (timer !== undefined) window.clearTimeout(timer);
+		this.imageTimer = undefined; this.desiredImageState = null; this.sentImageState = undefined; this.imageStatesSupported = false; this.lastImageSent = 0;
 		this.retryTimer = this.heartbeat = this.refreshTimer = this.deadline = this.publishTimer = undefined;
 		for (const cancel of this.requests) cancel(); this.requests.clear();
 		// Native HTTP may finish independently; generation checks fence every late
@@ -210,11 +234,12 @@ export class LocationChannel {
 			if (enabled === false || enabled === undefined) throw new ChannelFailure("unsupported");
 			if (enabled !== true) throw new ChannelFailure("unavailable");
 			if (this.options.surfaceLocations) {
-				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview;
-				if ([extended, roster, image].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true) && extended !== true) throw new ChannelFailure("unavailable");
+				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview, states = capability.features.presence_image_states_preview;
+				if ([extended, roster, image, states].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true) && extended !== true || states === true && roster !== true) throw new ChannelFailure("unavailable");
 				this.protocolVersion = extended === true ? 2 : 1;
 				this.rosterSupported = roster === true;
 				this.imageContextSupported = image === true;
+				this.imageStatesSupported = states === true;
 			}
 			const ticket = await this.ticket(version);
 			if (!this.current(version)) return;
@@ -238,14 +263,26 @@ export class LocationChannel {
 		const location = this.protocolVersion === 1 && this.desired?.kind !== "note" ? null : this.desired;
 		const encoded = JSON.stringify(location);
 		if (encoded !== this.sent && this.send({ type: "presence", location })) this.sent = encoded;
+		this.flushImageState();
+	}
+	private flushImageState(): void {
+		if (!this.supportsImageStates || this.desired?.kind !== "image" || this.sent !== JSON.stringify(this.desired)) return;
+		const encoded = JSON.stringify(this.desiredImageState);
+		// A new publication starts with no state on the server.
+		if (this.sentImageState === undefined && this.desiredImageState === null) { this.sentImageState = encoded; return; }
+		if (encoded !== this.sentImageState && this.send({ type: "image_state", location: this.desired, state: this.desiredImageState })) { this.sentImageState = encoded; this.lastImageSent = Date.now(); }
 	}
 	private emitRoster(scope: NonNoteLocation | null, status: SurfaceRosterEvent["status"], peers: SurfaceRosterEvent["peers"] = []): void {
+		if (status === "unavailable") this.emitImageStates(null, "unavailable");
 		try { this.options.roster?.({ scope, status, peers }); } catch { /* Isolate UI. */ }
+	}
+	private emitImageStates(scope: ImageLocation | null, status: ImageStatesEvent["status"], peers: ImageStatesEvent["peers"] = []): void {
+		try { this.options.imageStates?.({ scope, status, peers }); } catch { /* Isolate UI. */ }
 	}
 	private flushWatch(): void {
 		if (!this.supportsSurfaceRoster || !this.desiredWatch || this.sentWatch === JSON.stringify(this.desiredWatch)) return;
 		const scope = this.desiredWatch, id = uuid(); this.watching = { id, scope };
-		if (this.send({ type: "watch", subscription_id: id, location: scope })) this.sentWatch = JSON.stringify(scope);
+		if (this.send({ type: "watch", subscription_id: id, location: scope, ...(scope.kind === "image" && this.supportsImageStates && this.options.imageStates ? { image_states: true } : {}) })) this.sentWatch = JSON.stringify(scope);
 	}
 	private receive(raw: unknown): void {
 		try {
@@ -254,7 +291,7 @@ export class LocationChannel {
 			const bytes = new TextEncoder().encode(raw).length;
 			if (bytes > limit) throw new Error();
 			const value: unknown = JSON.parse(raw);
-			if (!isRecord(value) || value.type !== "roster" && bytes > 4096) throw new Error();
+			if (!isRecord(value) || value.type !== "roster" && value.type !== "image_states" && bytes > 4096) throw new Error();
 			if (value.type === "ready") {
 				if (this.status !== "connecting" || !exactFields(value, ["type", "protocol_version", "session_id", "instance_id", "expires_at"]) ||
 					value.protocol_version !== this.protocolVersion || value.instance_id !== this.identity.instanceId || !publicSessionId(value.session_id) || !expiry(value.expires_at)) throw new Error();
@@ -278,6 +315,16 @@ export class LocationChannel {
 					if (value.subscription_id === this.subscription) {
 						if (!available) this.subscription = undefined;
 						try { this.options.location?.({ subscriptionId: value.subscription_id, location }); } catch { /* Isolate UI. */ }
+					}
+				} else if (value.type === "image_states") {
+					const available = value.status === "available";
+					if (!this.supportsImageStates || !this.options.imageStates || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
+						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
+					const peers = available ? parseImagePeers(value.peers) : [];
+					if (this.watching?.id === value.subscription_id) {
+						const scope = this.watching.scope; if (scope.kind !== "image") throw new Error();
+						if (!available) { this.watching = undefined; this.emitRoster(scope, "unavailable"); }
+						this.emitImageStates(scope, available ? "available" : "unavailable", peers);
 					}
 				} else if (value.type === "roster") {
 					const available = value.status === "available";
