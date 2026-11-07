@@ -57,6 +57,8 @@ export interface NativeBaseGroupHandle {
 	/** One native header can represent several typed values. Capture must offer
 	 * the distinct choices instead of choosing whichever record was sorted first. */
 	ambiguous: boolean; current(): boolean;
+	/** Bounded, current source candidates for this exact typed value. */
+	members(): TFile[];
 }
 export type NativeBaseReveal = "revealed" | "hidden" | "property-hidden" | "unavailable";
 export interface NativeBaseBinding {
@@ -273,6 +275,19 @@ export class NativeBasesSurface {
 							const currentValues = this.groupValues(group, property, resolve);
 							return currentValues?.size === values.size && [...values.keys()].every(captured => currentValues.has(captured));
 						} catch { return false; }
+					}, members: () => {
+						try {
+							if (!this.current() || this.groups()?.[slot] !== group || this.groupHeading(model, group) !== heading) return [];
+							const entries = list(group.entries); if (!entries) return [];
+							const members = new Set<TFile>(), budget = nativeGroupValueBudget();
+							for (const entry of entries) {
+								if (!object(entry) || !(entry.file instanceof TFile) || !callable(entry.getValue)) return [];
+								const value = nativeBaseGroupValue(entry.getValue(property.source + "." + property.name), resolve, budget);
+								if (!value) return [];
+								if (nativeBaseGroupValueKey(value) === key) members.add(entry.file);
+							}
+							return [...members];
+						} catch { return []; }
 					} });
 				}
 				if (handles.length > MAX_HANDLES) return [];

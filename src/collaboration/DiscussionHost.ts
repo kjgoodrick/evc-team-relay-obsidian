@@ -1,3 +1,6 @@
+import { NativeBaseGroupComments } from "./NativeBaseGroupComments";
+import { baseGroupValueLabel } from "./BaseGroupValueBridge";
+import { isDocument } from "../Document";
 import type { LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { Component, FileView, MarkdownView, Notice, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
@@ -25,7 +28,7 @@ import type { BaseSyncHost } from "../bases/BaseSyncHost";
 import type { BaseRegistrySnapshot } from "../bases/BaseRegistryProtocol";
 import { isAttachmentFile } from "../AttachmentFile";
 import { isRecord } from "./DiscussionProtocol";
-import type { NativeBasesSurface, NativeBaseHandle, NativeBaseTarget } from "../bases/NativeBasesSurface";
+import type { NativeBasesSurface, NativeBaseHandle, NativeBaseTarget, NativeBaseGroupHandle } from "../bases/NativeBasesSurface";
 import { baseSelectionKey, type BaseCommentContext } from "./BaseCommentContext";
 import { BaseComments } from "./BaseComments";
 
@@ -227,12 +230,13 @@ export class DiscussionHost extends Component {
 			bootstrap?.();
 			const proof = await session.readBaseContext(entryId);
 			if (!authorized() || proof.definition_id !== binding.snapshot.definition_id || proof.registry_revision !== binding.snapshot.revision) return;
-			const recordFor = (recordFile: TFile) => {
-				if (!authorized() || this.plugin.app.vault.getFileByPath(recordFile.path) !== recordFile || this.shares.shareFor(recordFile.path) !== folder) return;
+			const recordFor = (recordFile: TFile, counts?: ReadonlyMap<string, number>) => {
+				if ((!counts && !authorized()) || this.plugin.app.vault.getFileByPath(recordFile.path) !== recordFile || this.shares.shareFor(recordFile.path) !== folder) return;
 				const path = folder.toVirtualPath(recordFile.path), record = folder.folderIndex.recordFor(path), index = folder._liveProvider?.managedIndex;
 				if (!record || !isId(record.id) || !isBaseRecordType(record.type)) return;
 				if (index && (!index.registered(path, record.id) || !index.snapshot.owner && !["read", "write"].includes(index.snapshot.permissions[path]))) return;
-				let count = 0; folder.folderIndex.eachRecord(item => { if (item.id === record.id) count++; });
+				let count = counts?.get(record.id) ?? 0;
+				if (!counts) folder.folderIndex.eachRecord(item => { if (item.id === record.id) count++; });
 				return count === 1 ? record : undefined;
 			};
 			let catalog: BaseDefinitionCatalog | undefined;
@@ -259,8 +263,33 @@ export class DiscussionHost extends Component {
 				}
 				const record = recordFor(target.file); return record ? { type: "item", recordId: record.id } : undefined;
 			};
+			const groups = catalog ? new NativeBaseGroupComments({ session, entryId, baseEntryId, surface, binding, current: authorized }, catalog, {
+				record: file => { const record = recordFor(file); return record && isBaseRecordType(record.type) ? { id: record.id, type: record.type, path: folder.toVirtualPath(file.path) } : undefined; },
+				records: files => {
+					if (!authorized()) return [];
+					const counts = new Map<string, number>(); folder.folderIndex.eachRecord(record => counts.set(record.id, (counts.get(record.id) ?? 0) + 1));
+					return files.map(file => { const record = recordFor(file, counts); return { file,
+						record: record && isBaseRecordType(record.type) ? { id: record.id, type: record.type, path: folder.toVirtualPath(file.path) } : undefined }; });
+				},
+				file: id => {
+					const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === id) paths.push(path); });
+					const file = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
+					return file && recordFor(file) ? file : undefined;
+				},
+				fileAtPath: path => this.plugin.app.vault.getFileByPath(path),
+				read: file => this.plugin.app.vault.read(file),
+				resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
+				source: file => {
+					if (this.shares.shareFor(file.path) !== folder) return;
+					const record = folder.folderIndex.recordFor(folder.toVirtualPath(file.path)), doc = record ? folder.trackedEntries.get(record.id) : undefined;
+					if (!record || record.type !== "markdown" || !isDocument(doc) || !doc.isLocallyPersisted) return;
+					const path = file.path, current = () => authorized() && file.path === path && recordFor(file)?.id === record.id &&
+						folder.trackedEntries.get(record.id) === doc && !doc.crdtDoc.isDestroyed && doc.entryPath === folder.toVirtualPath(path);
+					return current() ? { text: doc.crdtText, current } : undefined;
+				},
+			}) : undefined;
 			transferred = true;
-			return { file, session, entryId, baseEntryId, surface, binding, current: authorized, release,
+			return { file, session, entryId, baseEntryId, surface, binding, groups, current: authorized, release,
 				canComment: target => authorized() && session.permission(entryId)?.comment === true && !!selection(target) && session.canAnchorBase(selection(target)!.type) &&
 					(!("file" in target) || session.canAnchorBaseRecord(recordFor(target.file)?.type)),
 				selection,
@@ -304,11 +333,21 @@ export class DiscussionHost extends Component {
 			return await this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
 		} catch { new Notice("This Bases target or its access changed. Refresh the view and select it again; existing drafts are retained."); return false; }
 	}
+	async commentBaseGroupHandle(context: BaseCommentContext, handle: NativeBaseGroupHandle): Promise<boolean> {
+		const action = ++this.baseAction, current = () => action === this.baseAction && context.current() && handle.current();
+		try {
+			if (!current() || !context.groups?.canCapture(handle)) return false;
+			const anchor = await context.groups.capture(handle);
+			if (!current() || !await this.pinBaseContext(context, current)) return false;
+			return await this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
+		} catch (error) { new Notice(error instanceof Error ? error.message : "The group selection could not be saved. Existing drafts are retained."); return false; }
+	}
 	async openBaseThread(context: BaseCommentContext, threadId: string): Promise<void> {
 		const action = ++this.baseAction, current = () => action === this.baseAction && context.current();
 		try {
 			const thread = await context.session.cachedThread(context.entryId, threadId);
-			if (!current() || thread?.anchor?.type !== "base" || !context.native(thread.anchor)) return;
+			if (!current() || thread?.anchor?.type !== "base") return;
+			if (thread.anchor.target.type === "group" ? !await context.groups?.native(thread.anchor) : !context.native(thread.anchor)) return;
 			if (!await this.verifyBaseTarget(context, thread.anchor) || !current()) return;
 			if (await this.pinBaseContext(context, current)) await this.openThread(context.file, context.session, context.entryId, threadId);
 		} catch { new Notice("This discussion is no longer available in the current view."); }
@@ -334,7 +373,7 @@ export class DiscussionHost extends Component {
 	}
 	/** A cached target can be revealed even when the currently displayed view has
 	 * never had its discussions opened. Authority comes from the requested scope. */
-	async activateBaseView(surface: NativeBasesSurface, session: DiscussionSession, scopeId: string, anchor: BaseAnchor, alive: () => boolean): Promise<"unchanged" | "changed" | "unavailable"> {
+	async activateBaseView(surface: NativeBasesSurface, session: DiscussionSession, scopeId: string, anchor: Pick<BaseAnchor, "definition_id" | "view_id" | "generation" | "registry_revision">, alive: () => boolean): Promise<"unchanged" | "changed" | "unavailable"> {
 		const scope = parseDiscussionScope(scopeId), file = surface.file, folder = this.shares.shareFor(file.path);
 		const tracked = scope ? folder?.trackedEntries.get(scope.entryId) : undefined;
 		const current = () => !this.stopped && this.nativeBasesCommentsEnabled && alive() && surface.current() &&
@@ -496,14 +535,14 @@ export class DiscussionHost extends Component {
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
 	targetLabel(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): string | undefined {
-		if (anchor.type === "base_group_pending") return "Group: " + anchor.property.source + "." + anchor.property.name + " (verification pending)";
+		if (anchor.type === "base_group_pending") return "Group: " + anchor.property.name + " · " + baseGroupValueLabel(anchor.capture.value) + " (verification pending)";
 		if (anchor.type !== "base" || parseDiscussionScope(entryId)?.viewId !== anchor.view_id) return;
 		const target = anchor.target;
 		if (target.type === "view") return "Entire saved view";
 		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
 		if (target.type === "formula") return "Formula definition: " + target.property.name;
 		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
-		if (target.type === "group") return "Group: " + target.property.source + "." + target.property.name;
+		if (target.type === "group") return "Group: " + target.property.name + " · " + baseGroupValueLabel(target.value);
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });
@@ -514,10 +553,11 @@ export class DiscussionHost extends Component {
 		const available = () => !this.stopped && session.status !== "closed" && session.permission(entryId)?.read;
 		if (!available()) return;
 		const workspace = this.plugin.app.workspace;
-		if (anchor.type === "base_group_pending") {
-			new Notice("This group selection is saved with your draft. It will be verified when your comment is sent after reconnecting."); return;
-		}
 		try {
+			if (anchor.type === "base_group_pending") {
+				if (await this.baseComments?.reveal(session, entryId, anchor)) return;
+				if (available()) new Notice("This group selection is saved with your draft. Its original location is unavailable in the current view."); return;
+			}
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);
 				if (scope?.viewId !== anchor.view_id) return;

@@ -1,17 +1,27 @@
 /** @jest-environment jsdom */
+import type { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments";
 import type { FileView } from "obsidian";
 import { BaseCommentPane } from "../../src/collaboration/BaseComments";
-import { NativeBasesSurface, type NativeBaseTarget } from "../../src/bases/NativeBasesSurface";
+import { NativeBasesSurface, type NativeBaseTarget, type NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 
-jest.mock("obsidian", () => ({ Component: class {}, FileView: class {}, Notice: class {}, apiVersion: "1.13.7" }));
+const mockMenus: { title: string; click(): void }[][] = [];
+jest.mock("obsidian", () => ({ Menu: class {
+	items: { title: string; click(): void }[] = [];
+	constructor() { mockMenus.push(this.items); }
+	addItem(build: (item: unknown) => void) {
+		const item = { title: "", click: () => {}, setTitle(title: string) { this.title = title; return this; }, onClick(click: () => void) { this.click = click; return this; } };
+		build(item); this.items.push(item); return this;
+	}
+	showAtPosition() {}
+}, Component: class {}, FileView: class {}, Notice: class {}, apiVersion: "1.13.7" }));
 const id = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const rect = (left = 0, top = 0, width = 600, height = 400) => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON() {} });
 beforeEach(() => {
-	jest.useFakeTimers();
+	mockMenus.length = 0; jest.useFakeTimers();
 	jest.spyOn(HTMLElement.prototype, "getClientRects").mockImplementation(() => [rect()] as unknown as DOMRectList);
 	jest.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function(this: HTMLElement) { return this.dataset.cell ? rect(100, 120, 150, 30) : rect(); });
 });
@@ -46,7 +56,7 @@ function fixture() {
 			} as unknown as BaseCommentContext;
 			contexts.push(context); return context;
 		}),
-		verifyBaseTarget: jest.fn(async () => valid), commentBaseHandle: jest.fn(), openBaseThread: jest.fn(), openBaseView: jest.fn() };
+		verifyBaseTarget: jest.fn(async () => valid), commentBaseHandle: jest.fn(), commentBaseGroupHandle: jest.fn(), openBaseThread: jest.fn(), openBaseView: jest.fn() };
 	jest.spyOn(NativeBasesSurface, "inspect").mockImplementation(() => valid ? surface as unknown as NativeBasesSurface : undefined);
 	const pane = new BaseCommentPane(host as unknown as DiscussionHost, { file, contentEl: root } as unknown as FileView);
 	const buttons = () => Array.from(root.querySelectorAll<HTMLButtonElement>(".relay-bases-comment-tools button"));
@@ -176,5 +186,43 @@ test("record and cell discussions sharing one badge lane are grouped and native 
 		expect(f.root.querySelector(".relay-base-comment-marker")?.getAttribute("aria-label")).toContain("2 discussion(s)");
 		expect(f.cell.classList.contains("relay-base-comment-target")).toBe(true);
 		f.pane.close(); expect(f.cell.classList.contains("relay-base-comment-target")).toBe(false);
+	} finally { f.close(); }
+});
+
+test("a mixed group header offers typed choices and never falls back to a record or whole-view comment", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0];
+		const handles: NativeBaseGroupHandle[] = [
+			{ target: { type: "group", property: { source: "note", name: "status" }, value: { type: "number", value: 1 } }, element: f.row, ambiguous: true, current: () => true, members: () => [] },
+			{ target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "1" } }, element: f.row, ambiguous: true, current: () => true, members: () => [] },
+		];
+		context.groups = { hit: () => handles, handles: () => handles, canCapture: () => true } as unknown as NativeBaseGroupComments;
+		f.row.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		const button = f.buttons().find(button => button.textContent === "Choose group value to comment")!;
+		expect(button).toBeDefined(); expect(f.buttons().some(button => button.textContent === "Comment on view")).toBe(false);
+		button.click(); expect(mockMenus.at(-1)?.map(item => item.title)).toEqual(["1 (number)", '"1" (text)']);
+		mockMenus.at(-1)![1].click(); expect(f.host.commentBaseGroupHandle).toHaveBeenCalledWith(context, handles[1]);
+		expect(f.host.commentBaseHandle).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
+test("group markers deduplicate target verification, share a header badge and navigate through the group adapter", async () => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0];
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Done" } },
+			element: f.row, ambiguous: false, current: () => true, members: () => [] };
+		const native = jest.fn().mockResolvedValue(handle.target), reveal = jest.fn((_target, current) => current() ? "revealed" : "unavailable");
+		context.groups = { handles: () => [handle], hit: () => [handle], canCapture: () => true, native, reveal } as unknown as NativeBaseGroupComments;
+		const anchor = { ...f.anchor, target: { type: "group", definition_id: id(10), definition_revision: 1, property: handle.target.property,
+			value: handle.target.value, group_id: id(11), witness_id: id(12) } };
+		f.session.anchorThreads.mockResolvedValue([id(20), id(21)].map(id => ({ id, author_id: null, state: "open", anchor })));
+		f.pane.invalidate(); await settle();
+		expect(native).toHaveBeenCalledTimes(1);
+		const badge = f.root.querySelector<HTMLButtonElement>(".relay-base-comment-marker")!;
+		expect(badge.textContent).toBe("2"); expect(badge.getAttribute("aria-label")).toContain('group · "Done" (text)');
+		expect(await f.pane.reveal(context, handle.target)).toBe("revealed"); expect(reveal).toHaveBeenCalled();
+		expect(f.surface.reveal).not.toHaveBeenCalled();
 	} finally { f.close(); }
 });

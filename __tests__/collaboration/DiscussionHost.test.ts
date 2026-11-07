@@ -18,6 +18,7 @@ import type { BaseDefinitionCatalog } from "../../src/collaboration/BaseDefiniti
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
 jest.mock("../../src/collaboration/ui/BaseTargetPicker", () => ({ BaseTargetPicker: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
+jest.mock("../../src/Document", () => ({ isDocument: (value: { isDocument?: boolean }) => value?.isDocument === true }));
 jest.mock("../../src/AttachmentFile", () => ({ isAttachmentFile: (value: { isAttachment?: boolean }) => value?.isAttachment === true }));
 jest.mock("obsidian", () => ({
 	Component: class { register() {} registerEvent() {} registerDomEvent() {} addChild<T>(child: T): T { return child; } },

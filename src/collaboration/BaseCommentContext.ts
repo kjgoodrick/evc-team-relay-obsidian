@@ -1,3 +1,4 @@
+import type { NativeBaseGroupComments } from "./NativeBaseGroupComments";
 import type { TFile } from "obsidian";
 import type { NativeBasesSurface, NativeBaseBinding, NativeBaseTarget } from "../bases/NativeBasesSurface";
 import type { DiscussionSession, BaseTargetSelection } from "./DiscussionSession";
@@ -5,7 +6,7 @@ import type { BaseAnchor } from "./DiscussionProtocol";
 
 export interface BaseCommentContext {
 	file: TFile; session: DiscussionSession; entryId: string; baseEntryId: string;
-	surface: NativeBasesSurface; binding: NativeBaseBinding;
+	surface: NativeBasesSurface; binding: NativeBaseBinding; groups?: NativeBaseGroupComments;
 	current(): boolean; release(): void;
 	canComment(target: NativeBaseTarget): boolean;
 	selection(target: NativeBaseTarget): BaseTargetSelection | undefined;

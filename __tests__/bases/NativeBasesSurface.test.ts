@@ -270,9 +270,11 @@ describe("typed native groups", () => {
   const handles = f.surface.groupHit(f.child, () => null);
   expect(handles).toHaveLength(2); expect(handles.every(h => h.ambiguous && h.current())).toBe(true);
   expect(handles.map(h => h.target.value)).toEqual([{ type: "number", value: 1 }, { type: "text", value: "1" }]);
+  expect(handles[0].members()).toEqual([f.b]); expect(handles[1].members()).toEqual([f.a]);
   f.group.entries.reverse(); Object.assign(f.group, { key: NullValue.value });
   expect(f.surface.groupHandles(() => null).map(h => h.target)).toEqual(handles.map(h => h.target));
   expect(handles.every(h => h.current())).toBe(true);
+  expect(handles[0].members()).toEqual([f.b]); expect(handles[1].members()).toEqual([f.a]);
   expect(f.surface.hit(f.child)).toBeUndefined();
   expect(f.host.data).toBe(before);
  });

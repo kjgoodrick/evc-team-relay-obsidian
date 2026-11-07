@@ -1,3 +1,8 @@
+import type { TFile } from "obsidian";
+import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments";
+import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
+import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
+import type { NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
 import { DiscussionDelivery } from "../../src/collaboration/DiscussionDelivery";
 import { prepareBaseGroupCommand } from "../../src/collaboration/LocalDiscussionAnchor";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -32,7 +37,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 	const content = new BaseContentTransport(ownerIdentity, ownerCredential, fetch), registry = new BaseRegistryTransport(ownerIdentity, ownerCredential, fetch);
 	const docs: Y.Doc[] = [], providers: YSweetProvider[] = [];
 	const factory = new IDBFactory(), storeIdentity = { ...identity, vaultId: randomUUID() };
-	let store: DiscussionStore | undefined;
+	let store: DiscussionStore | undefined, captureSession: DiscussionSession | undefined;
 	async function peer(token: string, mode: string) {
 		const response = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: {
 			Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ share_id: f.share, doc_id: f.note, mode }) });
@@ -79,14 +84,25 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect(await transport.captureBaseGroup(scope, pending)).toEqual(captured);
 		if (first.target.type !== "group" || captured.target.type !== "group") throw new Error("Expected group anchors");
 		expect(first.target.group_id).not.toBe(captured.target.group_id);
-		const localTarget = { version: 1, type: "base_group_pending", entry_id: f.baseEntry, property: definition.property,
-			capture: { ...pending, operation_id: randomUUID() } };
+		store = await DiscussionStore.open(storeIdentity, factory);
+		captureSession = new DiscussionSession(store, transport); await captureSession.start();
+		captureSession.watch(scope, () => {}, "base"); await captureSession.refresh();
+		captureSession.setForeground(false); await captureSession.outbox.settled();
+		const file = { path: "Team/Note.md" } as TFile;
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: definition.property, value: { type: "text", value: "Done" } },
+			element: {} as HTMLElement, ambiguous: false, current: () => true, members: () => [file] };
+		const native = new NativeBaseGroupComments({ session: captureSession, entryId: scope, baseEntryId: f.baseEntry, current: () => true } as BaseCommentContext, catalog, {
+			record: candidate => candidate === file ? { id: f.note, type: "markdown", path: "Note.md" } : undefined,
+			file: id => id === f.note ? file : undefined, fileAtPath: path => path === file.path ? file : null,
+			source: () => ({ text: owner.text, current: () => true }), read: async () => owner.text.toString(), resolve: () => null,
+		});
+		const localTarget = await native.capture(handle);
+		expect(localTarget.capture.value).toEqual({ type: "text", value: "Done" });
 		const op = operation(captured); op.type = "base.group.create";
 		op.payload = { type: "base.group.create", thread_id: randomUUID(), message_id: randomUUID(),
 			anchor: protocolJson(localTarget), body: protocolJson(bodyFromText("Created offline before group verification")) };
-		store = await DiscussionStore.open(storeIdentity, factory);
 		await store.saveDraft({ id: "group", scopeId: scope, revision: 1, body: "Kept offline", target: protocolJson(localTarget) });
-		await store.enqueue(op, Date.now(), { id: "group", revision: 1 }); store.close();
+		await captureSession.queue(op, { id: "group", revision: 1 }); await captureSession.close(); captureSession = undefined;
 		store = await DiscussionStore.open(storeIdentity, factory);
 		expect(await store.getDraft("group")).toBeUndefined();
 		expect((await store.pending(scope))[0].payload).toEqual(op.payload);
@@ -99,10 +115,15 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 			}
 			return response;
 		});
+		let intentAnchor: BaseAnchor | undefined;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			const leased = (await store.claimNext("offline-" + attempt))!;
 			await expect(new DiscussionDelivery(store, twoPhase).send(leased)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
-			expect((await store.getOperation(op.operationId))?.preparedAnchor).toEqual(attempt ? captured : undefined);
+			if (attempt) {
+				intentAnchor = await transport.captureBaseGroup(scope, localTarget.capture);
+				expect(intentAnchor.target).toMatchObject({ type: "group", group_id: captured.target.group_id, value: captured.target.value });
+			}
+			expect((await store.getOperation(op.operationId))?.preparedAnchor).toEqual(intentAnchor);
 			await store.fail(op.operationId, leased.lease!, "network_unavailable", 0); store.close();
 			store = await DiscussionStore.open(storeIdentity, factory);
 		}
@@ -114,7 +135,7 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect(await transport.send(prepareBaseGroupCommand(op, leased.preparedAnchor))).toEqual(accepted);
 
 		expect((await transport.thread(scope, historical.thread_id)).anchor).toEqual(first);
-		expect((await transport.thread(scope, accepted.thread_id)).anchor).toEqual(captured);
+		expect((await transport.thread(scope, accepted.thread_id)).anchor).toEqual(intentAnchor);
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_id: f.secret }))
 			.rejects.toMatchObject({ action: "reject", code: "target_unavailable", status: 404 });
 		for (const provider of providers) provider.destroy();
@@ -127,5 +148,5 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect((await transport.send(operation(fresh))).message_revision).toBe(1);
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_generation: randomUUID() }))
 			.rejects.toMatchObject({ action: "reject", code: "anchor_generation_mismatch" });
-	} finally { store?.close(); for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy(); }
+	} finally { await captureSession?.close(); store?.close(); for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy(); }
 }, 60000);

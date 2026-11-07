@@ -1,5 +1,7 @@
+import { nativeGroupTargetKey, nativeGroupTargetLabel } from "./NativeBaseGroupComments";
+import type { PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
 import { apiVersion, Component, FileView, Menu, Notice, type Plugin } from "obsidian";
-import { NativeBasesSurface, type NativeBaseHandle, type NativeBaseTarget } from "../bases/NativeBasesSurface";
+import { NativeBasesSurface, type NativeBaseHandle, type NativeBaseTarget, type NativeBaseGroupHandle, type NativeBaseGroupTarget } from "../bases/NativeBasesSurface";
 import type { BaseSyncHost } from "../bases/BaseSyncHost";
 import type { DiscussionHost } from "./DiscussionHost";
 import type { DiscussionSession, AnchoredThread } from "./DiscussionSession";
@@ -8,8 +10,8 @@ import type { BaseAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
-type Marker = { handle: NativeBaseHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
-const label = (target: NativeBaseTarget) => target.type === "view" ? "view" : target.type === "property" ? "property header · " + target.property.source + "." + target.property.name :
+type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
+const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type === "group" ? "group · " + nativeGroupTargetLabel(target) : target.type === "view" ? "view" : target.type === "property" ? "property header · " + target.property.source + "." + target.property.name :
 	target.type === "cell" ? "cell · " + target.property.source + "." + target.property.name : "record";
 
 export class BaseComments extends Component {
@@ -28,7 +30,7 @@ export class BaseComments extends Component {
 		const moved = () => { for (const pane of this.panes.values()) pane.invalidate(true, true); };
 		this.registerEvent(this.plugin.app.vault.on("rename", moved)); this.registerEvent(this.plugin.app.vault.on("delete", moved));
 		this.plugin.addCommand({ id: "toggle-contextual-base-comments", name: "Toggle contextual Bases comments", callback: () => { void this.host.toggleNativeBasesComments(); } });
-		this.plugin.addCommand({ id: "comment-base-selection", name: "Comment on selected Bases cell or record", checkCallback: checking => {
+		this.plugin.addCommand({ id: "comment-base-selection", name: "Comment on selected Bases target", checkCallback: checking => {
 			const leaf = this.plugin.app.workspace.getMostRecentLeaf(), pane = leaf?.view instanceof FileView ? this.panes.get(leaf.view) : undefined;
 			if (!pane) return false; if (!checking) pane.comment(); return true;
 		} });
@@ -44,10 +46,11 @@ export class BaseComments extends Component {
 			pane.invalidate();
 		}
 	}
-	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor): Promise<boolean> {
+	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor): Promise<boolean> {
 		if (this.stopped || !this.host.nativeBasesCommentsEnabled) return false;
+		const placement = anchor.type === "base_group_pending" ? anchor.capture : anchor;
 		const scope = parseDiscussionScope(entryId), file = scope ? this.host.baseFile(session, scope.entryId) : undefined;
-		if (!file || scope?.viewId !== anchor.view_id || !session.permission(entryId)?.read) return false;
+		if (!file || scope?.viewId !== placement.view_id || !session.permission(entryId)?.read) return false;
 		const workspace = this.plugin.app.workspace;
 		let leaf = workspace.getLeavesOfType("bases").find(leaf => leaf.view instanceof FileView && leaf.view.file === file);
 		if (!leaf) { leaf = workspace.getLeaf("tab"); await leaf.openFile(file); }
@@ -57,21 +60,22 @@ export class BaseComments extends Component {
 		const navigating = pane.navigationGuard();
 		const surface = NativeBasesSurface.inspect(leaf.view, apiVersion, this.host.nativeBasesCommentsEnabled);
 		if (!surface) return false;
-		const activated = await this.host.activateBaseView(surface, session, entryId, anchor, navigating);
+		const activated = await this.host.activateBaseView(surface, session, entryId, placement, navigating);
 		if (activated === "unavailable") return false;
 		if (activated === "changed") pane.invalidate(true, true);
 		const context = await pane.ready();
 		if (!navigating()) return true;
 		if (!context || context.session !== session || context.baseEntryId !== scope.entryId || !context.current() ||
-			context.binding.snapshot.definition_id !== anchor.definition_id || context.binding.snapshot.generation !== anchor.generation) return false;
+			context.binding.snapshot.definition_id !== placement.definition_id || context.binding.snapshot.generation !== placement.generation) return false;
 		if (!context || context.entryId !== entryId || context.session !== session || !context.current()) return false;
-		const target = context.native(anchor); if (!target) return false;
+		const target = anchor.type === "base_group_pending" || anchor.target.type === "group" ? await context.groups?.native(anchor) : context.native(anchor);
+		if (!target) return false;
 		try {
-			if (!await this.host.verifyBaseTarget(context, anchor)) throw new Error("Target changed");
+			if (!await this.host.verifyBaseTarget(context, anchor.type === "base_group_pending" ? undefined : anchor)) throw new Error("Target changed");
 			if (!navigating()) return true;
 			const result = await pane.reveal(context, target, navigating);
 			if (result === "revealed") return true;
-			new Notice(result === "hidden" ? "This record is hidden by the saved view. Its filters were left unchanged." : result === "property-hidden" ?
+			new Notice(result === "hidden" ? (target.type === "group" ? "This group is absent from the current view. Its discussion is retained." : "This record is hidden by the saved view. Its filters were left unchanged.") : result === "property-hidden" ?
 				"This property is hidden in the current layout. Its discussion remains attached to that property." : "This target is unavailable or the view changed. Its discussion is retained.");
 			return true;
 		} catch { new Notice("This target or its saved-view association changed. Refresh synchronization before navigating again."); return true; }
@@ -90,6 +94,8 @@ export class BaseCommentPane {
 	private closed = false;
 	private context?: BaseCommentContext;
 	private chosen?: NativeBaseHandle;
+	private chosenGroups: NativeBaseGroupHandle[] = [];
+	private groupTargets = new Map<string, NativeBaseGroupTarget>();
 	private toolsContext?: BaseCommentContext;
 	private toolsChosen?: NativeBaseHandle;
 	private toolsKey?: string;
@@ -116,7 +122,8 @@ export class BaseCommentPane {
 		const select = (event: Event) => {
 			const node = event.target as Node | null;
 			if (!node || !Number.isInteger(node.nodeType) || this.owns(node)) return;
-			this.action++; this.chosen = this.context?.surface.hit(node); this.renderTools();
+			this.action++; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
+			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node); this.renderTools();
 		};
 		listen(root, "pointerdown", select, true); listen(root, "focusin", select, true);
 		listen(root, "wheel", () => { this.action++; }, true);
@@ -150,7 +157,7 @@ export class BaseCommentPane {
 		catch { if (this.context === context) this.invalidate(true, true); }
 		finally { this.checking = false; }
 	}
-	private detach(): void { this.context?.release(); this.context = undefined; this.chosen = undefined; this.threads = []; this.layer.hidden = true; this.toolbar.classList.add("is-unavailable"); this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true; }
+	private detach(): void { this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.groupTargets.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.classList.add("is-unavailable"); this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true; }
 	private updateMarkerTargets(next: Set<HTMLElement>): void {
 		for (const element of this.markerTargets) if (!next.has(element)) element.classList.remove("relay-base-comment-target");
 		this.markerTargets = next;
@@ -176,7 +183,17 @@ export class BaseCommentPane {
 			if (this.dataDirty) {
 				const threads = await context.session.anchorThreads(context.entryId);
 				if (!context.current() || this.closed || this.context !== context || version !== this.version) { this.invalidate(); return; }
-				this.threads = threads; this.dataDirty = false;
+				const groupTargets = new Map<string, NativeBaseGroupTarget>(), groups = new Map<string, Promise<NativeBaseGroupTarget | undefined>>();
+				for (let offset = 0; offset < threads.length; offset += 8) {
+					await Promise.all(threads.slice(offset, offset + 8).map(async thread => {
+						if (thread.anchor?.type !== "base" || thread.anchor.target.type !== "group" || !context.groups) return;
+						const id = thread.anchor.target.group_id;
+						let pending = groups.get(id); if (!pending) { pending = context.groups.native(thread.anchor); groups.set(id, pending); }
+						const target = await pending; if (target) groupTargets.set(thread.id, target);
+					}));
+					if (!context.current() || this.closed || this.context !== context || version !== this.version) { this.invalidate(); return; }
+				}
+				this.threads = threads; this.groupTargets = groupTargets; this.dataDirty = false;
 			}
 			if (!context.current()) { this.detach(); return; }
 			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers();
@@ -200,11 +217,12 @@ export class BaseCommentPane {
 		if (!context?.current()) { this.layer.hidden = true; this.toolbar.classList.add("is-unavailable"); return; }
 		const selected = this.chosen?.current() ? this.chosen : undefined;
 		const view = context.surface.handles().find(handle => handle.target.type === "view");
-		const target = selected ?? view;
+		const selectedGroups = this.chosenGroups.filter(handle => context.groups?.canCapture(handle));
+		const target = selected ?? (this.chosenGroups.length ? undefined : view);
 		const selection = target && context.canComment(target.target) ? context.selection(target.target) : undefined;
 		const item: NativeBaseTarget | undefined = selected?.target.type === "cell" ? { type: "item", file: selected.target.file } : undefined;
 		const commentRecord = !!item && context.canComment(item);
-		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord]);
+		const key = JSON.stringify([selection && baseSelectionKey(selection), commentRecord, selectedGroups.map(handle => nativeGroupTargetKey(handle.target))]);
 		// Preserve live buttons through scroll, polling and unrelated thread updates.
 		// A new handle/context must still replace callbacks, even for the same label.
 		if (this.toolsContext === context && this.toolsChosen === selected && this.toolsKey === key) return;
@@ -212,11 +230,24 @@ export class BaseCommentPane {
 		const focused = this.toolbar.contains(this.toolbar.ownerDocument.activeElement) ? this.toolbar.ownerDocument.activeElement?.getAttribute("aria-label") : undefined;
 		this.toolbar.replaceChildren();
 		this.button(this.toolbar, "Comments · " + context.binding.name, () => { if (context.current()) void this.host.openBaseView(context); });
+		if (selectedGroups.length) this.button(this.toolbar, selectedGroups.length === 1 ? "Comment on group · " + nativeGroupTargetLabel(selectedGroups[0].target) : "Choose group value to comment", () => this.commentGroup(selectedGroups));
 		if (target && selection) this.button(this.toolbar, "Comment on " + label(target.target), () => { void this.host.commentBaseHandle(context, target); });
 		if (selected && item && commentRecord) this.button(this.toolbar, "Comment on record", () => { void this.host.commentBaseHandle(context, selected, item); });
 		if (focused) Array.from(this.toolbar.querySelectorAll("button")).find(button => button.getAttribute("aria-label") === focused)?.focus({ preventScroll: true });
 	}
+	private commentGroup(handles: NativeBaseGroupHandle[]): void {
+		const context = this.context; if (!context?.current() || !context.groups) return;
+		const valid = handles.filter(handle => context.groups!.canCapture(handle));
+		if (valid.length === 1) { void this.host.commentBaseGroupHandle(context, valid[0]); return; }
+		if (!valid.length) { new Notice("This group is unavailable or unsupported. The original selection is retained."); return; }
+		const menu = new Menu();
+		for (const handle of valid) menu.addItem(item => item.setTitle(nativeGroupTargetLabel(handle.target)).onClick(() => {
+			if (context.current() && handle.current()) void this.host.commentBaseGroupHandle(context, handle);
+		}));
+		const rect = this.toolbar.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom });
+	}
 	comment(): void {
+		if (this.chosenGroups.length) { this.commentGroup(this.chosenGroups); return; }
 		const context = this.context, selected = this.chosen;
 		if (!context?.current() || !selected?.current() || !context.canComment(selected.target)) { new Notice("Select a supported shared Bases cell or record first."); return; }
 		void this.host.commentBaseHandle(context, selected);
@@ -225,11 +256,23 @@ export class BaseCommentPane {
 		const active = this.marks.ownerDocument.activeElement as HTMLElement | null;
 		const focused = active && this.marks.contains(active) ? active.dataset.baseMarker : undefined;
 		this.marks.replaceChildren(); const context = this.context; if (!context?.current()) { this.updateMarkerTargets(new Set()); return; }
-		const handles = context.surface.handles(), byKey = new Map<string, NativeBaseHandle>();
+		const handles = context.surface.handles(), byKey = new Map<string, NativeBaseHandle | NativeBaseGroupHandle>();
 		for (const handle of handles) { const selection = context.selection(handle.target); if (selection) byKey.set(baseSelectionKey(selection), handle); }
+		const ambiguousGroups = new Set<string>();
+		for (const handle of context.groups?.handles() ?? []) {
+			const key = nativeGroupTargetKey(handle.target);
+			if (byKey.has(key)) { byKey.delete(key); ambiguousGroups.add(key); }
+			if (!ambiguousGroups.has(key)) byKey.set(key, handle);
+		}
 		const markers = new Map<string, Marker>();
 		for (const thread of this.threads) {
 			if (thread.anchor?.type !== "base") continue;
+			if (thread.anchor.target.type === "group") {
+				const target = this.groupTargets.get(thread.id); if (!target) continue;
+				const key = nativeGroupTargetKey(target), handle = byKey.get(key); if (!handle) continue;
+				const marker = markers.get(key) ?? { handle, threads: [], hiddenProperty: false };
+				marker.threads.push(thread); markers.set(key, marker); continue;
+			}
 			const target = context.native(thread.anchor), selection = target ? context.selection(target) : undefined; if (!target || !selection) continue;
 			let key = baseSelectionKey(selection), handle = byKey.get(key), hiddenProperty = false;
 			if (!handle && (selection.type === "cell" || selection.type === "formula_cell")) { key = baseSelectionKey({ type: "item", recordId: selection.recordId }); handle = byKey.get(key); hiddenProperty = true; }
@@ -275,8 +318,10 @@ export class BaseCommentPane {
 		const action = this.action;
 		return () => !this.closed && this.visible() && this.action === action;
 	}
-	async reveal(context: BaseCommentContext, target: NativeBaseTarget, navigating = this.navigationGuard()) {
-		return context.surface.reveal(target, () => navigating() && this.context === context && context.current());
+	async reveal(context: BaseCommentContext, target: NativeBaseTarget | NativeBaseGroupTarget, navigating = this.navigationGuard()) {
+		const current = () => navigating() && this.context === context && context.current();
+		if (target.type === "group") return context.groups?.reveal(target, current) ?? "unavailable";
+		return context.surface.reveal(target, current);
 	}
 	close(): void {
 		if (this.closed) return; this.closed = true; this.action++;

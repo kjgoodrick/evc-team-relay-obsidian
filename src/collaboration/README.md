@@ -101,9 +101,26 @@ delete-only dependencies, source denial, relay restart and historical targets.
 Focused tests cover lease races, stop, storage failures, proof mismatch, dependent
 replies, picture recovery and offline source-read capture. The plugin regression
 suite passes 2,099 tests; preview build/main TypeScript and existing test-type
-gates pass. Native group selection, source conversion, markers/navigation and
-integrated native acceptance remain unfinished. This does not yet make native
-group commenting available to users.
+gates pass.
+
+Native group controls are now connected to that flow on the version-gated table,
+cards and list adapters. A mixed heading offers distinct typed choices. Capture
+uses an existing synchronized Markdown source, checks the visible selection and
+source bytes, freezes its Yjs snapshot, and resolves file/link values to managed
+IDs and generations. Unresolved links retain source path evidence. Markers and
+navigation match the typed group across membership/order changes, including saved
+pending drafts. Ambiguous duplicate headers and changed definitions retain the
+thread without guessing a target. Selection uses one inventory-count scan and
+stops looking for a source after finding an available candidate.
+
+Automated component tests and the actual Python/Rust/Yjs capture/session/delivery
+fixture verify the integration. This increment still needs a native Obsidian run:
+the Mac was locked when that check was attempted. The temporary native services
+were stopped without installing into a vault. A source whose CRDT is not loaded
+currently requires opening a note in the group; cold-cache capture remains to
+implement. Formula/file-property groups, group summaries, source-resolution
+compatibility, mobile and native acceptance also remain. Do not treat this as
+release-ready group commenting.
 
 Actual HTTP session tests cover separate views, offline restart/delivery, cache
 revocation/regrant and retained drafts. Desktop Obsidian tests capture/send all
