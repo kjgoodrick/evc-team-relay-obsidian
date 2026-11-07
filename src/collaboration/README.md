@@ -130,9 +130,22 @@ invalidates the retained source instead of letting stale cache replace its edits
 The actual Python/Rust fixture captures from a closed read-only peer cache and
 verifies outbox delivery through both accepted-response losses and reopen.
 Native Obsidian validation of this path remains pending.
-Formula/file-property groups, group summaries, source-resolution
+Formula groups, remaining file properties, group summaries, source-resolution
 compatibility, mobile and native acceptance also remain. Do not treat this as
 release-ready group commenting.
+
+Inventory-backed file groups now cover `name`, `basename`, `fullname`, `ext`,
+`path`, `folder` and `file` across supported record types. They negotiate an
+explicit property capability and capture managed identity, generation and a
+share-relative path digest without loading a CRDT or reading file contents.
+Path/folder values translate between each vault's mount and shared wire paths;
+empty shared folder means the share root. Typed source evidence keeps file and
+note intents disjoint, and cache version 15 fences older pending-intent workers
+without changing existing tables. Downgrade retains pending work and disables
+new file captures. The actual service fixture sends an image-file group and
+recovers both accepted-response losses across outbox reopen. The full plugin
+suite passes 2,141 tests. Native group/mobile acceptance and the other file
+properties (timestamps, size and dependency-bearing metadata) remain unfinished.
 
 Actual HTTP session tests cover separate views, offline restart/delivery, cache
 revocation/regrant and retained drafts. Desktop Obsidian tests capture/send all

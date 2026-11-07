@@ -76,7 +76,7 @@ async function nativeBaseFixture() {
 	Object.assign(s.plugin.app.vault, { getFileByPath: (path: string) => path === s.file.path ? s.file : path === recordFile.path ? recordFile : null, read: jest.fn().mockResolvedValue("saved bytes") });
 	const stops: jest.Mock[] = [], scope = baseDiscussionScope(id(3), id(4)); let valid = true, read = true, comment = true;
 	const session = Object.assign(mockSessions[0], { identity: { shareId: id(2) }, online: true,
-		knownDocumentGeneration: () => id(7), permission: () => ({ read, comment }), canAnchorBase: () => true, canAnchorBaseRecord: (kind: string) => kind === "markdown",
+		knownDocumentGeneration: () => id(7), permission: () => ({ read, comment }), canAnchorBase: () => true, canAnchorBaseGroup: () => true, canAnchorBaseRecord: (kind: string) => kind === "markdown",
 		watch: jest.fn(() => { const stop = jest.fn(); stops.push(stop); return stop; }), refresh: jest.fn().mockResolvedValue(undefined), scopeReady: jest.fn().mockResolvedValue(undefined),
 		readBaseContext: jest.fn().mockResolvedValue({ definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1, record_generation: id(9) }),
 		readBaseDefinitions: jest.fn<Promise<BaseDefinitionCatalog>, []>().mockResolvedValue({ protocol_version: 1, entry_id: id(3), definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1, computed_values: false,

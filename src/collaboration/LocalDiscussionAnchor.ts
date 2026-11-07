@@ -15,8 +15,10 @@ function requireValue(condition: unknown): asserts condition { if (!condition) t
 export function parseLocalDiscussionAnchor(value: unknown): LocalDiscussionAnchor {
 	if (!isRecord(value) || value.type !== "base_group_pending") return parseAnchor(value);
 	requireValue(value.version === 1 && Object.keys(value).length === 5 && isId(value.entry_id) && isBaseDefinitionProperty(value.property));
+	const capture = copyBaseGroupCapture(value.capture);
+	requireValue(value.property.source === (capture.source_kind === "file" ? "file" : "note"));
 	return { version: 1, type: "base_group_pending", entry_id: value.entry_id.toLowerCase(),
-		property: { source: value.property.source, name: value.property.name }, capture: copyBaseGroupCapture(value.capture) };
+		property: { source: value.property.source, name: value.property.name }, capture };
 }
 
 /** Validate scope and immutable evidence before persisting or resuming a send. */

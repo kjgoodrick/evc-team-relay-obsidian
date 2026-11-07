@@ -278,6 +278,11 @@ export class DiscussionHost extends Component {
 					return file && recordFor(file) ? file : undefined;
 				},
 				fileAtPath: path => this.plugin.app.vault.getFileByPath(path),
+				localPath: (path, directory) => {
+					if (!authorized() || path.length > 512 || path !== path.normalize("NFC") || /[\\:]/.test(path) || Array.from(path).some(char => char.charCodeAt(0) < 32) ||
+						(path === "" ? !directory : path.split("/").some(part => !part || part.startsWith(".")))) return;
+					return path ? folder.absolutePath(path) : folder.path || "/";
+				},
 				read: file => this.plugin.app.vault.read(file),
 				resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
 				retained: (files, selected) => {

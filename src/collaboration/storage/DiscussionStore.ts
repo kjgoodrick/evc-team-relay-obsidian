@@ -86,8 +86,8 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 14 fences workers that do not understand pending group captures.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 14);
+		// Version 15 fences workers that cannot retain inventory-backed group intents.
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 15);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {

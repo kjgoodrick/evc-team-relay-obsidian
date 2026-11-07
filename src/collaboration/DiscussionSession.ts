@@ -1,6 +1,6 @@
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
-import { copyBaseGroupCapture, type BaseGroupCapture } from "./BaseGroupProtocol";
+import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
 import { parseBaseGroupValue } from "./BaseGroupValue";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionDelivery } from "./DiscussionDelivery";
@@ -53,6 +53,7 @@ export class DiscussionSession {
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
 	private baseKinds: BaseTargetKind[] = [];
+	private baseFileGroupProperties: string[] = [];
 	private baseContextFlights = new Map<string, Promise<BaseTargetContext>>();
 	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
 	private baseRecordTypes: BaseRecordType[] = [];
@@ -89,6 +90,9 @@ export class DiscussionSession {
 	get canRepairPictures(): boolean { return this.online && this.canAttachPictures && this.recoveryEnabled; }
 	get canRecoverOnlineDraft(): boolean { return this.online && this.recoveryEnabled; }
 	canAnchorBase(kind: BaseTargetKind): boolean { return this.canQueue && this.baseKinds.includes(kind); }
+	canAnchorBaseGroup(property: { source: string; name: string }): boolean {
+		return this.canAnchorBase("group") && (property.source === "note" || property.source === "file" && this.baseFileGroupProperties.includes(property.name.toLowerCase()));
+	}
 	baseRegistryRevision(scopeId: string): number { return this.entries.get(scopeId)?.baseRegistryRevision ?? 0; }
 	private observeBaseRevision(scopeId: string, generation: string, revision: number): void {
 		const entry = this.entries.get(scopeId);
@@ -142,6 +146,8 @@ export class DiscussionSession {
 			this.baseKinds = Array.isArray(baseKinds) ? BASE_TARGET_KINDS.filter(kind => baseKinds.includes(kind)) : [];
 			const recordTypes = await this.store.preference("baseRecordTypes");
 			this.baseRecordTypes = Array.isArray(recordTypes) ? BASE_RECORD_TYPES.filter(kind => recordTypes.includes(kind)) : ["markdown"];
+			const fileGroupProperties = await this.store.preference("baseFileGroupProperties");
+			this.baseFileGroupProperties = Array.isArray(fileGroupProperties) ? BASE_FILE_GROUP_PROPERTIES.filter(name => fileGroupProperties.includes(name)) : [];
 			if (this.closed) return;
 			const capability = await this.transport.capabilities();
 			if (this.closed) return;
@@ -154,6 +160,7 @@ export class DiscussionSession {
 			this.recoveryEnabled = capability.recovery === true;
 			this.baseKinds = capability.baseTargets ?? [];
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
+			this.baseFileGroupProperties = capability.baseFileGroupProperties ?? [];
 			await this.store.setPreference("enabled", this.enabled);
 			await this.store.setPreference("textAnchorsEnabled", this.textEnabled);
 			await this.store.setPreference("blockAnchorsEnabled", this.blocksEnabled);
@@ -162,6 +169,7 @@ export class DiscussionSession {
 			await this.store.setPreference("picturesEnabled", this.picturesEnabled);
 			await this.store.setPreference("baseTargetKinds", protocolJson(this.baseKinds));
 			await this.store.setPreference("baseRecordTypes", protocolJson(this.baseRecordTypes));
+			await this.store.setPreference("baseFileGroupProperties", protocolJson(this.baseFileGroupProperties));
 			if (this.closed) return;
 			this.statusValue = this.enabled ? "ready" : "unavailable";
 		} catch (error) {
@@ -365,7 +373,9 @@ export class DiscussionSession {
 				!context || context.definition_id !== capture.definition_id || context.generation !== capture.generation ||
 				context.record_generation !== capture.record_generation || catalog.definition_id !== capture.definition_id ||
 				catalog.generation !== capture.generation || catalog.registry_revision < capture.registry_revision ||
-				!definition || definition.revision !== capture.group_definition_revision || definition.property.source !== anchor.property.source ||
+				!definition || !this.canAnchorBaseGroup(definition.property) ||
+				definition.property.source !== (capture.source_kind === "file" ? "file" : "note") ||
+				definition.revision !== capture.group_definition_revision || definition.property.source !== anchor.property.source ||
 				definition.property.name !== anchor.property.name) throw new Error("Review this group's saved selection before sending. Your draft is retained.");
 		} else queuedEnvelope(this.identity.shareId, command);
 		if (!this.canAttachPictures) {
@@ -455,14 +465,14 @@ export class DiscussionSession {
 	}
 	/** Save exact local evidence now; the ordinary outbox verifies it after reconnect.
 	 * Group witnesses require source read access, not source comment permission. */
-	async captureBaseGroupSelection(scopeId: string, input: Pick<BaseGroupCapture, "group_definition_id" | "group_definition_revision" |
-		"record_id" | "record_generation" | "dependency" | "time_zone" | "value">): Promise<PendingBaseGroupAnchor> {
+	async captureBaseGroupSelection(scopeId: string, input: BaseGroupSelection): Promise<PendingBaseGroupAnchor> {
 		const selected = { ...input, value: parseBaseGroupValue(input.value) };
 		if (!this.canAnchorBase("group") || !this.permission(scopeId)?.comment) throw new Error("Group comments are unavailable in this saved view.");
 		const context = await this.readBaseContext(scopeId, selected.record_id), catalog = await this.readBaseDefinitions(scopeId);
 		const definition = catalog.targets.find(item => item.kind === "group" && item.id === selected.group_definition_id);
 		if (this.closed || !this.canAnchorBase("group") || !this.permission(scopeId)?.comment ||
-			!definition || definition.revision !== selected.group_definition_revision || context.record_generation !== selected.record_generation ||
+			!definition || !this.canAnchorBaseGroup(definition.property) || definition.property.source !== (selected.source_kind === "file" ? "file" : "note") ||
+			definition.revision !== selected.group_definition_revision || context.record_generation !== selected.record_generation ||
 			context.definition_id !== catalog.definition_id || context.generation !== catalog.generation || context.registry_revision > catalog.registry_revision ||
 			this.documentGeneration(scopeId) !== catalog.generation) throw new Error("The group or its source changed. Select it again; existing drafts are retained.");
 		const capture = copyBaseGroupCapture({ ...selected, operation_id: uuid(), definition_id: catalog.definition_id, view_id: catalog.view_id,

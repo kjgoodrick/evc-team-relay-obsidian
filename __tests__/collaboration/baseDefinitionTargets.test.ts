@@ -191,6 +191,39 @@ function groupRemote() {
 const groupSelection = () => ({ group_definition_id: id(10), group_definition_revision: 2, record_id: id(20), record_generation: id(21),
 	dependency: "AA==", time_zone: "UTC", value: { type: "text" as const, value: "Done" } });
 
+test("inventory group capabilities and queued selections survive offline reopen, then downgrade preserves pending work", async () => {
+	function fileRemote() {
+		const transport = groupRemote();
+		transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "group"], baseRecordTypes: ["markdown", "image"], baseFileGroupProperties: ["ext", "path"] });
+		transport.baseDefinitions.mockResolvedValue({ ...catalog(), targets: [{ id: id(10), kind: "group", revision: 2,
+			fingerprint: "a".repeat(64), property: { source: "file", name: "ext" } }] });
+		return transport;
+	}
+	const factory = new IDBFactory(); let s = await open(factory, fileRemote());
+	const { dependency: _dependency, time_zone: _zone, ...common } = groupSelection();
+	const input = { ...common, source_kind: "file" as const, source_path_sha256: "a".repeat(64), value: { type: "text" as const, value: "png" } };
+	try {
+		expect(s.session.canAnchorBaseGroup({ source: "file", name: "EXT" })).toBe(true);
+		expect(s.session.canAnchorBaseGroup({ source: "file", name: "size" })).toBe(false);
+		await s.session.captureBaseGroupSelection(scope, input);
+		await expect(s.session.captureBaseGroupSelection(scope, groupSelection())).rejects.toThrow("source changed");
+		await s.session.close(); const offline = fileRemote();
+		for (const method of [offline.capabilities, offline.permissions, offline.baseTargetContext, offline.baseDefinitions, offline.changes]) method.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		s = await open(factory, offline);
+		expect(s.session.canAnchorBaseGroup({ source: "file", name: "ext" })).toBe(true);
+		const captured = await s.session.captureBaseGroupSelection(scope, input);
+		await s.store.saveDraft({ id: "file-group", scopeId: scope, revision: 0, body: "Offline file discussion", target: protocolJson(captured) });
+		await s.session.queue({ operationId: id(30), scopeId: scope, type: "base.group.create", dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Offline file discussion"), anchor: captured }) }, { id: "file-group", revision: 0 });
+		expect(await s.store.pending(scope)).toHaveLength(1); await s.session.close();
+		const downgraded = fileRemote(); downgraded.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "group"], baseRecordTypes: ["markdown"] });
+		s = await open(factory, downgraded);
+		expect(s.session.canAnchorBaseGroup({ source: "file", name: "ext" })).toBe(false);
+		await expect(s.session.captureBaseGroupSelection(scope, input)).rejects.toThrow("source changed");
+		expect((await s.store.pending(scope))[0].payload).toMatchObject({ anchor: captured });
+	} finally { await s.session.close(); }
+});
+
 test("new offline group capture uses cached source read lineage and never requires source comment permission", async () => {
 	const factory = new IDBFactory(); let s = await open(factory, groupRemote());
 	try {

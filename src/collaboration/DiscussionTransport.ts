@@ -5,7 +5,7 @@ import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictur
 import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type BaseRecordType, type DiscussionAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
-import { copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
+import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 
 export type FailureAction = "retry" | "authenticate" | "reject" | "pause";
 
@@ -171,7 +171,7 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[] }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
@@ -182,6 +182,13 @@ export class DiscussionTransport implements DiscussionSender {
 		let baseRecordTypes: BaseRecordType[] = [];
 		const definitionCatalog = value.features.discussion_base_definition_catalog === true;
 		const groupCapture = value.features.discussion_base_groups === true;
+		let baseFileGroupProperties: string[] | undefined;
+		const fileGroups = value.discussion_base_file_group_properties;
+		if (fileGroups !== undefined) {
+			if (!Array.isArray(fileGroups) || fileGroups.length > 64 || fileGroups.some(name => typeof name !== "string" || !name || name.length > 128) ||
+				new Set(fileGroups).size !== fileGroups.length) throw new DiscussionFailure("pause", "invalid_read_response");
+			baseFileGroupProperties = groupCapture && definitionCatalog && value.features.discussion_bases === true ? BASE_FILE_GROUP_PROPERTIES.filter(name => fileGroups.includes(name)) : [];
+		}
 		if (value.features.discussion_bases === true) {
 			if (!Array.isArray(value.discussion_base_targets) || value.discussion_base_targets.length > 32 ||
 				value.discussion_base_targets.some(kind => typeof kind !== "string" || kind.length > 64) ||
@@ -200,7 +207,8 @@ export class DiscussionTransport implements DiscussionSender {
 		}
 		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
-			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes };
+			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
+			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}) };
 	}
 
 	async picture(entryId: string, pictureId: string): Promise<PictureMetadata> {

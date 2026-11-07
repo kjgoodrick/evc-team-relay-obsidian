@@ -11,7 +11,7 @@ import type { BaseDefinitionCatalog } from "../../src/collaboration/BaseDefiniti
 import type { BaseGroupCapture } from "../../src/collaboration/BaseGroupProtocol";
 import type { PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
-import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import type { BaseAnchor, BaseRecordType } from "../../src/collaboration/DiscussionProtocol";
 import { retainedBaseGroupSources } from "../../src/collaboration/RetainedBaseGroupSources";
 import { LocalDocumentStore } from "../../src/storage/local-document-store";
 
@@ -25,8 +25,8 @@ function fixture(value: NativeBaseGroupValue = { type: "text", value: "Done" }) 
 		computed_values: false, targets: [{ kind: "group", id: id(5), revision: 1, property: { source: "note", name: "status" }, fingerprint: "a".repeat(64) }] };
 	const target: NativeBaseGroupTarget = { type: "group", property: { source: "note", name: "status" }, value };
 	const handle: NativeBaseGroupHandle = { target, element: {} as HTMLElement, ambiguous: false, current: () => current, members: () => members };
-	const records = new Map([[a, { id: id(6), type: "markdown" as const, path: "A.md" }], [b, { id: id(7), type: "markdown" as const, path: "B.md" }]]);
-	const session = { canAnchorBase: () => true, permission: () => ({ read: true, comment: true }),
+	const records = new Map<TFile, { id: string; type: BaseRecordType; path: string }>([[a, { id: id(6), type: "markdown", path: "A.md" }], [b, { id: id(7), type: "markdown", path: "B.md" }]]);
+	const session = { canAnchorBase: () => true, canAnchorBaseGroup: () => true, permission: () => ({ read: true, comment: true }),
 		readBaseContext: jest.fn(async (_scope: string, record: string) => ({ ...catalog, record_id: record, record_generation: id(8) })),
 		captureBaseGroupSelection: jest.fn(async (_scope: string, input: BaseGroupCapture): Promise<PendingBaseGroupAnchor> => ({ version: 1,
 			type: "base_group_pending", entry_id: id(1), property: target.property, capture: { ...input, operation_id: id(9),
@@ -43,6 +43,44 @@ function fixture(value: NativeBaseGroupValue = { type: "text", value: "Done" }) 
 const fixtures: ReturnType<typeof fixture>[] = [];
 function setup(value?: NativeBaseGroupValue) { const f = fixture(value); fixtures.push(f); return f; }
 afterEach(() => { fixtures.splice(0).forEach(f => f.doc.destroy()); });
+
+test.each(["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as BaseRecordType[])("file groups capture %s records without opening notes or reading content", async type => {
+	const f = setup({ type: "text", value: "png" });
+	f.target.property = { source: "file", name: "ext" }; f.catalog.targets[0].property = f.target.property;
+	f.records.set(f.a, { id: id(6), type, path: "A.png" }); f.a.path = "Team/A.png";
+	const loaded = jest.spyOn(f.sources, "source"); f.sources.retained = jest.fn();
+	const captured = await f.groups.capture(f.handle);
+	expect(captured.capture).toMatchObject({ source_kind: "file", source_path_sha256: hash("A.png"), value: { type: "text", value: "png" } });
+	expect(captured.capture).not.toHaveProperty("dependency"); expect(captured.capture).not.toHaveProperty("time_zone");
+	expect(loaded).not.toHaveBeenCalled(); expect(f.sources.retained).not.toHaveBeenCalled(); expect(f.sources.read).not.toHaveBeenCalled();
+});
+
+test.each(["path", "folder"])("file.%s values use shared paths and navigate in a different local mount", async property => {
+	const f = setup(); f.target.property = { source: "file", name: property }; f.catalog.targets[0].property = f.target.property;
+	f.a.path = "Team/Sub/A.md"; f.records.set(f.a, { id: id(6), type: "markdown", path: "Sub/A.md" });
+	f.target.value = { type: "text", value: property === "path" ? f.a.path : "Team/Sub" };
+	const captured = await f.groups.capture(f.handle);
+	expect(captured.capture.value).toEqual({ type: "text", value: property === "path" ? "Sub/A.md" : "Sub" });
+	f.sources.localPath = path => "Another mount/" + path;
+	expect((await f.groups.native(captured))?.value).toEqual({ type: "text", value: "Another mount/" + (property === "path" ? "Sub/A.md" : "Sub") });
+});
+
+test("share-root file folders retain empty shared paths and native vault-root presentation", async () => {
+	const f = setup({ type: "text", value: "/" }); f.members([f.a]); f.a.path = "A.md";
+	f.target.property = { source: "file", name: "folder" }; f.catalog.targets[0].property = f.target.property;
+	const captured = await f.groups.capture(f.handle); expect(captured.capture.value).toEqual({ type: "text", value: "" });
+	f.sources.localPath = (path, folder) => folder && !path ? "/" : path;
+	expect((await f.groups.native(captured))?.value).toEqual({ type: "text", value: "/" });
+});
+
+test("file group source selection handles denied candidates, stale paths and unsupported capabilities", async () => {
+	const f = setup({ type: "text", value: "md" }); f.target.property = { source: "file", name: "ext" }; f.catalog.targets[0].property = f.target.property;
+	f.session.readBaseContext.mockImplementation(async (_scope, record) => { if (record === id(6)) throw new Error("Denied"); return { ...f.catalog, record_id: record, record_generation: id(8) }; });
+	expect((await f.groups.capture(f.handle)).capture.record_id).toBe(id(7));
+	f.session.readBaseContext.mockImplementation(async (_scope, record) => { f.b.path = "Team/Moved.md"; return { ...f.catalog, record_id: record, record_generation: id(8) }; });
+	f.members([f.b]); await expect(f.groups.capture(f.handle)).rejects.toThrow("file group");
+	f.session.canAnchorBaseGroup = () => false; expect(f.groups.canCapture(f.handle)).toBe(false);
+});
 
 async function coldFixture() {
 	const f = setup(), names = new Map<TFile, string>();
@@ -69,6 +107,7 @@ test("captures from a closed actual document cache, keeps exact history and disp
 	const f = await coldFixture(); await f.persist(f.a);
 	const captured = await f.groups.capture(f.handle);
 	expect(captured.capture.record_id).toBe(id(6));
+	if (captured.capture.source_kind === "file") throw new Error("Expected note history");
 	expect(Y.equalSnapshots(Y.decodeSnapshot(Buffer.from(captured.capture.dependency, "base64")), Y.snapshot(f.doc))).toBe(true);
 	expect(f.loaded).toHaveLength(1); expect(f.loaded[0].isDestroyed).toBe(true);
 	expect(f.session.readBaseContext).toHaveBeenCalledWith(f.context.entryId, id(6));
@@ -119,6 +158,7 @@ test("native capture uses a stable existing source and an exact Yjs snapshot wit
 	const f = setup(), source = f.text.toString(), lookup = jest.spyOn(f.sources, "source");
 	const captured = await f.groups.capture(f.handle); expect(lookup).toHaveBeenCalledTimes(1);
 	expect(captured.capture.record_id).toBe(id(6)); expect(captured.capture.value).toEqual({ type: "text", value: "Done" });
+	if (captured.capture.source_kind === "file") throw new Error("Expected note history");
 	expect(Y.equalSnapshots(Y.decodeSnapshot(Buffer.from(captured.capture.dependency, "base64")), Y.snapshot(f.doc))).toBe(true);
 	f.members([f.a, f.b]); expect((await f.groups.capture(f.handle)).capture.record_id).toBe(id(6));
 	expect(f.text.toString()).toBe(source);

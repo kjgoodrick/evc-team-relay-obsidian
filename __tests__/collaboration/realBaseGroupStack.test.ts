@@ -160,6 +160,53 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect((await transport.send(operation(fresh))).message_revision).toBe(1);
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_generation: randomUUID() }))
 			.rejects.toMatchObject({ action: "reject", code: "anchor_generation_mismatch" });
+
+		// An attachment's file-property group has no note CRDT at all. Capture
+		// only authoritative inventory evidence, then exercise the same durable
+		// two-phase delivery with response loss and a reopened cache.
+		const beforeFile = await content.read(f.baseEntry);
+		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: beforeFile.state, bytes: new TextEncoder().encode(JSON.stringify({
+			views: [{ name: "Groups", type: "table", groupBy: { property: "file.ext", direction: "ASC" } }],
+		})).buffer as ArrayBuffer });
+		const fileState = await content.read(f.baseEntry), fileSnapshot = await registry.inspect(f.baseEntry, fileState.state.record.hash!, fileState.state.generation!);
+		const fileView = fileSnapshot.views[0].id!, fileScope = baseDiscussionScope(f.baseEntry, fileView);
+		captureSession = new DiscussionSession(store, transport); await captureSession.start(); captureSession.watch(fileScope, () => {}, "base");
+		await captureSession.refresh(); captureSession.setForeground(false); await captureSession.outbox.settled();
+		expect(captureSession.canAnchorBaseGroup({ source: "file", name: "ext" })).toBe(true);
+		const fileCatalog = await captureSession.readBaseDefinitions(fileScope), imageFile = { path: "Team/chart.png" } as TFile;
+		const fileHandle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "file", name: "ext" }, value: { type: "text", value: "png" } },
+			element: {} as HTMLElement, ambiguous: false, current: () => true, members: () => [imageFile] };
+		const fileNative = new NativeBaseGroupComments({ session: captureSession, entryId: fileScope, baseEntryId: f.baseEntry, current: () => true } as BaseCommentContext, fileCatalog, {
+			record: candidate => candidate === imageFile ? { id: f.image, type: "image", path: "chart.png" } : undefined,
+			file: id => id === f.image ? imageFile : undefined, fileAtPath: path => path === imageFile.path ? imageFile : null,
+			source: () => { throw new Error("File groups must not load a note"); }, read: async () => { throw new Error("File groups must not read content"); }, resolve: () => null,
+		});
+		const fileTarget = await fileNative.capture(fileHandle);
+		expect(fileTarget.capture).toMatchObject({ source_kind: "file", record_id: f.image, value: { type: "text", value: "png" } });
+		const fileOp: QueuedCommand = { operationId: randomUUID(), scopeId: fileScope, type: "base.group.create", dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: fileTarget, body: bodyFromText("An attachment group") }) };
+		await captureSession.queue(fileOp); await captureSession.close(); captureSession = undefined;
+		store = await DiscussionStore.open(storeIdentity, factory);
+		let fileCaptureLoss = true, fileSendLoss = true;
+		const fileTransport = new DiscussionTransport(identity, credential, async (url, options) => {
+			const response = await fetch(url, options);
+			if (response.ok && (fileCaptureLoss && String(url).endsWith("/group-targets") || fileSendLoss && String(url).endsWith("/commands"))) {
+				if (String(url).endsWith("/group-targets")) fileCaptureLoss = false; else fileSendLoss = false;
+				await response.text(); throw new Error("Lost accepted file-group response");
+			}
+			return response;
+		});
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const claimed = (await store.claimNext("file-" + attempt))!;
+			await expect(new DiscussionDelivery(store, fileTransport).send(claimed)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
+			await store.fail(fileOp.operationId, claimed.lease!, "network_unavailable", 0); store.close(); store = await DiscussionStore.open(storeIdentity, factory);
+		}
+		const fileClaim = (await store.claimNext("file-reopened"))!, fileAccepted = await new DiscussionDelivery(store, fileTransport).send(fileClaim);
+		if (!("thread_id" in fileAccepted)) throw new Error("Expected file group acceptance");
+		await store.accept(fileOp.operationId, protocolJson(fileAccepted));
+		expect((await transport.thread(fileScope, fileAccepted.thread_id)).anchor).toMatchObject({ target: {
+			type: "group", property: { source: "file", name: "ext" }, value: { type: "text", value: "png" } } });
+		expect(await transport.send(prepareBaseGroupCommand(fileOp, fileClaim.preparedAnchor))).toEqual(fileAccepted);
 	} finally {
 		await captureSession?.close(); store?.close(); for (const provider of providers) provider.destroy(); for (const doc of docs) doc.destroy();
 		Object.assign(globalThis, { indexedDB: previousIndexedDB });

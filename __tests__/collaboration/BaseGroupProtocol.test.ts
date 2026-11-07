@@ -16,6 +16,30 @@ const anchor = (): BaseAnchor => ({ version: 1, type: "base", definition_id: id(
 const result = () => ({ protocol_version: 1, entry_id: id(12), anchor: anchor() });
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
+test("inventory capture evidence is disjoint from note snapshots and retains the exact path digest", () => {
+	const { dependency: _dependency, time_zone: _zone, ...common } = request();
+	const value = { ...common, source_kind: "file", source_path_sha256: "a".repeat(64) };
+	expect(copyBaseGroupCapture(value)).toEqual(value);
+	for (const patch of [{ source_kind: null }, { source_kind: "note" }, { source_path_sha256: "a".repeat(63) },
+		{ dependency: "AA==" }, { dependency: null }, { time_zone: "UTC" }, { time_zone: null }, { extra: true }]) {
+		expect(() => copyBaseGroupCapture({ ...value, ...patch })).toThrow();
+	}
+});
+
+test("file group capabilities require explicit server support and ignore unknown future properties", async () => {
+	const base = { protocol_version: 1, features: { discussion_commands: true, discussion_bases: true,
+		discussion_base_definition_catalog: true, discussion_base_groups: true }, discussion_base_targets: ["group"],
+		discussion_base_file_group_properties: ["ext", "folder", "future"] };
+	const fetcher = jest.fn().mockResolvedValue(reply(base)), transport = new DiscussionTransport(identity, credential, fetcher);
+	expect((await transport.capabilities()).baseFileGroupProperties).toEqual(["ext", "folder"]);
+	fetcher.mockResolvedValue(reply({ ...base, features: { ...base.features, discussion_base_groups: false } }));
+	expect((await transport.capabilities()).baseFileGroupProperties).toEqual([]);
+	for (const invalid of [true, ["ext", "ext"], [null], [""], Array.from({ length: 65 }, (_, i) => String(i))]) {
+		fetcher.mockResolvedValue(reply({ ...base, discussion_base_file_group_properties: invalid }));
+		await expect(transport.capabilities()).rejects.toMatchObject({ code: "invalid_read_response" });
+	}
+});
+
 test.each([
 	{ type: "empty" }, { type: "text", value: "" }, { type: "text", value: "0" }, { type: "number", value: 0 }, { type: "boolean", value: false },
 	{ type: "date", value: "2026-11-06" }, { type: "instant", value: "2026-11-06T00:00:00.000Z" }, { type: "url", value: "https://example.test/" },
