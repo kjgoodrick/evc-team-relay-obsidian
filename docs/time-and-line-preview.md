@@ -84,17 +84,24 @@ and the original saved-view identity. The updated fork can temporarily focus a
 range outside the data-derived axis, retain its exact lane, and return to the
 original data viewport. Dense Sequence shows original property values while
 focused. These local navigation changes preserve schedules and saved settings;
-old range geometry must be reacquired after the renderer rebuilds. Empty or
-invalid queries without a live axis still cannot place a range.
-This behavior requires the fork's **`4678bf0`** implementation or later; see its
-[navigation contract](https://github.com/kjgoodrick/obsidian-time-and-line-planning/blob/4678bf0/COLLABORATION.md).
+old range geometry must be reacquired after the renderer rebuilds.
+
+Empty results and records without plottable dates/order values retain a real
+configured axis. Range selection, saved markers, distant navigation and return
+remain available. Team Relay must inspect and bind the replacement query result
+before using it. Only the view-level handle remains when all records disappear;
+missing lanes cannot become whole-view markers. Invalid axis configuration stays
+unavailable. This behavior requires fork **`d47f72f`** or later; see its
+[navigation contract](https://github.com/kjgoodrick/obsidian-time-and-line-planning/blob/d47f72f/COLLABORATION.md).
 
 Validation: **2,401 plugin tests in 203 suites** pass (15 opt-in tests skipped),
 with preview build/main types, changed-source lint (five existing warnings),
 whitespace checks and the frozen test-type gate (no new errors).
 Eight source interoperability cases exercise both real renderers, plugin load
 orders and grouping modes, including lane choice, endpoint picking, confirmation,
-saved lane markers, outside-axis focus/markers and return. Their session port supplies a verified axis. Separate
+saved lane markers, outside-axis focus/markers, return and rebinding to empty
+queries. The empty-view checks include the actual range form/selection, saved
+whole-view markers and missing-lane refusal. Their session port supplies a verified axis. Separate
 actual Python/Rust/client fixtures for Timeline and Sequence cover fresh
 unverified offline lane captures, both lost accepted responses, cache reopen,
 exact retries and relay restart. These are not native Obsidian tests.
@@ -126,6 +133,9 @@ node scripts/check-timeline-interop.mjs /path/to/obsidian-time-and-line-planning
 npm run build:preview
 npm run typecheck:tests
 ```
+
+Set `EVC_TIMELINE_TRACE=1` on the interoperability command for phase-level
+diagnostics. Child termination signals produce an explicit failing result.
 
 Run `npm test -- --runInBand` for the full plugin regression and `npm run package`
 inside the fork for its tests, typecheck, build and plugin-only archive.

@@ -28,5 +28,6 @@ try {
 		} });
 	const result = spawnSync(process.execPath, [outfile], { stdio: "inherit", timeout: 30_000 });
 	if (result.error) throw result.error;
+	if (result.signal) throw new Error(`Timeline interoperability check terminated by ${result.signal}`);
 	process.exitCode = result.status ?? 1;
 } finally { await rm(temp, { recursive: true, force: true }); }

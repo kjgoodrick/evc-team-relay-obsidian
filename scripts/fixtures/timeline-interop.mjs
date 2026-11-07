@@ -41,6 +41,7 @@ const file = path => Object.assign(new TFile(), { path, basename: path.split("/"
 	parent: { path: "Tasks" }, stat: { mtime: 1, ctime: 1, size: 1 } });
 
 for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const providerFirst of [true, false]) for (const grouped of [false, true]) {
+	const trace = phase => { if (process.env.EVC_TIMELINE_TRACE) console.error(`TRACE ${type}/${providerFirst ? "provider" : "consumer"}/${grouped ? "grouped" : "plain"}: ${phase}`); };
 	const files = [file("Tasks/one.md"), file("Tasks/two.md")], base = file("Tasks/Plan.base");
 	const metadata = new Map(files.map(value => [value.path, { start: "2026-11-26T08:00:00Z", end: "2026-11-26T09:00:00Z", status: "Ready", title: "Same label" }]));
 	const values = { startDateProp: "note.start", endDateProp: "note.end", labelProp: "note.title", orderProp: "note.order", orderEndProp: null,
@@ -202,11 +203,62 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		focusedMarks.remove(); root.querySelector(".sabidurian-comment-range-focus button").click();
 		for (const callback of [...frames.values()]) callback(0); frames.clear();
 		assert.equal(root.querySelector(".sabidurian-comment-range-focus"), null); assert.equal(focusedContext.current(), false);
+		// Empty query results retain the configured axis and whole-view range
+		// workflow. Missing lanes never become whole-view markers or targets.
+		const originalData = view.data, oldHandle = surface.handles()[0];
+		trace("empty query render");
+		view.data = { data: [], groupedData: [] }; view.onDataUpdated();
+		for (const callback of [...frames.values()]) callback(0); frames.clear();
+		assert.equal(oldHandle.current(), false); assert.equal(surface.current(), false);
+		const emptySurface = NativeBasesSurface.inspect(host, "1.13.7", true, client); assert.ok(emptySurface);
+		trace("empty query binding");
+		const emptyBinding = await emptySurface.bind(snapshot, uuid(2), async () => source, () => true); assert.ok(emptyBinding);
+		trace("empty query bound");
+		const emptyCommentContext = { ...rangeCommentContext, surface: emptySurface, binding: emptyBinding, groups: undefined, current: () => emptySurface.current() };
+		trace(`empty handle counts: ${emptySurface.handles().length}/${emptySurface.groupHandles(() => null).length}`);
+		assert.deepEqual(emptySurface.handles().map(handle => handle.target.type), ["view"]); assert.equal(emptySurface.groupHandles(() => null).length, 0);
+		assert.ok(emptySurface.rangeContext()?.current()); assert.deepEqual(emptySurface.rangeContext().axis, axisProof.axis.axis);
+		trace("empty axis verified");
+		let emptyRange;
+		const emptyWorkflow = new TimelineRangeWorkflow(plugin.app, emptyCommentContext, () => true, async (proof, range, current, lane) => {
+			assert.ok(current()); assert.equal(proof, axisProof); assert.equal(lane, undefined); emptyRange = range; return true;
+		});
+		trace("opening empty workflow"); await emptyWorkflow.open(); trace("opened empty workflow"); assert.equal(laneChoice().options.length, 1);
+		trace("empty range picker");
+		const emptyBody = view.timelineRenderer.element, emptySvg = view.timelineRenderer.svgElement;
+		Object.defineProperties(emptyBody, { clientWidth: { value: 800, configurable: true }, clientHeight: { value: 200, configurable: true } });
+		emptyBody.getBoundingClientRect = () => ({ left: 100, right: 900, top: 50, bottom: 250, width: 800, height: 200 });
+		emptySvg.getBoundingClientRect = () => ({ left: 100, right: 900, top: 50, bottom: 450, width: 800, height: 400 });
+		rangeButton("Select endpoints on timeline").click();
+		const emptyStatus = root.querySelector(".sabidurian-range-selection-status"); assert.ok(emptyStatus);
+		for (const key of ["Enter", "ArrowRight", "Enter"]) emptyStatus.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));
+		assert.equal(rangeButton("Write comment").disabled, false); rangeButton("Write comment").click();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		assert.equal(emptyRange.kind, sequence ? "ordinal" : "calendar"); emptyWorkflow.close();
+		trace("empty range reveal");
+		assert.equal(emptySurface.revealRange(farRange, axisProof.axis.axis, () => true), "revealed");
+		const emptyFocusedBody = view.timelineRenderer.element, emptyFocusedSvg = view.timelineRenderer.svgElement;
+		emptyFocusedBody.getBoundingClientRect = emptyBody.getBoundingClientRect; emptyFocusedSvg.getBoundingClientRect = emptySvg.getBoundingClientRect;
+		const emptyMarks = document.createElement("div"); root.append(emptyMarks);
+		const emptyMarkerOptions = { context: emptyCommentContext, proof: axisProof, lanes: new Map(),
+			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: emptyFocusedBody.getBoundingClientRect(), marks: emptyMarks, limit: 128, open: () => {} };
+		const wholeTarget = { ...rangeAnchor.target, range: farRange }; delete wholeTarget.lane;
+		assert.equal(renderTimelineRangeMarkers({ ...emptyMarkerOptions, threads: [{ id: uuid(41), anchor: { ...rangeAnchor, target: wholeTarget } }] }), 1);
+		trace("empty range marker");
+		if (grouped) {
+			assert.equal(renderTimelineRangeMarkers({ ...emptyMarkerOptions, threads: [{ id: uuid(41), anchor: rangeAnchor }] }), 0);
+			assert.equal(emptySurface.revealRange(farRange, axisProof.axis.axis, () => true, laneElement), "unavailable");
+		}
+		emptyMarks.remove(); root.querySelector(".sabidurian-comment-range-focus button").click();
+		trace("restore query");
+		view.data = originalData; view.onDataUpdated();
+		for (const callback of [...frames.values()]) callback(0); frames.clear();
 		assert.equal(host.data, source); assert.deepEqual(writes, []);
+		trace("dispose");
 		const captured = surface.handles()[1]; view.onDataUpdated(); assert.equal(captured.current(), false);
 		assert.equal(rangeContext.current(), false); assert.equal(selectedRange.current(), false); assert.equal(geometry.current(), false);
 		bridge.dispose(); assert.equal(client.find(view), undefined); assert.equal(surface.current(), false);
-		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, range confirmation/markers, projection, navigation, dirty inspector and disposal`);
+		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, range confirmation/markers, focus/return, empty query, dirty inspector and disposal`);
 	} finally {
 		client.close(); view.onunload(); bridge.dispose(); for (const modal of Modal.opened) modal.close(); Modal.opened = [];
 		frames.clear(); root.remove();
