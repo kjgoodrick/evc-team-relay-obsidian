@@ -5,8 +5,8 @@ import { parseAnchor } from "../DiscussionProtocol";
 import { readNativeTimelineAxis, sameTimelineAxis, timelineAxisMatches } from "../NativeTimelineRanges";
 import { parseTimelineMarkerContent, type TimelineMarkerContent } from "../TimelineMarkerContent";
 import type { TimelineMarkerManagementState } from "../TimelineMarkerManagement";
-import { parseTimelineMarkerCommand, type TimelineMarkerCommand, type TimelineMarkerDetail } from "../TimelineMarkerManagementProtocol";
-import type { TimelineMarkerCatalog, TimelineMarkerPlacement } from "../TimelineMarkerProtocol";
+import { parseTimelineMarkerCommand, type TimelineMarkerCommand, type TimelineMarkerDetail, type TimelineMarkerInventory } from "../TimelineMarkerManagementProtocol";
+import type { TimelineMarkerPlacement } from "../TimelineMarkerProtocol";
 import type { TimelineAxisContext } from "../TimelineRangeProtocol";
 import { timelineRangeLabel, type TimelineRange } from "../TimelineRange";
 import { TimelineRangeWorkflow } from "./TimelineRangeWorkflow";
@@ -25,7 +25,12 @@ export class TimelineMarkerManager extends Modal {
 	private recoveryAgain = false;
 	private recoveryError = false;
 	private dirty = false;
-	private catalog?: TimelineMarkerCatalog;
+	private catalog?: TimelineMarkerInventory;
+	private stopListening?: () => void;
+	private checkedPlacement?: TimelineMarkerPlacement;
+	private placementSelect?: HTMLSelectElement;
+	private placementCheck?: HTMLButtonElement;
+	private placementAdd?: HTMLButtonElement;
 	private proof?: TimelineAxisContext;
 	private detail?: TimelineMarkerDetail;
 	private draft?: Draft;
@@ -48,7 +53,8 @@ export class TimelineMarkerManager extends Modal {
 	private acknowledgeButton?: HTMLButtonElement;
 	private acknowledgeConfirmation?: HTMLInputElement;
 	constructor(app: App, private context: BaseCommentContext, private active: () => boolean, private closedCallback: () => void) { super(app); }
-	private current = () => !this.closed && this.active() && this.context.current() && this.context.session.permission(this.context.entryId)?.read === true;
+	private current = () => !this.closed && this.active() && this.context.current() && this.context.session.permission(this.context.entryId)?.read === true &&
+		!["authentication_required", "unavailable", "closed"].includes(this.context.session.status) && this.context.session.knownDocumentGeneration(this.context.entryId) === this.context.binding.snapshot.generation;
 	private canEdit = () => this.current() && this.context.session.online && this.context.session.permission(this.context.entryId)?.edit === true;
 	private canSave = () => this.canEdit() && this.context.session.canAnchorBase("timeline_marker");
 	private axisCurrent(): boolean {
@@ -56,6 +62,7 @@ export class TimelineMarkerManager extends Modal {
 	}
 	onOpen(): void {
 		if (!this.current()) { this.close(); return; }
+		this.stopListening ??= this.context.session.onChange(() => this.validate());
 		this.setTitle("Manage shared markers · " + this.context.binding.name); this.contentEl.classList.add("relay-timeline-marker-dialog");
 		this.contentEl.createEl("p", { text: "Marker edits affect every selected view of this base. Existing discussions keep their original label and position. Changes require an online editor." });
 		this.recoveryEl = this.contentEl.createDiv(); this.recoveryJson = "";
@@ -114,7 +121,7 @@ export class TimelineMarkerManager extends Modal {
 	}
 	private renderChoices(): void {
 		this.select.replaceChildren(); this.select.createEl("option", { text: "Choose a marker…", attr: { value: "" } });
-		for (const marker of this.catalog?.markers ?? []) this.select.createEl("option", { text: marker.content.label + (marker.active ? marker.placement.active ? "" : " · detached from this view" : " · archived") + " · " + marker.id.slice(-8), attr: { value: marker.id } });
+		for (const marker of this.catalog?.markers ?? []) this.select.createEl("option", { text: marker.content.label + (marker.active ? "" : " · archived") + " · " + marker.id.slice(-8), attr: { value: marker.id } });
 		this.select.value = this.detail?.marker.id ?? "";
 	}
 	private async refresh(selectedId = this.detail?.marker.id): Promise<void> {
@@ -124,7 +131,7 @@ export class TimelineMarkerManager extends Modal {
 			await this.checkRecovery(); if (!this.current() || serial !== this.serial) return;
 			if (this.recoveryError) return;
 			if (!this.context.session.online) throw new Error("Reconnect to load marker metadata. Saved requests remain available here.");
-			const catalog = await this.context.session.transport.timelineMarkers(this.context.entryId, this.context.binding.viewId);
+			const catalog = await this.context.session.readTimelineMarkerInventory(this.context.entryId);
 			if (!this.current() || serial !== this.serial) return;
 			const snapshot = this.context.binding.snapshot;
 			if (catalog.definition_id !== snapshot.definition_id || catalog.generation !== snapshot.generation || catalog.registry_revision !== snapshot.revision) throw new Error("The saved view changed. Finish synchronization and reopen marker management.");
@@ -133,8 +140,8 @@ export class TimelineMarkerManager extends Modal {
 			try { proof = await readNativeTimelineAxis(this.context); } catch { /* Archiving and recovery do not require a projectable axis. */ }
 			if (!this.current() || serial !== this.serial) return;
 			this.proof = proof;
-			this.detail = undefined; this.draft = undefined; this.renderChoices(); this.renderForm();
-			this.status.textContent = this.proof ? "Select a marker or create a new one." : "The saved axis is unavailable. Existing markers can still be reviewed or archived.";
+			this.detail = undefined; this.draft = undefined; this.checkedPlacement = undefined; this.renderChoices(); this.renderForm();
+			this.status.textContent = this.proof ? "Showing markers from every saved view in this base. Select one or create a new marker." : "The saved axis is unavailable. Existing markers can still be reviewed or archived.";
 		} catch (error) { if (this.current() && serial === this.serial) this.status.textContent = this.error(error); }
 		finally { this.loading = false; if (this.current()) this.updateControls(); }
 		if (this.current() && !this.recoveryError && selectedId && this.catalog?.markers.some(marker => marker.id === selectedId)) await this.load(selectedId);
@@ -144,7 +151,7 @@ export class TimelineMarkerManager extends Modal {
 		if (!this.context.session.online) { this.status.textContent = "Reconnect to load current marker details."; return; }
 		const serial = ++this.serial, catalog = this.catalog; this.loading = true; this.updateControls();
 		try {
-			const detail = await this.context.session.transport.timelineMarker(this.context.entryId, markerId);
+			const detail = await this.context.session.readTimelineMarkerDetail(this.context.entryId, markerId);
 			if (!this.current() || serial !== this.serial) return;
 			if (detail.definition_id !== catalog.definition_id || detail.generation !== catalog.generation || detail.registry_revision !== catalog.registry_revision || detail.catalog_revision !== catalog.catalog_revision) throw new Error("Markers changed while loading. Refresh the list before editing.");
 			this.detail = detail; this.resetDraft(); this.select.value = markerId; this.status.textContent = "Loaded current marker details. Review every selected view before saving.";
@@ -157,16 +164,18 @@ export class TimelineMarkerManager extends Modal {
 	private newDraft(): void {
 		if (!this.canSave() || !this.axisCurrent() || this.dirty || this.busy || this.loading || this.recovery) return;
 		this.detail = undefined; this.draft = { id: uuid(), label: "", color: "#7c3aed", kind: "point", placements: [this.currentPlacement()!] };
+		this.checkedPlacement = undefined;
 		this.select.value = ""; this.renderForm(); this.updateControls(); this.form.querySelector("input")?.focus();
 	}
 	private resetDraft(): void {
-		const marker = this.detail?.marker; this.dirty = false;
+		const marker = this.detail?.marker; this.dirty = false; this.checkedPlacement = undefined;
 		this.draft = marker ? { id: marker.id, ...marker.content, placements: marker.placements.filter(placement => placement.active).map(placement => ({ ...placement })) } : undefined;
 		if (marker && !marker.active && this.draft && this.currentPlacement()) this.draft.placements = [this.currentPlacement()!];
 		this.renderForm(); this.updateControls();
 	}
 	private renderForm(): void {
 		this.form.replaceChildren(); this.fields = []; this.saveButton = undefined; this.archiveButton = undefined; this.positionButton = undefined; this.validation = undefined;
+		this.placementSelect = undefined; this.placementCheck = undefined; this.placementAdd = undefined;
 		const draft = this.draft; if (!draft) return;
 		const changed = () => { this.dirty = true; this.updateControls(); };
 		const input = (label: string, value: string, type = "text") => {
@@ -180,6 +189,7 @@ export class TimelineMarkerManager extends Modal {
 		this.form.createEl("p", { text: draft.range ? timelineRangeLabel(draft.range) : "Choose a position before saving." });
 		this.positionButton = this.button(this.form, "Choose marker position", () => this.choosePosition());
 		const placements = this.form.createEl("fieldset"); placements.createEl("legend", { text: "Place in saved views" });
+		if (this.detail?.marker.active && !draft.placements.some(item => item.view_id === this.context.binding.viewId)) placements.createEl("p", { text: "This marker is not currently placed in this view. Select this view below to add it." });
 		const choices = new Map((this.detail?.marker.placements ?? draft.placements).map(placement => [placement.view_id, placement]));
 		for (const placement of draft.placements) choices.set(placement.view_id, placement);
 		const current = this.currentPlacement(); if (current && !choices.has(current.view_id)) choices.set(current.view_id, current);
@@ -190,6 +200,17 @@ export class TimelineMarkerManager extends Modal {
 			const checked = placements.createEl("label", { text: name + " · " + placement.axis.start_property.name + (placement.axis.time_zone ? " · " + placement.axis.time_zone : "") }).createEl("input", { attr: { type: "checkbox", "aria-label": "Place in " + name } });
 			checked.checked = draft.placements.some(item => item.view_id === placement.view_id); this.fields.push(checked);
 			checked.onchange = () => { draft.placements = draft.placements.filter(item => item.view_id !== placement.view_id); if (checked.checked) draft.placements.push({ ...placement, active: true }); changed(); };
+		}
+		const available = this.context.binding.snapshot.views.filter(view => view.id && ["sabidurian-timeline", "sabidurian-sequence"].includes(view.type));
+		if (available.length) {
+			placements.createEl("p", { text: "Add another saved view or review a changed axis. Only the selected view is checked; nothing is saved until you save the marker." });
+			const select = this.placementSelect = placements.createEl("label", { text: "Saved view to check" }).createEl("select", { attr: { "aria-label": "Saved view to check" } });
+			select.createEl("option", { text: "Choose a saved timeline view…", attr: { value: "" } });
+			for (const view of available) select.createEl("option", { text: view.name + " · " + view.id!.slice(-8), attr: { value: view.id! } });
+			select.value = this.checkedPlacement?.view_id ?? ""; this.fields.push(select);
+			select.onchange = () => { this.checkedPlacement = undefined; this.updateControls(); this.renderPlacementReview(placements); };
+			this.placementCheck = this.button(placements, "Check selected view", () => { void this.checkPlacement(select.value); });
+			this.renderPlacementReview(placements);
 		}
 		if (current && draft.placements.some(item => item.view_id === current.view_id && (item.axis_definition_id !== current.axis_definition_id || item.axis_definition_revision !== current.axis_definition_revision || !sameTimelineAxis(item.axis, current.axis)))) {
 			this.form.createEl("p", { text: "This marker uses an older axis in this view. Review its coordinates before switching to the current property: " + current.axis.start_property.name + "." });
@@ -204,6 +225,48 @@ export class TimelineMarkerManager extends Modal {
 			this.fields.push(this.archiveConfirmation); this.archiveConfirmation.onchange = () => this.updateControls();
 			this.archiveButton = this.button(this.form, "Archive marker", () => { void this.save(true); });
 		}
+	}
+	private placementCompatible(placement: TimelineMarkerPlacement): void {
+		if (!this.draft?.range || !this.catalog) throw new Error("Choose a marker position first.");
+		parseAnchor({ version: 1, type: "base", definition_id: this.catalog.definition_id, generation: this.catalog.generation,
+			registry_revision: this.catalog.registry_revision, view_id: placement.view_id, target: { type: "timeline_range", axis_definition_id: placement.axis_definition_id,
+				axis_definition_revision: placement.axis_definition_revision, axis: placement.axis, range: this.draft.range } });
+	}
+	private renderPlacementReview(parent: HTMLElement): void {
+		parent.querySelector(".relay-marker-placement-review")?.remove(); this.placementAdd = undefined;
+		const placement = this.checkedPlacement; if (!placement) return;
+		const box = parent.createDiv({ cls: "relay-marker-placement-review" });
+		const name = this.context.binding.snapshot.views.find(view => view.id === placement.view_id)?.name ?? "Selected view";
+		box.createEl("p", { text: name + " · " + placement.axis.start_property.name + (placement.axis.end_property ? " → " + placement.axis.end_property.name : "") +
+			(placement.axis.time_zone ? " · " + placement.axis.time_zone : "") + ". The marker keeps exactly the same coordinates." });
+		const replacing = this.draft?.placements.some(item => item.view_id === placement.view_id);
+		this.placementAdd = this.button(box, replacing ? "Use checked axis for this placement" : "Add checked placement", () => {
+			if (!this.canSave() || this.busy || this.loading || this.recovery || this.recoveryError || this.checkedPlacement !== placement || !this.draft) return;
+			try {
+				this.placementCompatible(placement);
+				this.draft.placements = this.draft.placements.filter(item => item.view_id !== placement.view_id).concat(placement);
+				this.checkedPlacement = undefined; this.dirty = true; this.renderForm(); this.updateControls();
+				this.status.textContent = "Placement added to this form. Review all selected views, then save the marker.";
+				this.saveButton?.focus();
+			} catch { this.status.textContent = "The marker position is incompatible with this view. Review the coordinate type and time zone."; }
+		});
+		this.updateControls();
+	}
+	private async checkPlacement(viewId: string): Promise<void> {
+		const draft = this.draft, catalog = this.catalog;
+		const view = this.context.binding.snapshot.views.find(view => view.id === viewId && ["sabidurian-timeline", "sabidurian-sequence"].includes(view.type));
+		if (!this.canSave() || !draft || !catalog || this.busy || this.loading || this.recovery || this.recoveryError ||
+			!view) return;
+		const serial = ++this.serial; this.loading = true; this.checkedPlacement = undefined; this.updateControls(); this.status.textContent = "Checking the selected view’s saved axis…";
+		try {
+			const proof = await this.context.session.readTimelineMarkerPlacementAxis(this.context.entryId, viewId, catalog.registry_revision);
+			if (!this.canSave() || serial !== this.serial || draft !== this.draft || this.recovery || this.recoveryError) return;
+			if (proof.entry_id !== this.context.baseEntryId || proof.view_id !== viewId || proof.definition_id !== catalog.definition_id || proof.generation !== catalog.generation || proof.registry_revision !== catalog.registry_revision || proof.axis.axis.renderer !== view.type) throw new Error("The saved view changed. Reopen marker management before choosing this placement.");
+			const placement = { view_id: viewId, active: true, axis_definition_id: proof.axis.id, axis_definition_revision: proof.axis.revision, axis: proof.axis.axis };
+			try { this.placementCompatible(placement); } catch { throw new Error("The marker position is incompatible with this view. Review the coordinate type and time zone."); }
+			this.checkedPlacement = placement; this.renderForm(); this.status.textContent = "Review the checked axis, then add it to the form.";
+		} catch (error) { if (this.current() && serial === this.serial) this.status.textContent = this.error(error); }
+		finally { this.loading = false; if (this.current()) { this.updateControls(); this.placementAdd?.focus(); } }
 	}
 	private request(archive: boolean, operationId = "00000000-0000-4000-8000-000000000000"): TimelineMarkerCommand {
 		const catalog = this.catalog, draft = this.draft; if (!catalog || !draft) throw new Error("Load a marker or start a new one first.");
@@ -263,6 +326,11 @@ export class TimelineMarkerManager extends Modal {
 		this.refreshButton.disabled = this.busy || this.loading || this.dirty;
 		this.newButton.disabled = blocked || this.dirty || !this.canSave() || !this.axisCurrent();
 		for (const field of this.fields) field.disabled = blocked || !this.canSave();
+		if (this.placementCheck) this.placementCheck.disabled = blocked || !this.canSave() || !this.placementSelect?.value || !this.draft?.range;
+		if (this.placementAdd) {
+			try { this.placementCompatible(this.checkedPlacement!); this.placementAdd.disabled = blocked || !this.canSave(); }
+			catch { this.placementAdd.disabled = true; }
+		}
 		if (this.positionButton) this.positionButton.disabled = blocked || !this.canSave() || !this.axisCurrent();
 		if (this.saveButton) {
 			try { this.request(false); this.saveButton.disabled = blocked || !this.canSave(); if (this.validation) this.validation.textContent = "Ready to save the selected position and views."; }
@@ -285,6 +353,6 @@ export class TimelineMarkerManager extends Modal {
 		if (this.closed) return; this.closed = true; this.serial++;
 		const position = this.position; this.position = undefined; position?.close(); super.close(); this.finish();
 	}
-	private finish(): void { this.catalog = undefined; this.proof = undefined; this.detail = undefined; this.draft = undefined; this.recovery = undefined; this.fields = []; this.contentEl.empty(); this.closedCallback(); }
+	private finish(): void { this.stopListening?.(); this.stopListening = undefined; this.checkedPlacement = undefined; this.catalog = undefined; this.proof = undefined; this.detail = undefined; this.draft = undefined; this.recovery = undefined; this.fields = []; this.contentEl.empty(); this.closedCallback(); }
 	onClose(): void { if (this.transitioning) { this.contentEl.empty(); return; } if (!this.closed) { this.closed = true; this.serial++; this.finish(); } }
 }

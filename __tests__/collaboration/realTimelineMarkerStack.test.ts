@@ -25,6 +25,8 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 	await content.publish(f.markersEntry, { operationId: randomUUID(), expected: before.state, bytes: new TextEncoder().encode(JSON.stringify({ views: [
 		{ name: "Timeline", type: "sabidurian-timeline", startDateProp: "note.start", timeZone: "America/Denver" },
 		{ name: "Sequence", type: "sabidurian-sequence", orderProp: "note.order" },
+		{ name: "Roadmap", type: "sabidurian-timeline", startDateProp: "note.start", timeZone: "America/Denver" },
+		{ name: "Sequence overview", type: "sabidurian-sequence", orderProp: "note.order" },
 	] })).buffer as ArrayBuffer });
 	const saved = await content.read(f.markersEntry), snapshot = await registry.inspect(f.markersEntry, saved.state.record.hash!, saved.state.generation!);
 	const path = f.base + "/v1/collaboration/shares/" + f.share + "/entries/" + f.markersEntry + "/bases/timeline-markers/commands";
@@ -126,6 +128,24 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			expect(await ownerStore.cursor(scope)).not.toBe(cursor);
 			expect((await ownerSession.readTimelineMarkerMetadata(scope)).catalog.markers.find(marker => marker.id === markerId)?.revision).toBe(4);
 			const reads = catalogReads; await ownerSession.readTimelineMarkerMetadata(scope); expect(catalogReads).toBe(reads);
+			// Base-wide management sees a marker even when the destination view
+			// has never held it. Adding an explicit checked placement preserves
+			// the original one and never rewrites a captured discussion target.
+			const destination = snapshot.views[index + 2].id!, destinationScope = baseDiscussionScope(f.markersEntry, destination);
+			expect((await ownerTransport.timelineMarkers(destinationScope, destination)).markers).toEqual([]);
+			const inventory = await ownerSession.readTimelineMarkerInventory(scope);
+			expect(inventory.markers.find(marker => marker.id === markerId)).toMatchObject({ revision: 4, active: true });
+			const detail = await ownerSession.readTimelineMarkerDetail(scope, markerId);
+			const otherAxis = await ownerSession.readTimelineMarkerPlacementAxis(scope, destination, snapshot.revision);
+			const result = await ownerSession.markerManagement.state(scope); expect(result?.status).toBe("accepted");
+			expect(await ownerSession.markerManagement.acknowledge(scope, result!.request.operation_id)).toBe(true);
+			const placed = await ownerSession.markerManagement.save(scope, { ...put, operation_id: randomUUID(), expected_catalog_revision: inventory.catalog_revision,
+				command: { type: "marker.put", marker_id: markerId, expected_marker_revision: detail.marker.revision, content: detail.marker.content,
+					placements: [...detail.marker.placements.filter(p => p.active).map(({ view_id, axis_definition_id, axis_definition_revision }) => ({ view_id, axis_definition_id, axis_definition_revision })),
+						{ view_id: destination, axis_definition_id: otherAxis.axis.id, axis_definition_revision: otherAxis.axis.revision }] } });
+			expect(placed.marker.revision).toBe(5); expect(placed.marker.placements.filter(p => p.active).map(p => p.view_id).sort()).toEqual([axis.view_id, destination].sort());
+			expect((await ownerTransport.timelineMarkers(destinationScope, destination)).markers[0]).toMatchObject({ id: markerId, revision: 5, content: detail.marker.content });
+			expect((await transport.thread(scope, queued.payload.thread_id)).anchor).toEqual(captured);
 		} finally { outbox?.stop(); await outbox?.settled(); await session.close(); await ownerSession.close(); }
 	}
 	expect((await content.read(f.markersEntry)).state).toEqual(saved.state);

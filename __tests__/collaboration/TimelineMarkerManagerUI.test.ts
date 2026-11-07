@@ -31,7 +31,7 @@ function confirmation(text: string) {
 	const field = label.querySelector<HTMLInputElement>("input")!; field.checked = true; field.dispatchEvent(new Event("change"));
 }
 function fixture() {
-	const access = { current: true, read: true, edit: true, online: true, enabled: true };
+	const access = { current: true, read: true, edit: true, online: true, enabled: true, status: "ready", generation: id(4) };
 	const proof: TimelineAxisContext = { protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 2,
 		axis: { id: id(5), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "America/Denver" } } };
 	const placement = { view_id: id(3), active: true, axis_definition_id: id(5), axis_definition_revision: 2, axis: proof.axis.axis };
@@ -49,18 +49,23 @@ function fixture() {
 	const retry = jest.fn(async () => { if (!recovery) throw new Error("Missing intent"); const receipt = accepted(recovery.request); recovery = { version: 1, scope_id: scope, request: recovery.request, status: "accepted", receipt }; return receipt; });
 	const acknowledge = jest.fn(async () => { recovery = undefined; return true; });
 	const readAxis = jest.fn(async () => proof), readCatalog = jest.fn(async () => catalog), readDetail = jest.fn(async () => detail), closed = jest.fn();
+	const readPlacementAxis = jest.fn(async () => ({ ...proof, view_id: id(40), axis: { ...proof.axis, id: id(41) } }));
+	const listeners = new Set<() => void>();
 	let select: ((value: NativeTimelineSelection) => void) | undefined, stopped: (() => void) | undefined;
 	const stop = jest.fn(() => stopped?.());
 	const native = { axis: proof.axis.axis, kinds: ["calendar", "instant", "historical"], effectiveTimeZone: "America/Denver", current: () => access.current };
 	const context = { current: () => access.current, entryId: scope, baseEntryId: id(1),
 		binding: { name: "Planning", type: "sabidurian-timeline", viewId: id(3), snapshot: { definition_id: id(2), generation: id(4), revision: 2,
-			views: [{ id: id(3), name: "Planning" }, { id: id(30), name: "Roadmap" }] } },
-		session: { get online() { return access.online; }, permission: () => ({ read: access.read, edit: access.edit, comment: true }), canAnchorBase: () => access.enabled, readTimelineAxis: readAxis,
-			transport: { timelineMarkers: readCatalog, timelineMarker: readDetail }, markerManagement: { state, save, retry, acknowledge } },
+			views: [{ id: id(3), name: "Planning", type: "sabidurian-timeline" }, { id: id(30), name: "Roadmap", type: "sabidurian-timeline" },
+				{ id: id(40), name: "Schedule", type: "sabidurian-timeline" }, { id: null, name: "Unmatched", type: "sabidurian-timeline" }, { id: id(50), name: "Table", type: "table" }] } },
+		session: { get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
+			onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+			permission: () => ({ read: access.read, edit: access.edit, comment: true }), canAnchorBase: () => access.enabled, readTimelineAxis: readAxis,
+			readTimelineMarkerInventory: readCatalog, readTimelineMarkerDetail: readDetail, readTimelineMarkerPlacementAxis: readPlacementAxis, markerManagement: { state, save, retry, acknowledge } },
 		surface: { rangeContext: () => native, beginRange: jest.fn((_kind, _precision, callback, end) => { select = callback; stopped = end; return stop; }) },
 	} as unknown as BaseCommentContext;
 	const manager = new TimelineMarkerManager({} as App, context, () => true, closed);
-	return { access, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, manager, closed, stop, context,
+	return { access, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners,
 		setRecovery: (value: TimelineMarkerManagementState | undefined) => { recovery = value; },
 		pick: () => { stopped?.(); select?.({ context: native as NativeTimelineSelection["context"], draft: { ...range, end: "2026-11-09" }, current: () => access.current }); } };
 }
@@ -164,4 +169,60 @@ test("a shared recovery update arriving during an earlier local read is not lost
 		command: { type: "marker.archive", marker_id: id(20), expected_marker_revision: 1 } };
 	f.setRecovery({ version: 1, scope_id: scope, request, status: "pending" }); f.manager.validate(); finish(undefined); await flush();
 	expect(document.body.textContent).toContain("Marker save not confirmed"); expect(button("Save marker").disabled).toBe(true); f.manager.close();
+});
+
+test("a marker from another view can be placed here and in a checked third view without dropping its original placement", async () => {
+	const f = fixture(); f.detail.marker.placements = [f.detail.marker.placements[1]];
+	await loaded(f); expect(document.body.textContent).toContain("not currently placed in this view");
+	expect(f.readPlacementAxis).not.toHaveBeenCalled();
+	input("Place in Planning", true); input("Saved view to check", id(40));
+	expect(document.querySelector('[aria-label="Saved view to check"]')?.textContent).not.toContain("Table");
+	expect(document.querySelector('[aria-label="Saved view to check"]')?.textContent).not.toContain("Unmatched");
+	button("Check selected view").click(); await flush();
+	expect(f.readPlacementAxis).toHaveBeenCalledWith(scope, id(40), 2);
+	expect(document.activeElement).toBe(button("Add checked placement"));
+	expect(document.querySelector('[aria-label="Place in Schedule"]')).toBeNull(); expect(f.save).not.toHaveBeenCalled();
+	button("Add checked placement").click(); expect(document.querySelector<HTMLInputElement>('[aria-label="Place in Schedule"]')!.checked).toBe(true);
+	expect(document.activeElement).toBe(button("Save marker"));
+	expect(f.save).not.toHaveBeenCalled(); button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ placements: [
+		{ view_id: id(30), axis_definition_id: id(31), axis_definition_revision: 2 },
+		{ view_id: id(3), axis_definition_id: id(5), axis_definition_revision: 2 },
+		{ view_id: id(40), axis_definition_id: id(41), axis_definition_revision: 2 },
+	] }); f.manager.close(); expect(f.listeners.size).toBe(0);
+});
+
+test("checking another view never silently replaces an old placement axis", async () => {
+	const f = await loaded(); f.readPlacementAxis.mockResolvedValue({ ...f.proof, view_id: id(30), axis: { ...f.proof.axis, id: id(32) } });
+	input("Saved view to check", id(30)); button("Check selected view").click(); await flush();
+	expect(button("Use checked axis for this placement")).toBeDefined(); expect(f.save).not.toHaveBeenCalled();
+	button("Use checked axis for this placement").click(); button("Save marker").click(); await flush();
+	expect(f.save.mock.calls[0][1].command).toMatchObject({ placements: expect.arrayContaining([{ view_id: id(30), axis_definition_id: id(32), axis_definition_revision: 2 }]) }); f.manager.close();
+});
+
+test.each(["time_zone", "renderer", "definition_id", "generation", "registry_revision", "entry_id", "view_id"])("incompatible or changed placement %s leaves the draft untouched", async key => {
+	const f = await loaded(), original = await f.readPlacementAxis(); f.readPlacementAxis.mockClear();
+	const invalid = key === "time_zone" ? { ...original, axis: { ...original.axis, axis: { ...original.axis.axis, time_zone: "UTC" } } } :
+		key === "renderer" ? { ...original, axis: { ...original.axis, axis: { ...original.axis.axis, renderer: "sabidurian-sequence" as const } } } :
+		{ ...original, [key]: key === "registry_revision" ? 3 : id(99) };
+	f.readPlacementAxis.mockResolvedValue(invalid); input("Saved view to check", id(40)); button("Check selected view").click(); await flush();
+	expect(button("Add checked placement")).toBeUndefined(); expect(document.querySelector('[aria-label="Place in Schedule"]')).toBeNull();
+	expect(document.body.textContent).toContain(key === "time_zone" ? "incompatible" : "saved view changed");
+	button("Save marker").click(); await flush(); expect(f.save.mock.calls[0][1].command).toMatchObject({ placements: f.detail.marker.placements.map(({ view_id, axis_definition_id, axis_definition_revision }) => ({ view_id, axis_definition_id, axis_definition_revision })) }); f.manager.close();
+});
+
+test.each(["close", "authentication", "generation", "edit", "offline", "recovery"])("a late placement check cannot change the draft after %s", async reason => {
+	const f = await loaded(), proof = await f.readPlacementAxis(); let finish!: (value: TimelineAxisContext) => void;
+	f.readPlacementAxis.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+	input("Saved view to check", id(40)); button("Check selected view").click();
+	expect(button("Check selected view").disabled).toBe(true); expect(button("Save marker").disabled).toBe(true);
+	if (reason === "close") f.manager.close();
+	if (reason === "authentication") f.access.status = "authentication_required";
+	if (reason === "generation") f.access.generation = id(99);
+	if (reason === "edit") f.access.edit = false;
+	if (reason === "offline") f.access.online = false;
+	if (reason === "recovery") f.setRecovery({ version: 1, scope_id: scope, status: "pending", request: { operation_id: id(90), definition_id: id(2), generation: id(4), registry_revision: 2, expected_catalog_revision: 1,
+		command: { type: "marker.archive", marker_id: id(20), expected_marker_revision: 1 } } });
+	for (const listener of f.listeners) listener(); await flush(); finish(proof); await flush();
+	expect(button("Add checked placement")).toBeUndefined(); expect(f.save).not.toHaveBeenCalled(); f.manager.close(); expect(f.listeners.size).toBe(0);
 });

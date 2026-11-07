@@ -10,11 +10,33 @@ export type TimelineMarkerCommand = { operation_id: string; definition_id: strin
 export type TimelineMarkerDetail = { protocol_version: 1; entry_id: string; definition_id: string; generation: string; registry_revision: number;
 	catalog_revision: number; marker: { id: string; revision: number; active: boolean; content: TimelineMarkerContent; placements: TimelineMarkerPlacement[] } };
 export type TimelineMarkerReceipt = TimelineMarkerDetail & { operation_id: string };
+/** Base-wide list omits placements; fetch one selected marker's full details. */
+export type TimelineMarkerInventory = Omit<TimelineMarkerDetail, "marker"> & {
+	markers: Omit<TimelineMarkerDetail["marker"], "placements">[];
+};
+export type TimelineMarkerInventoryPage = TimelineMarkerInventory & { has_more: boolean; next_after: string | null };
 
 function check(value: unknown): asserts value { if (!value) throw new Error("Invalid marker management data"); }
 function fields(value: Record<string, unknown>, keys: string[]): void { check(Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key))); }
 function id(value: unknown): string { check(isId(value)); return value.toLowerCase(); }
 function nextRevision(value: unknown): value is number { return isSequence(value) && value < Number.MAX_SAFE_INTEGER; }
+
+export function parseTimelineMarkerInventoryPage(value: unknown, entryId: string, after?: string): TimelineMarkerInventoryPage {
+	check(isRecord(value)); fields(value, ["protocol_version", "entry_id", "definition_id", "generation", "registry_revision", "catalog_revision", "markers", "has_more", "next_after"]);
+	check(value.protocol_version === 1 && isId(entryId) && value.entry_id === entryId && isRevision(value.registry_revision) && isSequence(value.catalog_revision) &&
+		Array.isArray(value.markers) && value.markers.length <= 50 && typeof value.has_more === "boolean" && (!after || isId(after)));
+	const catalogRevision = value.catalog_revision;
+	let previous = after?.toLowerCase();
+	const markers = value.markers.map(item => {
+		check(isRecord(item)); fields(item, ["id", "revision", "active", "content"]);
+		const markerId = id(item.id); check((!previous || markerId > previous) && isRevision(item.revision) && item.revision <= catalogRevision && typeof item.active === "boolean");
+		previous = markerId;
+		return { id: markerId, revision: item.revision, active: item.active, content: parseTimelineMarkerContent(item.content) };
+	});
+	check((!value.has_more || markers.length > 0) && value.next_after === (previous ?? null));
+	return { protocol_version: 1, entry_id: entryId, definition_id: id(value.definition_id), generation: id(value.generation), registry_revision: value.registry_revision,
+		catalog_revision: catalogRevision, markers, has_more: value.has_more, next_after: previous ?? null };
+}
 
 export function parseTimelineMarkerCommand(value: unknown): TimelineMarkerCommand {
 	check(isRecord(value)); fields(value, ["operation_id", "definition_id", "generation", "registry_revision", "expected_catalog_revision", "command"]);

@@ -819,6 +819,32 @@ export class DiscussionSession {
 		})()).finally(() => { if (this.baseDefinitionFlights.get(scopeId) === flight) this.baseDefinitionFlights.delete(scopeId); });
 		this.baseDefinitionFlights.set(scopeId, flight); return flight;
 	}
+	/** Management reads are online-only, never persisted as capture permissions.
+	 * An authentication round trip cannot revive an earlier successful read. */
+	private readOnlineMarkerMetadata<T extends { generation: string; registry_revision: number }>(scopeId: string, read: () => Promise<T>): Promise<T> {
+		const epoch = this.authenticationEpoch, generation = this.knownDocumentGeneration(scopeId);
+		const current = () => epoch === this.authenticationEpoch && this.online && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		return this.trackLocal((async () => {
+			if (!parseDiscussionScope(scopeId)?.viewId || !current()) throw new Error("Reconnect to read shared marker metadata.");
+			try {
+				const result = await read();
+				if (!current() || result.generation !== generation || result.registry_revision < this.baseRegistryRevision(scopeId)) throw new Error("Shared marker access or the saved view changed. Reopen marker management.");
+				return result;
+			} catch (error) {
+				if (epoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				throw error;
+			}
+		})());
+	}
+	readTimelineMarkerInventory(scopeId: string) {
+		return this.readOnlineMarkerMetadata(scopeId, () => this.transport.timelineMarkerInventory(scopeId));
+	}
+	readTimelineMarkerDetail(scopeId: string, markerId: string) {
+		return this.readOnlineMarkerMetadata(scopeId, () => this.transport.timelineMarker(scopeId, markerId));
+	}
+	readTimelineMarkerPlacementAxis(scopeId: string, viewId: string, registryRevision: number) {
+		return this.readOnlineMarkerMetadata(scopeId, () => this.transport.timelineAxis(parseDiscussionScope(scopeId)!.entryId, viewId, registryRevision));
+	}
 	readTimelineAxis(scopeId: string): Promise<TimelineAxisContext> {
 		const existing = this.timelineAxisFlights.get(scopeId); if (existing) return existing;
 		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);

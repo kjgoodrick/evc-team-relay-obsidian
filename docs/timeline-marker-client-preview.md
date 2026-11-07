@@ -83,14 +83,14 @@ generation. Pending intents cannot be dismissed.
 
 The saved-view toolbar now exposes **Manage markers**, independently of the
 creation flag so an editor can recover a previous request after feature
-disablement. The dialog lists active, detached and archived associations in the
-current saved view. Editors create point/range markers, edit label/color/position,
+disablement. The dialog lists active and archived markers across the base and
+loads a selected marker's retained placements. Editors create point/range markers, edit label/color/position,
 review every retained view placement, explicitly detach placements, archive across
 all views, and restore in selected views. Updating one view preserves the other
 selected placements. Older axes require explicit review/rebinding in their view;
 the dialog does not silently reinterpret coordinates. Duplicate view names retain
-an ID suffix. New associations outside the current/retained views still need the
-base-wide placement/matching workflow.
+an ID suffix. Additional saved views can now be checked and explicitly added;
+local marker promotion/matching remains separate work.
 
 Position editing reuses the exact coordinate form and, for ranges, the actual
 renderer endpoint-selection workflow. Returning to the management form does not
@@ -219,9 +219,52 @@ does not render this dialog. The Time & Line checkout remains unchanged at
 Native desktop/popout/mobile layout, keyboard/touch and accessibility acceptance
 of the comparison remains. No live vault or production service was changed.
 
+## Base-wide marker placement
+
+Manage markers now uses the existing base-wide catalog endpoint. It fetches
+summaries in revision-pinned pages of 50, with at most six pages and 256 markers.
+It never returns a partial inventory across a revision change. Full placement
+details are fetched only for the selected marker; no per-marker or per-view eager
+fan-out is introduced. No new server protocol, schema or background polling is
+required.
+
+An editor can select a marker created in another saved view, retain its existing
+placements, and add the current or another Timeline/Sequence view. **Check selected
+view** reads only that view's saved axis at the reviewed registry revision. The
+form displays its properties and time zone, then requires **Add checked placement**
+or **Use checked axis for this placement** before changing the form. **Save marker**
+remains a separate final action. Coordinates are never converted to fit another
+axis; incompatible coordinate types/time zones are rejected. Unmatched views and
+non-timeline renderers are excluded from the chooser. Existing inactive placements
+remain available for explicit review and restore.
+
+Online management reads reject late results across authentication recovery,
+generation changes and access loss. Closing releases the modal listener and
+invalidates pending checks. Recovery updates and offline/editor permission loss
+prevent a late check from adding a placement. Existing immutable save intent,
+revision checks and exact retries apply to the complete selected placement set.
+Keyboard focus moves to the explicit placement confirmation and then Save.
+
+November 7 verification: the focused protocol/session/management set passes 108
+tests. Build/main types, frozen test types and changed-source lint pass. The
+full-suite result is recorded in the repository status page. Tests cover bounded
+256-marker pagination, malformed/torn lists, markers originating in other views,
+explicit axis replacement, incompatible/stale axes, retained placements and late
+access/recovery/close responses. The existing eight actual-source Time & Line
+interoperability cases still pass; those cases exercise the management range and
+comparison navigation, not native layout of the new placement chooser.
+
+The actual HTTP fixture passes seven tests in six suites. Both Timeline/calendar
+and Sequence/exact-decimal cases add a second saved view, preserve the original
+placement, and read the new association back without altering an existing
+discussion's captured target or the `.base` content. Its temporary server and
+database are removed afterward. Logs use `/private/tmp/marker-placement-*.log`.
+Native desktop/mobile placement acceptance remains; no live vault or production
+service was changed.
+
 ## Remaining work
 
-Base-wide placement/matching, local marker promotion, direct point picking and
+Local marker promotion/matching, direct point picking and
 broader recovery controls remain. The picker and management form still use explicit refresh so
 an in-progress selection/edit is never silently replaced; the timeline overlays
 refresh automatically through active discussion polling. Overlapping overlay

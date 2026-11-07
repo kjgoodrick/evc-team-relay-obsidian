@@ -7,7 +7,7 @@ import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { parseTimelineAxisContext } from "./TimelineRangeProtocol";
 import { parseTimelineMarkerCatalog, parseTimelineMarkerPage, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
-import { parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMarkerReceipt, type TimelineMarkerCommand } from "./TimelineMarkerManagementProtocol";
+import { parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMarkerReceipt, parseTimelineMarkerInventoryPage, type TimelineMarkerCommand, type TimelineMarkerInventory } from "./TimelineMarkerManagementProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadState, parseInboxChange, type InboxChange } from "./InboxProtocol";
 import { parseSearchPage, searchEnvelope, searchRequest, type DiscussionSearchRequest } from "./DiscussionSearchProtocol";
@@ -339,6 +339,24 @@ export class DiscussionTransport implements DiscussionSender {
 			if (result && (result.definition_id !== page.definition_id || result.generation !== page.generation ||
 				result.registry_revision !== page.registry_revision || result.catalog_revision !== page.catalog_revision)) throw new DiscussionFailure("pause", "invalid_read_response");
 			if (!result) result = parseTimelineMarkerCatalog(page, entryId, viewId);
+			else result.markers.push(...page.markers);
+			if (result.markers.length > 256) throw new DiscussionFailure("pause", "invalid_read_response");
+			if (!page.has_more) return result;
+			after = page.next_after!;
+		}
+		throw new DiscussionFailure("pause", "invalid_read_response");
+	}
+	async timelineMarkerInventory(scopeId: string): Promise<TimelineMarkerInventory> {
+		const path = this.scopePath(scopeId) + "/bases/timeline-markers/catalog", entryId = parseDiscussionScope(scopeId)!.entryId;
+		let result: TimelineMarkerInventory | undefined, after: string | undefined;
+		for (let count = 0; count < 6; count++) {
+			const value = await this.request(path, JSON.stringify({ include_archived: true,
+				...(result ? { expected_revision: result.catalog_revision, after } : {}) }), { responseLimit: 256 * 1024 });
+			const page = this.parse(value, item => parseTimelineMarkerInventoryPage(item, entryId, after));
+			if (result && (result.definition_id !== page.definition_id || result.generation !== page.generation || result.registry_revision !== page.registry_revision ||
+				result.catalog_revision !== page.catalog_revision)) throw new DiscussionFailure("pause", "invalid_read_response");
+			if (!result) result = { protocol_version: 1, entry_id: page.entry_id, definition_id: page.definition_id, generation: page.generation,
+				registry_revision: page.registry_revision, catalog_revision: page.catalog_revision, markers: page.markers };
 			else result.markers.push(...page.markers);
 			if (result.markers.length > 256) throw new DiscussionFailure("pause", "invalid_read_response");
 			if (!page.has_more) return result;

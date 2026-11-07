@@ -263,7 +263,8 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const markerDetail = { ...markerIdentity, marker: { id: uuid(60), revision: 1, active: true, content: sharedContent, placements: [markerCatalog.markers[0].placement] } };
 		let managementState, managementRequest;
 		Object.assign(rangeCommentContext.session, { online: true, permission: () => ({ read: true, comment: true, edit: true }),
-			transport: { timelineMarkers: async () => markerCatalog, timelineMarker: async () => markerDetail },
+			status: "ready", knownDocumentGeneration: () => uuid(3), onChange: () => () => {},
+			readTimelineMarkerInventory: async () => ({ ...markerIdentity, markers: [markerDetail.marker] }), readTimelineMarkerDetail: async () => markerDetail,
 			markerManagement: { state: async () => managementState, save: async (_scope, request) => {
 				managementRequest = request;
 				const receipt = parseTimelineMarkerReceipt({ ...markerIdentity, operation_id: request.operation_id, catalog_revision: 2,

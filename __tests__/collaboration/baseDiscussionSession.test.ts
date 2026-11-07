@@ -23,6 +23,37 @@ function remote() {
 		send: jest.fn(),
 	};
 }
+
+test.each(["inventory", "detail", "placement"] as const)("online marker %s reads reject a late success across authentication recovery", async kind => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), source = remote();
+	let finish!: (value: unknown) => void;
+	const read = jest.fn(() => new Promise(resolve => { finish = resolve; }));
+	const transport = { ...source, timelineMarkerInventory: read, timelineMarker: read, timelineAxis: read };
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		const reading = kind === "inventory" ? session.readTimelineMarkerInventory(scope) : kind === "detail" ? session.readTimelineMarkerDetail(scope, id(90)) : session.readTimelineMarkerPlacementAxis(scope, id(5), 1);
+		const rejected = expect(reading).rejects.toThrow("changed"); await until(() => !!finish);
+		if (kind === "placement") expect(read).toHaveBeenCalledWith(id(3), id(5), 1);
+		source.capabilities.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await session.start(); expect(session.status).toBe("authentication_required"); await session.start(); expect(session.online).toBe(true);
+		finish({ generation: id(7), registry_revision: 1 }); await rejected;
+	} finally { finish?.({ generation: id(7), registry_revision: 1 }); await session.close(); }
+});
+
+test("marker management reads require current online access and propagate authentication loss", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), source = remote();
+	const read = jest.fn().mockResolvedValue({ generation: id(7), registry_revision: 1 });
+	const session = new DiscussionSession(store, { ...source, timelineMarkerInventory: read } as unknown as DiscussionTransport);
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		expect(await session.readTimelineMarkerInventory(scope)).toMatchObject({ generation: id(7) });
+		session.setForeground(false); await expect(session.readTimelineMarkerInventory(scope)).rejects.toThrow("Reconnect"); expect(read).toHaveBeenCalledTimes(1);
+		session.setForeground(true); read.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await expect(session.readTimelineMarkerInventory(scope)).rejects.toMatchObject({ action: "authenticate" }); expect(session.status).toBe("authentication_required");
+		await expect(session.readTimelineMarkerInventory(scope)).rejects.toThrow("Reconnect"); expect(read).toHaveBeenCalledTimes(2);
+	} finally { await session.close(); }
+});
 const op = (scopeId: string, anchor: unknown, operationId = id(10)) => ({ operationId, scopeId, type: "thread.create" as const,
 	dependsOn: [], payload: { type: "thread.create", thread_id: id(11), message_id: id(12), anchor: protocolJson(anchor), body: protocolJson(bodyFromText("Saved")) } });
 
