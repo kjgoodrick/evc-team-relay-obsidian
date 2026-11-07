@@ -58,6 +58,13 @@ export class CommentComposer {
 	private reviewButton?: HTMLButtonElement;
 	private sendAvailable: () => boolean = () => true;
 	private editingAvailable: () => boolean = () => true;
+	private discardButton: HTMLButtonElement;
+	private discardPanel: HTMLElement;
+	private discardReview?: Draft;
+	private recoveryDraft = false;
+	private discarding = false;
+	private retiredTarget = false;
+	private stopDiscard?: () => void;
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private draftId: string,
 		private command: (body: MessageBody, anchor?: LocalDiscussionAnchor, editBaseRevision?: number) => ComposerCommand, label = "Comment", initialText: string | CommentDraft = "",
@@ -100,12 +107,20 @@ export class CommentComposer {
 		});
 		this.send = actions.createEl("button", { text: "Send", cls: "mod-cta", attr: { type: "submit" } });
 		this.send.disabled = true;
+		this.discardButton = actions.createEl("button", { text: "Discard draft", attr: { type: "button" } });
+		this.discardButton.hidden = true; this.discardButton.onclick = () => { void this.reviewDiscard(); };
+		this.discardPanel = this.el.createDiv();
 		this.refreshPictures = actions.createEl("button", { text: "Refresh picture uploads", attr: { type: "button", title: "Keep the saved pictures and prepare fresh uploads for your next send." } });
 		this.refreshPictures.onclick = () => { void this.recover(true); };
 		this.recoverSend = actions.createEl("button", { text: "Check delivery and edit", attr: { type: "button", title: "Check whether the reply was sent before making this draft editable again." } });
 		this.recoverSend.onclick = () => { void this.recover(false); };
 		this.refreshPictures.hidden = this.recoverSend.hidden = true;
 		this.status = this.el.createDiv({ cls: "relay-comment-save-status", attr: { role: "status", "aria-live": "polite" } });
+		this.stopDiscard = session.onDraftDiscarded?.(id => {
+			if (id !== this.draftId || this.disposed || this.discarding) return;
+			this.saveFailed = true; this.discardReview = undefined; this.discardPanel.empty();
+			this.status.setText("This draft was discarded in another view. Any text still shown here is not saved; copy it before closing this editor."); this.update();
+		});
 		this.el.addEventListener("submit", event => { event.preventDefault(); if (!this.composing) void this.submit(); });
 		this.textarea.addEventListener("compositionstart", () => { this.composing = true; });
 		this.textarea.addEventListener("compositionend", () => { this.composing = false; this.persist(); });
@@ -156,6 +171,7 @@ export class CommentComposer {
 				if (this.target.type === "base" && this.target.view_id !== parseDiscussionScope(this.entryId)?.viewId) throw new Error("Draft target does not match this saved view");
 			}
 			this.onlinePending = !!await session.store.preference("online:" + draftId);
+			this.recoveryDraft = !!await session.store.preference("recovery:" + draftId);
 			if (this.disposed) return;
 			this.textarea.disabled = false;
 			this.textarea.readOnly = this.onlinePending;
@@ -196,7 +212,7 @@ export class CommentComposer {
 	}
 	update(): void {
 		if (this.disposed) return;
-		const paused = !this.editingAvailable();
+		const paused = !this.editingAvailable() || !!this.discardReview || this.retiredTarget;
 		const blocked = paused || this.busy || this.saveFailed || !this.session.canQueue || !this.session.permission(this.entryId)?.comment;
 		this.send.disabled = blocked || this.textarea.disabled || this.onlinePending || this.needsEditReview || !this.sendAvailable();
 		this.textarea.readOnly = paused || this.busy || this.onlinePending || this.saveFailed;
@@ -212,13 +228,15 @@ export class CommentComposer {
 			for (const person of people) this.people.createEl("option", { text: person.name, attr: { value: person.id } });
 			this.people.value = selected;
 		}
-		this.people.disabled = paused || this.busy || this.onlinePending || this.textarea.disabled || !people.length;
+		this.people.disabled = paused || this.busy || this.onlinePending || this.saveFailed || this.textarea.disabled || !people.length;
 		this.attach.hidden = !this.session.canAttachPictures;
 		this.attach.disabled = blocked || this.onlinePending || this.textarea.disabled || this.pictures.length >= 10;
 		this.refreshPictures.hidden = !this.pictures.length || this.onlinePending;
 		this.refreshPictures.disabled = blocked || this.textarea.disabled || !this.session.canAttachPictures;
 		this.recoverSend.hidden = !this.onlinePending;
 		this.recoverSend.disabled = blocked || !this.session.canRecoverOnlineDraft;
+		this.discardButton.hidden = this.revision < 0 || this.onlinePending || this.recoveryDraft;
+		this.discardButton.disabled = paused || this.busy || this.saveFailed || this.textarea.disabled;
 		this.renderPictures();
 		const label = (this.target && this.targetLabel?.(this.target)) ?? (this.target?.type === "base_group_pending" ? (this.target.range ? timelineRangeLabel(this.target.range.range) + " · lane: " : "Group: ") + this.target.property.name + " (verification pending)" : this.target?.type === "image_file" ? "Image file: " + (this.target.geometry.type === "whole" ? "whole image" : this.target.geometry.type) : this.target?.type === "image" ? "Image " + (this.target.geometry.type === "whole" ? "discussion" : this.target.geometry.type) + ": “" + this.target.occurrence.context.quote + "”" : this.target?.type === "text" ? (this.target.structure ? "Selected blocks (" + this.target.structure.blocks.map(block => block.kind.replace(/_/g, " ")).join(", ") + "): “" + this.target.context.quote + "”" :
 			this.target.context.quote ? "Selected text: “" + this.target.context.quote + "”" : "Selected position") : this.target?.type === "base" ?
@@ -273,7 +291,7 @@ export class CommentComposer {
 			}
 		} catch (error) {
 			if (!this.disposed) this.status.setText(error instanceof Error && error.message.includes("100 MiB") ?
-				"Local picture storage is full. Your draft is retained. Send or remove other draft pictures before retrying." :
+				"Local picture storage is full. Your draft is retained. Send or remove other draft pictures, or finish a retained recovery copy in the storage panel, before retrying." :
 				error instanceof Error && error.message.includes("No saved picture originals") ? "No saved originals are available. Remove and add the affected pictures again." :
 				"Recovery was not confirmed. Your draft is retained. Check the connection and permissions, or reopen it if another window changed it.");
 		} finally {
@@ -301,7 +319,7 @@ export class CommentComposer {
 				};
 				card = { el, view, alt, remove }; this.pictureViews.set(picture.picture_id, card);
 			}
-			card.alt.disabled = card.remove.disabled = this.busy || this.onlinePending || this.saveFailed;
+			card.alt.disabled = card.remove.disabled = this.busy || this.onlinePending || this.saveFailed || !!this.discardReview || this.retiredTarget || !this.editingAvailable();
 		}
 	}
 	/** Bytes and references commit before the attachment appears in the draft.
@@ -309,7 +327,7 @@ export class CommentComposer {
 	 */
 	async addPictures(files: readonly File[]): Promise<void> {
 		await this.ready;
-		if (!files.length || this.disposed || this.busy || this.onlinePending || this.saveFailed || this.composing || this.rich?.composing || !this.session.canAttachPictures || !this.session.permission(this.entryId)?.comment) return;
+		if (!files.length || this.disposed || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed || this.composing || this.rich?.composing || !this.session.canAttachPictures || !this.session.permission(this.entryId)?.comment) return;
 		if (files.length + this.pictures.length > 10) { this.status.setText("A comment can contain at most ten pictures."); return; }
 		this.busy = true; this.textarea.readOnly = true; this.update();
 		this.attachmentFlight = this.session.trackLocal((async () => {
@@ -334,7 +352,7 @@ export class CommentComposer {
 			} catch (error) {
 				if (this.disposed) return;
 				if (error instanceof PictureInputError) this.status.setText(error.message);
-				else if (error instanceof Error && error.message.includes("100 MiB")) this.status.setText("Local picture storage is full. Send or remove other draft pictures before adding more.");
+				else if (error instanceof Error && error.message.includes("100 MiB")) this.status.setText("Local picture storage is full. Send or remove other draft pictures, or finish a retained recovery copy in the storage panel, before adding more.");
 				else {
 					this.saveFailed = error instanceof Error && error.message.includes("another view");
 					this.status.setText(this.saveFailed ? "This draft changed in another window. Reopen it before adding pictures." : "Could not save this picture. Check device storage and try again. Earlier saved pictures are retained.");
@@ -344,7 +362,7 @@ export class CommentComposer {
 		await this.attachmentFlight;
 	}
 	private persist(): void {
-		if (this.disposed || this.textarea.disabled || this.busy || this.onlinePending) return;
+		if (this.disposed || this.textarea.disabled || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed) return;
 		const text = this.textarea.value;
 		const draft = this.snapshot(), value = JSON.stringify(draft);
 		this.status.setText("Saving draft…");
@@ -362,7 +380,7 @@ export class CommentComposer {
 		}).finally(() => { if (!this.disposed) this.update(); }));
 	}
 	async submit(onlineAction?: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>): Promise<void> {
-		if (this.busy || this.disposed || this.composing || this.rich?.composing || this.needsEditReview || !this.sendAvailable()) return;
+		if (this.busy || this.disposed || this.discardReview || this.retiredTarget || this.composing || this.rich?.composing || this.needsEditReview || !this.sendAvailable()) return;
 		await this.ready;
 		if (this.busy || this.disposed || this.saveFailed || this.composing || this.rich?.composing || this.needsEditReview || !this.session.canQueue || !this.session.permission(this.entryId)?.comment) return;
 		if (this.onlinePending && !onlineAction) return;
@@ -382,6 +400,7 @@ export class CommentComposer {
 			this.revision = -1; this.savedValue = ""; this.textarea.value = ""; this.previousText = ""; this.mentions = []; this.onlinePending = false;
 			this.pictures = [];
 			this.rich?.setBody();
+			this.retiredTarget = !!this.target;
 			this.status.setText(onlineAction ? "Sent" : "Saved to send"); this.onSent();
 		} catch {
 			this.status.setText("Not confirmed. Your draft is saved. Check the connection or permissions before retrying.");
@@ -390,5 +409,37 @@ export class CommentComposer {
 			this.busy = false; this.textarea.readOnly = this.onlinePending; this.update();
 		}
 	}
-	dispose(): void { this.disposed = true; this.rich?.dispose(); for (const card of this.pictureViews.values()) card.view.dispose(); this.pictureViews.clear(); this.el.remove(); }
+	private async reviewDiscard(): Promise<void> {
+		if (this.disposed || this.busy || this.saveFailed || this.onlinePending || this.recoveryDraft || !this.editingAvailable()) return;
+		this.busy = true; this.update();
+		try {
+			if (!await this.flush()) throw new Error("Save this draft before reviewing discard.");
+			const draft = await this.session.store.getDraft(this.draftId);
+			if (this.disposed) return;
+			if (!draft || draft.scopeId !== this.entryId || draft.revision !== this.revision || JSON.stringify(readCommentDraft(draft.body)) !== this.savedValue) throw new Error("This draft changed in another view. Reopen it before discarding.");
+			this.discardReview = draft; this.discardPanel.empty();
+			this.discardPanel.createEl("p", { text: "Discard this saved draft? This cannot be undone here. Posted comments stay unchanged. Pictures used only by this draft are released; pictures used elsewhere or retained for a recovery copy stay available." });
+			const keep = this.discardPanel.createEl("button", { text: "Keep editing", attr: { type: "button" } });
+			const discard = this.discardPanel.createEl("button", { text: "Discard saved draft", attr: { type: "button" } });
+			keep.onclick = () => { if (this.busy) return; this.discardReview = undefined; this.discardPanel.empty(); this.update(); };
+			discard.onclick = () => { void this.discardSavedDraft(keep, discard); };
+		} catch (error) { if (!this.disposed) this.status.setText(error instanceof Error ? error.message : "Could not review this draft. Your saved work is retained."); }
+		finally { this.busy = false; this.update(); }
+	}
+	private async discardSavedDraft(keep: HTMLButtonElement, discard: HTMLButtonElement): Promise<void> {
+		const draft = this.discardReview; if (!draft || this.disposed || this.busy || this.saveFailed) return;
+		this.busy = this.discarding = true; keep.disabled = discard.disabled = true; this.update();
+		try {
+			await this.session.discardDraft(draft, () => !this.disposed && this.discardReview === draft);
+			if (this.disposed) return;
+			this.discardReview = undefined; this.discardPanel.empty();
+			this.revision = -1; this.savedValue = ""; this.textarea.value = this.previousText = ""; this.mentions = []; this.pictures = [];
+			this.rich?.setBody(); this.retiredTarget = !!this.target;
+			this.status.setText("Draft discarded. Posted comments are unchanged."); this.onSent();
+		} catch (error) {
+			if (!this.disposed) { this.discardReview = undefined; this.discardPanel.empty(); this.saveFailed = true;
+				this.status.setText(error instanceof Error ? error.message : "The draft could not be discarded. Copy your text and reopen it before retrying."); }
+		} finally { this.busy = this.discarding = false; this.update(); }
+	}
+	dispose(): void { this.disposed = true; this.stopDiscard?.(); this.stopDiscard = undefined; this.rich?.dispose(); for (const card of this.pictureViews.values()) card.view.dispose(); this.pictureViews.clear(); this.el.remove(); }
 }

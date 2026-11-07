@@ -68,6 +68,7 @@ export class DiscussionSession {
 	private startFlight?: Promise<void>;
 	private onlineFlights = new Set<Promise<unknown>>();
 	private channel?: BroadcastChannel;
+	private discardedDraftListeners = new Set<(id: string) => void>();
 	private statusValue: SessionStatus = "starting";
 	private authenticationEpoch = 0;
 	private enabled = false;
@@ -108,6 +109,9 @@ export class DiscussionSession {
 			this.channel = new BroadcastChannel("team-relay-discussion-wake:" + JSON.stringify([
 				store.identity.serverId, store.identity.accountId, store.identity.vaultId, store.identity.shareId]));
 			this.channel.onmessage = event => {
+				if (!this.closed && isRecord(event.data) && event.data.type === "draft-discarded" && typeof event.data.id === "string" && event.data.id.length <= 512) {
+					this.draftDiscarded(event.data.id, false); return;
+				}
 				if (event.data === "inbox" && !this.closed) { void this.inbox.reload(); return; }
 				if (event.data === "cache" && !this.closed) { this.notify(); return; }
 				if (event.data !== "changed" || this.closed) return;
@@ -136,6 +140,22 @@ export class DiscussionSession {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		if (!await this.trackLocal(this.store.releaseLocalWork(id))) throw new Error("The retained capture changed in another window. Refresh before reviewing it.");
 		if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); }
+	}
+	onDraftDiscarded(listener: (id: string) => void): () => void {
+		if (this.closed) return () => {};
+		this.discardedDraftListeners.add(listener); return () => { this.discardedDraftListeners.delete(listener); };
+	}
+	private draftDiscarded(id: string, broadcast = true): void {
+		if (this.closed) return;
+		for (const listener of this.discardedDraftListeners) listener(id);
+		if (broadcast) this.channel?.postMessage({ type: "draft-discarded", id });
+		this.notify();
+	}
+	async discardDraft(draft: Draft, visible: () => boolean): Promise<void> {
+		const epoch = this.authenticationEpoch, current = () => !this.closed && visible() && epoch === this.authenticationEpoch;
+		if (!current()) throw new Error("This draft review is closed.");
+		if (!await this.trackLocal(this.store.removeDraft(draft.id, draft.revision, draft, current))) throw new Error("This draft changed after review. Nothing was discarded; reopen it and review again.");
+		this.draftDiscarded(draft.id);
 	}
 	get status(): SessionStatus { return this.statusValue; }
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
@@ -1065,7 +1085,7 @@ export class DiscussionSession {
 	async abandonReviewedWork(review: ReviewedAbandonment, visible: () => boolean): Promise<void> {
 		const epoch = this.authenticationEpoch, current = () => !this.closed && visible() && epoch === this.authenticationEpoch;
 		if (!current()) throw new Error("This discussion account is closed.");
-		return this.trackLocal(this.store.abandonReviewedWork(review, current)
+		return this.trackLocal(this.store.abandonReviewedWork(review, current).then(() => { for (const draft of review.drafts) this.draftDiscarded(draft.id); })
 			.finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
 	}
 	async repairPictures(operation: OutboxOperation): Promise<"accepted" | "requeued"> {
@@ -1160,7 +1180,7 @@ export class DiscussionSession {
 		this.closed = true; this.statusValue = "closed";
 		const inboxClosing = this.inbox.close();
 		this.outbox.stop(); for (const entry of this.entries.values()) entry.sync.stop();
-		this.channel?.close(); this.channel = undefined; this.notify(); this.listeners.clear();
+		this.channel?.close(); this.channel = undefined; this.notify(); this.listeners.clear(); this.discardedDraftListeners.clear();
 		await Promise.allSettled([inboxClosing, this.startFlight, this.outbox.settled(), ...this.onlineFlights,
 			...[...this.entries.values()].flatMap(entry => [entry.sync.settled(), entry.permissionFlight])]);
 		this.entries.clear(); this.store.close();

@@ -37,8 +37,10 @@ absence of the discarded thread. Build/main types and the frozen test-type gate
 pass; changed-source lint has no errors or warnings. The full suite passes
 **3,042 tests / 240 suites**, with **21 opt-in tests / 17 suites skipped**.
 
+The [ordinary-draft preview](ordinary-comment-draft-discard-preview.md) now adds
+separate confirmation and cross-window invalidation for unsent drafts.
 Native desktop/mobile discard acceptance remains. Standalone reaction cleanup,
-ordinary unsent-draft cleanup, inaccessible/deleted-target recovery, reviewed
+inaccessible/deleted-target recovery, reviewed
 import and coherent backup/restore remain separate unfinished work. The full
 release is not ready for acceptance testing. No live vault or production service
 was changed.

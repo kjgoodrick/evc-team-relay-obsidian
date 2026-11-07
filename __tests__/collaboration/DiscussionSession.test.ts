@@ -50,6 +50,37 @@ test("local cache controls work offline without resuming command delivery", asyn
 		await f.session.close(); await expect(f.session.setPictureCacheLimit(0)).rejects.toThrow("closed");
 	} finally { await f.close(); }
 });
+
+test("discarding a reviewed ordinary draft works offline, notifies editors and never sends a command", async () => {
+	const f = await fixture(), discarded = jest.fn();
+	const stop = f.session.onDraftDiscarded(discarded);
+	try {
+		f.session.setForeground(false); await f.session.outbox.settled();
+		const draft = { id: "ordinary", scopeId: entry, revision: 0, body: "Unsent text" };
+		await f.store.saveDraft(draft); await f.session.discardDraft(draft, () => true);
+		expect(await f.store.getDraft(draft.id)).toBeUndefined(); expect(discarded).toHaveBeenCalledWith(draft.id);
+		expect(f.transport.send).not.toHaveBeenCalled(); expect(f.transport.sendOnline).not.toHaveBeenCalled();
+		await f.store.saveDraft({ ...draft, body: "Different text", revision: 0 }, null);
+		await expect(f.session.discardDraft(draft, () => true)).rejects.toThrow("changed after review");
+		expect((await f.store.getDraft(draft.id))?.body).toBe("Different text"); expect(discarded).toHaveBeenCalledTimes(1);
+		await expect(f.session.discardDraft({ ...draft, body: "Different text" }, () => false)).rejects.toThrow("closed");
+	} finally { stop(); await f.close(); }
+});
+
+test("draft discard invalidation reaches another window for the same account only", async () => {
+	const factory = new IDBFactory(), own = { ...identity, vaultId: "discard-broadcast" };
+	const one = new DiscussionSession(await DiscussionStore.open(own, factory), remote() as unknown as DiscussionTransport);
+	const two = new DiscussionSession(await DiscussionStore.open(own, factory), remote() as unknown as DiscussionTransport);
+	const foreignIdentity = { ...own, accountId: id(99) };
+	const other = new DiscussionSession(await DiscussionStore.open(foreignIdentity, factory), { ...remote(), identity: foreignIdentity } as unknown as DiscussionTransport);
+	const seen: string[] = [], foreign = jest.fn(); two.onDraftDiscarded(id => seen.push(id)); other.onDraftDiscarded(foreign);
+	try {
+		const draft = { id: "broadcast-draft", scopeId: entry, revision: 0, body: "Unsent" };
+		await one.store.saveDraft(draft); await one.discardDraft(draft, () => true);
+		for (let attempt = 0; attempt < 100 && !seen.length; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+		expect(seen).toEqual([draft.id]); expect(foreign).not.toHaveBeenCalled();
+	} finally { await Promise.all([one.close(), two.close(), other.close()]); }
+});
 async function linkedFixture() {
 	const f = await fixture(), read = linkedRead();
 	const transport = Object.assign(f.transport, { message: jest.fn().mockResolvedValue(read),

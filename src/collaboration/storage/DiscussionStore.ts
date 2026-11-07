@@ -360,14 +360,18 @@ export class DiscussionStore {
 			await request(store.put(value, key)); return true;
 		});
 	}
-	async removeDraft(id: string, revision: number): Promise<boolean> {
+	async removeDraft(id: string, revision: number, expected?: Draft, current: () => boolean = () => true): Promise<boolean> {
+		const reviewed = expected === undefined ? undefined : canonical(expected as unknown as Json);
 		return this.transaction(["drafts", ...PICTURE_STORES], "readwrite", async tx => {
 			if (await request(tx.objectStore("preferences").get("online:" + id))) throw new Error("Review the unconfirmed online action before removing this draft");
 			if (await request(tx.objectStore("preferences").get("recovery:" + id))) throw new Error("Review the saved change and its dependents before removing this draft");
-			const drafts = tx.objectStore("drafts"), current: Draft | undefined = await request(drafts.get(id));
-			if (!current || current.revision !== revision) return false;
+			const drafts = tx.objectStore("drafts"), saved: Draft | undefined = await request(drafts.get(id));
+			if (!saved || saved.revision !== revision || reviewed !== undefined && canonical(saved as unknown as Json) !== reviewed) return false;
+			if (!current()) throw new Error("Draft review is no longer active");
 			await request(drafts.delete(id));
-			await setPictureReferences(tx, "draft", id, current.scopeId, []); return true;
+			await setPictureReferences(tx, "draft", id, saved.scopeId, []);
+			if (!current()) throw new Error("Draft review is no longer active");
+			return true;
 		});
 	}
 

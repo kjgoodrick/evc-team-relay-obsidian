@@ -76,8 +76,11 @@ explicit abandonment of cancelled body commands and their unsent dependents.
 The [storage controls](comment-storage-preview.md) and [local recovery copies](local-comment-recovery-copy-preview.md)
 also have implemented previews.
 
-Full recovery/release acceptance is unfinished. Standalone reaction and ordinary
-draft cleanup, inaccessible/deleted-target recovery, broader cache controls,
+The [ordinary-draft preview](ordinary-comment-draft-discard-preview.md) adds
+separate draft discard with protection for other open editors.
+
+Full recovery/release acceptance is unfinished. Standalone reaction cleanup,
+inaccessible/deleted-target recovery, broader cache controls,
 reviewed import, coherent service backup/restore, native interrupted-response and
 multiwindow/picture/target/mobile cases, and resource/accessibility validation
 remain. Picture refresh can retain shared originals intentionally. A large
