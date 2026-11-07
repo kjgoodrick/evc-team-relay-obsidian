@@ -18,6 +18,7 @@ import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession, type AnchoredThread, type BaseTargetSelection } from "./DiscussionSession";
 import { ReattachCommentModal, commentTargetDescription } from "./ui/ReattachComment";
+import { CancelReactionModal } from "./ui/CancelReaction";
 import { RecoverCommentModal } from "./ui/RecoverComment";
 import { CommentStorageModal } from "./ui/CommentStorage";
 import { CommentStoragePicker, type CommentStorageSource } from "./ui/CommentStoragePicker";
@@ -79,7 +80,7 @@ export class DiscussionHost extends Component {
 	private inboxAction = 0;
 	private reattachSelection?: { session: DiscussionSession; entryId: string; thread: AnchoredThread };
 	private reattachModal?: ReattachCommentModal;
-	private recoveryModal?: RecoverCommentModal;
+	private recoveryModal?: RecoverCommentModal | CancelReactionModal;
 	private storageModal?: CommentStorageModal;
 	private storagePicker?: CommentStoragePicker;
 	private recoverySelection?: { session: DiscussionSession; entryId: string; operation: OutboxOperation; draft: Draft };
@@ -824,6 +825,11 @@ export class DiscussionHost extends Component {
 	cancelReattachmentSelection(): void { this.reattachSelection = undefined; this.recoverySelection = undefined; this.notify(); }
 	openCommandRecovery(session: DiscussionSession, operation: OutboxOperation): void {
 		const entryId = operation.scopeId;
+		if (operation.type === "reaction.set") {
+			if (!this.localStorageCurrent(session)) return;
+			this.recoveryModal?.close(); this.recoveryModal = new CancelReactionModal(this.plugin.app, session, operation, () => this.localStorageCurrent(session));
+			this.recoveryModal.open(); return;
+		}
 		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
 		if (!current() || !session.permission(entryId)?.read) return;
 		this.reattachModal?.close(); this.recoveryModal?.close();

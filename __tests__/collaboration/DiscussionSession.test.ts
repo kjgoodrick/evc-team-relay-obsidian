@@ -668,3 +668,39 @@ test("image targets persist with offline drafts and outbox dependencies without 
 		expect(session.canAnchorImages).toBe(false); expect((await store.getOperation(operation.operationId))?.payload).toEqual(operation.payload);
 	} finally { await session.close(); }
 });
+
+test.each(["offline unsent", "withdrawn", "accepted", "lost response"])("saved reaction cancellation handles %s without reversing or duplicating it", async outcome => {
+	const f = await fixture();
+	try {
+		f.transport.capabilities.mockResolvedValue({ discussions: true, ...{ recovery: true } }); await f.session.refresh();
+		f.session.outbox.stop(); await f.session.outbox.settled();
+		const op = await f.store.enqueue({ operationId: id(80), scopeId: entry, type: "reaction.set", dependsOn: [], payload: { type: "reaction.set", thread_id: id(5), message_id: id(6), emoji: "thumbs_up", present: true } }, 1);
+		if (outcome === "offline unsent") f.session.setForeground(false);
+		else await f.store.claimNext("worker", 2);
+		if (outcome === "accepted") f.transport.withdraw.mockResolvedValue({ status: "accepted", result: await f.transport.send() });
+		if (outcome === "lost response") {
+			f.transport.withdraw.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+			await expect(f.session.cancelSavedReaction(op, () => true)).rejects.toMatchObject({ action: "retry" });
+			expect((await f.store.getOperation(op.operationId))?.state).toBe("sending");
+		}
+		f.transport.send.mockClear();
+		expect(await f.session.cancelSavedReaction(op, () => true)).toBe(outcome === "accepted" ? "accepted" : "withdrawn");
+		expect((await f.store.getOperation(op.operationId))?.state).toBe(outcome === "accepted" ? "accepted" : "withdrawn");
+		expect(f.transport.send).not.toHaveBeenCalled(); expect(f.transport.sendOnline).not.toHaveBeenCalled();
+		expect(f.transport.withdraw).toHaveBeenCalledTimes(outcome === "offline unsent" ? 0 : outcome === "lost response" ? 2 : 1);
+	} finally { await f.close(); }
+});
+
+test("closing a reaction cancellation during withdrawal retains recovery state until it can be verified again", async () => {
+	const f = await fixture(); let visible = true;
+	try {
+		f.transport.capabilities.mockResolvedValue({ discussions: true, ...{ recovery: true } }); await f.session.refresh(); f.session.outbox.stop(); await f.session.outbox.settled();
+		const op = await f.store.enqueue({ operationId: id(80), scopeId: entry, type: "reaction.set", dependsOn: [], payload: { type: "reaction.set", thread_id: id(5), message_id: id(6), emoji: "heart", present: false } }, 1);
+		await f.store.claimNext("worker", 2); let finish!: (value: { status: string }) => void, entered!: () => void;
+		const started = new Promise<void>(resolve => { entered = resolve; });
+		f.transport.withdraw.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; entered(); }));
+		const pending = f.session.cancelSavedReaction(op, () => visible), rejected = expect(pending).rejects.toThrow("Reopen this reaction"); await started;
+		visible = false; finish({ status: "withdrawn" }); await rejected; expect((await f.store.getOperation(op.operationId))?.state).toBe("sending");
+		visible = true; expect(await f.session.cancelSavedReaction(op, () => visible)).toBe("withdrawn");
+	} finally { await f.close(); }
+});

@@ -1045,6 +1045,25 @@ export class DiscussionSession {
 		if (!this.closed) { this.broadcast(); this.outbox.wake(); this.notify(); }
 		return retried;
 	}
+	async cancelSavedReaction(operation: OutboxOperation, visible: () => boolean): Promise<"accepted" | "withdrawn"> {
+		const epoch = this.authenticationEpoch, alive = () => visible() && !this.closed && epoch === this.authenticationEpoch;
+		const dispatch = () => alive() && this.canRecoverSavedCommand && this.permission(operation.scopeId)?.comment === true;
+		return this.trackLocal((async () => {
+			if (!alive() || operation.type !== "reaction.set") throw new Error("This saved reaction is unavailable.");
+			queuedEnvelope(this.identity.shareId, operation);
+			const local = await this.store.retireReaction(operation, false, alive);
+			if (local !== "uncertain") return local;
+			if (!dispatch()) throw new Error("Reconnect with comment permission to check this reaction's delivery before cancelling.");
+			let result;
+			try { result = await this.transport.withdraw(operation, dispatch); }
+			catch (error) { if (error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication(); throw error; }
+			if (result.status === "accepted") { await this.store.accept(operation.operationId, protocolJson(result.result)); return "accepted" as const; }
+			if (!alive()) throw new Error("Delivery was checked on the server. Reopen this reaction to finish recovery.");
+			const retired = await this.store.retireReaction(operation, true, alive);
+			if (retired === "uncertain") throw new Error("The reaction needs another delivery review.");
+			return retired;
+		})().finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
+	}
 	async recoverSavedCommand(operation: OutboxOperation, visible: () => boolean = () => true): Promise<{ status: "accepted" | "requeued" } | { status: "editable"; draft: Draft; operation: OutboxOperation }> {
 		const epoch = this.authenticationEpoch;
 		const alive = () => visible() && !this.closed && epoch === this.authenticationEpoch;

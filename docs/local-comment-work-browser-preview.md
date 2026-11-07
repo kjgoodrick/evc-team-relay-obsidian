@@ -9,8 +9,9 @@ its explicit review/confirmation and ownership checks. Saved targets and edit
 base revisions remain attached. Sending, changing targets, picking new members,
 adding pictures and checking delivery stay in the original discussion workflow.
 Unconfirmed online sends are read-only, and recovered drafts retain their separate
-dependent-work discard requirements. Queued commands are inspectable/copyable but
-cannot be replayed or mutated from this browser.
+dependent-work discard requirements. Queued body commands are inspectable/copyable but cannot be replayed or mutated
+from this browser. A later [reaction-cancellation increment](comment-reaction-cancellation-preview.md)
+adds explicit delivery-aware cancellation for standalone reactions.
 
 Pages contain ten items, with a maximum API page size of twenty. Draft reads use
 a primary-key range; waiting changes use the existing state index, seek past the
@@ -55,6 +56,6 @@ Native pagination, picture-only recovery, uncertain-send and discard flows,
 physical mobile/touch, popouts and broader accessibility acceptance remain.
 Removing the entire shared-folder connection still removes its session from the
 storage chooser; historical disconnected-store recovery needs a separate design.
-Reviewed import, recovery to a different target, standalone reaction cleanup and
-coherent shared-discussion/service backup/restore also remain. This preview is
+Reviewed import, recovery to a different target and coherent shared-discussion/
+service backup/restore also remain. This preview is
 not the complete collaboration feature's testing-ready release.

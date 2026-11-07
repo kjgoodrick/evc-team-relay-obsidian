@@ -571,6 +571,28 @@ export class DiscussionStore {
 		});
 	}
 
+	/** Cancel only a standalone reaction. Never infer nondelivery from a retry or
+	 * rejected state; attempted work needs an exact authenticated withdrawal. */
+	async retireReaction(original: QueuedCommand, serverWithdrawn = false, current: () => boolean = () => true): Promise<"withdrawn" | "accepted" | "uncertain"> {
+		const identity = (op: QueuedCommand) => canonical({ operationId: op.operationId, scopeId: op.scopeId, type: op.type, payload: op.payload, dependsOn: op.dependsOn });
+		if (original.type !== "reaction.set") throw new Error("Choose a saved reaction to cancel.");
+		const expected = identity(original);
+		return this.transaction(["outbox"], "readwrite", async tx => {
+			if (!current()) throw new Error("This reaction review is no longer current.");
+			const outbox = tx.objectStore("outbox"), saved: OutboxOperation | undefined = await request(outbox.get(original.operationId));
+			if (!saved || identity(saved) !== expected || saved.replacementId) throw new Error("The saved reaction changed. Review it again.");
+			if (saved.state === "accepted") return "accepted";
+			if (saved.state === "withdrawn") return "withdrawn";
+			const dependents: OutboxOperation[] = await request(outbox.index("dependency").getAll(saved.operationId, 101));
+			if (dependents.length > 100 || dependents.some(op => op.state !== "accepted" && op.state !== "withdrawn")) throw new Error("Other saved work depends on this reaction. Review those changes first.");
+			if (!serverWithdrawn && (saved.state !== "queued" || saved.attempt !== 0 || saved.lease)) return "uncertain";
+			saved.state = "withdrawn"; delete saved.lease; delete saved.error;
+			await request(outbox.put(saved));
+			if (!current()) throw new Error("This reaction review is no longer current.");
+			return "withdrawn";
+		});
+	}
+
 	async getOperation(id: string): Promise<OutboxOperation | undefined> {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
 	}

@@ -103,6 +103,10 @@ export class PendingComments {
 			edit.disabled = op.state !== "review" && (!canRetry || !this.session.canRecoverSavedCommand);
 			edit.onclick = () => this.review?.(op);
 		}
+		if (this.review && op.type === "reaction.set") {
+			const cancel = box.createEl("button", { text: "Cancel saved reaction", attr: { type: "button" } });
+			cancel.onclick = () => this.review?.(op);
+		}
 		if (hasPictures && op.state !== "review") {
 			const repair = box.createEl("button", { text: "Refresh picture uploads and retry", attr: { type: "button" } });
 			repair.disabled = !canRetry || !this.session.canRepairPictures;

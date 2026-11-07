@@ -276,3 +276,36 @@ integration("withdrawn comments recover as edited drafts without duplicate sends
 		await expect(transport.thread(fixture.entry, discardedThread)).rejects.toMatchObject({ status: 404 });
 	} finally { stop?.(); await session.close(); }
 }, 30_000);
+
+integration("reaction cancellation reconciles uncertain delivery without reversing posted reactions", async () => {
+	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; owner: string; ownerToken: string };
+	if (new URL(fixture.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const identity = { serverId: fixture.base, accountId: fixture.owner, shareId: fixture.share, vaultId: "reaction-cancel-owner" };
+	let loseWithdrawal = true;
+	const transport = new DiscussionTransport(identity, async () => ({ accountId: fixture.owner, accessToken: fixture.ownerToken }), async (url, init) => {
+		const response = await fetch(url, init);
+		if (loseWithdrawal && url.endsWith("/commands/withdraw") && response.ok) { loseWithdrawal = false; await response.text(); throw new Error("Lost cancellation response"); }
+		return response;
+	});
+	const store = await DiscussionStore.open(identity, new IDBFactory()), session = new DiscussionSession(store, transport);
+	let stop: (() => void) | undefined;
+	try {
+		await session.start(); stop = session.watch(fixture.entry, () => {}); await session.refresh(); session.outbox.stop(); await session.outbox.settled();
+		const thread = randomUUID(), message = randomUUID();
+		await transport.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
+			type: "thread.create", thread_id: thread, message_id: message, anchor: { version: 1, type: "note" }, body: protocolJson(bodyFromText("Reaction cancellation fixture")) } });
+		const command = (emoji: string, present = true): QueuedCommand => ({ operationId: randomUUID(), scopeId: fixture.entry, type: "reaction.set", dependsOn: [],
+			payload: { type: "reaction.set", thread_id: thread, message_id: message, emoji, present } });
+		const cancelled = await store.enqueue(command("heart"), 1); await store.claimNext("worker", 2);
+		await expect(session.cancelSavedReaction(cancelled, () => true)).rejects.toMatchObject({ action: "retry" });
+		expect((await store.getOperation(cancelled.operationId))?.state).toBe("sending");
+		await expect(transport.send(cancelled)).rejects.toMatchObject({ code: "operation_withdrawn" });
+		expect(await session.cancelSavedReaction(cancelled, () => true)).toBe("withdrawn");
+		expect((await transport.thread(fixture.entry, thread)).messages[0].reactions).toEqual([]);
+		const delivered = await store.enqueue(command("thumbs_up"), 3); await store.claimNext("worker", 4); await transport.send(delivered);
+		expect(await session.cancelSavedReaction(delivered, () => true)).toBe("accepted"); expect((await store.getOperation(delivered.operationId))?.state).toBe("accepted");
+		const removal = await store.enqueue(command("thumbs_up", false), 5); session.setForeground(false);
+		expect(await session.cancelSavedReaction(removal, () => true)).toBe("withdrawn");
+		expect((await transport.thread(fixture.entry, thread)).messages[0].reactions).toEqual([{ emoji: "thumbs_up", count: 1, mine: true }]);
+	} finally { stop?.(); await session.close(); }
+}, 30_000);

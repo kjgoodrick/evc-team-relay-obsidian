@@ -2,9 +2,10 @@ import { Modal, type App } from "obsidian";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { Draft, OutboxOperation } from "../storage/DiscussionStore";
 import type { LocalDraftItem, WaitingCursor } from "../storage/LocalWorkPage";
-import { isRecord, parseBody } from "../DiscussionProtocol";
+import { isRecord, parseBody, REACTIONS } from "../DiscussionProtocol";
 import { commentBodyText } from "./CommentBody";
 import { readCommentDraft } from "./CommentDraft";
+import { CancelReactionModal } from "./CancelReaction";
 import { CommentComposer } from "./CommentComposer";
 import { copyToClipboard } from "../../utils/clipboard";
 
@@ -17,6 +18,10 @@ function draftText(draft: Draft): string {
 	try { return readCommentDraft(draft.body).text; } catch { return "This draft could not be read. Save a recovery copy before changing it."; }
 }
 function operationText(operation: OutboxOperation): string {
+	if (operation.type === "reaction.set" && isRecord(operation.payload)) {
+		const emoji = REACTIONS[String(operation.payload.emoji) as keyof typeof REACTIONS];
+		return `${operation.payload.present ? "Add" : "Remove"} reaction${emoji ? ": " + emoji : ""}`;
+	}
 	if (!isRecord(operation.payload) || operation.payload.body === undefined) return operationLabels[operation.type];
 	try { return commentBodyText(parseBody(operation.payload.body), () => "Member"); }
 	catch { return "This saved change could not be displayed. Save a recovery copy before changing it."; }
@@ -29,6 +34,7 @@ export class CommentLocalWorkModal extends Modal {
 	private generation = 0;
 	private stop?: () => void;
 	private composer?: CommentComposer;
+	private reaction?: CancelReactionModal;
 	private mode: "drafts" | "waiting" = "drafts";
 	private draftPages: (string | undefined)[] = [undefined];
 	private waitingPages: (WaitingCursor | undefined)[] = [undefined];
@@ -38,7 +44,7 @@ export class CommentLocalWorkModal extends Modal {
 	constructor(app: App, private session: DiscussionSession, private context: () => boolean) { super(app); }
 	private accountCurrent = () => this.context() && this.session.status !== "closed";
 	private current = () => this.live && this.accountCurrent();
-	validate(): void { if (this.live && !this.current()) this.close(); }
+	validate(): void { if (this.live && !this.current()) this.close(); else this.reaction?.validate(); }
 	async onOpen(): Promise<void> {
 		this.setTitle("Saved comment work");
 		this.stop = this.session.onChange(() => { this.validate(); if (this.current()) this.composer?.update(); });
@@ -114,7 +120,11 @@ export class CommentLocalWorkModal extends Modal {
 		card.createEl("h3", { text: `${operationLabels[operation.type]} · ${stateLabels[operation.state]}` });
 		card.createEl("p", { text: operationText(operation).slice(0, 1000) });
 		card.createEl("p", { text: `Saved ${new Date(operation.createdAt).toLocaleString()} · ${operation.dependsOn.length} dependencies` });
-		card.createEl("p", { text: "This saved command is read-only here. Check delivery and review recovery from the original discussion before changing or sending it again." });
+		card.createEl("p", { text: operation.type === "reaction.set" ? "Cancellation checks delivery before retiring this change. It never sends an opposite reaction." : "This saved command is read-only here. Check delivery and review recovery from the original discussion before changing or sending it again." });
+		if (operation.type === "reaction.set") {
+			const cancel = card.createEl("button", { text: "Cancel saved reaction", attr: { type: "button" } });
+			cancel.onclick = () => { if (!this.current()) return; this.reaction?.close(); this.reaction = new CancelReactionModal(this.app, this.session, operation, this.current); this.reaction.open(); };
+		}
 		this.copy(card, () => operationText(operation));
 	}
 	private openDraft(draft: Draft): void {
@@ -129,7 +139,7 @@ export class CommentLocalWorkModal extends Modal {
 		this.copy(this.contentEl, () => this.composer?.textarea.value ?? "");
 	}
 	onClose(): void {
-		this.live = false; this.generation++; this.stop?.(); this.stop = undefined;
+		this.live = false; this.reaction?.close(); this.reaction = undefined; this.generation++; this.stop?.(); this.stop = undefined;
 		this.composer?.dispose(); this.composer = undefined; this.contentEl.empty();
 	}
 }
