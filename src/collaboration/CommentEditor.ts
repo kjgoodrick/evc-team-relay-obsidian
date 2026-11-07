@@ -1,3 +1,4 @@
+import type { LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { StateEffect, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { editorInfoField, Menu, type Editor, type TFile } from "obsidian";
@@ -12,7 +13,7 @@ import { editorImageTargets, type RenderedImageTarget } from "./anchors/rendered
 import type { ImageOccurrence } from "./anchors/images";
 
 const refreshComments = StateEffect.define<null>();
-export type CapturedCommentSelection<A extends DiscussionAnchor = WireTextAnchor> = { file: TFile; session: DiscussionSession; entryId: string; anchor: A };
+export type CapturedCommentSelection<A extends LocalDiscussionAnchor = WireTextAnchor> = { file: TFile; session: DiscussionSession; entryId: string; anchor: A };
 export type ImageCommentContext = { file: TFile; session: DiscussionSession; entryId: string; text: Y.Text; generation: string; position?: number; current: () => boolean };
 export interface CommentEditorSurface {
 	imageContext?(writable?: boolean): ImageCommentContext;

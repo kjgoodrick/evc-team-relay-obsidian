@@ -26,7 +26,7 @@ export type CommandResult = {
 };
 export interface DiscussionSender {
 	readonly identity: Readonly<DiscussionIdentity>;
-	send(operation: QueuedCommand): Promise<CommandResult | PictureMetadata>;
+	send(operation: QueuedCommand, current?: () => boolean): Promise<CommandResult | PictureMetadata>;
 }
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

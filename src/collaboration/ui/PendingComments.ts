@@ -5,8 +5,15 @@ import { commentBodyText, renderCommentBody } from "./CommentBody";
 import { commandPictures } from "../storage/PictureRecords";
 
 const failureHelp: Record<string, string> = {
+	base_groups_disabled: "Group comments are disabled on this server. Your saved comment and group selection are retained.",
+	base_group_source_changed: "The source of this group changed after selection. Your original comment and target are retained for review.",
+	base_group_value_changed: "This group no longer matches the captured source. Review the current group before choosing another target; your saved work is retained.",
+	base_group_value_unavailable: "This group value could not be verified. Your saved work is retained for review.",
+	base_group_adapter_unavailable: "This kind of group is not supported by the server yet. Your saved comment is retained.",
+	base_group_limit: "This view has reached its group discussion limit. Your saved comment is retained.",
+	base_group_witness_limit: "This group has reached its source evidence limit. Your saved comment is retained.",
 	base_formula_cells_disabled: "Formula cell comments are disabled on this server. Your saved work is retained; retry after support is restored.",
-	base_target_definition_changed: "The formula or summary definition changed after capture. Your saved comment retains its original target. Review the current definition before choosing a new target.",
+	base_target_definition_changed: "The formula, summary or group definition changed after capture. Your saved comment retains its original target. Review the current definition before choosing a new target.",
 	base_target_definition_unavailable: "The captured definition is unavailable in this saved view. Your comment and original target are retained for review.",
 	base_definition_targets_disabled: "Formula and summary comments are disabled on this server. Your saved work is retained; retry after support is restored.",
 	base_view_unavailable: "This saved view is archived or needs an association review. The comment keeps its original view; restore that association before retrying.",

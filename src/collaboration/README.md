@@ -71,16 +71,39 @@ read grants and both threads after a fully offline reload. Native image-cell
 and CSV-record sends, draft reload and offline CSV queue/reload also passed.
 Native record tests use an owner; reviewer enforcement has actual HTTP evidence.
 
-Group protocol support now decodes bounded typed values, negotiates the explicit
-server capability, and submits immutable capture requests to the private-source
-backed endpoint. A group anchor contains both a stable group ID and the exact
-source witness used for its thread's authorization. Cache version 13 retains
-existing data and fences workers that cannot decode these anchors. The actual
-Python/Rust/Yjs fixture covers delete-only dependency waiting, lost capture
-responses, source denial, relay restart and retained verified anchors/drafts/
-queued comments through a database reopen. Native group selection, markers,
-navigation and new offline capture intents remain to implement; protocol support
-does not make the native group-comment feature ready for testing.
+Group protocol support decodes bounded typed values, negotiates the explicit
+server capability and submits immutable capture requests to the private-source
+backed endpoint. A verified group anchor contains a stable group ID and the exact
+source witness used for its thread's authorization.
+
+New group selections can now remain local as `base_group_pending` draft targets.
+They retain the source generation, Yjs snapshot, typed value, definition revision
+and timezone. The session can capture from cached read-side source lineage while
+offline; source comment permission is not required. Public anchor parsing rejects
+these local targets. Cache version 14 preserves existing data and closes older
+workers that cannot safely deliver this operation type.
+
+The ordinary outbox handles `base.group.create` in two phases: capture with its
+own immutable operation ID, then persist the verified anchor under the worker's
+current lease before sending a normal `thread.create`. The comment operation ID,
+message body, thread ID and original selection do not change. Both lost capture
+responses and lost thread responses recover through database reopen. Expired,
+replaced or stopped workers cannot advance from capture to comment delivery.
+Pictures retain ordinary upload dependencies. Recovery can atomically fence an
+unprepared local group intent; after preparation it must withdraw the exact wire
+command before replacing expired uploads. Original drafts/commands remain
+available for review when current permissions or definitions reject delivery.
+
+The composer and draft chooser retain/display pending targets through recreation.
+The actual Python/Rust/Yjs fixture now creates a previously unverified offline
+intent and loses both accepted responses across reopen, in addition to checking
+delete-only dependencies, source denial, relay restart and historical targets.
+Focused tests cover lease races, stop, storage failures, proof mismatch, dependent
+replies, picture recovery and offline source-read capture. The plugin regression
+suite passes 2,099 tests; preview build/main TypeScript and existing test-type
+gates pass. Native group selection, source conversion, markers/navigation and
+integrated native acceptance remain unfinished. This does not yet make native
+group commenting available to users.
 
 Actual HTTP session tests cover separate views, offline restart/delivery, cache
 revocation/regrant and retained drafts. Desktop Obsidian tests capture/send all

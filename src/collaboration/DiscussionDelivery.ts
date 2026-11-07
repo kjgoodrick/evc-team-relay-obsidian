@@ -1,6 +1,8 @@
 import { DiscussionFailure, type DiscussionSender, type DiscussionTransport } from "./DiscussionTransport";
 import { parsePictureUpload } from "./PictureProtocol";
-import type { DiscussionStore, QueuedCommand } from "./storage/DiscussionStore";
+import { parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "./LocalDiscussionAnchor";
+import { protocolJson } from "./DiscussionProtocol";
+import type { DiscussionStore, OutboxOperation, QueuedCommand } from "./storage/DiscussionStore";
 
 /** The normal outbox owns ordering, leases and retry policy for uploads too.
  * Upload commands never reach the discussion command endpoint.
@@ -8,7 +10,24 @@ import type { DiscussionStore, QueuedCommand } from "./storage/DiscussionStore";
 export class DiscussionDelivery implements DiscussionSender {
 	readonly identity;
 	constructor(private store: DiscussionStore, private transport: DiscussionTransport, private canUpload: () => boolean = () => true) { this.identity = transport.identity; }
-	async send(operation: QueuedCommand) {
+	async send(operation: QueuedCommand | OutboxOperation, current: () => boolean = () => true) {
+		if (operation.type === "base.group.create") {
+			if (!("lease" in operation) || !operation.lease) throw new DiscussionFailure("pause", "group_capture_lease_required");
+			const active = () => { if (!current()) throw new DiscussionFailure("retry", "local_operation_stopped"); };
+			active();
+			let saved = await this.store.prepareBaseGroup(operation.operationId, operation.lease);
+			if (!saved) throw new DiscussionFailure("retry", "local_operation_changed");
+			active();
+			if (saved.preparedAnchor === undefined) {
+				const pending = parsePendingBaseGroupCommand(saved);
+				const anchor = await this.transport.captureBaseGroup(saved.scopeId, pending.anchor.capture);
+				active();
+				saved = await this.store.prepareBaseGroup(saved.operationId, operation.lease, protocolJson(anchor));
+				if (!saved) throw new DiscussionFailure("retry", "local_operation_changed");
+			}
+			active();
+			return this.transport.send(prepareBaseGroupCommand(saved, saved.preparedAnchor));
+		}
 		if (operation.type !== "picture.upload") return this.transport.send(operation);
 		if (!this.canUpload()) throw new DiscussionFailure("reject", "pictures_disabled");
 		let upload;

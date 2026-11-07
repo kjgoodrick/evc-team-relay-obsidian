@@ -1,3 +1,4 @@
+import type { LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { Component, FileView, MarkdownView, Notice, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { AuthSession } from "../AuthSession";
@@ -8,7 +9,7 @@ import { DiscussionSession, type BaseTargetSelection } from "./DiscussionSession
 import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { DiscussionTransport } from "./DiscussionTransport";
 import { DiscussionStore } from "./storage/DiscussionStore";
-import { isId, isBaseRecordType, protocolJson, type DiscussionAnchor, type BaseAnchor } from "./DiscussionProtocol";
+import { isId, isBaseRecordType, protocolJson, type BaseAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
 import { commentEditorExtension, type CommentEditorSurface, type CapturedCommentSelection, type ImageCommentContext } from "./CommentEditor";
 import { BlockSelectionError } from "./anchors/blocks";
@@ -472,7 +473,7 @@ export class DiscussionHost extends Component {
 			await this.saveCommentSelection(surface.capture(blocks));
 		} catch (error) { new Notice(error instanceof BlockSelectionError ? error.message : "The selection could not be saved. Check comment access and wait for the shared editor to finish synchronizing, then try again."); }
 	}
-	async saveCommentSelection({ session, entryId, file, anchor }: CapturedCommentSelection<DiscussionAnchor>): Promise<boolean> {
+	async saveCommentSelection({ session, entryId, file, anchor }: CapturedCommentSelection<LocalDiscussionAnchor>): Promise<boolean> {
 		try {
 			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session && this.targetFor(file).entryId === entryId && session.permission(entryId)?.comment;
 			if (!current()) return false;
@@ -494,7 +495,8 @@ export class DiscussionHost extends Component {
 		this.lastFile = file; this.focus = { session, entryId, threadId, serial: ++this.focusSerial };
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
-	targetLabel(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): string | undefined {
+	targetLabel(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): string | undefined {
+		if (anchor.type === "base_group_pending") return "Group: " + anchor.property.source + "." + anchor.property.name + " (verification pending)";
 		if (anchor.type !== "base" || parseDiscussionScope(entryId)?.viewId !== anchor.view_id) return;
 		const target = anchor.target;
 		if (target.type === "view") return "Entire saved view";
@@ -508,10 +510,13 @@ export class DiscussionHost extends Component {
 		const record = paths.length === 1 ? paths[0] : "Unavailable record (" + target.record_id.slice(0, 8) + ")";
 		return target.type === "item" ? "Record: " + record : "Cell: " + record + " · " + target.property.source + "." + target.property.name;
 	}
-	async revealTarget(session: DiscussionSession, entryId: string, anchor: DiscussionAnchor): Promise<void> {
+	async revealTarget(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): Promise<void> {
 		const available = () => !this.stopped && session.status !== "closed" && session.permission(entryId)?.read;
 		if (!available()) return;
 		const workspace = this.plugin.app.workspace;
+		if (anchor.type === "base_group_pending") {
+			new Notice("This group selection is saved with your draft. It will be verified when your comment is sent after reconnecting."); return;
+		}
 		try {
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);

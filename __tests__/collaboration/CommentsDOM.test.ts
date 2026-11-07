@@ -369,3 +369,25 @@ test("a corrupt saved target keeps draft text selectable and never submits as a 
 		await composer.submit(); expect(session.queue).not.toHaveBeenCalled();
 	} finally { composer.dispose(); store.close(); }
 });
+
+test("pending group drafts survive composer recreation and enqueue evidence without fabricating a verified anchor", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div"), scope = baseDiscussionScope(entry, id(4));
+	const target = { version: 1, type: "base_group_pending", entry_id: entry, property: { source: "note", name: "status" }, capture: {
+		operation_id: id(5), definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 2, group_definition_id: id(8),
+		group_definition_revision: 2, record_id: id(9), record_generation: id(10), dependency: "AA==", time_zone: "UTC", value: { type: "text", value: "Done" } } };
+	const draftId = "selection:" + scope + ":group", begin = jest.fn().mockResolvedValue(undefined);
+	await store.saveDraft({ id: draftId, scopeId: scope, revision: 0, body: "Offline group comment", target });
+	await store.setPreference("activeNewDraft:" + scope, draftId);
+	let drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
+	try {
+		await until(() => parent.querySelector("textarea")?.value === "Offline group comment");
+		expect(parent.textContent).toContain("Group: status (verification pending)");
+		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
+		await until(() => parent.querySelector("textarea")?.value === "Offline group comment");
+		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await until(() => session.queue.mock.calls.length === 1);
+		expect(session.queue.mock.calls[0][0]).toMatchObject({ scopeId: scope, type: "base.group.create", payload: { anchor: target } });
+		await until(() => !parent.querySelector("textarea"));
+		expect((await store.pending(scope))[0].payload).toMatchObject({ anchor: target });
+	} finally { drafts.dispose(); await new Promise(resolve => setTimeout(resolve, 10)); store.close(); }
+});

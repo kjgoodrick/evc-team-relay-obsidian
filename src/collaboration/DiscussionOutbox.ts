@@ -74,7 +74,7 @@ export class DiscussionOutbox {
 			if (!this.valid(generation)) return;
 			if (!op) break;
 			try {
-				const result = await this.sender.send(op);
+				const result = await this.sender.send(op, () => this.valid(generation));
 				if (!this.valid(generation)) return;
 				await this.store.accept(op.operationId, result);
 			} catch (error) {

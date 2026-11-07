@@ -1,4 +1,7 @@
 import { v4 as uuid } from "uuid";
+import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
+import { copyBaseGroupCapture, type BaseGroupCapture } from "./BaseGroupProtocol";
+import { parseBaseGroupValue } from "./BaseGroupValue";
 import { DiscussionOutbox } from "./DiscussionOutbox";
 import { DiscussionDelivery } from "./DiscussionDelivery";
 import { DiscussionPictures } from "./DiscussionPictures";
@@ -352,7 +355,19 @@ export class DiscussionSession {
 	}
 	async queue(command: QueuedCommand, draft?: Pick<Draft, "id" | "revision">): Promise<void> {
 		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment permission is required.");
-		queuedEnvelope(this.identity.shareId, command);
+		if (command.type === "base.group.create") {
+			const pending = parsePendingBaseGroupCommand(command), anchor = pending.anchor, capture = anchor.capture;
+			const context = await this.cachedBaseContext(command.scopeId, capture.record_id);
+			const catalog = await this.readBaseDefinitions(command.scopeId);
+			const definition = catalog.targets.find(item => item.kind === "group" && item.id === capture.group_definition_id);
+			if (this.closed || !this.permission(command.scopeId)?.comment || this.entries.get(command.scopeId)?.kind !== "base" ||
+				!this.canAnchorBase("group") || this.documentGeneration(command.scopeId) !== capture.generation ||
+				!context || context.definition_id !== capture.definition_id || context.generation !== capture.generation ||
+				context.record_generation !== capture.record_generation || catalog.definition_id !== capture.definition_id ||
+				catalog.generation !== capture.generation || catalog.registry_revision < capture.registry_revision ||
+				!definition || definition.revision !== capture.group_definition_revision || definition.property.source !== anchor.property.source ||
+				definition.property.name !== anchor.property.name) throw new Error("Review this group's saved selection before sending. Your draft is retained.");
+		} else queuedEnvelope(this.identity.shareId, command);
 		if (!this.canAttachPictures) {
 			for (const id of commandPictures(command.payload)) if (await this.store.pictureSource(id, command.scopeId) &&
 				(await this.store.getOperation(id))?.state !== "accepted") throw new Error("Pictures are not enabled on this server.");
@@ -437,6 +452,23 @@ export class DiscussionSession {
 			if (!current() || !context || context.generation !== generation) throw new Error("Connect to verify this saved target before navigating offline.");
 			return context;
 		})());
+	}
+	/** Save exact local evidence now; the ordinary outbox verifies it after reconnect.
+	 * Group witnesses require source read access, not source comment permission. */
+	async captureBaseGroupSelection(scopeId: string, input: Pick<BaseGroupCapture, "group_definition_id" | "group_definition_revision" |
+		"record_id" | "record_generation" | "dependency" | "time_zone" | "value">): Promise<PendingBaseGroupAnchor> {
+		const selected = { ...input, value: parseBaseGroupValue(input.value) };
+		if (!this.canAnchorBase("group") || !this.permission(scopeId)?.comment) throw new Error("Group comments are unavailable in this saved view.");
+		const context = await this.readBaseContext(scopeId, selected.record_id), catalog = await this.readBaseDefinitions(scopeId);
+		const definition = catalog.targets.find(item => item.kind === "group" && item.id === selected.group_definition_id);
+		if (this.closed || !this.canAnchorBase("group") || !this.permission(scopeId)?.comment ||
+			!definition || definition.revision !== selected.group_definition_revision || context.record_generation !== selected.record_generation ||
+			context.definition_id !== catalog.definition_id || context.generation !== catalog.generation || context.registry_revision > catalog.registry_revision ||
+			this.documentGeneration(scopeId) !== catalog.generation) throw new Error("The group or its source changed. Select it again; existing drafts are retained.");
+		const capture = copyBaseGroupCapture({ ...selected, operation_id: uuid(), definition_id: catalog.definition_id, view_id: catalog.view_id,
+			generation: catalog.generation, registry_revision: catalog.registry_revision });
+		return parseLocalDiscussionAnchor({ version: 1, type: "base_group_pending", entry_id: catalog.entry_id,
+			property: definition.property, capture }) as PendingBaseGroupAnchor;
 	}
 	async captureBaseTarget(scopeId: string, target: BaseTargetSelection): Promise<BaseAnchor> {
 		const scope = parseDiscussionScope(scopeId), entry = this.entries.get(scopeId);
@@ -557,6 +589,7 @@ export class DiscussionSession {
 	async retryRejected(operation: OutboxOperation): Promise<boolean> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check comment permission before retrying.");
 		if (operation.type === "picture.upload") parsePictureUpload(operation.payload);
+		else if (operation.type === "base.group.create") parsePendingBaseGroupCommand(operation);
 		else queuedEnvelope(this.identity.shareId, operation);
 		const retried = await this.trackLocal(this.store.retryRejected(operation.operationId, operation.scopeId, operation.attempt));
 		if (!this.closed) { this.broadcast(); this.outbox.wake(); this.notify(); }
@@ -564,7 +597,8 @@ export class DiscussionSession {
 	}
 	async repairPictures(operation: OutboxOperation): Promise<"accepted" | "requeued"> {
 		if (!this.canRepairPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect with picture and comment permission before repairing uploads.");
-		queuedEnvelope(this.identity.shareId, operation);
+		if (operation.type === "base.group.create") parsePendingBaseGroupCommand(operation);
+		else queuedEnvelope(this.identity.shareId, operation);
 		return this.trackLocal((async () => {
 			const current = await this.store.getOperation(operation.operationId);
 			if (!current || current.scopeId !== operation.scopeId) throw new Error("Saved comment changed during recovery.");
@@ -577,7 +611,12 @@ export class DiscussionSession {
 			}
 			if (!replacements.length) throw new Error("No saved picture originals are available for this comment.");
 			if (!this.canRepairPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before repairing this comment.");
-			const outcome = await this.transport.withdraw(operation);
+			if (current.type === "base.group.create" && current.preparedAnchor === undefined) {
+				await this.store.replacePicturesAfterWithdrawal(operation, uuid(), replacements, Date.now(), true);
+				return "requeued" as const;
+			}
+			const wire = current.type === "base.group.create" ? prepareBaseGroupCommand(current, current.preparedAnchor) : operation;
+			const outcome = await this.transport.withdraw(wire);
 			if (outcome.status === "accepted") { await this.store.accept(operation.operationId, protocolJson(outcome.result)); return "accepted" as const; }
 			await this.store.replacePicturesAfterWithdrawal(operation, uuid(), replacements);
 			return "requeued" as const;

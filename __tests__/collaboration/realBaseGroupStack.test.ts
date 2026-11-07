@@ -1,3 +1,5 @@
+import { DiscussionDelivery } from "../../src/collaboration/DiscussionDelivery";
+import { prepareBaseGroupCommand } from "../../src/collaboration/LocalDiscussionAnchor";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -77,17 +79,40 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		expect(await transport.captureBaseGroup(scope, pending)).toEqual(captured);
 		if (first.target.type !== "group" || captured.target.type !== "group") throw new Error("Expected group anchors");
 		expect(first.target.group_id).not.toBe(captured.target.group_id);
-		const op = operation(captured);
-		// A previously verified anchor remains durable while the app is offline.
-		// Capturing a new unverified group offline is a separate integration step.
+		const localTarget = { version: 1, type: "base_group_pending", entry_id: f.baseEntry, property: definition.property,
+			capture: { ...pending, operation_id: randomUUID() } };
+		const op = operation(captured); op.type = "base.group.create";
+		op.payload = { type: "base.group.create", thread_id: randomUUID(), message_id: randomUUID(),
+			anchor: protocolJson(localTarget), body: protocolJson(bodyFromText("Created offline before group verification")) };
 		store = await DiscussionStore.open(storeIdentity, factory);
-		await store.saveDraft({ id: "group", scopeId: scope, revision: 1, body: "Kept offline", target: protocolJson(captured) });
-		await store.enqueue(op); store.close();
+		await store.saveDraft({ id: "group", scopeId: scope, revision: 1, body: "Kept offline", target: protocolJson(localTarget) });
+		await store.enqueue(op, Date.now(), { id: "group", revision: 1 }); store.close();
 		store = await DiscussionStore.open(storeIdentity, factory);
-		expect((await store.getDraft("group"))?.target).toEqual(captured);
-		const queued = (await store.pending(scope))[0]; expect(queued.operationId).toBe(op.operationId);
-		const accepted = await transport.send(queued);
-		expect(await transport.send(op)).toEqual(accepted);
+		expect(await store.getDraft("group")).toBeUndefined();
+		expect((await store.pending(scope))[0].payload).toEqual(op.payload);
+		let loseCapture = true, loseSend = true;
+		const twoPhase = new DiscussionTransport(identity, credential, async (url, options) => {
+			const response = await fetch(url, options);
+			if (response.ok && (loseCapture && String(url).endsWith("/group-targets") || loseSend && String(url).endsWith("/commands"))) {
+				if (String(url).endsWith("/group-targets")) loseCapture = false; else loseSend = false;
+				await response.text(); throw new Error("Synthetic accepted response loss");
+			}
+			return response;
+		});
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const leased = (await store.claimNext("offline-" + attempt))!;
+			await expect(new DiscussionDelivery(store, twoPhase).send(leased)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
+			expect((await store.getOperation(op.operationId))?.preparedAnchor).toEqual(attempt ? captured : undefined);
+			await store.fail(op.operationId, leased.lease!, "network_unavailable", 0); store.close();
+			store = await DiscussionStore.open(storeIdentity, factory);
+		}
+		const leased = (await store.claimNext("restarted"))!;
+		const accepted = await new DiscussionDelivery(store, twoPhase).send(leased);
+		if (!("thread_id" in accepted)) throw new Error("Expected discussion acceptance");
+		await store.accept(op.operationId, protocolJson(accepted));
+		expect((await store.getOperation(op.operationId))?.state).toBe("accepted");
+		expect(await transport.send(prepareBaseGroupCommand(op, leased.preparedAnchor))).toEqual(accepted);
+
 		expect((await transport.thread(scope, historical.thread_id)).anchor).toEqual(first);
 		expect((await transport.thread(scope, accepted.thread_id)).anchor).toEqual(captured);
 		await expect(transport.captureBaseGroup(scope, { ...pending, operation_id: randomUUID(), record_id: f.secret }))

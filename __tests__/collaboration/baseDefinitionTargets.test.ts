@@ -177,3 +177,55 @@ test("readers can inspect definitions without gaining capture authority and stal
 		await expect(s.session.readBaseDefinitions(scope)).rejects.toThrow("Connect to verify");
 	} finally { await s.session.close(); }
 });
+
+function groupRemote() {
+	const transport = remote();
+	transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "group"], baseRecordTypes: ["markdown"] });
+	transport.baseDefinitions.mockResolvedValue({ ...catalog(), targets: [{ id: id(10), kind: "group", revision: 2,
+		fingerprint: "a".repeat(64), property: { source: "note", name: "status" } }] });
+	transport.baseTargetContext.mockImplementation(async (_scope, _view, record?: string) => ({ ...catalog(),
+		...(record ? { record_id: record, record_generation: id(21) } : {}) }));
+	transport.permissions.mockImplementation(async key => ({ read: true, comment: key !== id(20), edit: false, moderate: false }));
+	return transport;
+}
+const groupSelection = () => ({ group_definition_id: id(10), group_definition_revision: 2, record_id: id(20), record_generation: id(21),
+	dependency: "AA==", time_zone: "UTC", value: { type: "text" as const, value: "Done" } });
+
+test("new offline group capture uses cached source read lineage and never requires source comment permission", async () => {
+	const factory = new IDBFactory(); let s = await open(factory, groupRemote());
+	try {
+		await s.session.readBaseContext(scope, id(20)); await s.session.readBaseDefinitions(scope); await s.session.close();
+		const offline = groupRemote();
+		for (const method of [offline.capabilities, offline.permissions, offline.baseTargetContext, offline.baseDefinitions, offline.changes]) {
+			method.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		}
+		s = await open(factory, offline);
+		const captured = await s.session.captureBaseGroupSelection(scope, groupSelection());
+		expect(captured).toMatchObject({ type: "base_group_pending", capture: groupSelection() });
+		await s.store.saveDraft({ id: "offline-group", scopeId: scope, revision: 0, body: "Keep me", target: protocolJson(captured) });
+		const pending = { operationId: id(30), scopeId: scope, type: "base.group.create" as const, dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Offline group comment"), anchor: captured }) };
+		await s.session.queue(pending, { id: "offline-group", revision: 0 });
+		expect(await s.store.getDraft("offline-group")).toBeUndefined(); expect((await s.store.pending(scope))[0].payload).toEqual(pending.payload);
+		await expect(s.session.captureBaseGroupSelection(scope, { ...groupSelection(), record_id: id(99) })).rejects.toThrow("Connect to verify");
+		expect(offline.permissions.mock.calls.map(call => call[0])).not.toContain(id(20));
+	} finally { await s.session.close(); }
+});
+
+test("capture freezes local value before asynchronous verification and rejects changed source lineage", async () => {
+	const s = await open(new IDBFactory(), groupRemote());
+	try {
+		const selection = groupSelection(), flight = s.session.captureBaseGroupSelection(scope, selection);
+		selection.value.value = "Changed"; selection.dependency = "AQ==";
+		const captured = await flight;
+		expect(captured.capture.value).toEqual({ type: "text", value: "Done" }); expect(captured.capture.dependency).toBe("AA==");
+		await expect(s.session.captureBaseGroupSelection(scope, { ...groupSelection(), record_generation: id(99) })).rejects.toThrow("source changed");
+		await s.store.saveDraft({ id: "group", scopeId: scope, revision: 0, body: "Keep me", target: protocolJson(captured) });
+		s.transport.baseDefinitions.mockResolvedValue({ ...catalog(3), targets: [{ id: id(10), kind: "group", revision: 3,
+			fingerprint: "b".repeat(64), property: { source: "note", name: "status" } }] });
+		await expect(s.session.queue({ operationId: id(30), scopeId: scope, type: "base.group.create", dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Keep me"), anchor: captured }) }, { id: "group", revision: 0 }))
+			.rejects.toThrow("draft is retained");
+		expect((await s.store.getDraft("group"))?.target).toEqual(captured); expect(await s.store.pending(scope)).toHaveLength(0);
+	} finally { await s.session.close(); }
+});

@@ -2,13 +2,14 @@
 import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, PICTURE_CACHE_QUOTA, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
 import { isId, isRecord, parseBody, protocolJson } from "../DiscussionProtocol";
+import { parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "../LocalDiscussionAnchor";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
 export interface QueuedCommand {
 	operationId: string;
 	scopeId: string;
-	type: "thread.create" | "reply.create" | "message.edit" | "reaction.set" | "picture.upload";
+	type: "thread.create" | "reply.create" | "message.edit" | "reaction.set" | "picture.upload" | "base.group.create";
 	payload: Json;
 	dependsOn: string[];
 }
@@ -20,6 +21,8 @@ export interface OutboxOperation extends QueuedCommand {
 	nextAttemptAt: number;
 	lease?: { owner: string; attempt: number; expiresAt: number };
 	result?: Json;
+	/** Persisted before the first thread send; original capture/body stay immutable. */
+	preparedAnchor?: Json;
 	error?: string;
 }
 export interface CachedEntity { id: string; revision: number; value: Json }
@@ -75,7 +78,7 @@ function requiredId(value: string): void {
 	if (typeof value !== "string" || value.length < 1 || value.length > 512) throw new Error("Missing or invalid identity");
 }
 
-const commandTypes = new Set(["thread.create", "reply.create", "message.edit", "reaction.set"]);
+const commandTypes = new Set(["thread.create", "reply.create", "message.edit", "reaction.set", "base.group.create"]);
 
 export class DiscussionStore {
 	private constructor(private db: IDBDatabase, readonly identity: Readonly<StoreIdentity>) {}
@@ -83,9 +86,8 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 13 keeps the tables but fences workers that cannot decode
-		// verified group anchors before they claim and reject that saved work.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 13);
+		// Version 14 fences workers that do not understand pending group captures.
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 14);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -376,6 +378,7 @@ export class DiscussionStore {
 			throw new Error("Send and reopen requires an online command");
 		}
 		command = JSON.parse(boundedJson(command as unknown as Json)) as QueuedCommand;
+		if (command.type === "base.group.create") parsePendingBaseGroupCommand(command);
 		return this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
 			const ids = commandPictures(command.payload), uploads = tx.objectStore("outbox");
 			for (const id of ids) {
@@ -422,7 +425,7 @@ export class DiscussionStore {
 
 	/** Atomically replace pictures after the server has fenced the original request. */
 	async replacePicturesAfterWithdrawal(original: QueuedCommand, replacementId: string,
-		replacements: { oldId: string; newId: string }[], now = Date.now()): Promise<string> {
+		replacements: { oldId: string; newId: string }[], now = Date.now(), onlyUnpreparedGroup = false): Promise<string> {
 		// Call only after an authenticated withdrawal. Never change a submitted
 		// payload; keep the original as a tombstone and create a separate request.
 		requiredId(replacementId);
@@ -442,6 +445,9 @@ export class DiscussionStore {
 			if (!previous || previous.scopeId !== original.scopeId || previous.type !== original.type || canonical(previous.payload) !== canonical(original.payload)) throw new Error("Saved command changed during recovery");
 			if (previous.state === "withdrawn" && previous.replacementId) return previous.replacementId;
 			if (previous.state === "accepted" || previous.state === "withdrawn") throw new Error("Saved command was already completed");
+			// An unprepared local group intent cannot have sent a thread. Fence it
+			// in this same transaction; a concurrent capture cannot prepare afterward.
+			if (onlyUnpreparedGroup && (previous.type !== "base.group.create" || previous.preparedAnchor !== undefined)) throw new Error("Group capture advanced during recovery; retry after checking delivery");
 			if (await request(outbox.get(replacementId))) throw new Error("Replacement identity was already used");
 			const map = new Map(prepared.map(item => [item.oldId, item.newId]));
 			for (const { newId } of prepared) {
@@ -597,6 +603,30 @@ export class DiscussionStore {
 				await request(store.put(op)); return op;
 			}
 			return undefined;
+		});
+	}
+
+	/** Lease CAS separates capture from delivery. A stopped/expired worker cannot
+	 * prepare or resume a comment after another window has claimed its operation.
+	 * The original local target remains available for recovery and explanation. */
+	async prepareBaseGroup(operationId: string, lease: { owner: string; attempt: number }, anchor?: Json,
+		now = Date.now()): Promise<OutboxOperation | undefined> {
+		if (anchor !== undefined) anchor = JSON.parse(boundedJson(anchor)) as Json;
+		if (!Number.isFinite(now)) throw new Error("Invalid capture time");
+		return this.transaction(["outbox"], "readwrite", async tx => {
+			const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
+			if (!op || op.type !== "base.group.create" || op.state !== "sending" || op.lease?.owner !== lease.owner ||
+				op.lease.attempt !== lease.attempt || op.lease.expiresAt <= now) return undefined;
+			parsePendingBaseGroupCommand(op);
+			if (op.preparedAnchor !== undefined) {
+				prepareBaseGroupCommand(op, op.preparedAnchor);
+				if (anchor !== undefined && canonical(anchor) !== canonical(op.preparedAnchor)) throw new Error("Group capture receipt changed");
+			} else if (anchor !== undefined) {
+				prepareBaseGroupCommand(op, anchor);
+				op.preparedAnchor = anchor;
+				await request(store.put(op));
+			}
+			return op;
 		});
 	}
 
