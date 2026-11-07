@@ -6,6 +6,8 @@ const identity: LocationIdentity = { serverUrl: "https://relay.example", account
 const note = (n = 4): NoteLocation => ({ kind: "note", share_id: id(5), entry_id: id(n), surface: "editor" });
 const picture = (n = 8): ImageLocation => ({ kind: "image", share_id: id(5), entry_id: id(n), generation: id(9), content_sha256: "a".repeat(64) });
 const base = (n = 12): BaseLocation => ({ kind: "base", share_id: id(5), entry_id: id(10), generation: id(9), definition_id: id(11), view_id: id(n), registry_revision: 1 });
+const baseContext = () => ({ protocol_version: 1, share_id: id(5), entry_id: id(10), generation: id(9), definition_id: id(11), registry_revision: 1, content_sha256: "a".repeat(64),
+	views: [{ id: id(12), slot: 0, name: "Work", type: "table" }] });
 const target = { user_id: id(6), session_id: "a".repeat(32), instance_id: id(7) };
 const jwt = (patch = {}) => Buffer.from('{"alg":"HS256"}').toString("base64url") + "." + Buffer.from(JSON.stringify({ sub: id(1), session_id: id(2), exp: Math.floor(Date.now() / 1000) + 3600, ...patch })).toString("base64url") + ".synthetic";
 const credentials = () => Promise.resolve({ accountId: id(1), accessToken: jwt() });
@@ -27,12 +29,12 @@ class Socket {
 	ready(expiresIn = 3600, protocolVersion = 1) { this.message({ type: "ready", protocol_version: protocolVersion, session_id: "b".repeat(32), instance_id: id(3), expires_at: Math.floor(Date.now() / 1000) + expiresIn }); }
 	disconnect(code = 1006) { this.readyState = 3; this.onclose?.call(this as unknown as WebSocket, { code } as CloseEvent); }
 }
-function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false) {
+function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false, bases = serverSupports) {
 	const sockets: Socket[] = [], status = jest.fn(), location = jest.fn(), followStopped = jest.fn(), roster = jest.fn();
 	const imageStates = jest.fn(), imageEmbeds = jest.fn();
 	let counter = 0;
 	const fetcher = jest.fn(async (url: string) => url.includes("/capabilities?") ? response({ protocol_version: 1, features: { presence_locations_preview: true,
-		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds } : {}) } }) :
+		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds, presence_base_context_preview: bases } : {}) } }) :
 		response({ protocol_version: 1, ticket: "ticket_" + String(++counter).padStart(32, "0"), expires_in: 30, socket_path: "/v1/collaboration/events" }));
 	const options = { credential: jest.fn(credentials), fetcher, status, location, followStopped, roster, surfaceLocations, random: () => 0.5,
 		imageStates: movement ? imageStates : undefined, imageEmbeds: embeds ? imageEmbeds : undefined,
@@ -95,6 +97,42 @@ test("image context uses the session credential and returns only the requested c
 		expect(await f.channel.readImageLocation(id(5), id(8))).toEqual(picture());
 		expect(f.fetcher).toHaveBeenLastCalledWith("https://relay.example/v1/collaboration/image-location?share_id=" + id(5) + "&entry_id=" + id(8), expect.objectContaining({ sensitive: true, headers: { Authorization: expect.stringMatching(/^Bearer /) } }));
 	} finally { f.channel.stop(); }
+});
+
+test("Bases context uses normal credentials and accepts bounded Unicode contexts above the small control-frame budget", async () => {
+	const f = fixture(true), value = { ...baseContext(), views: Array.from({ length: 64 }, (_, slot) => ({ id: id(100 + slot), slot, name: "😀".repeat(254) + String(slot).padStart(2, "0"), type: "😀".repeat(256) })) };
+	try {
+		await ready(f); expect(f.channel.supportsBaseContext).toBe(true);
+		f.fetcher.mockResolvedValueOnce(response(value));
+		expect(await f.channel.readBaseContext(id(5), id(10))).toEqual(value);
+		expect(f.fetcher).toHaveBeenLastCalledWith("https://relay.example/v1/collaboration/base-context?share_id=" + id(5) + "&entry_id=" + id(10), expect.objectContaining({ sensitive: true, method: "GET", headers: { Authorization: expect.stringMatching(/^Bearer /) } }));
+	} finally { f.channel.stop(); }
+});
+
+test.each([false, true])("Bases lookup requires its own negotiated capability (extended server %s)", async extended => {
+	const f = fixture(true, extended, false, false, false);
+	try { await ready(f); await expect(f.channel.readBaseContext(id(5), id(10))).rejects.toThrow(); expect(f.fetcher).toHaveBeenCalledTimes(2); }
+	finally { f.channel.stop(); }
+});
+
+test.each(["identity", "oversized", "protocol", "extra"])("Bases lookup rejects %s responses", async change => {
+	const f = fixture(true), value = { ...baseContext(), ...(change === "identity" ? { entry_id: id(99) } : change === "protocol" ? { protocol_version: 2 } : change === "extra" ? { configuration: {} } : {}) };
+	try {
+		await ready(f); f.fetcher.mockResolvedValueOnce(change === "oversized" ? new Response(" ".repeat(192 * 1024 + 1)) : response(value));
+		await expect(f.channel.readBaseContext(id(5), id(10))).rejects.toThrow();
+	} finally { f.channel.stop(); }
+});
+
+test.each(["disconnect", "stop"])("Bases lookup discards late responses after %s", async action => {
+	const f = fixture(true);
+	try {
+		const socket = await ready(f); let finish!: (value: Response) => void;
+		f.fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		const result = f.channel.readBaseContext(id(5), id(10)), rejected = expect(result).rejects.toThrow();
+		await flush(); if (action === "stop") f.channel.stop(); else socket.disconnect();
+		finish(response(baseContext())); await rejected; expect(f.channel.supportsBaseContext).toBe(false);
+	} finally { f.channel.stop(); }
+	expect(jest.getTimerCount()).toBe(0);
 });
 
 test.each([

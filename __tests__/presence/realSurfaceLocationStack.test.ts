@@ -3,6 +3,7 @@ import type { EmbeddedImage, EmbeddedImagesEvent } from "../../src/collaboration
 import { readFileSync } from "node:fs";
 import { decodeJwt } from "jose";
 import { LocationChannel } from "../../src/collaboration/presence/LocationChannel";
+import { basePresenceLocation } from "../../src/collaboration/presence/BasePresenceProtocol";
 import type { NoteLocation, BaseLocation, ImageLocation, LocationEvent, SurfaceLocation, SurfaceRosterEvent, ImageStatesEvent } from "../../src/collaboration/presence/LocationProtocol";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
@@ -48,6 +49,11 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 		expect(publisher.channel.supportsSurfaceLocations).toBe(true); expect(viewer.channel.supportsSurfaceRoster).toBe(true);
 		expect(viewer.channel.supportsImageContext).toBe(true);
 		expect(await viewer.channel.readImageLocation(image.share_id, image.entry_id)).toEqual(image);
+		expect(viewer.channel.supportsBaseContext).toBe(true);
+		const baseContext = await viewer.channel.readBaseContext(views[0].share_id, views[0].entry_id);
+		expect(baseContext.views.map(view => basePresenceLocation(baseContext, view.id))).toEqual(views);
+		expect(baseContext.views.map(view => view.slot)).toEqual([0, 1]);
+		expect(JSON.stringify(baseContext)).not.toMatch(/filters|configuration|Presence.base/);
 		expect(viewer.channel.supportsImageStates).toBe(true);
 		const state = { pointer: { x: 0.25, y: 0.75 }, viewport: { x: 0, y: 0.5, width: 1, height: 0.5 } }, rosterCount = viewer.rosters.length;
 		publisher.channel.publishImageState(state);

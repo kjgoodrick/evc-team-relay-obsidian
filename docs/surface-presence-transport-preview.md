@@ -7,7 +7,7 @@ Jump/Follow. Notes and images reuse one socket per foreground host/account.
 Direct-image pointer overlays and position-aware Jump/Follow are also connected.
 Embedded-image capture, overlays and Jump/Follow are connected in the foreground
 note as well. These have automated host evidence; native image acceptance,
-visible split-pane image observation and Bases/timeline bindings remain unfinished.
+visible split-pane image observation and Bases/timeline host integration remain unfinished.
 
 ## Transport contract
 
@@ -34,6 +34,35 @@ uses a separate typed message rather than changing the room descriptor.
 Revisions must be positive safe integers. Embedded-image occurrences now have
 a separate typed transport and source-anchor foundation below. Fine-grained
 Bases/timeline state still needs typed extensions and authorization.
+
+## Read-only saved-view context
+
+`presence_base_context_preview` negotiates `readBaseContext(shareId, entryId)`.
+The new `/base-context` endpoint returns the existing definition/generation,
+registry revision, synchronized content hash and at most 64 active saved views
+(ID, slot, name and type). It requires a current normal session and read access;
+it does not require comment permission or an open discussion sidebar. Presence
+and the Bases registry must both be enabled. No registry is initialized or
+repaired, no file is written, and no object-store content is fetched. A missing
+or stale registry remains unavailable until the normal Bases workflow updates it.
+
+One SQL statement reads active identities and their revision together. Archived
+and unmatched views, filters, formulas and record values are omitted. Sparse
+slots are preserved. The client copies/freezes the bounded response, verifies
+the requested share/entry and rejects malformed, duplicated or unordered views.
+Only this context response has a 192 KiB HTTP budget to accommodate 64 Unicode
+view labels; small control responses keep their existing limit. Disconnect or
+account/channel replacement discards late lookup responses.
+
+`NativeBasesSurface.bindPresence` verifies exact disk bytes, current saved runtime
+configuration and every returned view slot before assigning a saved-view identity.
+It is independent of discussion sessions and comment capabilities. Source,
+file-stat, ownership or permission changes invalidate the binding. Guarded view
+activation uses the existing transient native selection method; it requires this
+surface's original binding and respects the integration's navigation guard.
+These adapter methods have automated evidence, including delayed permission loss
+and unchanged saved configuration. Foreground Bases host wiring, participant
+controls, movement and native desktop/mobile acceptance still remain.
 
 ## Direct image binding
 
@@ -112,7 +141,7 @@ text nodes and continue to enforce local surface/account ownership.
 
 ## Validation
 
-The full plugin suite passes **2,623 tests in 215 suites**; 17 opt-in tests in 16
+The full plugin suite passes **2,669 tests in 216 suites**; 17 opt-in tests in 16
 suites are skipped in that default run. Preview build/main types and changed
 source/test lint pass. The build retains 15 existing Svelte warnings. The frozen
 test-type gate passes with 206 known errors/45 signatures, below its 207/46
@@ -126,11 +155,14 @@ separation, same-socket renewal, reconnect, no automatic Follow restart, idle
 read revocation and socket cleanup. It also reads current image context using
 the read-only reviewer's session and rejects that read after revocation.
 The service/database are removed afterward.
+The fixture also verifies the negotiated read-only Bases context through the
+actual client transport and checks that its active view IDs reconstruct the
+server's exact saved-view locations.
 The fixture also delivers actual image pointer/viewport updates without roster
 churn, clears them on surface departure and denies them after read revocation.
 The broader runner also retains the existing Bases/discussion recovery checks.
 
-The server regression set passes 211 tests across location, managed-awareness
+The server regression set passes 265 tests across location, managed-awareness
 protocol, collaboration-policy and Bases-registry suites. Controlled async tests
 cover authorization becoming stale while waiting for the shared socket writer,
 1,000 pending membership changes and an old denial completing after a new watch.
@@ -144,12 +176,17 @@ hidden observation, exact scroll positions for Jump/Follow, unchanged zoom,
 unsafe transforms, malformed state, late subscriptions and cancellation. Server
 tests cover geometry validation, legacy watchers, read-only publishers, changed
 context during socket waits and 1,001 coalesced movements without roster work.
+Bases-context cases verify read access without discussions, a single coherent
+identity query, no database writes, sparse/archived views, registry/hash/generation
+changes, revocation, malformed metadata, feature gates and normal-session-only
+credentials. Native binding cases verify unchanged saved configuration and
+rejection of late or mismatched source/account/view proofs.
 
 ## Required next work
 
-Connect Bases/timeline bindings to this transport, including permission/version
-refresh independent of whether discussions are open. Extend image presence to
-embeds. Complete transformed-image and large-file coverage. Add semantic Jump/Follow and typed cell, row,
+Connect the read-only Bases/timeline bindings to the foreground host, including
+permission/version refresh independent of whether discussions are open.
+Complete transformed-image and large-file coverage. Add semantic Jump/Follow and typed cell, row,
 header, group, lane and timeline targets. Preserve a single foreground publisher
 and local interaction interruption across all surfaces and popouts. Separate
 high-frequency movement from membership snapshots and measure its authorization,

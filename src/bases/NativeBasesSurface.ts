@@ -3,6 +3,7 @@ import { sha256Hex } from "../contentDigest";
 import { isBaseDefinitionProperty, type BaseDefinitionProperty, type TimelineAxis } from "../collaboration/DiscussionProtocol";
 import type { HistoricalPoint, TimelineRange } from "../collaboration/TimelineRange";
 import { parseBaseRegistry, type BaseRegistrySnapshot } from "./BaseRegistryProtocol";
+import { parseBasePresenceContext, type BasePresenceContext } from "../collaboration/presence/BasePresenceProtocol";
 import { nativeBaseGroupValue, nativeBaseGroupValueKey, nativeGroupValueBudget, type NativeBaseGroupValue, type NativeGroupLinkResolver } from "./NativeBaseGroupValue";
 
 /** Private built-in renderer contract, observed in desktop Obsidian 1.13.7.
@@ -93,6 +94,9 @@ export interface NativeBasesIntegrations {
 export interface NativeBaseBinding {
 	snapshot: BaseRegistrySnapshot; viewId: string; name: string; type: string; current(): boolean;
 }
+export interface NativeBasePresenceBinding {
+	context: BasePresenceContext; viewId: string; name: string; type: string; current(): boolean;
+}
 
 function propertyEqual(a: BaseDefinitionProperty, b: BaseDefinitionProperty): boolean { return a.source === b.source && a.name === b.name; }
 function sameTarget(a: NativeBaseTarget, b: NativeBaseTarget): boolean {
@@ -110,6 +114,7 @@ export class NativeBasesSurface {
 	private readonly key: string;
 	private readonly data: unknown;
 	private bindings = new WeakSet<NativeBaseBinding>();
+	private presenceBindings = new WeakSet<NativeBasePresenceBinding>();
 	private constructor(private host: ObjectValue, private controller: ObjectValue, private renderer: ObjectValue, private query: ObjectValue,
 		private config: ObjectValue, file: TFile, slot: number, key: string,
 		private integrations?: NativeBasesIntegrations, private external?: NativeBasesExtension) {
@@ -182,6 +187,38 @@ export class NativeBasesSurface {
 			if (!this.bindings.has(binding) || !binding.current() || !this.current() || !callable(this.controller.selectView) || this.integrations?.canNavigate(this.root.ownerDocument) === false) return false;
 			const next = binding.snapshot.views.find(view => view.id === viewId);
 			if (!next || !["table", "cards", "list"].includes(next.type) && !this.integrations?.supports(next.type)) return false;
+			this.controller.selectView(next.name); return true;
+		} catch { return false; }
+	}
+	/** Presence uses an existing read-only identity context, independent of a
+	 * discussion session. Unmatched slots never acquire an inferred identity.
+	 * The caller's current() fences account, inventory, access and registry changes. */
+	async bindPresence(context: BasePresenceContext, shareId: string, entryId: string, read: () => Promise<string>, current: () => boolean): Promise<NativeBasePresenceBinding | undefined> {
+		try {
+			if (!this.current() || !current()) return;
+			const verified = parseBasePresenceContext(context, shareId, entryId), view = verified.views.find(view => view.slot === this.slot);
+			if (!view || view.name !== this.name || view.type !== this.type) return;
+			const saved = parseYaml(this.source) as unknown;
+			if (!object(saved) || !Array.isArray(saved.views) || verified.views.some(view => {
+				const candidate = (saved.views as unknown[])[view.slot];
+				return !object(candidate) || candidate.name !== view.name || candidate.type !== view.type;
+			})) return;
+			const { mtime, size } = this.file.stat;
+			const unchanged = () => this.file.stat.mtime === mtime && this.file.stat.size === size;
+			const source = await read();
+			if (source !== this.source || new TextEncoder().encode(source).byteLength > 262_144) return;
+			if (await sha256Hex(new TextEncoder().encode(source).buffer) !== verified.content_sha256 || !current() || !this.current() || !unchanged()) return;
+			const binding = { context: verified, viewId: view.id, name: view.name, type: view.type, current: () => current() && unchanged() && this.current() };
+			this.presenceBindings.add(binding); return binding;
+		} catch { return; }
+	}
+	activatePresenceView(viewId: string, binding: NativeBasePresenceBinding): boolean {
+		try {
+			if (!this.presenceBindings.has(binding) || !binding.current() || !this.current() || !callable(this.controller.selectView) || this.integrations?.canNavigate(this.root.ownerDocument) === false) return false;
+			const next = binding.context.views.find(view => view.id === viewId);
+			if (!next || !["table", "cards", "list"].includes(next.type) && !this.integrations?.supports(next.type)) return false;
+			const target = list(this.query.views, 64)?.[next.slot];
+			if (!object(target) || target.name !== next.name || target.type !== next.type) return false;
 			this.controller.selectView(next.name); return true;
 		} catch { return false; }
 	}

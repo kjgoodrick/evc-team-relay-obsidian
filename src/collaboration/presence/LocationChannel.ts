@@ -3,6 +3,7 @@ import { v4 as uuid } from "uuid";
 import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
 import { parseRetryAfterMs, RelayHttpError } from "../../relayRequestErrors";
 import { isRecord } from "../DiscussionProtocol";
+import { parseBasePresenceContext, type BasePresenceContext } from "./BasePresenceProtocol";
 import { parseEmbeddedImage, parseEmbeddedPeers, type EmbeddedImage, type EmbeddedImagesEvent } from "./EmbeddedImageProtocol";
 import { parseImageState, parseImagePeers, type ImagePresenceState, type ImageStatesEvent } from "./LocationProtocol";
 import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseSurfaceLocation, parseSurfacePeers, publicSessionId, type ImageLocation, type LocationEvent, type LocationTarget, type NonNoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
@@ -41,6 +42,7 @@ export class LocationChannel {
 	private protocolVersion: 1 | 2 = 1;
 	private rosterSupported = false;
 	private imageContextSupported = false;
+	private baseContextSupported = false;
 	private imageStatesSupported = false;
 	private embedsSupported = false;
 	private desiredEmbed: EmbeddedImage | null = null;
@@ -78,6 +80,7 @@ export class LocationChannel {
 	get supportsSurfaceLocations(): boolean { return this.ready && this.protocolVersion === 2; }
 	get supportsSurfaceRoster(): boolean { return this.supportsSurfaceLocations && this.rosterSupported; }
 	get supportsImageContext(): boolean { return this.supportsSurfaceLocations && this.imageContextSupported; }
+	get supportsBaseContext(): boolean { return this.supportsSurfaceLocations && this.baseContextSupported; }
 	get supportsImageStates(): boolean { return this.supportsSurfaceRoster && this.imageStatesSupported; }
 	get supportsEmbeddedImages(): boolean { return this.supportsSurfaceLocations && this.embedsSupported; }
 	publishEmbeddedImage(embed: EmbeddedImage | null): void {
@@ -109,6 +112,12 @@ export class LocationChannel {
 		const location = parseSurfaceLocation(value.location);
 		if (location.kind !== "image" || location.share_id !== shareId || location.entry_id !== entryId) throw new Error("Invalid image location");
 		return location;
+	}
+	async readBaseContext(shareId: string, entryId: string): Promise<BasePresenceContext> {
+		if (!this.supportsBaseContext || !locationId(shareId) || !locationId(entryId)) throw new Error("Bases presence unavailable");
+		const version = this.version, value = await this.request(`/base-context?share_id=${shareId}&entry_id=${entryId}`, version, false, 192 * 1024);
+		if (!this.current(version) || !this.supportsBaseContext) throw new Error("Bases presence unavailable");
+		return parseBasePresenceContext(value, shareId, entryId);
 	}
 	/** The caller supplies a currently authorized foreground share for discovery. */
 	start(shareId: string, location: SurfaceLocation | null): void {
@@ -190,7 +199,7 @@ export class LocationChannel {
 		// Native HTTP may finish independently; generation checks fence every late
 		// credential, response and callback. Do not retain timers or a live socket.
 		this.renewing = false; this.sent = undefined;
-		this.watching = undefined; this.sentWatch = undefined; this.protocolVersion = 1; this.rosterSupported = false; this.imageContextSupported = false;
+		this.watching = undefined; this.sentWatch = undefined; this.protocolVersion = 1; this.rosterSupported = false; this.imageContextSupported = false; this.baseContextSupported = false;
 		this.emitRoster(null, "unavailable");
 		const ws = this.ws; this.ws = undefined;
 		if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; try { ws.close(); } catch { /* Already closed. */ } }
@@ -205,7 +214,7 @@ export class LocationChannel {
 			this.retryTimer = window.setTimeout(() => { this.retryTimer = undefined; void this.connect(); }, delay);
 		}
 	}
-	private async request(path: string, version: number, post = false): Promise<unknown> {
+	private async request(path: string, version: number, post = false, limit = 65_536): Promise<unknown> {
 		let timer: number | undefined, ended = false, cancel: (() => void) | undefined;
 		const current = () => !ended && this.current(version);
 		const attempt = async () => {
@@ -227,7 +236,7 @@ export class LocationChannel {
 			if (response.status === 408 || response.status === 429 || response.status >= 500) throw new ChannelFailure("reconnecting", parseRetryAfterMs(response.headers.get("Retry-After")));
 			if (!response.ok) throw new ChannelFailure("unavailable");
 			const raw = await response.text();
-			if (!current() || raw.length > 65_536 || new TextEncoder().encode(raw).length > 65_536) throw new ChannelFailure("unavailable");
+			if (!current() || raw.length > limit || new TextEncoder().encode(raw).length > limit) throw new ChannelFailure("unavailable");
 			try { return JSON.parse(raw) as unknown; } catch { throw new ChannelFailure("unavailable"); }
 		};
 		try {
@@ -256,10 +265,12 @@ export class LocationChannel {
 			if (enabled !== true) throw new ChannelFailure("unavailable");
 			if (this.options.surfaceLocations) {
 				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview, states = capability.features.presence_image_states_preview, embeds = capability.features.presence_embedded_images_preview;
-				if ([extended, roster, image, states, embeds].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true || embeds === true) && extended !== true || states === true && roster !== true) throw new ChannelFailure("unavailable");
+				const base = capability.features.presence_base_context_preview;
+				if ([extended, roster, image, states, embeds, base].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true || embeds === true || base === true) && extended !== true || states === true && roster !== true) throw new ChannelFailure("unavailable");
 				this.protocolVersion = extended === true ? 2 : 1;
 				this.rosterSupported = roster === true;
 				this.imageContextSupported = image === true;
+				this.baseContextSupported = base === true;
 				this.imageStatesSupported = states === true;
 				this.embedsSupported = embeds === true;
 			}

@@ -6,6 +6,7 @@ import { TextEncoder } from "node:util";
 import { sha256Hex } from "../../src/contentDigest";
 import { NativeBasesSurface, baseConfigurationKey, nativeBaseProperty } from "../../src/bases/NativeBasesSurface";
 import type { BaseRegistrySnapshot } from "../../src/bases/BaseRegistryProtocol";
+import type { BasePresenceContext } from "../../src/collaboration/presence/BasePresenceProtocol";
 import { TimelineBridgeClient } from "../../src/bases/TimelineBridgeClient";
 import type { Workspace } from "obsidian";
 
@@ -325,6 +326,43 @@ describe("verified saved-view binding", () => {
 		if (change === "slot") snapshot.views[0].name = "Other";
 		const read = async () => { if (change === "permission") allowed = false; if (change === "runtime") f.host.dirty = true; return f.source + (change === "bytes" ? "\n" : ""); };
 		expect(await surface.bind(snapshot, id(2), read, () => allowed)).toBeUndefined();
+	});
+});
+
+describe("read-only Bases presence binding", () => {
+	async function setup() {
+		const f = fixture();
+		f.serial.views.push({ type: "cards", name: "Cards", order: ["file.name"] });
+		f.query.views.push({ query: f.query, type: "cards", name: "Cards" });
+		const source = f.host.data = f.host.lastSavedData = JSON.stringify(f.serial), selectView = jest.fn();
+		Object.assign(f.controller, { selectView });
+		const context: BasePresenceContext = { protocol_version: 1, share_id: id(9), entry_id: id(2), generation: id(3), definition_id: id(1), registry_revision: 1,
+			content_sha256: await sha256Hex(new TextEncoder().encode(source).buffer), views: [{ id: id(4), slot: 0, name: "Work", type: "table" }, { id: id(5), slot: 1, name: "Cards", type: "cards" }] };
+		return { ...f, source, context, selectView, surface: f.inspect()! };
+	}
+	test("verifies exact saved bytes and switches only the transient saved-view selection", async () => {
+		const f = await setup(), read = jest.fn(async () => f.source);
+		const binding = (await f.surface.bindPresence(f.context, id(9), id(2), read, () => true))!;
+		expect(binding?.current()).toBe(true); expect(read).toHaveBeenCalledTimes(1);
+		expect(f.surface.activatePresenceView(id(5), { ...binding })).toBe(false);
+		expect(f.surface.activatePresenceView(id(5), binding)).toBe(true); expect(f.selectView).toHaveBeenCalledWith("Cards");
+		expect(f.host.data).toBe(f.source); expect(f.host.lastSavedData).toBe(f.source); expect(f.host.dirty).toBe(false);
+		expect(f.surface.activatePresenceView(id(8), binding)).toBe(false);
+		f.host.file.stat.mtime++; expect(binding.current()).toBe(false);
+		expect(f.surface.activatePresenceView(id(5), binding)).toBe(false); expect(f.selectView).toHaveBeenCalledTimes(1);
+	});
+	test.each(["bytes", "hash", "share", "entry", "unmatched", "other-slot", "permission", "runtime", "stat"])("refuses %s mismatch without changing native state", async change => {
+		const f = await setup(); let allowed = true;
+		const context = { ...f.context, ...(change === "hash" ? { content_sha256: "f".repeat(64) } : change === "share" ? { share_id: id(8) } : change === "entry" ? { entry_id: id(8) } : {}),
+			views: change === "unmatched" ? f.context.views.slice(1) : change === "other-slot" ? f.context.views.map(view => view.slot ? { ...view, name: "Other" } : view) : f.context.views };
+		const read = async () => { if (change === "permission") allowed = false; if (change === "runtime") f.host.dirty = true; if (change === "stat") f.host.file.stat.mtime++; return f.source + (change === "bytes" ? "\n" : ""); };
+		expect(await f.surface.bindPresence(context, id(9), id(2), read, () => allowed)).toBeUndefined();
+		expect(f.selectView).not.toHaveBeenCalled();
+	});
+	test("late verification cannot restore a released foreground context", async () => {
+		const f = await setup(); let allowed = true, finish!: (value: string) => void;
+		const pending = f.surface.bindPresence(f.context, id(9), id(2), () => new Promise(resolve => { finish = resolve; }), () => allowed);
+		allowed = false; finish(f.source); expect(await pending).toBeUndefined(); expect(f.selectView).not.toHaveBeenCalled();
 	});
 });
 
