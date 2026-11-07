@@ -1,6 +1,6 @@
 import { parseTimelineAxis, type TimelineAxis } from "../collaboration/DiscussionProtocol";
 import { parseTimelineRange, validateTimelineTimeZone, type HistoricalPoint, type TimelineRange } from "../collaboration/TimelineRange";
-import type { NativeBasesExtension, NativeBaseReveal, NativeTimelineContext, NativeTimelineGeometry, NativeTimelineSelection } from "./NativeBasesSurface";
+import type { NativeBasesExtension, NativeBaseReveal, NativeTimelineContext, NativeTimelineGeometry, NativeTimelineSelection, NativeTimelinePresence } from "./NativeBasesSurface";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): value is ObjectValue => !!value && typeof value === "object" && !Array.isArray(value);
@@ -9,6 +9,9 @@ export interface RemoteTimelineRanges {
 	rangeContext?(): unknown;
 	rangeGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): unknown;
 	revealRange?(range: TimelineRange, axis: TimelineAxis, group?: unknown): unknown;
+	rangePresence?(point?: { clientX: number; clientY: number }): unknown;
+	rangePresenceGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): unknown;
+	revealRangePresence?(range: TimelineRange, axis: TimelineAxis, offset: Readonly<{ x: number; y: number }>, group?: unknown): unknown;
 	beginRange?(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: unknown) => void, stopped: () => void): unknown;
 }
 interface Lifecycle {
@@ -16,7 +19,7 @@ interface Lifecycle {
 	register(stop: () => void): void;
 	retire(stop: () => void): void;
 }
-type RangeMethods = Pick<NativeBasesExtension, "rangeContext" | "rangeGeometry" | "revealRange" | "beginRange">;
+type RangeMethods = Pick<NativeBasesExtension, "rangeContext" | "rangeGeometry" | "revealRange" | "beginRange" | "rangePresence" | "rangePresenceGeometry" | "revealRangePresence">;
 
 /** A gesture may return an incomplete explicit-offset date for confirmation.
  * Copy bounded JSON without coercion; only the final composer may turn a draft
@@ -72,21 +75,51 @@ export function timelineRangeBridge(source: RemoteTimelineRanges, renderer: stri
 			parsedRange.kind === "calendar" && parsedRange.time_zone !== selected.effectiveTimeZone) return;
 		return { selected, axis: parsedAxis, range: parsedRange };
 	};
+	const presenceSupported = () => supported() && source.capabilities.includes("range-presence") &&
+		typeof source.rangePresence === "function" && typeof source.rangePresenceGeometry === "function" && typeof source.revealRangePresence === "function";
+	const offset = (value: unknown): value is { x: number; y: number } => object(value) && Object.keys(value).length === 2 &&
+		[value.x, value.y].every(number => typeof number === "number" && Number.isFinite(number) && number >= 0 && number <= 1);
+	const geometry = (range: TimelineRange, axis: TimelineAxis, group: unknown, presence = false): NativeTimelineGeometry | undefined => {
+		try {
+			const checked = inputs(range, axis); if (!checked || presence && !presenceSupported()) return;
+			const value = presence ? source.rangePresenceGeometry!(checked.range, checked.axis, group) : source.rangeGeometry!(checked.range, checked.axis, group);
+			if (!object(value) || typeof value.current !== "function" || typeof value.discontinuous !== "boolean" || presence && ((value.endX as number) < (value.startX as number) || value.discontinuous && value.endX === value.startX)) return;
+			const coordinates = [value.startX, value.endX, value.top, value.bottom];
+			if (!coordinates.every(coordinate => typeof coordinate === "number" && Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9) ||
+				(value.bottom as number) < (value.top as number)) return;
+			const [startX, endX, top, bottom] = coordinates as number[], discontinuous = value.discontinuous;
+			const live = () => { try { return (!presence || presenceSupported()) && checked.selected.current() && (value.current as () => unknown).call(value) === true &&
+				value.startX === startX && value.endX === endX && value.top === top && value.bottom === bottom && value.discontinuous === discontinuous; } catch { return false; } };
+			return live() ? { startX, endX, top, bottom, discontinuous, current: live } : undefined;
+		} catch { return; }
+	};
 	return {
 		rangeContext,
-		rangeGeometry: (range, axis, group): NativeTimelineGeometry | undefined => {
+		rangeGeometry: (range, axis, group) => geometry(range, axis, group),
+		rangePresenceGeometry: (range, axis, group) => geometry(range, axis, group, true),
+		rangePresence: (point): NativeTimelinePresence | undefined => {
 			try {
-				const checked = inputs(range, axis); if (!checked) return;
-				const value = source.rangeGeometry!(checked.range, checked.axis, group);
-				if (!object(value) || typeof value.current !== "function" || typeof value.discontinuous !== "boolean") return;
-				const coordinates = [value.startX, value.endX, value.top, value.bottom];
-				if (!coordinates.every(coordinate => typeof coordinate === "number" && Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9) ||
-					(value.bottom as number) < (value.top as number)) return;
-				const [startX, endX, top, bottom] = coordinates as number[], discontinuous = value.discontinuous;
-				const live = () => { try { return checked.selected.current() && (value.current as () => unknown).call(value) === true &&
-					value.startX === startX && value.endX === endX && value.top === top && value.bottom === bottom && value.discontinuous === discontinuous; } catch { return false; } };
-				return live() ? { startX, endX, top, bottom, discontinuous, current: live } : undefined;
+				if (!presenceSupported() || point && ![point.clientX, point.clientY].every(value => Number.isFinite(value) && Math.abs(value) <= 1e9)) return;
+				const value = source.rangePresence!(point);
+				if (!object(value) || typeof value.current !== "function" || !offset(value.offset) || value.group !== null && !object(value.group)) return;
+				const selected = context(value.context); if (!selected?.current()) return;
+				const checked = inputs(parseTimelineRange(value.range), selected.axis); if (!checked) return;
+				const range = checked.range, key = JSON.stringify(range), group = value.group, position = Object.freeze({ ...value.offset });
+				if (typeof range.start === "object") Object.freeze(range.start);
+				if (typeof range.end === "object") Object.freeze(range.end); Object.freeze(range);
+				const live = () => { try { return presenceSupported() && selected.current() && checked.selected.current() &&
+					(value.current as () => unknown).call(value) === true && value.group === group && offset(value.offset) &&
+					value.offset.x === position.x && value.offset.y === position.y && JSON.stringify(parseTimelineRange(value.range)) === key; } catch { return false; } };
+				return live() ? { context: selected, range, group, offset: position, current: live } : undefined;
 			} catch { return; }
+		},
+		revealRangePresence: (range, axis, position, group) => {
+			try {
+				const checked = inputs(range, axis); if (!checked || !presenceSupported() || !offset(position)) return "unavailable";
+				if (!canNavigate()) return "busy";
+				const result = source.revealRangePresence!(checked.range, checked.axis, { ...position }, group);
+				return ["revealed", "hidden", "unavailable", "busy", "ambiguous"].includes(String(result)) ? result as NativeBaseReveal : "unavailable";
+			} catch { return "unavailable"; }
 		},
 		revealRange: (range, axis, group) => {
 			try {

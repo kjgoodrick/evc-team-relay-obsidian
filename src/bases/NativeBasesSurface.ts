@@ -75,6 +75,10 @@ export interface NativeTimelineSelection {
 export interface NativeTimelineGeometry {
 	startX: number; endX: number; top: number; bottom: number; discontinuous: boolean; current(): boolean;
 }
+export interface NativeTimelinePresence {
+	context: NativeTimelineContext; range: TimelineRange; group: unknown | null;
+	offset: Readonly<{ x: number; y: number }>; current(): boolean;
+}
 export interface NativeBasesExtension {
 	owner: unknown; root: HTMLElement; current(): boolean; viewport(): HTMLElement | undefined;
 	handles(): NativeBaseHandle[]; hit(node: Node, point?: { clientX: number; clientY: number }): NativeBaseHandle | undefined;
@@ -83,6 +87,9 @@ export interface NativeBasesExtension {
 	rangeContext?(): NativeTimelineContext | undefined;
 	rangeGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): NativeTimelineGeometry | undefined;
 	revealRange?(range: TimelineRange, axis: TimelineAxis, group?: unknown): NativeBaseReveal;
+	rangePresence?(point?: { clientX: number; clientY: number }): NativeTimelinePresence | undefined;
+	rangePresenceGeometry?(range: TimelineRange, axis: TimelineAxis, group?: unknown): NativeTimelineGeometry | undefined;
+	revealRangePresence?(range: TimelineRange, axis: TimelineAxis, offset: Readonly<{ x: number; y: number }>, group?: unknown): NativeBaseReveal;
 	beginRange?(kind: TimelineRange["kind"], precision: HistoricalPoint["precision"], select: (selection: NativeTimelineSelection) => void, stopped: () => void): (() => void) | undefined;
 	beginAnnotation(select: (handle: NativeBaseHandle) => void, stopped: () => void, group?: (location: NativeBaseGroupLocation) => void): (() => void) | undefined;
 }
@@ -228,6 +235,27 @@ export class NativeBasesSurface {
 	rangeContext(): NativeTimelineContext | undefined {
 		const context = this.current() ? this.external?.rangeContext?.() : undefined;
 		return context?.current() ? { ...context, current: () => this.current() && context.current() } : undefined;
+	}
+	rangePresence(point?: { clientX: number; clientY: number }): (Omit<NativeTimelinePresence, "group"> & { groupElement: Element | null }) | undefined {
+		if (!this.current()) return;
+		const value = this.external?.rangePresence?.(point); if (!value?.current()) return;
+		const groups = value.group !== null ? (this.groupLocations() ?? []).filter(location => location.group === value.group && location.current()) : [];
+		if (value.group !== null && groups.length !== 1) return;
+		return { context: value.context, range: value.range, offset: value.offset, groupElement: groups[0]?.element ?? null,
+			current: () => this.current() && value.current() && (!groups[0] || groups[0].current()) };
+	}
+	rangePresenceGeometry(range: TimelineRange, axis: TimelineAxis, groupElement?: Element): NativeTimelineGeometry | undefined {
+		if (!this.current()) return;
+		const groups = groupElement ? (this.groupLocations() ?? []).filter(location => location.element === groupElement && location.current()) : [];
+		if (groupElement && groups.length !== 1) return;
+		const geometry = this.external?.rangePresenceGeometry?.(range, axis, groups[0]?.group);
+		return geometry?.current() ? { ...geometry, current: () => this.current() && (!groups[0] || groups[0].current()) && geometry.current() } : undefined;
+	}
+	revealRangePresence(range: TimelineRange, axis: TimelineAxis, offset: Readonly<{ x: number; y: number }>, current: () => boolean, groupElement?: Element): NativeBaseReveal {
+		if (!this.canNavigate() || !current()) return "unavailable";
+		const groups = groupElement ? (this.groupLocations() ?? []).filter(location => location.element === groupElement && location.current()) : [];
+		if (groupElement && groups.length !== 1) return "unavailable";
+		return this.external?.revealRangePresence?.(range, axis, offset, groups[0]?.group) ?? "unavailable";
 	}
 	rangeGeometry(range: TimelineRange, axis: TimelineAxis, groupElement?: Element): NativeTimelineGeometry | undefined {
 		if (!this.current()) return;

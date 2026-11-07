@@ -111,3 +111,50 @@ test.each(["cyclic", "oversized", "wrong-kind", "other-axis", "stale-context"])(
 	if (reason === "stale-context") value.context = { ...f.context, current: () => false };
 	f.adapter.beginRange!(f.range.kind, "day", select, jest.fn()); f.choose(value); expect(select).not.toHaveBeenCalled();
 });
+
+function presenceFixture(sequence = false) {
+	const f = fixture(sequence), value = { context: f.context, range: { ...f.range }, group: null as unknown, offset: { x: 0.5, y: 0.25 }, current: () => true };
+	f.source.capabilities.push("range-presence");
+	f.source.rangePresence = jest.fn(() => value); f.source.rangePresenceGeometry = jest.fn(() => f.geometry); f.source.revealRangePresence = jest.fn(() => "revealed");
+	return { ...f, value };
+}
+
+test.each([false, true])("passive range positions are copied, negotiated and independent of annotation (Sequence=%s)", sequence => {
+	const f = presenceFixture(sequence), captured = f.adapter.rangePresence!({ clientX: 10, clientY: 20 })!;
+	expect(captured.current()).toBe(true); expect(captured.range).toEqual(f.range); expect(Object.isFrozen(captured.range)).toBe(true);
+	expect(f.source.beginRange).not.toHaveBeenCalled(); expect(f.source.revealRange).not.toHaveBeenCalled();
+	expect(f.adapter.rangePresenceGeometry!(captured.range, captured.context.axis)?.current()).toBe(true);
+	expect(f.adapter.revealRangePresence!(captured.range, captured.context.axis, captured.offset)).toBe("revealed");
+	f.value.offset.x = 0.75; expect(captured.offset.x).toBe(0.5); expect(captured.current()).toBe(false);
+	f.source.capabilities = ["ranges"];
+	expect(f.adapter.rangePresence!()).toBeUndefined(); expect(f.adapter.rangePresenceGeometry!(f.range, f.axis)).toBeUndefined();
+	expect(f.adapter.revealRangePresence!(f.range, f.axis, { x: 0.5, y: 0.5 })).toBe("unavailable");
+});
+
+test.each(["axis", "range", "offset", "group", "stale", "method", "bounds", "reversed"])("rejects %s passive range providers", reason => {
+	const f = presenceFixture(), captured = f.adapter.rangePresence!()!;
+	if (reason === "axis") f.axis.start_property.name = "changed";
+	if (reason === "range") f.value.range.start = "invalid";
+	if (reason === "offset") f.value.offset.y = 2;
+	if (reason === "group") f.value.group = "Lane label";
+	if (reason === "stale") f.stale();
+	if (reason === "method") f.source.revealRangePresence = undefined;
+	if (reason === "bounds") f.geometry.bottom = Infinity;
+	if (reason === "reversed") { f.geometry.discontinuous = true; f.geometry.endX = -10; }
+	if (!["bounds", "reversed"].includes(reason)) expect(captured.current()).toBe(false);
+	if (["range", "offset", "group", "stale", "method"].includes(reason)) expect(f.adapter.rangePresence!()).toBeUndefined();
+	if (["bounds", "reversed", "stale", "method"].includes(reason)) expect(f.adapter.rangePresenceGeometry!(f.range, f.axis)).toBeUndefined();
+});
+
+test("range presence refuses bad coordinates and navigation while an inspector is dirty", () => {
+	const f = presenceFixture();
+	expect(f.adapter.rangePresence!({ clientX: Infinity, clientY: 20 })).toBeUndefined(); expect(f.source.rangePresence).not.toHaveBeenCalled();
+	f.busy(); expect(f.adapter.rangePresence!()?.current()).toBe(true);
+	expect(f.adapter.revealRangePresence!(f.range, f.axis, { x: 0.5, y: 0.5 })).toBe("busy");
+	expect(f.source.revealRangePresence).not.toHaveBeenCalled();
+});
+
+test("civil range projection preserves a forward DST discontinuity without treating its width as UTC duration", () => {
+	const f = presenceFixture(); f.geometry.discontinuous = true;
+	expect(f.adapter.rangePresenceGeometry!(f.range, f.axis)).toMatchObject({ discontinuous: true, startX: -5, endX: 50 });
+});

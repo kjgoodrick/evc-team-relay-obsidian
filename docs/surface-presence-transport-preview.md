@@ -8,7 +8,8 @@ foreground host/account. Bases participants and whole-view Jump/Follow are conne
 Direct-image pointer overlays and position-aware Jump/Follow are also connected.
 Embedded-image capture, overlays and Jump/Follow are connected in the foreground
 note as well. These have automated host evidence; native image acceptance,
-visible split-pane image observation and group/lane/range presence remain unfinished.
+visible split-pane image observation and the remaining group adapters remain unfinished.
+Supported group/lane and timeline-range presence now have host/bridge evidence.
 Precise cell/record/header capture, overlays and Jump/Follow are now connected
 through the native Bases and Time & Line adapters, with automated host evidence.
 
@@ -37,7 +38,7 @@ uses a separate typed message rather than changing the room descriptor.
 Revisions must be positive safe integers. Embedded-image occurrences now have
 a separate typed transport and source-anchor foundation below. Fine-grained
 Bases cells/records/headers now have a separate typed stream and record-specific
-authorization below. Groups/lanes/ranges remain.
+authorization below. Negotiated groups/lanes/ranges are described later.
 
 ## Read-only saved-view context
 
@@ -486,6 +487,46 @@ observation and cleanup. No new server code was required; preceding transport
 and authorization evidence remains applicable.
 
 Actual desktop/mobile acceptance remains unavailable while the Mac is locked.
-Native date-range capture/overlays/navigation, formula and dependency-bearing
-metadata groups, empty/repeated/merged-group interaction, broader keyboard
+Formula and dependency-bearing metadata groups, empty/repeated/merged-group interaction, broader keyboard
 support and resource/accessibility measurements remain required release work.
+
+## Native timeline range presence
+
+The optional local `range-presence` capability connects Time & Line's current
+axis and viewport to the existing negotiated version-two movement stream.
+`rangePresence(point)` passively captures an instant or original Sequence value;
+without a point it captures the visible interval and its center. Historical
+coordinates use a Gregorian period plus a normalized position. Exact native lane
+bands preserve an optional lane identity; unsupported/denied lanes cannot become
+whole-view targets. Whole-view coordinates work on an empty configured axis.
+
+`rangePresenceGeometry` projects through the receiver's current zoom and scroll.
+`revealRangePresence` centers the semantic point and uses temporary local range
+focus when necessary, retaining the existing Return to data behavior. Jump uses
+the pointer; Follow prefers the viewport. Saved configuration, collapse state,
+tasks and comment storage are untouched. A dirty inspector or cancelled/lost
+permission prevents navigation. Existing record/hash waits are cancellable.
+
+Dense Sequence interpolates original property values with fixed-point arithmetic,
+including small offsets from large origins. Values outside occupied dense
+positions or below supported precision are not invented. Ambiguous/nonexistent
+DST pointer times remain unavailable. Forward intervals crossing DST retain their
+civil-axis discontinuity; their displayed width is not elapsed UTC duration.
+Historical ranges avoid JavaScript Date limits. Captures and geometry expire on
+axis, query, rendering, lane, ownership or viewport changes.
+
+Ordinary item/cell/header/group hit targets retain precedence. Empty timeline
+background uses range targets, while range viewports take precedence over nearest
+records. Read-only observers need no discussion permission. Capture uses the
+existing 125 ms coalescing and bounded metadata/group caches; no new socket,
+persistent cursor history, service mutation or migration is added.
+
+Validation: 2,800 plugin tests in 221 suites, preview build/main types, changed
+source/test lint and the frozen test-type gate pass (206 known errors/45
+signatures; existing 15 Svelte warnings). All eight source interoperability
+scenarios pass against Time & Line's 255-test package. This includes both real
+Timeline/Sequence source providers and the
+real bridge/client/native adapter/presence controller under synthetic layout,
+plus foreground channel tests for lanes, precise projection, Jump/Follow, hidden
+observation, record denial, stale contexts, navigation locks and unload. Actual
+native desktop/mobile, physical touch and resource acceptance remain required.

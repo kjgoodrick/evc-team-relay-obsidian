@@ -8,6 +8,7 @@ import { SequenceView } from "sequence-view";
 import { CollaborationBridge } from "timeline-bridge";
 import { TaskInspector } from "timeline-inspector";
 import { TimelineBridgeClient } from "../../src/bases/TimelineBridgeClient.ts";
+import { BasePresenceMotion } from "../../src/collaboration/presence/BasePresenceMotion.ts";
 import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface.ts";
 import { sha256Hex } from "../../src/contentDigest.ts";
 import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments.ts";
@@ -19,7 +20,7 @@ import { parseTimelineMarkerReceipt } from "../../src/collaboration/TimelineMark
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol.ts";
 
 const win = new Window();
-Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS });
+Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS, MutationObserver: win.MutationObserver });
 Object.defineProperty(window.crypto, "subtle", { value: webcrypto.subtle });
 const proto = win.HTMLElement.prototype;
 Modal.prototype.setTitle = function(text) { this.contentEl.setAttribute("aria-label", text); };
@@ -145,6 +146,33 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		viewport.getBoundingClientRect = () => ({ left: 100, right: 500, top: 50, bottom: 250, width: 400, height: 200 });
 		svg.getBoundingClientRect = () => ({ left: 100 - viewport.scrollLeft, right: 900 - viewport.scrollLeft, top: 50, bottom: 450, width: 800, height: 400 });
 		const rangeContext = surface.rangeContext(); assert.ok(rangeContext?.current()); assert.equal(rangeContext.axis.renderer, type);
+		// Actual renderer -> bridge -> native adapter -> presence capture/overlay/
+		// navigation. Saved identities and record metadata are synthetic ports.
+		root.getBoundingClientRect = () => new win.DOMRect(0, 0, 1000, 600);
+		Object.defineProperty(viewport, "scrollHeight", { value: 400, configurable: true });
+		let publishedPosition;
+		const location = { kind: "base", share_id: uuid(90), entry_id: uuid(2), generation: uuid(3), definition_id: uuid(1), view_id: uuid(4), registry_revision: 1 };
+		const motion = new BasePresenceMotion(root, { current: () => surface.current(), publishing: () => true, surface: () => surface, location: () => location,
+			local: file => { const index = files.indexOf(file); return index < 0 ? undefined : { id: uuid(6 + index), type: "markdown", path: file.path }; },
+			file: id => files.find((_file, index) => uuid(6 + index) === id),
+			read: async id => ({ protocol_version: 1, share_id: uuid(90), entry_id: id, generation: uuid(50 + files.findIndex((_file, index) => uuid(6 + index) === id)), type: "markdown" }),
+			publish: state => { publishedPosition = state; }, groups: { supported: () => true, resolve: () => null, fileAtPath: path => files.find(file => file.path === path) ?? null } });
+		try {
+			const layer = root.querySelector(".relay-base-presence");
+			Object.defineProperties(layer, { clientWidth: { value: 1000 }, clientHeight: { value: 600 } }); layer.getBoundingClientRect = root.getBoundingClientRect;
+			svg.dispatchEvent(new win.MouseEvent("pointermove", { bubbles: true, clientX: 300, clientY: 150 }));
+			for (let n = 0; n < 30 && publishedPosition?.pointer?.target.type !== "timeline_range"; n++) await new Promise(resolve => setTimeout(resolve, 50));
+			assert.equal(publishedPosition?.pointer?.target.type, "timeline_range", "native range pointer reaches presence");
+			assert.equal(publishedPosition.version, 2); assert.equal(publishedPosition.viewport.target.type, "timeline_range");
+			assert.equal(publishedPosition.pointer.target.range.kind, sequence ? "ordinal" : "instant");
+			const position = publishedPosition; assert.equal(!!position.pointer.target.lane, grouped, "lane identity is retained through the complete bridge");
+			motion.setPeers([{ key: "remote", userId: uuid(80), name: "Timeline peer", baseState: position }]);
+			for (let n = 0; n < 30 && !layer.children.length; n++) await new Promise(resolve => setTimeout(resolve, 20));
+			const pointer = layer.querySelector(".relay-base-presence-pointer"); assert.ok(pointer); assert.equal(pointer.textContent, "Timeline peer");
+			assert.ok(Math.abs(parseFloat(pointer.style.left) - 300) < 0.1); assert.ok(Math.abs(parseFloat(pointer.style.top) - 150) < 0.1);
+			assert.ok(await motion.reveal(position, false, () => true)); assert.ok(await motion.reveal(position, true, () => true));
+			assert.equal(root.querySelector(".sabidurian-range-selection-status"), null); assert.deepEqual(writes, []); assert.equal(host.data, source);
+		} finally { motion.close(); viewport.scrollLeft = 0; viewport.scrollTop = 0; }
 		let selectedRange, rangeStops = 0;
 		assert.ok(surface.beginRange(sequence ? "ordinal" : "calendar", "day", value => { selectedRange = value; }, () => rangeStops++));
 		const status = root.querySelector(".sabidurian-range-selection-status"); assert.ok(status);
@@ -342,7 +370,7 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const captured = surface.handles()[1]; view.onDataUpdated(); assert.equal(captured.current(), false);
 		assert.equal(rangeContext.current(), false); assert.equal(selectedRange.current(), false); assert.equal(geometry.current(), false);
 		bridge.dispose(); assert.equal(client.find(view), undefined); assert.equal(surface.current(), false);
-		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, range confirmation/markers, focus/return, empty query, dirty inspector and disposal`);
+		console.log(`PASS actual ${type}: ${providerFirst ? "provider" : "consumer"} first; ${grouped ? "lane source capture" : "ungrouped"}, saved view, range presence/Jump/Follow, range confirmation/markers, focus/return, empty query, dirty inspector and disposal`);
 	} finally {
 		client.close(); view.onunload(); bridge.dispose(); for (const modal of Modal.opened) modal.close(); Modal.opened = [];
 		frames.clear(); root.remove();

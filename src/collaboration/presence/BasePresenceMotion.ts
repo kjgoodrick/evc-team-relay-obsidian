@@ -7,6 +7,7 @@ import { baseScreenPoint, baseTargetGeometry, revealBasePoint } from "./BasePres
 import { BasePresenceRecords, type BaseLocalRecord } from "./BasePresenceRecords";
 import { BasePresenceGroups, type BaseGroupFrame, type BaseGroupSources } from "./BasePresenceGroups";
 import { parseBaseState, type BasePosition, type BasePresenceState, type BasePresenceTarget, type BaseRecordContext } from "./BasePositionProtocol";
+import type { BasePresenceRange } from "./BaseExtendedTargets";
 import type { BaseLocation } from "./LocationProtocol";
 import type { SurfacePresencePeer } from "./PresencePeers";
 
@@ -121,13 +122,37 @@ export class BasePresenceMotion {
 		const target = this.groups.capture(frame, handle), offset = imagePoint(geometry.box, x, y);
 		return target && offset ? { target, offset: { x: rounded(offset.x), y: rounded(offset.y) } } : null;
 	}
+	private rangePosition(surface: NativeBasesSurface, groups: () => BaseGroupFrame | undefined, point?: { x: number; y: number }): BasePosition | null {
+		if (!this.options.groups?.supported()) return null;
+		const viewport = surface.viewport(), clip = viewport && baseTargetGeometry(viewport, this.root)?.clip;
+		if (!clip || point && !imagePoint(clip, point.x, point.y)) return null;
+		const captured = surface.rangePresence(point && { clientX: point.x, clientY: point.y }); if (!captured?.current()) return null;
+		let lane = null;
+		if (captured.groupElement) {
+			const frame = groups(), matches = frame?.handles.filter(handle => handle.element === captured.groupElement && handle.current()) ?? [];
+			if (!frame || matches.length !== 1) return null;
+			lane = this.groups?.capture(frame, matches[0]); if (!lane) return null;
+		}
+		return { target: { type: "timeline_range", axis: captured.context.axis, range: captured.range, lane }, offset: captured.offset };
+	}
+	private rangePoint(surface: NativeBasesSurface, target: BasePresenceRange, offset: BasePosition["offset"], groups?: BaseGroupFrame): { x: number; y: number } | undefined {
+		const lane = target.lane && groups ? this.groups?.project(groups, target.lane) : undefined;
+		if (target.lane && !lane?.current()) return;
+		const geometry = surface.rangePresenceGeometry(target.range, target.axis, lane?.handle.element), viewport = surface.viewport();
+		const clip = viewport && baseTargetGeometry(viewport, this.root)?.clip;
+		if (!geometry?.current() || !clip) return;
+		const point = { x: geometry.startX + (geometry.endX - geometry.startX) * offset.x, y: geometry.top + (geometry.bottom - geometry.top) * offset.y };
+		return imagePoint(clip, point.x, point.y) ? point : undefined;
+	}
 	private captureCurrent(): void {
 		const snapshot = this.snapshot();
 		if (!snapshot || !this.options.publishing()) { this.options.publish(null); return; }
 		const { surface } = snapshot, handles = surface.handles(); if (handles.length > 2048) { this.options.publish(null); return; }
 		const pointer = this.pointer, hit = pointer && surface.hit(pointer.node, { clientX: pointer.x, clientY: pointer.y });
-		const rect = surface.viewport()?.getBoundingClientRect(); let viewport: BasePosition | null = null;
-		if (rect && rect.width > 0 && rect.height > 0) {
+		let groupFrame: BaseGroupFrame | undefined;
+		const groups = () => groupFrame ??= this.groups?.frame(surface);
+		const rect = surface.viewport()?.getBoundingClientRect(); let viewport = this.rangePosition(surface, groups);
+		if (!viewport && rect && rect.width > 0 && rect.height > 0) {
 			const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
 			const candidates: { handle: NativeBaseHandle; distance: number }[] = [];
 			for (const handle of handles) {
@@ -146,7 +171,7 @@ export class BasePresenceMotion {
 		}
 		let pointerPosition = pointer ? this.position(hit, pointer.x, pointer.y, handles) : null;
 		if (this.groups && (!pointerPosition && pointer || !viewport)) {
-			const frame = this.groups.frame(surface);
+			const frame = groups()!;
 			if (pointer && !pointerPosition && (!hit || hit.target.type === "view")) pointerPosition = this.groupPosition(frame, pointer.x, pointer.y, pointer.node);
 			if (!viewport && rect) {
 				const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
@@ -158,7 +183,8 @@ export class BasePresenceMotion {
 				for (const candidate of candidates.slice(0, 16)) { viewport = this.groupPosition(frame, candidate.px, candidate.py); if (viewport) break; }
 			}
 		}
-		try { this.options.publish(parseBaseState({ version: pointerPosition?.target.type === "group" || viewport?.target.type === "group" ? 2 : 1, pointer: pointerPosition, viewport })); }
+		if (pointer && !pointerPosition && (!hit || hit.target.type === "view")) pointerPosition = this.rangePosition(surface, groups, pointer);
+		try { this.options.publish(parseBaseState({ version: [pointerPosition, viewport].some(position => position && ["group", "timeline_range"].includes(position.target.type)) ? 2 : 1, pointer: pointerPosition, viewport })); }
 		catch { this.options.publish(null); }
 	}
 	private nativeTarget(target: BasePresenceTarget, files: readonly TFile[]): NativeBaseTarget | undefined {
@@ -180,16 +206,20 @@ export class BasePresenceMotion {
 		const snapshot = this.snapshot(), wanted = new Set<string>();
 		const box = this.layer.getBoundingClientRect(), sx = box.width / this.layer.clientWidth, sy = box.height / this.layer.clientHeight;
 		const handles = snapshot?.surface.handles() ?? [], files = [...new Set(handles.flatMap(handle => "file" in handle.target ? [handle.target.file] : []))];
-		const groups = snapshot && this.peers.some(peer => peer.baseState?.pointer?.target.type === "group") ? this.groups?.frame(snapshot.surface) : undefined;
+		const groups = snapshot && this.peers.some(peer => { const target = peer.baseState?.pointer?.target; return target?.type === "group" || target?.type === "timeline_range" && !!target.lane; }) ? this.groups?.frame(snapshot.surface) : undefined;
 		this.layer.hidden = !snapshot || handles.length > 2048 || ![sx, sy].every(value => Number.isFinite(value) && value > 0);
 		if (!this.layer.hidden) for (const peer of this.peers) {
 			const pointer = peer.baseState?.pointer; if (!pointer) continue;
 			const group = pointer.target.type === "group" && groups ? this.groups?.project(groups, pointer.target) : undefined;
 			const target = this.nativeTarget(pointer.target, files), matches = target ? handles.filter(handle => sameTarget(handle.target, target)) : [];
 			const handle = pointer.target.type === "group" ? group?.current() ? group.handle : undefined : matches.length === 1 && matches[0].current() ? matches[0] : undefined;
-			if (!handle) continue;
-			const geometry = baseTargetGeometry(handle.element, this.root); if (!geometry) continue;
-			const point = baseScreenPoint(geometry.box, pointer.offset); if (!imagePoint(geometry.clip, point.x, point.y)) continue;
+			let point: { x: number; y: number } | undefined;
+			if (pointer.target.type === "timeline_range") point = this.rangePoint(snapshot!.surface, pointer.target, pointer.offset, groups);
+			else if (handle) {
+				const geometry = baseTargetGeometry(handle.element, this.root);
+				if (geometry) { const candidate = baseScreenPoint(geometry.box, pointer.offset); if (imagePoint(geometry.clip, candidate.x, candidate.y)) point = candidate; }
+			}
+			if (!point) continue;
 			wanted.add(peer.key); let marker = this.markers.get(peer.key);
 			if (!marker) {
 				const element = this.root.ownerDocument.createElement("div"), label = this.root.ownerDocument.createElement("span"); element.className = "relay-base-presence-pointer";
@@ -213,7 +243,18 @@ export class BasePresenceMotion {
 		let recordCurrent = () => true;
 		const current = () => version === this.navigation && authorized() && recordCurrent() && !!initial && this.snapshot()?.surface === initial.surface && initial.surface.canNavigate();
 		if (!position || !initial || !current()) return false;
-		if (position.target.type === "timeline_range") return false;
+		if (position.target.type === "timeline_range") {
+			const target = position.target; let groupElement: Element | undefined;
+			if (target.lane) {
+				if (!this.groups) return false;
+				let cancel!: () => void;
+				const cancelled = new Promise<undefined>(resolve => { cancel = () => resolve(undefined); this.waits.add(cancel); });
+				const match = await Promise.race([this.groups.wait(initial.surface, target.lane, current), cancelled]); this.waits.delete(cancel);
+				if (!match || !current() || !match.current()) return false;
+				groupElement = match.handle.element;
+			}
+			return current() && initial.surface.revealRangePresence(target.range, target.axis, position.offset, current, groupElement) === "revealed" && current();
+		}
 		if (position.target.type === "group") {
 			if (!this.groups || !this.options.groups) return false;
 			let cancel!: () => void;

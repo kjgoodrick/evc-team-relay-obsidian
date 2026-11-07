@@ -842,3 +842,57 @@ test.each(["table", "sabidurian-timeline", "sabidurian-sequence"])("foreground %
 		bridge.available = false; changed?.(); expect(base.host.data).toBe(base.source); expect(base.host.dirty).toBe(false);
 	} finally { m.close(); expect(changed).toBeUndefined(); }
 });
+
+test.each([['sabidurian-timeline', false], ['sabidurian-timeline', true], ['sabidurian-sequence', false], ['sabidurian-sequence', true]] as const)("foreground %s range presence (lane=%s) publishes, projects and follows semantic positions", async (type, withLane) => {
+	const m = baseMotionFixture(), { base, renderer, f } = m; let busy = false, rangeLive = true, changed: (() => void) | undefined;
+	base.serial.views[0].type = renderer.type = renderer.config.type = type;
+	if (withLane) { Object.assign(base.serial.views[0], { groupBy: { property: "note.status" } }); Object.assign(renderer.config, { groupBy: { property: "note.status" } }); }
+	base.source = base.host.data = base.host.lastSavedData = JSON.stringify(base.serial); base.record.hash = createHash("sha256").update(base.source).digest("hex");
+	base.file.stat.size = Buffer.byteLength(base.source); base.file.stat.mtime++;
+	base.context = { ...base.context, content_sha256: base.record.hash, views: base.context.views.map(view => view.slot === 0 ? { ...view, type } : view) };
+	const group = renderer.data.groupedData[0]; group.entries.forEach(entry => Object.assign(entry, { getValue: () => new StringValue("Done") }));
+	const heading = renderer.scrollEl.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "svg")).appendChild(document.createElementNS("http://www.w3.org/2000/svg", "rect"));
+	heading.getBoundingClientRect = () => ({ x: 0, y: 40, left: 0, top: 40, right: 400, bottom: 50, width: 400, height: 10, toJSON: () => ({}) });
+	const groupHandle = { target: { type: "group", group }, element: heading, current: () => heading.isConnected };
+	const sequence = type === "sabidurian-sequence", axis = { version: 1, renderer: type, start_property: { source: "note", name: sequence ? "order" : "start" }, end_property: null, time_zone: sequence ? null : "UTC" };
+	const context = { axis, effectiveTimeZone: axis.time_zone, kinds: sequence ? ["ordinal"] : ["instant"], current: () => rangeLive };
+	const range = sequence ? { version: 1, kind: "ordinal", start: "1.25", end: "1.25", unit: "property-value", start_inclusive: true, end_inclusive: true } :
+		{ version: 1, kind: "instant", start: "2026-01-01T00:00:00.000Z", end: "2026-01-01T00:00:00.000Z", time_zone: "UTC", start_inclusive: true, end_inclusive: true };
+	const visibleRange = { ...range, end: sequence ? "3" : "2026-01-02T00:00:00.000Z" };
+	const remote = { protocolVersion: 1, owner: renderer, root: renderer.containerEl,
+		capabilities: ["item", "cell", "geometry", "reveal", "annotation", "groups", "ranges", "range-presence"], current: () => base.controller.view === renderer && renderer.containerEl.isConnected,
+		viewport: () => renderer.scrollEl, handles: () => [], hit: () => undefined, reveal: jest.fn(() => "revealed"), groups: () => withLane ? [groupHandle] : [], revealGroup: jest.fn(() => "revealed"), beginAnnotation: () => () => {},
+		rangeContext: () => context, rangeGeometry: jest.fn(), revealRange: jest.fn(), beginRange: jest.fn(),
+		rangePresence: jest.fn((point?: unknown) => ({ context, range: point ? range : visibleRange, group: withLane ? group : null, offset: { x: 0.5, y: 0.5 }, current: () => rangeLive })),
+		rangePresenceGeometry: jest.fn(() => ({ startX: 100, endX: 100, top: 50, bottom: 150, discontinuous: false, current: () => rangeLive })),
+		revealRangePresence: jest.fn(() => "revealed") };
+	const bridge = { protocolVersion: 1, available: true, viewTypes: [type], getSurfaces: () => [remote], canNavigate: () => !busy,
+		onChange: (callback: () => void) => { changed = callback; return () => { changed = undefined; }; } };
+	f.workspace.trigger.mockImplementation((name: string, receive: (value: unknown) => void) => { if (name === "time-and-line:collaboration-request") receive(bridge); });
+	try {
+		const { socket, layer } = await m.open();
+		renderer.scrollEl.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 100 }));
+		await until(() => socket.frames.some(frame => frame.type === "base_state" && (frame.state as BasePresenceState)?.pointer?.target.type === "timeline_range"));
+		const state = socket.frames.filter(frame => frame.type === "base_state" && (frame.state as BasePresenceState)?.pointer?.target.type === "timeline_range").at(-1)!.state as BasePresenceState;
+		expect(state.version).toBe(2); expect(state.viewport?.target).toMatchObject({ type: "timeline_range", range: visibleRange });
+		expect(state.pointer?.target).toMatchObject({ type: "timeline_range", lane: withLane ? expect.objectContaining({ type: "group" }) : null });
+		const target = { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" };
+		socket.message({ type: "base_states", subscription_id: socket.frames.filter(frame => frame.type === "watch").at(-1)!.subscription_id, status: "available", peers: [{ target, state }] });
+		await until(() => layer.children.length === 1); const marker = layer.querySelector<HTMLElement>(".relay-base-presence-pointer")!;
+		expect([marker.style.left, marker.style.top]).toEqual(["100px", "100px"]);
+		const peer = f.controller.peers[0]; expect(await f.controller.navigate(peer.key, false)).toBe(true);
+		expect(remote.revealRangePresence).toHaveBeenLastCalledWith(range, axis, { x: 0.5, y: 0.5 }, withLane ? group : undefined);
+		expect(await f.controller.navigate(peer.key, true)).toBe(true);
+		expect(remote.revealRangePresence).toHaveBeenLastCalledWith(visibleRange, axis, { x: 0.5, y: 0.5 }, withLane ? group : undefined);
+		renderer.scrollEl.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100, clientY: 100 })); expect(f.controller.following).toBeUndefined();
+		busy = true; expect(await f.controller.navigate(peer.key, true)).toBe(false); busy = false;
+		await f.controller.setVisible(false); expect(layer.children).toHaveLength(1);
+		if (withLane) {
+			f.folder.crdtDoc.getMap("managed_base_v1").set("snapshot", { owner: false, permissions: { [base.file.path]: "read" } });
+			await until(() => layer.children.length === 0); expect(f.controller.peers).toHaveLength(1); expect(await f.controller.navigate(peer.key, false)).toBe(false);
+		}
+		rangeLive = false; window.dispatchEvent(new Event("resize")); await until(() => layer.children.length === 0);
+		expect(remote.beginRange).not.toHaveBeenCalled(); expect(remote.revealRange).not.toHaveBeenCalled(); expect(base.host.data).toBe(base.source);
+		f.logout(); expect(base.content.querySelector(".relay-base-presence")).toBeNull();
+	} finally { m.close(); expect(changed).toBeUndefined(); }
+});
