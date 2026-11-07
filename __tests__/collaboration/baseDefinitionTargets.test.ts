@@ -319,3 +319,40 @@ test("fresh HTTP catalog proof never transfers to a retry fallback or an offline
 		s.session.setForeground(false); expect(s.session.verifiedTargetCatalog(verified)).toBe(false);
 	} finally { await s.session.close(); }
 });
+
+test.each(["definitions", "axis", "markers"] as const)("%s target verification started before authentication loss stays invalid after sign-in recovery", async kind => {
+	const s = await open(new IDBFactory()); let finish!: (value: unknown) => void;
+	const { targets: _targets, computed_values: _computed, ...context } = catalog();
+	const value = kind === "definitions" ? catalog() : kind === "markers" ? { ...context, catalog_revision: 0, markers: [] } :
+		{ ...context, axis: { id: id(60), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1,
+			renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null } } };
+	const remoteRead = jest.fn(() => new Promise(resolve => { finish = resolve; }));
+	Object.assign(s.transport, { [kind === "definitions" ? "baseDefinitions" : kind === "axis" ? "timelineAxis" : "timelineMarkers"]: remoteRead });
+	const read = () => kind === "definitions" ? s.session.readBaseDefinitions(scope) : kind === "axis" ? s.session.readTimelineAxis(scope) : s.session.readTimelineMarkers(scope);
+	try {
+		const reading = read(), rejected = expect(reading).rejects.toThrow(); await until(() => remoteRead.mock.calls.length === 1);
+		s.transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await s.session.start(); expect(s.session.status).toBe("authentication_required");
+		await s.session.start(); expect(s.session.status).toBe("ready");
+		finish(value); await rejected;
+		expect(s.session.verifiedTargetCatalog(value)).toBe(false);
+		const key = (kind === "definitions" ? "baseDefinitions:" : kind === "axis" ? "timelineAxis:" : "timelineMarkers:") + scope;
+		expect(await s.store.preference(key)).toBeUndefined();
+		remoteRead.mockImplementation(() => Promise.resolve(value)); await expect(read()).resolves.toEqual(value);
+	} finally { finish?.(value); await s.session.close(); }
+});
+
+test.each(["definitions", "axis", "markers"] as const)("%s authentication denial locks verification until a successful sign-in check", async kind => {
+	const s = await open(new IDBFactory());
+	const failure = new DiscussionFailure("authenticate", "session_revoked", 401), remoteRead = jest.fn().mockRejectedValue(failure);
+	Object.assign(s.transport, { [kind === "definitions" ? "baseDefinitions" : kind === "axis" ? "timelineAxis" : "timelineMarkers"]: remoteRead });
+	const read = () => kind === "definitions" ? s.session.readBaseDefinitions(scope) : kind === "axis" ? s.session.readTimelineAxis(scope) : s.session.readTimelineMarkers(scope);
+	try {
+		await expect(read()).rejects.toBe(failure);
+		expect(s.session.status).toBe("authentication_required"); expect(s.session.canQueue).toBe(false);
+		await expect(read()).rejects.toThrow("unavailable"); expect(remoteRead).toHaveBeenCalledTimes(1);
+		s.transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+		await s.session.start(); expect(s.session.status).toBe("authentication_required");
+		await s.session.start(); expect(s.session.status).toBe("ready");
+	} finally { await s.session.close(); }
+});

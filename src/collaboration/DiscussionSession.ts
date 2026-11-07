@@ -764,7 +764,9 @@ export class DiscussionSession {
 	readBaseDefinitions(scopeId: string): Promise<BaseDefinitionCatalog> {
 		const existing = this.baseDefinitionFlights.get(scopeId); if (existing) return existing;
 		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
-		const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const authenticationEpoch = this.authenticationEpoch;
+		const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue) &&
+			!!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
 		const key = "baseDefinitions:" + scopeId;
 		const flight = this.trackLocal((async () => {
 			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
@@ -772,10 +774,11 @@ export class DiscussionSession {
 			try {
 				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
 				const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				if (!current()) throw new Error("Saved view access changed during verification.");
 				let catalog: BaseDefinitionCatalog;
 				try { catalog = await this.transport.baseDefinitions(scopeId, scope.viewId); }
 				catch (error) {
-					if (!this.closed && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+					if (current() && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null, current);
 					throw error;
 				}
 				if (!current() || catalog.generation !== generation) throw new Error("Saved view changed during verification.");
@@ -783,11 +786,13 @@ export class DiscussionSession {
 				if (!current() || context?.generation === catalog.generation && context.registry_revision > catalog.registry_revision) throw new Error("Saved definition verification is stale. Refresh the definitions.");
 				let previous: BaseDefinitionCatalog | undefined; try { previous = parse(proof.previous); } catch { /* No prior proof. */ }
 				if (previous?.generation === catalog.generation && previous.registry_revision > catalog.registry_revision) throw new Error("Saved definition verification is stale.");
-				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved definition verification changed. Try again.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog), current)) throw new Error("Saved definition verification changed. Try again.");
+				if (!current()) throw new Error("Saved view access changed during verification.");
 				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
-				this.verifiedTargetCatalogs.set(catalog, { epoch: this.authenticationEpoch, at: Date.now() });
+				this.verifiedTargetCatalogs.set(catalog, { epoch: authenticationEpoch, at: Date.now() });
 				return catalog;
 			} catch (error) {
+				if (authenticationEpoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
 				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
 				let catalog: BaseDefinitionCatalog | undefined;
 				try { catalog = parse(await this.store.preference(key)); } catch { /* An incomplete catalogue cannot authorize offline capture. */ }
@@ -803,7 +808,9 @@ export class DiscussionSession {
 	readTimelineAxis(scopeId: string): Promise<TimelineAxisContext> {
 		const existing = this.timelineAxisFlights.get(scopeId); if (existing) return existing;
 		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
-		const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const authenticationEpoch = this.authenticationEpoch;
+		const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue) &&
+			!!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
 		const key = "timelineAxis:" + scopeId;
 		const flight = this.trackLocal((async () => {
 			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
@@ -811,10 +818,11 @@ export class DiscussionSession {
 			try {
 				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
 				const proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				if (!current()) throw new Error("Saved view access changed during verification.");
 				let catalog: TimelineAxisContext;
 				try { catalog = await this.transport.timelineAxis(scopeId, scope.viewId); }
 				catch (error) {
-					if (!this.closed && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+					if (current() && error instanceof DiscussionFailure && error.action !== "retry") await this.store.finishPreferenceVerification(scopeId, key, proof, null, current);
 					throw error;
 				}
 				if (!current() || catalog.generation !== generation) throw new Error("Saved view changed during verification.");
@@ -822,11 +830,13 @@ export class DiscussionSession {
 				if (!current() || context?.generation === catalog.generation && context.registry_revision > catalog.registry_revision) throw new Error("Saved axis verification is stale. Refresh the timeline axis.");
 				let previous: TimelineAxisContext | undefined; try { previous = parse(proof.previous); } catch { /* No prior proof. */ }
 				if (previous?.generation === catalog.generation && previous.registry_revision > catalog.registry_revision) throw new Error("Saved axis verification is stale.");
-				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved axis verification changed. Try again.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog), current)) throw new Error("Saved axis verification changed. Try again.");
+				if (!current()) throw new Error("Saved view access changed during verification.");
 				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
-				this.verifiedTargetCatalogs.set(catalog, { epoch: this.authenticationEpoch, at: Date.now() });
+				this.verifiedTargetCatalogs.set(catalog, { epoch: authenticationEpoch, at: Date.now() });
 				return catalog;
 			} catch (error) {
+				if (authenticationEpoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
 				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
 				let catalog: TimelineAxisContext | undefined;
 				try { catalog = parse(await this.store.preference(key)); } catch { /* An incomplete axis context cannot authorize offline capture. */ }
@@ -854,7 +864,9 @@ export class DiscussionSession {
 	readTimelineMarkerMetadata(scopeId: string): Promise<{ axis: TimelineAxisContext; catalog: TimelineMarkerCatalog }> {
 		return this.trackLocal((async () => {
 			const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
-			const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+			const authenticationEpoch = this.authenticationEpoch;
+			const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue) &&
+				!!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
 			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
 			const checkpoint = await this.store.checkpoint(scopeId), version = this.timelineMarkerVersions.get(scopeId);
 			if (version && version.generation !== generation) throw new Error("The base generation changed. Refresh synchronization before showing shared markers.");
@@ -879,7 +891,9 @@ export class DiscussionSession {
 	readTimelineMarkers(scopeId: string): Promise<TimelineMarkerCatalog> {
 		const existing = this.timelineMarkerFlights.get(scopeId); if (existing) return existing;
 		const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId), key = "timelineMarkers:" + scopeId;
-		const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const authenticationEpoch = this.authenticationEpoch;
+		const current = () => !this.closed && authenticationEpoch === this.authenticationEpoch && !["authentication_required", "unavailable"].includes(this.statusValue) &&
+			!!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
 		const flight = this.trackLocal((async () => {
 			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
 			const parse = (value: unknown) => parseTimelineMarkerCatalog(value, scope.entryId, scope.viewId!);
@@ -887,6 +901,7 @@ export class DiscussionSession {
 			try {
 				if (this.statusValue === "offline") throw new DiscussionFailure("retry", "offline_cache");
 				proof = await this.store.beginPreferenceVerification(scopeId, key, uuid());
+				if (!current()) throw new Error("Saved view access changed during verification.");
 				const catalog = parse(await this.transport.timelineMarkers(scopeId, scope.viewId));
 				if (!current() || catalog.generation !== generation) throw new Error("Saved view changed during marker verification.");
 				const context = await this.cachedBaseContext(scopeId);
@@ -896,12 +911,14 @@ export class DiscussionSession {
 				let previous: TimelineMarkerCatalog | undefined; try { previous = parse(proof.previous); } catch { /* No prior verified catalog. */ }
 				if (previous?.generation === generation && (previous.definition_id !== catalog.definition_id || previous.registry_revision > catalog.registry_revision ||
 					previous.catalog_revision > catalog.catalog_revision)) throw new Error("Saved marker verification is stale.");
-				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog))) throw new Error("Saved marker verification changed. Try again.");
+				if (!await this.store.finishPreferenceVerification(scopeId, key, proof, protocolJson(catalog), current)) throw new Error("Saved marker verification changed. Try again.");
+				if (!current()) throw new Error("Saved view access changed during verification.");
 				this.observeBaseRevision(scopeId, catalog.generation, catalog.registry_revision);
-				this.verifiedTargetCatalogs.set(catalog, { epoch: this.authenticationEpoch, at: Date.now() });
+				this.verifiedTargetCatalogs.set(catalog, { epoch: authenticationEpoch, at: Date.now() });
 				return catalog;
 			} catch (error) {
-				if (proof && !this.closed && (!(error instanceof DiscussionFailure) || error.action !== "retry")) await this.store.finishPreferenceVerification(scopeId, key, proof, null);
+				if (authenticationEpoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				if (proof && current() && (!(error instanceof DiscussionFailure) || error.action !== "retry")) await this.store.finishPreferenceVerification(scopeId, key, proof, null, current);
 				if (!current() || !(error instanceof DiscussionFailure) || error.action !== "retry") throw error;
 				let catalog: TimelineMarkerCatalog | undefined; try { catalog = parse(await this.store.preference(key)); } catch { /* Never authorize capture from incomplete metadata. */ }
 				const context = await this.cachedBaseContext(scopeId);

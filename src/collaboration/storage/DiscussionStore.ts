@@ -351,13 +351,17 @@ export class DiscussionStore {
 			return { token, generation, previous };
 		});
 	}
-	async finishPreferenceVerification(scopeId: string, key: string, proof: PreferenceVerification, value: Json): Promise<boolean> {
+	async finishPreferenceVerification(scopeId: string, key: string, proof: PreferenceVerification, value: Json, current: () => boolean = () => true): Promise<boolean> {
 		requiredId(scopeId); requiredId(key); value = JSON.parse(boundedJson(value)) as Json;
 		return this.transaction(["preferences", "generations"], "readwrite", async tx => {
+			if (!current()) return false;
 			const preferences = tx.objectStore("preferences");
 			if (await request(preferences.get("verification:" + key)) !== proof.token ||
 				(await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== proof.generation) return false;
-			await request(preferences.put(value, key)); return true;
+			if (!current()) return false;
+			await request(preferences.put(value, key));
+			if (!current()) throw new Error("Target verification access changed");
+			return true;
 		});
 	}
 	/** Retiring a sent draft must not replace a newer choice in another pane. */

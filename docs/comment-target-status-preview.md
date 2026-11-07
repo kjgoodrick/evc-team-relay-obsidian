@@ -62,3 +62,26 @@ verification, share-wide target discovery, multiwindow/mobile behavior and
 resource acceptance remain. Native Undo attachment needs further design and
 validation across the editor binding; automatic text matching is not a safe
 substitute. No live vault installation or production deployment was performed.
+
+## Authentication recovery follow-up
+
+Definition, timeline-axis and marker catalog reads now capture their
+authentication lifetime. A response started before authentication loss is
+rejected even if sign-in recovers before it arrives. An authentication denial
+locks the session and stops subsequent catalog requests until a successful
+capability check. An offline failure cannot clear that sign-in requirement.
+Cached marker metadata observes the same lifetime checks.
+
+Catalog commits also receive the caller's access guard inside the existing
+IndexedDB verification transaction. It checks before reads, before replacement
+and after the write; loss after the write aborts the transaction and preserves
+the old proof. Existing cross-window tickets and cache-generation fences remain.
+No schema migration or service change is required.
+
+Three delayed-response regression cases failed before this correction and pass
+after it. Additional tests cover authentication denials, failed/successful
+recovery and all three transaction stages. The final focused run passes **248
+tests / 6 suites**; the full suite passes **3,104 tests / 246 suites**, with 22
+tests / 17 suites skipped. Build/main types, frozen test types and changed-source
+lint pass. This is automated follow-up to the native evidence above; the newer
+build has not been installed in a live vault.

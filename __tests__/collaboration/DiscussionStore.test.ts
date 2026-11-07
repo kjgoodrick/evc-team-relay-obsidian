@@ -182,3 +182,16 @@ test("selection drafts page within a note, preserve targets, and survive reopeni
 		expect((await store.getDraft("selection:note:a"))?.target).toEqual(target);
 	} finally { store.close(); }
 });
+
+test.each([0, 1, 2])("preference verification preserves the old proof when access disappears at transaction stage %i", async stage => {
+	const store = await DiscussionStore.open(identity, new IDBFactory());
+	try {
+		await store.setPreference("base-proof", { revision: 1 });
+		const proof = await store.beginPreferenceVerification("note", "base-proof", "request"); let checks = 0;
+		const writing = store.finishPreferenceVerification("note", "base-proof", proof, { revision: 2 }, () => checks++ < stage);
+		if (stage === 2) await expect(writing).rejects.toThrow("access changed"); else expect(await writing).toBe(false);
+		expect(await store.preference("base-proof")).toEqual({ revision: 1 });
+		expect(await store.finishPreferenceVerification("note", "base-proof", proof, { revision: 3 }, () => true)).toBe(true);
+		expect(await store.preference("base-proof")).toEqual({ revision: 3 });
+	} finally { store.close(); }
+});
