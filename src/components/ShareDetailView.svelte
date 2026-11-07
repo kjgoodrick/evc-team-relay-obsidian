@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { copyToClipboard } from "../utils/clipboard";
-	import { onMount } from "svelte";
+	import { onMount, onDestroy } from "svelte";
 	import { Notice, Setting, TFile } from "obsidian";
 	import { createEventDispatcher } from "svelte";
 	import type TeamRelayPlugin from "../main";
@@ -8,7 +8,7 @@
 	import type { ShareMember, Invite, WebFolderEntry } from "../RelayOnPremShareClient";
 	import { LimitExceededApiError, VisibilityNotAllowedApiError } from "../RelayOnPremShareClient";
 	import type { ShareWithServer } from "../RelayOnPremShareClientManager";
-	import { PathPermissionsModal } from "../ui/PathPermissionsModal";
+	import { canManagePermissionPolicy, openPermissionEditor } from "../ui/openPermissionEditor";
 	import { FolderPathPickerModal } from "../ui/FolderPathPickerModal";
 	import { confirmDialog, promptDialog, choiceDialog } from "../ui/dialogs";
 	import { withOutboundSyncGuard } from "../WebSyncManager";
@@ -31,6 +31,9 @@
 	let members: ShareMember[] = [];
 	let invites: Invite[] = [];
 	let isOwner = false;
+	let canManagePermissions = false;
+	let disposed = false;
+	onDestroy(() => { disposed = true; });
 	let loading = true;
 	let webPublishEnabled = false;
 	let webPublishDomain: string | null = null;
@@ -87,6 +90,11 @@
 				isOwner = currentUser?.id === share.owner_user_id;
 			}
 
+			canManagePermissions = isOwner;
+			if (share.managed && !isOwner) {
+				void canManagePermissionPolicy(live, share).then(allowed => { if (!disposed) canManagePermissions = allowed; });
+			}
+
 			// Load all data in parallel
 			const [serverInfo, membersResult, invitesResult] = await Promise.all([
 				loadServerInfo(),
@@ -107,8 +115,7 @@
 	}
 
 	function managePathPermissions() {
-		const client = live.shareClientManager?.getClient(share.serverId) ?? live.shareClient;
-		if (client) new PathPermissionsModal(live.app, client, share.id, members).open();
+		openPermissionEditor(live, share, members);
 	}
 
 	async function loadServerInfo() {
@@ -730,9 +737,9 @@
 
 		{#if currentShare.managed}
 			<div class="evc-section">
-				<div class="evc-section-title">File and folder permissions</div>
+				<div class="evc-section-title">File and comment permissions</div>
 				<p>Members need explicit access rules. Membership and invitation roles do not grant file access in this share.</p>
-				{#if isOwner}
+				{#if canManagePermissions}
 					<button class="mod-cta" on:click={managePathPermissions}>Manage permissions</button>
 				{/if}
 			</div>

@@ -587,6 +587,31 @@
 }
 
 /* Paths and member identifiers are untrusted-length content in recovery/ACL dialogs. */
+.evc-permission-editor .evc-permission-fields {
+	display: grid;
+	gap: var(--size-4-3);
+}
+.evc-permission-editor label {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-4-1);
+}
+.evc-permission-editor input[type="text"],
+.evc-permission-editor select {
+	width: 100%;
+	max-width: 100%;
+}
+.evc-permission-editor button {
+	margin: var(--size-4-1);
+	white-space: normal;
+	height: auto;
+	min-height: 32px;
+}
+.evc-permission-editor p { overflow-wrap: anywhere; }
+.is-mobile .evc-permission-editor button,
+.is-mobile .evc-permission-editor input,
+.is-mobile .evc-permission-editor select { min-height: 44px; }
 .evc-path-permissions, .evc-managed-conflicts {
 	overflow-wrap: anywhere;
 }

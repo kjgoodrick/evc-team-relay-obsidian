@@ -14,7 +14,7 @@ import { getDefaultServer, type RelayOnPremServer } from "../RelayOnPremConfig";
 import { confirmDialog, promptDialog } from "./dialogs";
 import { setDestructiveButton } from "./destructiveButton";
 import { withOutboundSyncGuard } from "../WebSyncManager";
-import { PathPermissionsModal } from "./PathPermissionsModal";
+import { canManagePermissionPolicy, openPermissionEditor } from "./openPermissionEditor";
 import { buildVaultIdentity } from "../vaultIdentity";
 import { collectWebFolderItems, joinFolderPath, resolveShareFolder, toSharePath } from "../vaultRootPath";
 import { copyToClipboard } from "../utils/clipboard";
@@ -26,6 +26,7 @@ export class ShareManagementModal extends Modal {
 	private invites: Invite[] = [];
 	private agentKeys: AgentKey[] = [];
 	private isOwner = false;
+	private canManagePermissions = false;
 	private isLoading = false;
 	private serverId?: string;
 	private serverName?: string;
@@ -175,6 +176,7 @@ export class ShareManagementModal extends Modal {
 			this.selectedShare = share;
 			this.invites = [];
 			this.isOwner = false;
+			this.canManagePermissions = false;
 
 			// Show loading indicator immediately
 			const { contentEl } = this;
@@ -192,6 +194,8 @@ export class ShareManagementModal extends Modal {
 				const currentUser = authProvider?.getCurrentUser();
 				this.isOwner = currentUser?.id === share.owner_user_id;
 			}
+
+			this.canManagePermissions = this.isOwner || await canManagePermissionPolicy(this.plugin, share);
 
 			// Run all API calls in parallel for faster loading
 			const serverInfoPromise = (async () => {
@@ -386,12 +390,11 @@ export class ShareManagementModal extends Modal {
 		}
 
 		// Members section
-		if (this.selectedShare.managed && this.isOwner) {
-			new Setting(contentEl).setName("File and folder permissions")
+		if (this.selectedShare.managed && this.canManagePermissions) {
+			new Setting(contentEl).setName("File and comment permissions")
 				.setDesc("Members need explicit access rules before they can see files.")
 				.addButton(button => button.setButtonText("Manage permissions").onClick(() => {
-					const client = this.plugin.shareClientManager?.getClient(this.selectedShare!.serverId) ?? this.plugin.shareClient;
-					if (client) new PathPermissionsModal(this.app, client, this.selectedShare!.id, this.members).open();
+					openPermissionEditor(this.plugin, this.selectedShare!, this.members);
 				}));
 		}
 		contentEl.createEl("h4", { text: "Members" });

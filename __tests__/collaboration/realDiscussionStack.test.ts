@@ -10,6 +10,7 @@ import { protocolJson, type MessageBody } from "../../src/collaboration/Discussi
 import { EditorState } from "prosemirror-state";
 import { bodyToCommentDoc, commentDocBody, richCommentBody } from "../../src/collaboration/ui/RichCommentModel";
 import { PermissionPolicyClient } from "../../src/collaboration/PermissionPolicy";
+import { applyPermissionOverrides, permissionChanges } from "../../src/collaboration/PermissionEditor";
 
 const fixturePath = process.env.EVC_DISCUSSION_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -178,7 +179,8 @@ integration("combined permission client grants a read-only reviewer, detects sta
 	const before = await permissions.read();
 	const reading = await permissions.save(before, { file_rules: [{ user_id: f.reviewer, path: "", recursive: true, permission: "read" }], comment_rules: [] });
 	expect(await reviewer.permissions(f.entry)).toEqual({ read: true, comment: false, edit: false, moderate: false });
-	const proposed = { file_rules: reading.file_rules, comment_rules: [{ user_id: f.reviewer, path: "", recursive: true, allowed: true }] };
+	const proposed = applyPermissionOverrides(reading, { user_id: f.reviewer, path: "", recursive: true, file: "read", comment: "allow" });
+	expect(permissionChanges(reading, proposed)).toHaveLength(1);
 	const unreliable = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.ownerToken, () => true, async (url, init) => {
 		const response = await fetch(url, init); if (init.method === "PUT" && response.ok) { await response.text(); throw new Error("Lost successful response"); } return response;
 	});
