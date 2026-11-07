@@ -179,11 +179,50 @@ revisions, exact host capture and dirty inspectors at every navigation stage.
 The native availability check encountered a locked Mac; this is not native
 desktop/mobile or physical keyboard/touch acceptance.
 
+## Captured-versus-current comparison
+
+The discussion card now offers **Compare marker positions** to readers, including
+members without comment or edit permission. The dialog shows the immutable
+captured target beside the latest checked marker: label, color, shape, exact
+coordinates, range inclusivity, axis properties and marker revision. It identifies
+changed fields, archived markers and detached placements. Its columns stack in
+narrow windows and controls retain mobile-sized touch targets.
+
+**Show captured position** and **Show checked position** use the guarded saved-view
+navigation path. Neither updates the discussion target, marker metadata or note.
+An archived/detached marker has no current-position navigation. Cached catalogs
+are explicitly labeled; absence from a cache does not claim the marker was
+deleted. Point labels show a single coordinate rather than repeating a range.
+
+Comparison is an explicit, bounded read with no polling timer. Refresh rechecks
+the discussion and catalog, then rereads the cached thread before showing the
+result. Closing, access/authentication changes, generation changes, retargeting
+and disposed sidebar cards clear the dialog or reject late results. Repeated
+refreshes share the pending read; prior navigation callbacks become invalid.
+Catalog lineage and registry revisions must match the captured saved view.
+
+November 7 validation: **3,133 tests in 247 suites pass**, with 22 opt-in tests in
+17 suites skipped. The 150-test focused set, build/main types, frozen test-type
+gate and changed-source lint pass. Eighteen comparison cases cover changed and
+unchanged content, archived/detached status, fresh versus cached absence, access
+loss, late completion, lineage mismatches and exact decimal/historical payloads;
+the sidebar integration case verifies reader access and closure on retargeting.
+
+All eight source interoperability cases now open this actual dialog and navigate
+both positions through the actual Timeline/Sequence providers, in both plugin
+load orders and grouped/ungrouped views. Note writes remain empty. The companion
+HTTP fixture passes seven tests in six suites, exercising real authorization,
+catalogs, immutable anchors, offline recovery and surface presence. That fixture
+does not render this dialog. The Time & Line checkout remains unchanged at
+`6eedff2`. Logs use `/private/tmp/marker-comparison-*.log`.
+
+Native desktop/popout/mobile layout, keyboard/touch and accessibility acceptance
+of the comparison remains. No live vault or production service was changed.
+
 ## Remaining work
 
-Side-by-side current-versus-captured position comparison, base-wide placement/
-matching, local marker promotion, direct point picking and broader recovery
-controls remain. The picker and management form still use explicit refresh so
+Base-wide placement/matching, local marker promotion, direct point picking and
+broader recovery controls remain. The picker and management form still use explicit refresh so
 an in-progress selection/edit is never silently replaced; the timeline overlays
 refresh automatically through active discussion polling. Overlapping overlay
 polish and native layout/resource measurements remain. The Time & Line fork

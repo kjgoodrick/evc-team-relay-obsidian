@@ -16,6 +16,8 @@ import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeW
 import { renderTimelineDiscussionMarkers, renderTimelineSharedMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
 import { TimelineMarkerPicker } from "../../src/collaboration/ui/TimelineMarkerPicker.ts";
 import { TimelineMarkerManager } from "../../src/collaboration/ui/TimelineMarkerManager.ts";
+import { TimelineMarkerComparisonModal } from "../../src/collaboration/ui/TimelineMarkerComparison.ts";
+import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope.ts";
 import { parseTimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol.ts";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor } from "../../src/collaboration/TimelineMarkerProtocol.ts";
 
@@ -315,6 +317,32 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		focusedMarks.remove(); root.querySelector(".sabidurian-comment-range-focus button").click();
 		for (const callback of [...frames.values()]) callback(0); frames.clear();
 		assert.equal(root.querySelector(".sabidurian-comment-range-focus"), null); assert.equal(focusedContext.current(), false);
+		// The comparison keeps the immutable target while both navigation buttons
+		// exercise the real Timeline/Sequence provider and saved-axis bridge.
+		const checkedContent = { ...sharedContent, label: "Updated shared launch", range: { ...sharedContent.range,
+			start: savedRange.end, end: savedRange.end } };
+		const checkedCatalog = parseTimelineMarkerCatalog({ ...markerCatalog, catalog_revision: 2,
+			markers: [{ ...markerCatalog.markers[0], revision: 2, content: checkedContent,
+				target: { ...markerTarget, marker_revision: 2, content: checkedContent } }] }, uuid(2), uuid(4));
+		const comparisonThread = { id: uuid(61), anchor_revision: 1, anchor: capturedMarker }, navigation = [];
+		const comparisonSession = { status: "ready", permission: () => ({ read: true, comment: false }),
+			knownDocumentGeneration: () => uuid(3), baseRegistryRevision: () => 1, onChange: () => () => {},
+			linkedThread: async () => ({ thread: comparisonThread }), cachedThread: async () => comparisonThread,
+			readTimelineMarkers: async () => checkedCatalog, verifiedTargetCatalog: () => true };
+		const comparison = new TimelineMarkerComparisonModal(plugin.app, comparisonSession, baseDiscussionScope(uuid(2), uuid(4)),
+			uuid(61), 1, capturedMarker, () => surface.current(), async (anchor, current) => {
+				assert.ok(current()); assert.equal(surface.revealRange(anchor.target.content.range, anchor.target.axis, current), "revealed");
+				navigation.push(anchor);
+			});
+		comparison.open(); await settleManagement();
+		assert.ok(document.body.textContent.includes("Updated shared launch"));
+		for (const label of ["Show captured position", "Show checked position"]) {
+			const button = [...document.querySelectorAll(".relay-marker-comparison button")].find(button => button.textContent === label);
+			assert.ok(button); button.click(); await settleManagement();
+		}
+		assert.equal(navigation.length, 2); assert.deepEqual(navigation[0], capturedMarker);
+		assert.equal(navigation[1].target.marker_revision, 2); assert.deepEqual(navigation[1].target.content.range.start, savedRange.end);
+		assert.deepEqual(writes, []); comparison.close(); assert.equal(document.querySelector(".relay-marker-comparison"), null);
 		// Empty query results retain the configured axis and whole-view range
 		// workflow. Missing lanes never become whole-view markers or targets.
 		const originalData = view.data, oldHandle = surface.handles()[0];

@@ -872,3 +872,7 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-comment-edit-review { border: 1px solid var(--background-modifier-border); padding: 10px; margin-block: 10px; }
 .relay-comment-rich [hidden] { display: none; }
 .is-mobile .relay-comment-rich button, .is-mobile .relay-comment-rich input { min-height: 44px; }
+.relay-marker-comparison-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 12px; margin-block: 12px; }
+.relay-marker-comparison-columns section { min-width: 0; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); overflow-wrap: anywhere; }
+.relay-marker-comparison-columns h3 { margin-top: 0; }
+.is-mobile .relay-marker-comparison button { min-height: 44px; }

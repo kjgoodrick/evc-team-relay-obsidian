@@ -16,6 +16,7 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { DiscussionSearchPanel } from "./DiscussionSearchPanel";
 import { CommentHistoryModal } from "./CommentHistory";
 import { TargetHistoryModal, commentTargetDescription } from "./ReattachComment";
+import { TimelineMarkerComparisonModal } from "./TimelineMarkerComparison";
 
 export const COMMENTS_VIEW = "team-relay-comments";
 
@@ -65,6 +66,7 @@ class EditCommentModal extends AccountModal {
 }
 
 class ThreadCard {
+	private markerComparison?: TimelineMarkerComparisonModal;
 	private targetStatus = uncheckedTarget();
 	private subscription: ThreadSubscription;
 	readonly el: HTMLElement;
@@ -95,6 +97,7 @@ class ThreadCard {
 	}
 	async update(thread: AnchoredThread, targetStatus?: CommentTargetStatus): Promise<void> {
 		this.thread = thread; if (targetStatus) this.targetStatus = targetStatus;
+		this.markerComparison?.validate();
 		const key = JSON.stringify([thread.activity_sequence, this.targetStatus, this.count, this.after, this.expanded,
 			this.session.permission(this.entryId), this.session.online, this.session.canQueue, this.session.participants(this.entryId),
 			this.session.baseRegistryRevision(this.entryId)]);
@@ -116,6 +119,17 @@ class ThreadCard {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
 			const target = this.controls.createEl("button", { text: thread.anchor.target.type === "summary" ? "Definition details" : thread.anchor.target.type === "timeline_marker" ? "Show captured marker position" : "Show Bases target" });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
+			if (thread.anchor.target.type === "timeline_marker") {
+				const captured = thread.anchor, revision = thread.anchor_revision;
+				const compare = this.controls.createEl("button", { text: "Compare marker positions" });
+				compare.onclick = () => {
+					this.markerComparison?.close();
+					this.markerComparison = new TimelineMarkerComparisonModal(this.app, this.session, this.entryId, thread.id, revision, captured,
+						() => !this.disposed && this.thread.anchor_revision === revision,
+						(anchor, current) => this.host.revealTarget(this.session, this.entryId, anchor, current));
+					this.markerComparison.open();
+				};
+			}
 		}
 		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
 		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
@@ -237,7 +251,7 @@ class ThreadCard {
 			}
 		}
 	}
-	dispose(): void { this.disposed = true; this.generation++; this.subscription.dispose(); this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
+	dispose(): void { this.disposed = true; this.generation++; this.markerComparison?.close(); this.markerComparison = undefined; this.subscription.dispose(); this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
 }
 
 export class CommentsView extends ItemView {

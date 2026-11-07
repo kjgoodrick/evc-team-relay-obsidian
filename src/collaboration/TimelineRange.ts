@@ -111,12 +111,12 @@ export function timelineRangeKey(value: TimelineRange): string {
 		"time_zone" in range ? range.time_zone : range.kind === "historical" ? [range.calendar, range.year_numbering] : range.unit]);
 }
 
-export function timelineRangeLabel(range: TimelineRange): string {
+export function timelineRangeLabel(range: TimelineRange, shape: "range" | "point" = "range"): string {
 	const point = (value: HistoricalPoint) => {
 		const year = value.year > 0 ? String(value.year) : `${1 - value.year} BCE`;
 		return value.precision === "year" ? year : `${String(value.month).padStart(2, "0")}${value.precision === "day" ? "-" + String(value.day).padStart(2, "0") : ""}, ${year}`;
 	};
 	const start = range.kind === "historical" ? point(range.start) : range.start;
 	const end = range.kind === "historical" ? point(range.end) : range.end;
-	return `${range.kind === "ordinal" ? "Sequence" : "Timeline"} range: ${start} – ${end}${"time_zone" in range ? " · " + range.time_zone : ""}`;
+	return `${range.kind === "ordinal" ? "Sequence" : "Timeline"} ${shape}: ${start}${shape === "range" ? " – " + end : ""}${"time_zone" in range ? " · " + range.time_zone : ""}`;
 }

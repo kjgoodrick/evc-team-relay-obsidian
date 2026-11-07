@@ -16,6 +16,8 @@ import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import type { OnlineOperation } from "../../src/collaboration/DiscussionTransport";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import * as clipboard from "../../src/utils/clipboard";
+import { TimelineMarkerComparisonModal } from "../../src/collaboration/ui/TimelineMarkerComparison";
+import { parseAnchor } from "../../src/collaboration/DiscussionProtocol";
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 
 jest.mock("obsidian", () => ({
@@ -512,4 +514,30 @@ test("slow target verification does not delay cached comments and cannot restore
 		finish(new Map([[id(4), { state: "changed", message: "Private target label" }]])); await new Promise(resolve => setTimeout(resolve, 100));
 		expect(view.contentEl.textContent).not.toContain("Private target label"); expect(view.contentEl.textContent).not.toContain("Cached comment before target check");
 	} finally { await view.onClose(); store.close(); }
+});
+
+test("marker threads expose read-only comparison and close it when the discussion is retargeted", async () => {
+	const { store, session, typed } = await fixture(), scope = baseDiscussionScope(entry, id(6));
+	const anchor = parseAnchor({ version: 1, type: "base", definition_id: id(8), view_id: id(6), generation: id(7), registry_revision: 1,
+		target: { type: "timeline_marker", marker_id: id(9), marker_revision: 1, axis_definition_id: id(10), axis_definition_revision: 1,
+			axis: { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "America/Denver" },
+			content: { kind: "point", label: "Original milestone", color: "#abcdef", range: { version: 1, kind: "calendar", start: "2026-11-07", end: "2026-11-07", time_zone: "America/Denver", start_inclusive: true, end_inclusive: true } } } });
+	let thread = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false, created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z", anchor };
+	session.local.mockImplementation(async () => ({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 }));
+	session.messages.mockResolvedValue({ messages: [], hasMore: false });
+	session.permission = () => ({ read: true, comment: false, edit: false, moderate: false });
+	Object.assign(session, { knownDocumentGeneration: () => id(7) });
+	let notify!: () => void;
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: () => undefined,
+		onChange: (fn: () => void) => { notify = fn; return () => {}; }, targetLabel: () => "Original milestone",
+		current: () => ({ path: "Plan.base", entryId: scope, kind: "base", baseViewName: "Timeline", session: typed }) } as unknown as DiscussionHost;
+	const opened = jest.spyOn(TimelineMarkerComparisonModal.prototype, "open");
+	const closed = jest.spyOn(TimelineMarkerComparisonModal.prototype, "close");
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => !![...view.contentEl.querySelectorAll("button")].find(button => button.textContent === "Compare marker positions"));
+		[...view.contentEl.querySelectorAll("button")].find(button => button.textContent === "Compare marker positions")!.click();
+		expect(opened).toHaveBeenCalledTimes(1); expect(closed).not.toHaveBeenCalled();
+		thread = { ...thread, activity_sequence: 2, anchor_revision: 2 }; notify(); await until(() => closed.mock.calls.length > 0);
+	} finally { await view.onClose(); store.close(); opened.mockRestore(); closed.mockRestore(); }
 });
