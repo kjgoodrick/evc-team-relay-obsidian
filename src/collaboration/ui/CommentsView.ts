@@ -332,7 +332,7 @@ export class CommentsView extends ItemView {
 			this.moveSelection = this.contentEl.createDiv({ cls: "relay-comment-target-selection", attr: { role: "status", "aria-live": "polite" } });
 			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { void this.session?.refresh(); };
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
-			this.pendingView = new PendingComments(this.pending, this.session, this.entryId);
+			this.pendingView = new PendingComments(this.pending, this.session, this.entryId, operation => this.host.openCommandRecovery(this.session!, operation));
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
 			const session = this.session, entryId = this.entryId;
 			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); },
@@ -350,7 +350,7 @@ export class CommentsView extends ItemView {
 		if (this.moveSelection) {
 			this.moveSelection.empty(); this.moveSelection.hidden = !this.host.choosingReattachment;
 			if (this.host.choosingReattachment) {
-				this.moveSelection.createEl("p", { text: this.host.selectingReattachment(session, entryId) ? "Moving a discussion: choose text, blocks, an image or a Bases target using its comment action. You will review the move before saving." : "A discussion target selection is active in another note or saved view. Return there or cancel the selection." });
+				this.moveSelection.createEl("p", { text: this.host.selectingReattachment(session, entryId) ? (this.host.choosingCommandRecovery ? "Recovering a saved comment: choose text, blocks, an image or a Bases target using its comment action. You will review the draft before sending." : "Moving a discussion: choose text, blocks, an image or a Bases target using its comment action. You will review the move before saving.") : "A discussion target selection is active in another note or saved view. Return there or cancel the selection." });
 				const cancel = this.moveSelection.createEl("button", { text: "Cancel target selection" }); cancel.onclick = () => this.host.cancelReattachmentSelection();
 			}
 		}

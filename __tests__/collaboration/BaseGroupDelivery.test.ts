@@ -7,6 +7,7 @@ import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { bodyFromText, parseAnchor, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -169,6 +170,19 @@ test("stopping the worker during capture never starts a thread send", async () =
 	const w = worker(transport); w.resume(); await started; w.stop(); finish(anchor()); await w.settled();
 	expect(transport.send).not.toHaveBeenCalled();
 	expect(await store.getOperation(id(13))).toMatchObject({ state: "sending", payload: command().payload });
+});
+
+test("editing an unprepared group draft fences a capture already in flight before any thread send", async () => {
+	const original = await store.enqueue(command()), transport = remote();
+	let finish!: (proof: BaseAnchor) => void, began!: () => void;
+	const started = new Promise<void>(resolve => { began = resolve; });
+	transport.captureBaseGroup.mockImplementationOnce(() => { began(); return new Promise<BaseAnchor>(resolve => { finish = resolve; }); });
+	const w = worker(transport); w.resume(); await started;
+	const recovered = await store.restoreCommandForReview(original, protocolJson(editableCommentDraft(parsePendingBaseGroupCommand(command()).body, () => "Member")), true);
+	finish(anchor()); await w.settled();
+		expect(transport.send).not.toHaveBeenCalled();
+		expect(await store.getOperation(original.operationId)).toMatchObject({ state: "review", reviewDraftId: recovered.id });
+		expect(recovered.target).toEqual(target());
 });
 
 test("capture rejection retains the original comment and keeps dependent replies blocked", async () => {

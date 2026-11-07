@@ -15,8 +15,9 @@ export interface QueuedCommand {
 	dependsOn: string[];
 }
 export interface OutboxOperation extends QueuedCommand {
-	state: "queued" | "sending" | "accepted" | "rejected" | "withdrawn";
+	state: "queued" | "sending" | "accepted" | "rejected" | "review" | "withdrawn";
 	replacementId?: string;
+	reviewDraftId?: string;
 	createdAt: number;
 	attempt: number;
 	nextAttemptAt: number;
@@ -87,10 +88,10 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 20 fences workers that cannot preserve rich drafts, their edit
-		// base revisions or picture references retained for undo.
+		// Version 21 fences workers that cannot preserve withdrawn-command review
+		// drafts and atomically reconnect their dependent operations on replacement.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 20);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 21);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -290,6 +291,7 @@ export class DiscussionStore {
 	async removeDraft(id: string, revision: number): Promise<boolean> {
 		return this.transaction(["drafts", ...PICTURE_STORES], "readwrite", async tx => {
 			if (await request(tx.objectStore("preferences").get("online:" + id))) throw new Error("Review the unconfirmed online action before removing this draft");
+			if (await request(tx.objectStore("preferences").get("recovery:" + id))) throw new Error("Review the saved change and its dependents before removing this draft");
 			const drafts = tx.objectStore("drafts"), current: Draft | undefined = await request(drafts.get(id));
 			if (!current || current.revision !== revision) return false;
 			await request(drafts.delete(id));
@@ -398,6 +400,25 @@ export class DiscussionStore {
 		command = JSON.parse(boundedJson(command as unknown as Json)) as QueuedCommand;
 		if (command.type === "base.group.create") parsePendingBaseGroupCommand(command);
 		return this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
+			const recoveryId = draft ? await request(tx.objectStore("preferences").get("recovery:" + draft.id)) : undefined;
+			let original: OutboxOperation | undefined;
+			if (recoveryId !== undefined) {
+				original = await request(tx.objectStore("outbox").get(recoveryId));
+				if (!original || original.state !== "review" || original.reviewDraftId !== draft?.id || original.scopeId !== command.scopeId ||
+					original.operationId === command.operationId || !isRecord(original.payload) || !isRecord(command.payload) ||
+					original.payload.thread_id !== command.payload.thread_id || original.payload.message_id !== command.payload.message_id ||
+					(command.type !== original.type && !(["thread.create", "base.group.create"].includes(command.type) && ["thread.create", "base.group.create"].includes(original.type)))) {
+					throw new Error("Recovered command changed identity or scope");
+				}
+				if (command.dependsOn.some(id => !original!.dependsOn.includes(id) && !commandPictures(command.payload).includes(id))) throw new Error("Recovered command introduced an unrelated dependency");
+				// Keep ordering against non-picture predecessors. Pictures removed or
+				// refreshed in the review draft must not retain a failed old upload.
+				for (const id of original.dependsOn) {
+					const dependency: OutboxOperation | undefined = await request(tx.objectStore("outbox").get(id));
+					if (!dependency || dependency.scopeId !== command.scopeId) throw new Error("Missing or cross-scope dependency");
+					if (dependency.type !== "picture.upload") command.dependsOn = [...new Set([...command.dependsOn, id])];
+				}
+			}
 			const ids = commandPictures(command.payload), uploads = tx.objectStore("outbox");
 			for (const id of ids) {
 				const source: LocalPicture | undefined = await request(tx.objectStore("pictureSources").get(id));
@@ -433,12 +454,75 @@ export class DiscussionStore {
 			}
 			const op: OutboxOperation = { ...command, state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now };
 			await request(store.add(op));
+			if (original && draft) {
+				const dependents: OutboxOperation[] = await request(store.index("dependency").getAll(original.operationId, 101));
+				if (dependents.length > 100) throw new Error("Too many dependent changes for this review");
+				for (const dependent of dependents) {
+					if (dependent.state === "accepted" || dependent.state === "withdrawn") continue;
+					if (dependent.scopeId !== command.scopeId || (dependent.state !== "review" && (dependent.attempt !== 0 || dependent.state !== "queued")) || dependent.operationId === command.operationId) throw new Error("A dependent change needs separate review");
+					dependent.dependsOn = dependent.dependsOn.map(id => id === original!.operationId ? command.operationId : id);
+					await request(store.put(dependent));
+				}
+				original.state = "withdrawn"; original.replacementId = command.operationId;
+				await request(store.put(original));
+				await request(tx.objectStore("preferences").delete("recovery:" + draft.id));
+				await setPictureReferences(tx, "outbox", original.operationId, command.scopeId, []);
+				for (const oldId of commandPictures(original.payload).filter(id => !ids.includes(id))) {
+					// A removed/refreshed picture must not keep an abandoned upload and
+					// its original bytes forever. Shared drafts/commands keep ownership.
+					const references = await request(tx.objectStore("pictureReferences").index("picture").getAll(oldId, 101)) as { kind: string; ownerId: string }[];
+					const dependencies: OutboxOperation[] = await request(store.index("dependency").getAll(oldId, 101));
+					const upload: OutboxOperation | undefined = await request(store.get(oldId));
+					if (upload?.type === "picture.upload" && upload.scopeId === command.scopeId && references.length <= 100 && dependencies.length <= 100 &&
+						!references.some(ref => ref.kind !== "outbox" || ref.ownerId !== oldId) &&
+						!dependencies.some(op => op.state !== "accepted" && op.state !== "withdrawn")) {
+						if (upload.state !== "accepted") { upload.state = "withdrawn"; delete upload.lease; delete upload.error; await request(store.put(upload)); }
+						await setPictureReferences(tx, "outbox", oldId, command.scopeId, []);
+					}
+				}
+			}
 			return op;
 		});
 	}
 
 	async getOperation(id: string): Promise<OutboxOperation | undefined> {
 		return this.transaction(["outbox"], "readonly", tx => request(tx.objectStore("outbox").get(id)));
+	}
+
+	/** Call only after server withdrawal of the exact wire command. An unprepared
+	 * group is the exception: the lease-CAS check below proves it was never sent.
+	 * The original payload stays immutable; no worker sends the review draft.
+	 */
+	async restoreCommandForReview(original: OutboxOperation, body: Json, onlyUnpreparedGroup = false): Promise<Draft> {
+		original = JSON.parse(boundedJson(original as unknown as Json)) as OutboxOperation;
+		body = JSON.parse(boundedJson(body)) as Json;
+		if (!["thread.create", "base.group.create", "reply.create", "message.edit"].includes(original.type) ||
+			!isRecord(original.payload) || !isRecord(body) || canonical(protocolJson(parseBody(original.payload.body))) !== canonical(protocolJson(parseBody(body.rich)))) throw new Error("Invalid recovered draft");
+		const draftId = "recovery:" + original.operationId;
+		return this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
+			const outbox = tx.objectStore("outbox"), drafts = tx.objectStore("drafts"), preferences = tx.objectStore("preferences");
+			const current: OutboxOperation | undefined = await request(outbox.get(original.operationId));
+			if (!current || current.scopeId !== original.scopeId || current.type !== original.type || canonical(current.payload) !== canonical(original.payload)) throw new Error("Saved command changed during recovery");
+			if (current.state === "review" && current.reviewDraftId === draftId) {
+				const saved: Draft | undefined = await request(drafts.get(draftId));
+				if (!saved || saved.scopeId !== current.scopeId || await request(preferences.get("recovery:" + draftId)) !== current.operationId) throw new Error("Recovered draft is unavailable");
+				return saved;
+			}
+			if (current.state === "accepted" || current.state === "withdrawn" || current.state === "review") throw new Error("Saved command was already completed");
+			if (onlyUnpreparedGroup) {
+				if (current.type !== "base.group.create" || current.preparedAnchor !== undefined) throw new Error("Group capture advanced; check delivery before recovery");
+			} else if (canonical(current.preparedAnchor ?? null) !== canonical(original.preparedAnchor ?? null)) throw new Error("Group capture changed during recovery");
+			if (await request(drafts.get(draftId)) || await request(preferences.get("recovery:" + draftId))) throw new Error("Recovery identity was already used");
+			const payload = current.payload as Record<string, Json>;
+			const draft: Draft = { id: draftId, scopeId: current.scopeId, revision: 0, body,
+				...(payload.anchor !== undefined ? { target: payload.anchor } : {}) };
+			await request(drafts.add(draft));
+			await setPictureReferences(tx, "draft", draftId, current.scopeId, pictureIds(body, true));
+			await request(preferences.put(current.operationId, "recovery:" + draftId));
+			current.state = "review"; current.reviewDraftId = draftId; delete current.lease;
+			await request(outbox.put(current));
+			return draft;
+		});
 	}
 
 	/** Atomically replace pictures after the server has fenced the original request. */
@@ -462,7 +546,7 @@ export class DiscussionStore {
 			const previous: OutboxOperation | undefined = await request(outbox.get(original.operationId));
 			if (!previous || previous.scopeId !== original.scopeId || previous.type !== original.type || canonical(previous.payload) !== canonical(original.payload)) throw new Error("Saved command changed during recovery");
 			if (previous.state === "withdrawn" && previous.replacementId) return previous.replacementId;
-			if (previous.state === "accepted" || previous.state === "withdrawn") throw new Error("Saved command was already completed");
+			if (previous.state === "accepted" || previous.state === "withdrawn" || previous.state === "review") throw new Error("Saved command was already completed or is being reviewed");
 			// An unprepared local group intent cannot have sent a thread. Fence it
 			// in this same transaction; a concurrent capture cannot prepare afterward.
 			if (onlyUnpreparedGroup && (previous.type !== "base.group.create" || previous.preparedAnchor !== undefined)) throw new Error("Group capture advanced during recovery; retry after checking delivery");
@@ -536,7 +620,7 @@ export class DiscussionStore {
 		if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid pending page");
 		return this.transaction(["outbox"], "readonly", async tx => {
 			const index = tx.objectStore("outbox").index("scopeState"), result: OutboxOperation[] = [];
-			for (const state of ["queued", "sending", "rejected"]) {
+			for (const state of ["queued", "sending", "rejected", "review"]) {
 				const range = IDBKeyRange.bound([scopeId, state], [scopeId, state, []]);
 				result.push(...await request(index.getAll(range, limit)) as OutboxOperation[]);
 			}
@@ -668,7 +752,7 @@ export class DiscussionStore {
 
 	private async acceptInTransaction(tx: IDBTransaction, operationId: string, result: Json): Promise<void> {
 		const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
-		if (!op || op.state === "accepted" || op.state === "withdrawn") return;
+		if (!op || op.state === "accepted" || op.state === "withdrawn" || op.state === "review") return;
 		op.state = "accepted"; op.result = result; delete op.lease; delete op.error;
 		await request(store.put(op));
 		await setPictureReferences(tx, "outbox", operationId, op.scopeId, []);

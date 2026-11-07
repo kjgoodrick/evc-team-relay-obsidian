@@ -168,10 +168,10 @@ export class DiscussionTransport implements DiscussionSender {
 	}
 
 	/** Resolve acceptance or fence every late send before creating a replacement. */
-	async withdraw(operation: QueuedCommand): Promise<WithdrawalResult> {
+	async withdraw(operation: QueuedCommand, current?: () => boolean): Promise<WithdrawalResult> {
 		// A timeout never proves withdrawal; validate the exact operation/scope.
 		const body = queuedEnvelope(this.identity.shareId, operation);
-		return this.withdrawEnvelope(operation, body);
+		return this.withdrawEnvelope(operation, body, current);
 	}
 	async withdrawOnline(operation: OnlineOperation, current?: () => boolean): Promise<WithdrawalResult> {
 		return this.withdrawEnvelope(operation, onlineEnvelope(this.identity.shareId, operation), current);

@@ -14,6 +14,17 @@ const result = () => ({ operation_id: id(3), scope_id: id(7), thread_id: id(5), 
 	state: "open", state_revision: 1, message_revision: 1, message_deleted: false, changed: true, removed: false });
 const reply = (status: number, body: unknown, headers?: HeadersInit) => new Response(JSON.stringify(body), { status, headers });
 
+test("queued withdrawal rechecks its view after credential refresh before sending", async () => {
+	let finish!: (value: { accountId: string; accessToken: string }) => void;
+	let current = true;
+	const fetcher = jest.fn(), pending = new Promise<{ accountId: string; accessToken: string }>(resolve => { finish = resolve; });
+	const transport = new DiscussionTransport(identity, () => pending, fetcher);
+	const withdrawing = transport.withdraw(op(), () => current);
+	const rejected = expect(withdrawing).rejects.toBeInstanceOf(DiscussionFailure);
+	current = false; finish({ accountId: id(1), accessToken: "synthetic-token" });
+	await rejected; expect(fetcher).not.toHaveBeenCalled();
+});
+
 test("history uses bounded revision windows and rejects oversized or unordered pages", async () => {
 	const revisions = [4, 5].map(revision => ({ revision, body: null, actor_id: id(1), created_at: "2026-11-07T00:00:00Z", reason: null }));
 	const fetcher = jest.fn().mockResolvedValue(reply(200, { revisions, has_more: false, next_after: 5 }));

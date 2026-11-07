@@ -11,10 +11,13 @@ import { EditorState } from "prosemirror-state";
 import { bodyToCommentDoc, commentDocBody, richCommentBody } from "../../src/collaboration/ui/RichCommentModel";
 import { PermissionPolicyClient } from "../../src/collaboration/PermissionPolicy";
 import { applyPermissionOverrides, permissionChanges } from "../../src/collaboration/PermissionEditor";
+import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
+import { bodyFromText } from "../../src/collaboration/DiscussionProtocol";
 
 const fixturePath = process.env.EVC_DISCUSSION_FIXTURE;
 const integration = fixturePath ? test : test.skip;
 Object.assign(globalThis, { IDBKeyRange });
+
 
 integration("real HTTP commands recover lost replies, persist history/reactions, and recheck comment revocation", async () => {
 	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as {
@@ -193,4 +196,66 @@ integration("combined permission client grants a read-only reviewer, detects sta
 	const switched = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.token, () => true, fetch);
 	await expect(switched.read()).rejects.toMatchObject({ code: "account_changed", status: 403 });
 	await permissions.save(confirmed, { file_rules: before.file_rules, comment_rules: before.comment_rules });
+}, 30_000);
+
+integration("withdrawn comments recover as edited drafts without duplicate sends or detached replies", async () => {
+	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; owner: string; ownerToken: string };
+	if (new URL(fixture.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const identity = { serverId: fixture.base, accountId: fixture.owner, shareId: fixture.share, vaultId: "recovery-owner" };
+	let loseWithdrawal = true;
+	const transport = new DiscussionTransport(identity, async () => ({ accountId: fixture.owner, accessToken: fixture.ownerToken }), async (url, init) => {
+		const response = await fetch(url, init);
+		if (loseWithdrawal && url.endsWith("/commands/withdraw") && response.ok) { loseWithdrawal = false; await response.text(); throw new Error("Lost withdrawal response"); }
+		return response;
+	});
+	const store = await DiscussionStore.open(identity, new IDBFactory()), session = new DiscussionSession(store, transport);
+	let stop: (() => void) | undefined;
+	try {
+		await session.start(); stop = session.watch(fixture.entry, () => {}); await session.refresh(); session.outbox.stop(); await session.outbox.settled();
+		const thread = randomUUID(), message = randomUUID(), childMessage = randomUUID();
+		const original = await store.enqueue({ operationId: randomUUID(), scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
+			type: "thread.create", thread_id: thread, message_id: message, anchor: { version: 1, type: "note" }, body: protocolJson(bodyFromText("Original saved body")),
+		} });
+		const child = await store.enqueue({ operationId: randomUUID(), scopeId: fixture.entry, type: "reply.create", dependsOn: [original.operationId], payload: {
+			type: "reply.create", thread_id: thread, message_id: childMessage, body: protocolJson(bodyFromText("Waiting reply")),
+		} });
+		await expect(session.recoverSavedCommand(original)).rejects.toMatchObject({ action: "retry" });
+		expect((await store.getOperation(original.operationId))?.state).toBe("queued");
+		await expect(transport.send(original)).rejects.toMatchObject({ code: "operation_withdrawn" });
+		const recovered = await session.recoverSavedCommand(original);
+		if (recovered.status !== "editable") throw new Error("Expected editable recovery");
+		const corrected = bodyFromText("Corrected before sending");
+		const draft = { ...recovered.draft, revision: 1, body: protocolJson(editableCommentDraft(corrected, () => "Owner")) };
+		await store.saveDraft(draft, 0);
+		const replacement = { ...original, operationId: randomUUID(), payload: { ...(original.payload as object), body: protocolJson(corrected) } };
+		await session.queue(replacement, draft); session.outbox.resume(); await session.outbox.settled();
+		expect(await store.getOperation(child.operationId)).toMatchObject({ state: "accepted", dependsOn: [replacement.operationId] });
+		const delivered = await transport.thread(fixture.entry, thread);
+		expect(delivered.messages).toHaveLength(2);
+		expect(delivered.messages.map(item => [item.id, item.body])).toMatchObject([[message, corrected], [childMessage, bodyFromText("Waiting reply")]]);
+		expect(await session.recoverSavedCommand(original)).toEqual({ status: "requeued" });
+		await expect(transport.send(original)).rejects.toMatchObject({ code: "operation_withdrawn" });
+		// An accepted change whose acknowledgement was lost returns its receipt;
+		// recovery must not manufacture an editable replacement of that message.
+		session.outbox.stop(); await session.outbox.settled();
+		const accepted = await store.enqueue({ operationId: randomUUID(), scopeId: fixture.entry, type: "reply.create", dependsOn: [], payload: {
+			type: "reply.create", thread_id: thread, message_id: randomUUID(), body: protocolJson(bodyFromText("Accepted before recovery")),
+		} });
+		await transport.send(accepted);
+		expect(await session.recoverSavedCommand(accepted)).toEqual({ status: "accepted" });
+		expect(await store.getDraft("recovery:" + accepted.operationId)).toBeUndefined();
+		const stale = await store.enqueue({ operationId: randomUUID(), scopeId: fixture.entry, type: "message.edit", dependsOn: [], payload: {
+			type: "message.edit", thread_id: thread, message_id: message, expected_revision: 1, body: protocolJson(bodyFromText("My offline edit")),
+		} });
+		await transport.send({ ...stale, operationId: randomUUID(), payload: { ...(stale.payload as object), body: protocolJson(bodyFromText("Changed on another device")) } });
+		await expect(transport.send(stale)).rejects.toMatchObject({ code: "stale_message_revision" });
+		const edit = await session.recoverSavedCommand(stale);
+		if (edit.status !== "editable") throw new Error("Expected editable stale change");
+		expect(edit.draft.body).toMatchObject({ editBaseRevision: 1, text: "My offline edit" });
+		const latest = await session.linkedThread(fixture.entry, thread, message);
+		expect(latest?.message?.revision).toBe(2);
+		await session.queue({ ...stale, operationId: randomUUID(), payload: { ...(stale.payload as object), expected_revision: 2 } }, edit.draft);
+		session.outbox.resume(); await session.outbox.settled();
+		expect((await transport.message(fixture.entry, thread, message)).message).toMatchObject({ revision: 3, body: bodyFromText("My offline edit") });
+	} finally { stop?.(); await session.close(); }
 }, 30_000);

@@ -7,6 +7,8 @@ import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { DiscussionReattachment } from "./DiscussionReattachment";
+import { editableCommentDraft } from "./ui/CommentDraft";
+import { parseBody } from "./DiscussionProtocol";
 import { BASE_FILE_GROUP_PROPERTIES, copyBaseGroupCapture, type BaseGroupSelection } from "./BaseGroupProtocol";
 import { parseBaseGroupValue } from "./BaseGroupValue";
 import { DiscussionOutbox } from "./DiscussionOutbox";
@@ -117,6 +119,7 @@ export class DiscussionSession {
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
 	get canReattach(): boolean { return this.online && this.reattachEnabled; }
+	get canRecoverSavedCommand(): boolean { return this.online && this.recoveryEnabled; }
 	async search(input: DiscussionSearchRequest): Promise<DiscussionSearchPage> {
 		const request = searchRequest(input);
 		if (!this.canSearch) throw new Error("Connect to a server with comment search enabled.");
@@ -998,6 +1001,39 @@ export class DiscussionSession {
 		const retried = await this.trackLocal(this.store.retryRejected(operation.operationId, operation.scopeId, operation.attempt));
 		if (!this.closed) { this.broadcast(); this.outbox.wake(); this.notify(); }
 		return retried;
+	}
+	async recoverSavedCommand(operation: OutboxOperation, visible: () => boolean = () => true): Promise<{ status: "accepted" | "requeued" } | { status: "editable"; draft: Draft; operation: OutboxOperation }> {
+		const epoch = this.authenticationEpoch;
+		const alive = () => visible() && !this.closed && epoch === this.authenticationEpoch;
+		const dispatch = () => alive() && this.canRecoverSavedCommand && this.permission(operation.scopeId)?.comment === true;
+		return this.trackLocal((async () => {
+			if (!alive()) throw new Error("This discussion account is closed.");
+			const saved = await this.store.getOperation(operation.operationId);
+			if (!alive() || !saved || saved.scopeId !== operation.scopeId) throw new Error("Saved change is unavailable.");
+			if (saved.state === "accepted") return { status: "accepted" as const };
+			if (saved.state === "withdrawn" && saved.replacementId) return { status: "requeued" as const };
+			if (saved.state === "review" && saved.reviewDraftId) {
+				const draft = await this.store.getDraft(saved.reviewDraftId);
+				if (!alive() || !draft || draft.scopeId !== saved.scopeId) throw new Error("Recovered draft is unavailable.");
+				return { status: "editable" as const, draft, operation: saved };
+			}
+			if (!dispatch()) throw new Error("Reconnect with comment permission to check delivery before editing this saved change.");
+			if (!["thread.create", "base.group.create", "reply.create", "message.edit"].includes(saved.type) || !isRecord(saved.payload)) throw new Error("This kind of saved change cannot be edited.");
+			const body = editableCommentDraft(parseBody(saved.payload.body), id => this.displayName(saved.scopeId, id));
+			if (saved.type === "message.edit") body.editBaseRevision = saved.payload.expected_revision as number;
+			const unprepared = saved.type === "base.group.create" && saved.preparedAnchor === undefined;
+			if (unprepared) parsePendingBaseGroupCommand(saved);
+			else {
+				const wire = saved.type === "base.group.create" ? prepareBaseGroupCommand(saved, saved.preparedAnchor) : saved;
+				let result;
+				try { result = await this.transport.withdraw(wire, dispatch); }
+				catch (error) { if (error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication(); throw error; }
+				if (result.status === "accepted") { await this.store.accept(saved.operationId, protocolJson(result.result)); return { status: "accepted" as const }; }
+			}
+			if (!alive()) throw new Error("Recovery is saved on the server. Reopen this change to continue.");
+			const draft = await this.store.restoreCommandForReview(saved, protocolJson(body), unprepared);
+			return { status: "editable" as const, draft, operation: { ...saved, state: "review" as const, reviewDraftId: draft.id } };
+		})().finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
 	}
 	async repairPictures(operation: OutboxOperation): Promise<"accepted" | "requeued"> {
 		if (!this.canRepairPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect with picture and comment permission before repairing uploads.");

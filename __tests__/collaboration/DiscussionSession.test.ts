@@ -308,6 +308,65 @@ test.each(["withdrawn", "accepted", "lost response"])("picture recovery handles 
 	} finally { await close(); }
 });
 
+test.each(["withdrawn", "accepted", "lost response"])("saved comment review resolves %s before exposing an editable replacement", async outcome => {
+	const f = await fixture();
+	try {
+		f.transport.capabilities.mockResolvedValue({ discussions: true, ...{ recovery: true } }); await f.session.refresh();
+		f.session.outbox.stop(); await f.session.outbox.settled();
+		const op = await f.store.enqueue(command(), 1);
+		if (outcome === "accepted") f.transport.withdraw.mockResolvedValue({ status: "accepted", result: await f.transport.send() });
+		if (outcome === "lost response") f.transport.withdraw.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+		if (outcome === "lost response") {
+			await expect(f.session.recoverSavedCommand(op)).rejects.toMatchObject({ action: "retry" });
+			expect((await f.store.getOperation(op.operationId))?.state).toBe("queued");
+			expect(await f.store.getDraft("recovery:" + op.operationId)).toBeUndefined();
+		}
+		const recovered = await f.session.recoverSavedCommand(op);
+		if (outcome === "accepted") {
+			expect(recovered).toEqual({ status: "accepted" });
+			expect(await f.store.getDraft("recovery:" + op.operationId)).toBeUndefined();
+		} else {
+			expect(recovered).toMatchObject({ status: "editable", draft: { body: { text: "Saved" } } });
+			f.session.setForeground(false);
+			expect(await f.session.recoverSavedCommand(op)).toMatchObject({ status: "editable" });
+			expect(f.transport.send).not.toHaveBeenCalled();
+		}
+		expect(f.transport.withdraw).toHaveBeenCalledTimes(outcome === "lost response" ? 2 : 1);
+		expect(f.transport.withdraw).toHaveBeenLastCalledWith(expect.objectContaining(command()), expect.any(Function));
+	} finally { await f.close(); }
+});
+
+test("closing a recovery view during withdrawal retains the exact request for later recovery", async () => {
+	const f = await fixture(); let visible = true;
+	try {
+		f.transport.capabilities.mockResolvedValue({ discussions: true, ...{ recovery: true } }); await f.session.refresh();
+		f.session.outbox.stop(); await f.session.outbox.settled();
+		const op = await f.store.enqueue(command(), 1);
+		let finish!: (value: { status: string }) => void, entered!: () => void;
+		const started = new Promise<void>(resolve => { entered = resolve; });
+		f.transport.withdraw.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; entered(); }));
+		const recovery = f.session.recoverSavedCommand(op, () => visible);
+		const rejected = expect(recovery).rejects.toThrow("Reopen"); await started;
+		visible = false; finish({ status: "withdrawn" }); await rejected;
+		expect(await f.store.getOperation(op.operationId)).toMatchObject({ state: "queued", payload: command().payload });
+		expect(await f.store.getDraft("recovery:" + op.operationId)).toBeUndefined();
+		expect(await f.session.recoverSavedCommand(op)).toMatchObject({ status: "editable" });
+	} finally { await f.close(); }
+});
+
+test("withdrawal authentication failure stops delivery and retains the original work", async () => {
+	const f = await fixture();
+	try {
+		f.transport.capabilities.mockResolvedValue({ discussions: true, ...{ recovery: true } }); await f.session.refresh();
+		f.session.outbox.stop(); await f.session.outbox.settled();
+		const original = await f.store.enqueue(command(), 1);
+		f.transport.withdraw.mockRejectedValueOnce(new DiscussionFailure("authenticate", "session_revoked", 401));
+		await expect(f.session.recoverSavedCommand(original)).rejects.toMatchObject({ action: "authenticate" });
+		expect(f.session.status).toBe("authentication_required");
+		expect(f.session.canQueue).toBe(false); expect((await f.store.getOperation(id(4)))?.state).toBe("queued");
+	} finally { await f.close(); }
+});
+
 test("previously verified capabilities/permissions support offline drafts, but not an unknown server", async () => {
 	const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory);
 	await store.setPreference("enabled", true); await store.setPreference("permission:" + entry, { read: true, comment: true, edit: false, moderate: false });

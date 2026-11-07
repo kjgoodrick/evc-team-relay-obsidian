@@ -51,7 +51,7 @@ export class PendingComments {
 	private heading: HTMLElement;
 	private limit: HTMLElement;
 	private disposed = false;
-	constructor(private parent: HTMLElement, private session: DiscussionSession, private entryId: string) {
+	constructor(private parent: HTMLElement, private session: DiscussionSession, private entryId: string, private review?: (operation: OutboxOperation) => void) {
 		this.heading = parent.createEl("h3", { text: "Saved on this device" });
 		this.limit = parent.createEl("p", { cls: "relay-comment-muted" });
 	}
@@ -64,7 +64,7 @@ export class PendingComments {
 		for (const [id, card] of this.cards) if (!ids.has(id)) { card.el.remove(); this.cards.delete(id); }
 		for (const op of operations) {
 			const canRetry = this.session.online && !!this.session.permission(this.entryId)?.comment;
-			const signature = JSON.stringify([op, canRetry, this.session.canRepairPictures, this.session.participants(this.entryId)]);
+			const signature = JSON.stringify([op, canRetry, this.session.canRepairPictures, this.session.canRecoverSavedCommand, this.session.participants(this.entryId)]);
 			let card = this.cards.get(op.operationId);
 			if (!card) {
 				card = { el: this.parent.createDiv({ cls: "relay-comment-pending-item" }), signature: "" };
@@ -78,7 +78,7 @@ export class PendingComments {
 	private render(box: HTMLElement, op: OutboxOperation, canRetry: boolean): void {
 		// A rejected retry may follow an accepted request whose acknowledgment was
 		// lost. Do not promise "not sent" or offer a fresh-ID resubmission here.
-		box.createEl("p", { text: op.state === "rejected" ? "Delivery needs review — your saved work is kept on this device" :
+		box.createEl("p", { text: op.state === "review" ? "Editing a saved change — send it explicitly when ready. Original text is shown below." : op.state === "rejected" ? "Delivery needs review — your saved work is kept on this device" :
 			op.dependsOn.length ? "Waiting for an earlier saved change to be confirmed…" : "Waiting for delivery confirmation…" });
 		const payload = op.payload;
 		if (isRecord(payload) && op.type === "picture.upload") {
@@ -98,7 +98,12 @@ export class PendingComments {
 		}
 		let hasPictures = false;
 		try { hasPictures = op.type !== "picture.upload" && commandPictures(payload).length > 0; } catch { /* Keep malformed saved work for manual recovery. */ }
-		if (hasPictures) {
+		if (this.review && ["thread.create", "base.group.create", "reply.create", "message.edit"].includes(op.type)) {
+			const edit = box.createEl("button", { text: op.state === "review" ? "Continue editing saved change" : "Review delivery and edit", attr: { type: "button" } });
+			edit.disabled = op.state !== "review" && (!canRetry || !this.session.canRecoverSavedCommand);
+			edit.onclick = () => this.review?.(op);
+		}
+		if (hasPictures && op.state !== "review") {
 			const repair = box.createEl("button", { text: "Refresh picture uploads and retry", attr: { type: "button" } });
 			repair.disabled = !canRetry || !this.session.canRepairPictures;
 			box.createEl("p", { cls: "relay-comment-muted", text: "Keeps your saved text, pictures and target. Checks delivery before retrying to avoid a duplicate comment." });

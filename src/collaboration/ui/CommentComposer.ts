@@ -56,6 +56,8 @@ export class CommentComposer {
 	private editBaseRevision?: number;
 	private needsEditReview = false;
 	private reviewButton?: HTMLButtonElement;
+	private sendAvailable: () => boolean = () => true;
+	private editingAvailable: () => boolean = () => true;
 
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string, private draftId: string,
 		private command: (body: MessageBody, anchor?: LocalDiscussionAnchor, editBaseRevision?: number) => ComposerCommand, label = "Comment", initialText: string | CommentDraft = "",
@@ -182,6 +184,8 @@ export class CommentComposer {
 		return { ...draft, ...(this.editBaseRevision !== undefined ? { editBaseRevision: this.editBaseRevision } : {}) };
 	}
 	onRevealTarget(reveal: (anchor: LocalDiscussionAnchor) => void, label?: (anchor: LocalDiscussionAnchor) => string | undefined): void { this.reveal = reveal; this.targetLabel = label; }
+	setSendAvailable(available: () => boolean): void { this.sendAvailable = available; this.update(); }
+	setEditingAvailable(available: () => boolean): void { this.editingAvailable = available; this.update(); }
 	get hasUnconfirmedSend(): boolean { return this.onlinePending; }
 	async flush(): Promise<boolean> { await this.ready; await this.attachmentFlight; await this.chain; return !this.saveFailed; }
 	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>, available: () => boolean = () => true): void {
@@ -191,11 +195,14 @@ export class CommentComposer {
 		this.update();
 	}
 	update(): void {
-		const blocked = this.busy || this.saveFailed || !this.session.canQueue || !this.session.permission(this.entryId)?.comment;
-		this.send.disabled = blocked || this.onlinePending || this.needsEditReview;
-		this.formatting.disabled = this.busy || this.onlinePending || this.textarea.disabled || this.saveFailed;
-		this.rich?.setEditable(!this.busy && !this.onlinePending && !this.textarea.disabled && !this.saveFailed);
-		if (this.reviewButton) this.reviewButton.disabled = this.busy || this.onlinePending || this.saveFailed;
+		if (this.disposed) return;
+		const paused = !this.editingAvailable();
+		const blocked = paused || this.busy || this.saveFailed || !this.session.canQueue || !this.session.permission(this.entryId)?.comment;
+		this.send.disabled = blocked || this.textarea.disabled || this.onlinePending || this.needsEditReview || !this.sendAvailable();
+		this.textarea.readOnly = paused || this.busy || this.onlinePending || this.saveFailed;
+		this.formatting.disabled = paused || this.busy || this.onlinePending || this.textarea.disabled || this.saveFailed;
+		this.rich?.setEditable(!paused && !this.busy && !this.onlinePending && !this.textarea.disabled && !this.saveFailed);
+		if (this.reviewButton) this.reviewButton.disabled = paused || this.busy || this.onlinePending || this.saveFailed;
 		if (this.extra) { this.extra.hidden = !this.extraAvailable(); this.extra.disabled = blocked || !this.session.online || !this.extraAvailable();
 			this.extra.setText(this.onlinePending ? "Retry send and reopen" : "Send and reopen"); }
 		const people = this.session.participants(this.entryId), signature = JSON.stringify(people);
@@ -205,7 +212,7 @@ export class CommentComposer {
 			for (const person of people) this.people.createEl("option", { text: person.name, attr: { value: person.id } });
 			this.people.value = selected;
 		}
-		this.people.disabled = this.busy || this.onlinePending || this.textarea.disabled || !people.length;
+		this.people.disabled = paused || this.busy || this.onlinePending || this.textarea.disabled || !people.length;
 		this.attach.hidden = !this.session.canAttachPictures;
 		this.attach.disabled = blocked || this.onlinePending || this.textarea.disabled || this.pictures.length >= 10;
 		this.refreshPictures.hidden = !this.pictures.length || this.onlinePending;
@@ -355,7 +362,7 @@ export class CommentComposer {
 		}).finally(() => { if (!this.disposed) this.update(); }));
 	}
 	async submit(onlineAction?: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>): Promise<void> {
-		if (this.busy || this.disposed || this.composing || this.rich?.composing || this.needsEditReview) return;
+		if (this.busy || this.disposed || this.composing || this.rich?.composing || this.needsEditReview || !this.sendAvailable()) return;
 		await this.ready;
 		if (this.busy || this.disposed || this.saveFailed || this.composing || this.rich?.composing || this.needsEditReview || !this.session.canQueue || !this.session.permission(this.entryId)?.comment) return;
 		if (this.onlinePending && !onlineAction) return;
@@ -364,7 +371,7 @@ export class CommentComposer {
 		this.persist(); this.busy = true; this.textarea.readOnly = true; this.update();
 		try {
 			await this.chain;
-			if (this.saveFailed) return;
+			if (this.saveFailed || this.disposed || !this.sendAvailable()) return;
 			if (onlineAction) {
 				await onlineAction(body, { id: this.draftId, revision: this.revision });
 			} else {

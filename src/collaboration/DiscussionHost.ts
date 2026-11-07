@@ -18,9 +18,10 @@ import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
 import { DiscussionSession, type AnchoredThread, type BaseTargetSelection } from "./DiscussionSession";
 import { ReattachCommentModal, commentTargetDescription } from "./ui/ReattachComment";
+import { RecoverCommentModal } from "./ui/RecoverComment";
 import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { DiscussionFailure, DiscussionTransport } from "./DiscussionTransport";
-import { DiscussionStore } from "./storage/DiscussionStore";
+import { DiscussionStore, type Draft, type OutboxOperation } from "./storage/DiscussionStore";
 import { isId, isBaseRecordType, protocolJson, type BaseAnchor } from "./DiscussionProtocol";
 import { CommentsView, COMMENTS_VIEW } from "./ui/CommentsView";
 import { InboxView, INBOX_VIEW } from "./ui/InboxView";
@@ -76,6 +77,8 @@ export class DiscussionHost extends Component {
 	private inboxAction = 0;
 	private reattachSelection?: { session: DiscussionSession; entryId: string; thread: AnchoredThread };
 	private reattachModal?: ReattachCommentModal;
+	private recoveryModal?: RecoverCommentModal;
+	private recoverySelection?: { session: DiscussionSession; entryId: string; operation: OutboxOperation; draft: Draft };
 
 	constructor(private plugin: Plugin, private auth: AuthSession, private shares: ShareRegistry,
 		private settings: SettingsScope<RelayOnPremSettings>, private vaultId: string, private bases?: BaseSyncHost) { super(); }
@@ -138,9 +141,11 @@ export class DiscussionHost extends Component {
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private notify(): void {
-		this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); this.reattachModal?.validate();
+		this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); this.reattachModal?.validate(); this.recoveryModal?.validate();
 		const move = this.reattachSelection;
 		if (move && (!this.sessionCurrent(move.session) || !move.session.canReattach || !move.session.permission(move.entryId)?.comment)) this.reattachSelection = undefined;
+		const recovery = this.recoverySelection;
+		if (recovery && (!this.sessionCurrent(recovery.session) || !recovery.session.permission(recovery.entryId)?.comment)) this.recoverySelection = undefined;
 		for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } }
 	}
 	private key(serverUrl: string, accountId: string, shareId: string): string {
@@ -769,6 +774,14 @@ export class DiscussionHost extends Component {
 		try {
 			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session && this.targetFor(file).entryId === entryId && session.permission(entryId)?.comment;
 			if (!current()) return false;
+			if (this.recoverySelection) {
+				const recovery = this.recoverySelection;
+				if (recovery.session !== session || recovery.entryId !== entryId) { new Notice("Return to the original note or saved view to recover this comment, or cancel target selection."); return false; }
+				await session.trackLocal(session.store.saveDraft({ ...recovery.draft, revision: recovery.draft.revision + 1, target: protocolJson(anchor) }, recovery.draft.revision));
+				if (this.recoverySelection !== recovery || !current()) return false;
+				this.recoverySelection = undefined;
+				this.lastFile = file; this.openCommandRecovery(session, recovery.operation); this.notify(); return true;
+			}
 			if (this.reattachSelection) {
 				const move = this.reattachSelection;
 				if (move.session !== session || move.entryId !== entryId) { new Notice("Return to the original note or saved view to move this discussion, or cancel target selection."); return false; }
@@ -786,13 +799,36 @@ export class DiscussionHost extends Component {
 		} catch { new Notice("The selection draft could not be saved. Check local storage and comment access, then try again."); return false; }
 	}
 	selectingReattachment(session: DiscussionSession, entryId: string): boolean {
-		return this.reattachSelection?.session === session && this.reattachSelection.entryId === entryId;
+		return (this.reattachSelection?.session === session && this.reattachSelection.entryId === entryId) ||
+			(this.recoverySelection?.session === session && this.recoverySelection.entryId === entryId);
 	}
-	get choosingReattachment(): boolean { return this.reattachSelection !== undefined; }
-	cancelReattachmentSelection(): void { this.reattachSelection = undefined; this.notify(); }
+	get choosingReattachment(): boolean { return this.reattachSelection !== undefined || this.recoverySelection !== undefined; }
+	get choosingCommandRecovery(): boolean { return this.recoverySelection !== undefined; }
+	cancelReattachmentSelection(): void { this.reattachSelection = undefined; this.recoverySelection = undefined; this.notify(); }
+	openCommandRecovery(session: DiscussionSession, operation: OutboxOperation): void {
+		const entryId = operation.scopeId;
+		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
+		if (!current() || !session.permission(entryId)?.read) return;
+		this.reattachModal?.close(); this.recoveryModal?.close();
+		this.reattachSelection = undefined; this.recoverySelection = undefined;
+		this.recoveryModal = new RecoverCommentModal(this.plugin.app, session, operation, {
+			current,
+			label: anchor => this.targetLabel(session, entryId, anchor) ?? commentTargetDescription(anchor),
+			reveal: anchor => { void this.revealTarget(session, entryId, anchor); },
+			choose: (saved, draft) => {
+				if (!current() || !session.permission(entryId)?.comment) return;
+				this.recoverySelection = { session, entryId, operation: saved, draft }; this.notify();
+				if (this.current().kind === "image") this.commentCurrentImage(session, entryId);
+				else if (this.current().kind === "base") void this.commentCurrentBase(session, entryId);
+				else new Notice("Select text, blocks or an image and use its comment action to replace this saved draft's target. Review the draft before sending.", 10000);
+			},
+		});
+		this.recoveryModal.open(); this.notify();
+	}
 	openReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected?: LocalDiscussionAnchor): void {
 		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
 		if (!current() || !session.permission(entryId)?.read) return;
+		this.recoveryModal?.close(); this.recoverySelection = undefined;
 		this.reattachModal?.close();
 		const label = (anchor: LocalDiscussionAnchor) => this.targetLabel(session, entryId, anchor) ?? commentTargetDescription(anchor);
 		this.reattachModal = new ReattachCommentModal(this.plugin.app, session, entryId, thread, {
@@ -918,6 +954,7 @@ export class DiscussionHost extends Component {
 	onunload(): void {
 		this.stopped = true;
 		this.reattachSelection = undefined; this.reattachModal?.close(); this.reattachModal = undefined;
+		this.recoverySelection = undefined; this.recoveryModal?.close(); this.recoveryModal = undefined;
 		this.rangeWorkflow?.close(); this.rangeWorkflow = undefined;
 		this.markerPicker?.close(); this.markerPicker = undefined;
 		this.markerManager?.close(); this.markerManager = undefined;
