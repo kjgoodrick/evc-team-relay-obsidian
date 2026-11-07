@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import { v4 as uuidv4 } from "uuid";
 import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
 import { LocationHost } from "./LocationHost";
+import { baseFollowPosition } from "./BasePresenceMotion";
 import { sameNote, type LocationEvent, type SurfaceLocation } from "./LocationProtocol";
 import type { AuthSession } from "../../AuthSession";
 import { DocumentViewBinding, type ViewBindingRegistry } from "../../ViewBindings";
@@ -11,7 +12,7 @@ import type { YSweetProvider } from "../../client/provider";
 import { readingCommentBinding, onReadingBindingChange } from "../ReadingTextBinding";
 import type { NotePresenceSurface, PresenceSettings } from "./PresenceSettings";
 import { NotePresenceSurfaces } from "./NotePresenceSurfaces";
-import { isNotePeer, peerLocation, presencePeers, type ActivePresencePeer, type PresenceLocation, type PresencePeer } from "./PresencePeers";
+import { isNotePeer, peerLocation, presencePeers, type ActivePresencePeer, type PresenceLocation, type PresencePeer, type SurfacePresencePeer } from "./PresencePeers";
 import { PresenceRoster } from "./PresenceRoster";
 import type { ReadingPresenceScope } from "./ReadingPresenceLayer";
 
@@ -52,6 +53,7 @@ export class PresenceController extends Component {
 	private lastFollowPosition?: string;
 	private navigationVersion = 0;
 	private followBusy = false;
+	private pendingSurfaceTarget?: { key: string; target: string | undefined };
 	private followingMode?: string;
 	private controls?: PresenceControls;
 	private locations?: LocationHost;
@@ -76,6 +78,11 @@ export class PresenceController extends Component {
 				positions: () => {
 					if (this.canObserveSurface()) this.peers = this.locations!.surfacePeers;
 					else if (!this.canNavigate()) return;
+					const pending = this.pendingSurfaceTarget;
+					if (pending) {
+						const peer = this.peers.find(peer => peer.key === pending.key);
+						if (!peer || isNotePeer(peer) || JSON.stringify(baseFollowPosition(peer.baseState, true)?.target) !== pending.target) this.locations?.cancelSurfaceNavigation();
+					}
 					// Pointer motion updates the overlay and Follow, not roster labels
 					// or the complete note/host lifecycle.
 					if (this.following) this.scheduleFollow();
@@ -301,6 +308,9 @@ export class PresenceController extends Component {
 		if (this.locations?.embedPosition(peer)) await this.locations.materializeEmbed(peer, follow, current);
 		return current();
 	}
+	private surfacePosition(peer: SurfacePresencePeer): string {
+		return JSON.stringify([peer.location, peer.surface === "base" ? baseFollowPosition(peer.baseState, true) : peer.imageState?.viewport ?? peer.imageState?.pointer]);
+	}
 	/** Re-read the selected peer at click time; stale UI cannot navigate. */
 	async navigate(key: string, follow: boolean): Promise<boolean> {
 		this.refresh();
@@ -309,10 +319,13 @@ export class PresenceController extends Component {
 		if (peer && !isNotePeer(peer)) {
 			const view = this.plugin.app.workspace.getActiveViewOfType(FileView);
 			const current = () => version === this.navigationVersion && this.plugin.app.workspace.getActiveViewOfType(FileView) === view && this.canLocate(peer);
-			if (!view?.file || !current() || !this.locations?.revealSurface(peer, current, follow)) { this.navigationMessage = "Location unavailable or still synchronizing."; this.notify(); return false; }
-			const location = this.locations.currentLocation, subscriptionId = follow ? this.locations.follow(peer) : undefined;
+			let revealed = false;
+			try { revealed = !!view?.file && current() && await this.locations?.revealSurface(peer, current, follow) === true; } catch { /* A replaced or unsupported native target cannot navigate. */ }
+			if (version !== this.navigationVersion) return false;
+			if (!view?.file || !current() || !revealed) { this.navigationMessage = "Location unavailable or still synchronizing."; this.notify(); return false; }
+			const location = this.locations?.currentLocation, subscriptionId = follow ? this.locations?.follow(peer) : undefined;
 			if (follow && (!subscriptionId || !location)) { this.navigationMessage = "Following is unavailable."; this.notify(); return false; }
-			this.following = follow ? peer : undefined; this.followingMode = undefined; this.lastFollowPosition = JSON.stringify([location, peer.imageState?.viewport ?? peer.imageState?.pointer]);
+			this.following = follow ? peer : undefined; this.followingMode = undefined; this.lastFollowPosition = this.surfacePosition(peer);
 			if (subscriptionId && location) this.crossFollow = { subscriptionId, peer, location, file: view.file, leaf: view.leaf, busy: false, waitUntil: 0 };
 			this.navigationMessage = follow ? `Following ${peer.name}.` : `Jumped to ${peer.name}.`;
 			this.updateFollowBar(); this.notify(); this.scheduleFollow(); return true;
@@ -336,6 +349,7 @@ export class PresenceController extends Component {
 	stopFollowing(message = "Following stopped."): void {
 		this.navigationVersion++;
 		this.crossFollow = undefined; this.locations?.unfollow();
+		this.pendingSurfaceTarget = undefined;
 		if (this.followTimer !== undefined) window.clearTimeout(this.followTimer); this.followTimer = undefined;
 		if (!this.following) return;
 		this.following = undefined; this.followingMode = undefined; this.lastFollowPosition = undefined; this.navigationMessage = message;
@@ -360,10 +374,25 @@ export class PresenceController extends Component {
 			}
 			this.following = peer;
 			if (!isNotePeer(peer)) {
-				const version = this.navigationVersion, current = () => version === this.navigationVersion && this.crossFollow === cross && this.canLocate(peer);
-				const position = JSON.stringify([peer.location, peer.imageState?.viewport ?? peer.imageState?.pointer]);
-				if (position !== this.lastFollowPosition && !this.locations?.revealSurface(peer, current, true)) { this.stopFollowing("Location unavailable."); return; }
-				this.lastFollowPosition = position; cross.waitUntil = 0; return;
+				const version = this.navigationVersion, target = JSON.stringify(baseFollowPosition(peer.baseState, true)?.target);
+				const latest = () => this.peers.find(item => item.key === peer.key);
+				const current = () => { const now = latest(); return version === this.navigationVersion && this.crossFollow === cross && this.canLocate(peer) &&
+					(peer.surface !== "base" || !!now && !isNotePeer(now) && JSON.stringify(baseFollowPosition(now.baseState, true)?.target) === target); };
+				const position = this.surfacePosition(peer);
+				if (position === this.lastFollowPosition) { cross.waitUntil = 0; return; }
+				this.followBusy = true;
+				this.pendingSurfaceTarget = peer.surface === "base" ? { key: peer.key, target } : undefined;
+				try {
+					const revealed = await this.locations.revealSurface(peer, current, true);
+					if (!current()) return;
+					if (!revealed) { this.stopFollowing("Location unavailable."); return; }
+					this.lastFollowPosition = position; cross.waitUntil = 0;
+				} catch { if (current()) this.stopFollowing("Location unavailable."); }
+				finally {
+					this.followBusy = false; this.pendingSurfaceTarget = undefined; const now = latest();
+					if (this.crossFollow === cross && this.following && now && !isNotePeer(now) && this.surfacePosition(now) !== this.lastFollowPosition) this.scheduleFollow();
+				}
+				return;
 			}
 		}
 		if (!this.following || !isNotePeer(this.following) || !this.candidate || !this.canNavigate()) { this.stopFollowing("Location unavailable."); return; }

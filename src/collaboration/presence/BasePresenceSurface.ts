@@ -2,13 +2,16 @@ import type { FileView } from "obsidian";
 import type { NativeBasesSurface, NativeBasePresenceBinding } from "../../bases/NativeBasesSurface";
 import { basePresenceLocation, type BasePresenceContext } from "./BasePresenceProtocol";
 import type { BaseLocation } from "./LocationProtocol";
+import { BasePresenceMotion, baseFollowPosition, type BaseMotionOptions, type BasePointerPeer } from "./BasePresenceMotion";
+import type { BasePresenceState } from "./BasePositionProtocol";
 
 type Options = {
 	current(): boolean; connected(): boolean; supported(): boolean; hash(): string | undefined;
 	inspect(): NativeBasesSurface | undefined; read(): Promise<BasePresenceContext>; readSource(): Promise<string>;
 	changed(): void; interacted(): void;
+	motion?: Omit<BaseMotionOptions, "surface" | "location">;
 };
-const owned = ".relay-presence-action,.relay-presence-follow,.relay-bases-comments,.relay-bases-comment-tools";
+const owned = ".relay-base-presence,.relay-presence-action,.relay-presence-follow,.relay-bases-comments,.relay-bases-comment-tools";
 
 /** One foreground native Base, verified independently of discussions. Metadata
  * and source reads are reused across result repainting and saved-view changes. */
@@ -26,6 +29,7 @@ export class BasePresenceSurface {
 	private closed = false;
 	private timer?: number;
 	private stops: (() => void)[] = [];
+	private motion?: BasePresenceMotion;
 	state: "waiting" | "ready" | "unavailable" = "waiting";
 	constructor(readonly view: FileView, private shareId: string, private entryId: string, private options: Options) {
 		const root = view.contentEl;
@@ -43,6 +47,7 @@ export class BasePresenceSurface {
 			if (!(event.target as Element | null)?.closest?.(".relay-presence-action,.relay-presence-follow")) this.options.interacted();
 		};
 		for (const event of ["pointerdown", "wheel", "keydown"]) { root.addEventListener(event, interacted, { passive: true }); this.stops.push(() => root.removeEventListener(event, interacted)); }
+		if (options.motion) this.motion = new BasePresenceMotion(root, { ...options.motion, surface: () => this.surface, location: () => this.location });
 	}
 	get location(): BaseLocation | undefined {
 		return !this.closed && this.options.current() && this.options.supported() && this.binding?.current() && this.binding.context.content_sha256 === this.options.hash() ?
@@ -50,6 +55,7 @@ export class BasePresenceSurface {
 	}
 	private clear(state: BasePresenceSurface["state"]): void {
 		const changed = !!this.binding || this.state !== state; this.binding = undefined; this.state = state;
+		this.motion?.refresh();
 		if (changed && !this.closed) this.options.changed();
 	}
 	private attemptKey(surface: NativeBasesSurface): string { return JSON.stringify([this.key, surface.slot, surface.name, surface.type]); }
@@ -86,7 +92,7 @@ export class BasePresenceSurface {
 			const binding = await surface.bindPresence(context, this.shareId, this.entryId, async () => source, current);
 			if (!current()) return;
 			if (!binding?.current()) throw new Error("Base view unavailable");
-			this.binding = binding; this.attempted = undefined; this.state = "ready"; this.options.changed();
+			this.binding = binding; this.attempted = undefined; this.state = "ready"; this.motion?.refresh(); this.options.changed();
 		}).catch(() => { if (current()) { this.attempted = { scope: attempt, source: surface.source }; this.clear("unavailable"); } }).finally(() => {
 			this.pending = false;
 			if (!this.closed && this.version !== version) this.refresh();
@@ -96,8 +102,14 @@ export class BasePresenceSurface {
 		this.version++; this.attempted = this.surface ? { scope: this.attemptKey(this.surface), source: this.surface.source } : undefined;
 		this.context = undefined; this.source = undefined; this.selection = undefined; this.clear("unavailable");
 	}
-	retry(): void { this.version++; this.attempted = undefined; this.context = undefined; this.source = undefined; this.selection = undefined; this.refreshedFor = undefined; this.clear("waiting"); this.refresh(); }
-	cancelNavigation(): void { this.selection = undefined; }
+	retry(): void { this.version++; this.attempted = undefined; this.context = undefined; this.source = undefined; this.selection = undefined; this.refreshedFor = undefined; this.motion?.retry(); this.clear("waiting"); this.refresh(); }
+	cancelNavigation(): void { this.selection = undefined; this.motion?.cancelNavigation(); }
+	refreshMovement(): void { this.motion?.refresh(); }
+	recordsChanged(): void { this.motion?.recordsChanged(); }
+	setPeers(peers: readonly BasePointerPeer[]): void { this.motion?.setPeers(peers); }
+	async revealPosition(current: () => boolean, state?: BasePresenceState, follow = false): Promise<boolean> {
+		return state && baseFollowPosition(state, follow) ? await this.motion?.reveal(state, follow, current) === true : this.reveal(current);
+	}
 	/** Select only a verified saved view. Never reopen the file or save settings. */
 	activate(location: BaseLocation, current: () => boolean): "ready" | "waiting" | "unavailable" {
 		if (!current() || this.closed) return "unavailable";
@@ -123,6 +135,7 @@ export class BasePresenceSurface {
 	}
 	close(): void {
 		if (this.closed) return; this.closed = true; this.version++;
+		this.motion?.close(); this.motion = undefined;
 		if (this.timer !== undefined) window.clearTimeout(this.timer); this.timer = undefined;
 		this.stops.splice(0).forEach(stop => stop()); this.surface = undefined; this.binding = undefined; this.context = undefined; this.source = undefined;
 	}

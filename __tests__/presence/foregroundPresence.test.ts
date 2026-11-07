@@ -1,6 +1,6 @@
 /** @jest-environment jsdom */
 /* eslint-disable @typescript-eslint/no-require-imports -- Jest's hoisted host mocks require their dependencies inside the factory. */
-import { FileView, MarkdownView, type Plugin, type TFile, type WorkspaceLeaf, type MarkdownPostProcessorContext } from "obsidian";
+import { FileView, MarkdownView, TFile, type Plugin, type WorkspaceLeaf, type MarkdownPostProcessorContext } from "obsidian";
 import { createHash, webcrypto } from "node:crypto";
 import type { AuthSession } from "../../src/AuthSession";
 import { Account } from "../../src/Account";
@@ -66,7 +66,7 @@ function fixture(crossNote = false, withImage = false, withBase = false) {
 	const notes = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"].map(id => {
 		const doc = new ProviderBacked(id, new RemoteDocumentAddress("relay-onprem", "00000000-0000-4000-8000-000000000003", id), credentials, auth, "server");
 		const text = doc.crdtDoc.getText("contents"); text.insert(0, "alpha beta");
-		const file = { path: id + ".md", extension: "md" };
+		const file: TFile = Object.assign(Object.create(TFile.prototype), { path: id + ".md", extension: "md", stat: { mtime: 1, size: 10 } });
 		const containerEl = document.body.appendChild(document.createElement("div"));
 		let mode = "source";
 		const view = Object.assign(Object.create(MarkdownView.prototype), { file, containerEl, contentEl: containerEl,
@@ -294,7 +294,7 @@ test("status and explicit retry reflect the active provider; unload removes stat
 	} finally { f.close(); }
 });
 
-function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>, embeds = false, baseContext?: () => unknown | Promise<unknown>) {
+function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>, embeds = false, baseContext?: () => unknown | Promise<unknown>, baseRecordContext?: (entry: string) => unknown | Promise<unknown>) {
 	const sockets: ReturnType<typeof makeSocket>[] = [];
 	function makeSocket() {
 		const socket = { readyState: 0, bufferedAmount: 0, onopen: null as WebSocket["onopen"], onmessage: null as WebSocket["onmessage"],
@@ -319,8 +319,8 @@ function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<u
 		return socket;
 	}
 	jest.mocked(platformFetch).mockImplementation(async url => ({ status: 200, ok: true, text: async () => JSON.stringify(String(url).includes("/capabilities?") ?
-		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true, presence_embedded_images_preview: embeds, presence_base_context_preview: !!baseContext } : {}) } } :
-		String(url).includes("/base-context?") ? await baseContext?.() : String(url).includes("/image-location?") ? { protocol_version: 1, location: await imageContext?.() } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
+		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true, presence_embedded_images_preview: embeds, presence_base_context_preview: !!baseContext, presence_base_states_preview: !!baseRecordContext } : {}) } } :
+		String(url).includes("/base-record-context?") ? await baseRecordContext?.(new URL(String(url)).searchParams.get("entry_id")!) : String(url).includes("/base-context?") ? await baseContext?.() : String(url).includes("/image-location?") ? { protocol_version: 1, location: await imageContext?.() } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
 	const mock = jest.spyOn(window, "WebSocket").mockImplementation(url => {
 		expect(String(url)).toBe("wss://relay.example/v1/collaboration/events");
 		const socket = makeSocket(); sockets.push(socket); return socket as unknown as WebSocket;
@@ -714,4 +714,89 @@ test("Live Preview widget maps image presence to the exact bound CodeMirror occu
         if (previousRects) Object.defineProperty(Range.prototype, "getClientRects", previousRects); else Reflect.deleteProperty(Range.prototype, "getClientRects");
         if (previousBounds) Object.defineProperty(Range.prototype, "getBoundingClientRect", previousBounds); else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
     }
+});
+
+function baseMotionFixture() {
+	const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+	const read = jest.fn(async (entry: string) => ({ protocol_version: 1, share_id: id(3), entry_id: entry, generation: id(50 + Number(entry.slice(-12))), type: "markdown" }));
+	const network = crossNetwork(true, undefined, false, () => f.base!.context, entry => read(entry)), f = fixture(true, false, true), base = f.base!;
+	const rows = base.setRecords(f.notes.map(note => note.view.file!))[0], renderer = base.renderers[0];
+	function box(element: HTMLElement, width: number, height: number, left = 0, top = 0) {
+		Object.defineProperties(element, { offsetWidth: { value: width, configurable: true }, offsetHeight: { value: height, configurable: true }, clientWidth: { value: width, configurable: true }, clientHeight: { value: height, configurable: true } });
+		element.getBoundingClientRect = () => ({ x: left, y: top, left, top, width, height, right: left + width, bottom: top + height, toJSON: () => ({}) });
+	}
+	box(base.root, 400, 300); box(base.content, 400, 300); box(renderer.containerEl, 400, 300); box(renderer.scrollEl, 400, 200, 0, 40);
+	rows.forEach((row, index) => { box(row.el, 400, 50, 0, 50 + index * 100); row.cells.forEach((cell, col) => box(cell.el, 200, 50, col * 200, 50 + index * 100)); });
+	const state = (record = 1, generation = 50 + record, x = 0.25) => ({ version: 1, pointer: { target: { type: "cell", record_id: id(record), record_generation: id(generation), property: { source: "note", name: "status" } }, offset: { x, y: 0.5 } }, viewport: null });
+	const send = (record = 1, generation = 50 + record, x = 0.25) => { const socket = network.sockets[0]; socket.message({ type: "base_states", subscription_id: socket.frames.filter(frame => frame.type === "watch").at(-1)!.subscription_id, status: "available",
+		peers: [{ target: { user_id: id(8), session_id: "a".repeat(32), instance_id: id(9) }, state: state(record, generation, x) }] }); };
+	return { f, base, network, rows, renderer, read, state, send, open: async () => {
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(base.view);
+		await until(() => socket.frames.some(frame => frame.type === "watch" && frame.base_states === true));
+		const layer = base.content.querySelector<HTMLElement>(".relay-base-presence")!; box(layer, 400, 300); socket.roster(); return { socket, layer };
+	}, close: () => { f.close(); network.close(); } };
+}
+
+test("foreground Bases publish exact cells, render remote cursors, Jump/Follow and preserve hidden observation", async () => {
+	const m = baseMotionFixture();
+	try {
+		const { socket, layer } = await m.open();
+		m.send(); await until(() => layer.querySelector(".relay-base-presence-pointer") !== null);
+		const peer = m.f.controller.peers[0]; expect(peer.surface).toBe("base");
+		expect(await m.f.controller.navigate(peer.key, true)).toBe(true); expect(m.rows[0].cells[1].el.scrollIntoView).toHaveBeenCalled();
+		m.rows[0].cells[1].el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 250, clientY: 75 }));
+		expect(m.f.controller.following).toBeUndefined();
+		await until(() => socket.frames.some(frame => frame.type === "base_state" && (frame.state as ReturnType<typeof m.state>)?.pointer?.target.record_id === m.f.notes[0].doc.entityGuid));
+		const pointer = layer.querySelector<HTMLElement>(".relay-base-presence-pointer")!; expect(pointer.style.left).toBe("250px");
+		await m.f.controller.setVisible(false); expect(socket.frames.at(-1)).toEqual({ type: "presence", location: null });
+		await until(() => layer.querySelector(".relay-base-presence-pointer") === pointer); expect(m.f.controller.peers).toHaveLength(1);
+		const reads = m.read.mock.calls.length;
+		for (let n = 0; n < 50; n++) m.f.controller.refresh(); await new Promise(resolve => window.setTimeout(resolve, 150)); expect(m.read).toHaveBeenCalledTimes(reads);
+		m.f.folder.crdtDoc.getMap("managed_base_v1").set("snapshot", { owner: false, permissions: { [m.base.file.path]: "read" } });
+		await until(() => layer.children.length === 0); expect(m.f.controller.peers).toHaveLength(1); expect(await m.f.controller.navigate(peer.key, false)).toBe(false);
+		expect(m.base.host.data).toBe(m.base.source); expect(m.f.openFile).not.toHaveBeenCalled();
+		m.f.logout(); expect(m.f.controller.peers).toEqual([]); expect(m.base.content.querySelector(".relay-base-presence")).toBeNull();
+	} finally { m.close(); }
+});
+
+test("a newer precise Follow target supersedes delayed record verification without scrolling the old target", async () => {
+	const m = baseMotionFixture(); let finish!: (value: Awaited<ReturnType<typeof m.read>>) => void;
+	try {
+		await m.open(); m.send(); await until(() => m.read.mock.calls.some(call => call[0] === m.f.notes[0].doc.entityGuid));
+		expect(await m.f.controller.navigate(m.f.controller.peers[0].key, true)).toBe(true);
+		const original = m.read.getMockImplementation()!;
+		m.read.mockImplementation(entry => entry === m.f.notes[1].doc.entityGuid ? new Promise(resolve => { finish = resolve; }) : original(entry));
+		m.send(2, 60); await until(() => !!finish); await new Promise(resolve => window.setTimeout(resolve, 150)); m.send(1, 51, 0.75);
+		await until(() => jest.mocked(m.rows[0].cells[1].el.scrollIntoView).mock.calls.length >= 2);
+		finish({ protocol_version: 1, share_id: m.f.folder.entityGuid, entry_id: m.f.notes[1].doc.entityGuid, generation: "00000000-0000-4000-8000-000000000060", type: "markdown" });
+		await new Promise(resolve => window.setTimeout(resolve, 200)); expect(m.rows[1].cells[1].el.scrollIntoView).not.toHaveBeenCalled(); expect(m.f.controller.following).toBeDefined();
+	} finally { m.close(); }
+});
+
+test.each(["sabidurian-timeline", "sabidurian-sequence"])("precise %s presence uses the real bridge client and respects navigation locks", async type => {
+	const m = baseMotionFixture(), { base, renderer, f } = m; let busy = false, changed: (() => void) | undefined;
+	base.serial.views[0].type = renderer.type = renderer.config.type = type;
+	base.source = base.host.data = base.host.lastSavedData = JSON.stringify(base.serial); base.record.hash = createHash("sha256").update(base.source).digest("hex");
+	base.file.stat.size = Buffer.byteLength(base.source); base.file.stat.mtime++;
+	base.context = { ...base.context, content_sha256: base.record.hash, views: base.context.views.map(view => view.slot === 0 ? { ...view, type } : view) };
+	const svg = renderer.scrollEl.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "svg")), cell = svg.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "rect"));
+	cell.getBoundingClientRect = m.rows[0].cells[1].el.getBoundingClientRect;
+	const handle = { target: { type: "cell", file: f.notes[0].view.file, property: "note.status" }, element: cell, current: () => cell.isConnected };
+	const remote = { protocolVersion: 1, owner: renderer, root: renderer.containerEl,
+		capabilities: ["item", "cell", "geometry", "reveal", "annotation"], current: () => base.controller.view === renderer && renderer.containerEl.isConnected,
+		viewport: () => renderer.scrollEl, handles: () => [handle], hit: (node: Node) => cell.contains(node) ? handle : undefined,
+		reveal: jest.fn(() => "revealed"), beginAnnotation: () => () => {} };
+	const bridge = { protocolVersion: 1, available: true, viewTypes: [type], getSurfaces: () => [remote], canNavigate: () => !busy,
+		onChange: (callback: () => void) => { changed = callback; return () => { changed = undefined; }; } };
+	f.workspace.trigger.mockImplementation((name: string, receive: (value: unknown) => void) => { if (name === "time-and-line:collaboration-request") receive(bridge); });
+	try {
+		const { socket, layer } = await m.open(); m.send(); await until(() => layer.querySelector(".relay-base-presence-pointer") !== null);
+		cell.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 250, clientY: 75 }));
+		await until(() => socket.frames.some(frame => frame.type === "base_state" && (frame.state as ReturnType<typeof m.state>)?.pointer?.target.record_id === f.notes[0].doc.entityGuid));
+		expect(await f.controller.navigate(f.controller.peers[0].key, false)).toBe(true);
+		expect(remote.reveal).toHaveBeenCalledWith({ type: "cell", file: f.notes[0].view.file, property: "note.status" });
+		busy = true; expect(await f.controller.navigate(f.controller.peers[0].key, true)).toBe(false);
+		bridge.available = false; changed?.(); await until(() => layer.children.length === 0); expect(f.controller.peers).toEqual([]);
+		expect(base.host.data).toBe(base.source); expect(base.host.dirty).toBe(false);
+	} finally { m.close(); expect(changed).toBeUndefined(); }
 });

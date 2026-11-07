@@ -8,7 +8,9 @@ foreground host/account. Bases participants and whole-view Jump/Follow are conne
 Direct-image pointer overlays and position-aware Jump/Follow are also connected.
 Embedded-image capture, overlays and Jump/Follow are connected in the foreground
 note as well. These have automated host evidence; native image acceptance,
-visible split-pane image observation and fine-grained Bases/timeline movement remain unfinished.
+visible split-pane image observation and group/lane/range presence remain unfinished.
+Precise cell/record/header capture, overlays and Jump/Follow are now connected
+through the native Bases and Time & Line adapters, with automated host evidence.
 
 ## Transport contract
 
@@ -35,7 +37,7 @@ uses a separate typed message rather than changing the room descriptor.
 Revisions must be positive safe integers. Embedded-image occurrences now have
 a separate typed transport and source-anchor foundation below. Fine-grained
 Bases cells/records/headers now have a separate typed stream and record-specific
-authorization below. Groups/lanes/ranges and native movement wiring remain.
+authorization below. Groups/lanes/ranges remain.
 
 ## Read-only saved-view context
 
@@ -92,8 +94,9 @@ Newer destinations supersede an in-flight file open; cancellation permits a fres
 action. An incompatible generation/revision is re-read once before rejection.
 Reconnect refreshes observation but never restarts Follow automatically.
 
-This increment navigates to the **whole saved view**. It does not yet publish
-cell/row/header/group/lane/item/range positions or render their remote cursors.
+Whole saved-view navigation remains available when no precise position is
+published. Cell/record/header positions are now connected as described below;
+group/lane/range targets remain unfinished.
 Automated tests exercise the real native adapter against simulated host objects
 and the actual `TimelineBridgeClient` contract. They cover read-only/hidden
 observation, table/card and timeline view changes, denial/retry, source changes,
@@ -325,8 +328,8 @@ identities reject. Formula names carry no evaluated results.
 `readBaseRecordContext(shareId, entryId)` uses normal session credentials and a
 read-only lookup of current record lineage/type, independent of discussions.
 It does not create missing IDs, and late results after stop/reconnect are fenced.
-The future native capture host must cache/bound these reads and verify its local
-record binding rather than requesting metadata for every pointer movement.
+The native capture host bounds/reuses these reads and verifies local record
+bindings rather than requesting metadata for every pointer movement.
 
 `publishBaseState(state)` uses the existing location socket and movement timer.
 It sends only after the exact visible Base publication, coalesces ordinary
@@ -346,7 +349,46 @@ cell delivery, explicit/hidden clearing and idle record revocation while the
 Base remains observable. Unit checks cover Unicode bounds, malformed frames,
 capability negotiation, coalescing, stale callbacks and reconnect cleanup.
 
-This is the transport foundation. `BasePresenceSurface` still publishes only
-the saved view: precise native capture, remote overlays and Jump/Follow wiring
-remain next. Group/lane/range schemas, native desktop/mobile acceptance and
+`BasePresenceSurface` now connects this stream to native capture, overlays and
+Jump/Follow. Group/lane/range schemas, native desktop/mobile acceptance and
 performance/battery measurements remain part of the full feature scope.
+
+## Precise native Bases host
+
+`BasePresenceMotion` uses current native record/cell/property handles; display
+labels, DOM order and row numbers never identify a record. Capture coalesces
+pointer/touch events and a semantic viewport point. Only nearby viewport
+candidates need ancestor-style checks, and only visible remote targets render.
+The receiver joins positions to authenticated roster names/colors, proves current
+local record access and matching generation, then clips the pointer to the
+actual target and scrolling ancestors. Rotated/reflected/perspective geometry,
+recycled rows, ambiguous repeated targets and unavailable properties do not
+receive guessed coordinates. Overlays are noninteractive and aria-hidden; the
+participant controls retain navigation and accessible labels.
+
+`BasePresenceRecords` permits two metadata requests at once, retains at most 256
+entries and prioritizes explicit navigation over queued background lookups.
+Repaints and saved-view switches reuse verified lineage; denied lookups do not
+poll. Explicit retry, changed local identities or a newly advertised generation
+allow fresh checks. Generation mismatch refreshes are bounded. Account/access
+changes, stale responses, eviction and close release pending waiters and cannot
+restore old state. Geometry never reads note contents or attachment bytes.
+
+Jump uses the pointer target; Follow prefers the viewport target. Navigation
+waits for current lineage, uses the native adapter to materialize offscreen
+cells, and centers the verified point through nested scrollers. It changes
+neither selection nor saved configuration and respects Time & Line navigation
+locks. Manual cancellation and unload release pending frame/metadata navigation.
+A newer Follow target cancels the old wait and can proceed immediately, without
+waiting for an unrelated HTTP response. Pointer departure, touch release, scroll,
+privacy changes and lost bindings withdraw local coordinates. Hidden readers
+continue observing authorized positions.
+
+Automated evidence covers the real native adapter with simulated table/cards/list
+layout; the real `TimelineBridgeClient` with simulated Timeline/Sequence SVG
+handles; foreground publication/identity joining/overlays/Jump/Follow; virtualized
+navigation, nested scrolling, revocation, stale generations, delayed responses,
+recycled/duplicate targets, coalescing, bounded requests, hidden observation and
+cleanup. This is **not native Obsidian desktop/mobile acceptance**. Group/lane/
+range targets, broader keyboard/accessibility behavior, repeated-target context,
+physical touch and resource/latency measurements remain required.
