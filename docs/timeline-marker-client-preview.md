@@ -40,6 +40,21 @@ outside disposable tests until the remaining interface and renderer work lands.
 - Projection uses cached discussion data and performs no network work on scroll.
   Cancellation, closing, account/access changes and async completion are guarded;
   the picker releases its host reference and loaded metadata on close.
+- Active shared definitions now render without a discussion. Solid marker lines
+  and labels are separate from captured-discussion highlights/badges. Nearby
+  labels share bounded choosers without merging marker IDs or revisions; all
+  visible markers remain selectable even in dense clusters. Labels reserve the
+  native scrollbar and use 44-pixel controls on mobile. The sidebar/picker remains
+  available when a viewport is too small or its combined label budget is full.
+- Active discussion refreshes opt into a small `timeline_markers` revision hint.
+  Unchanged verified axis/catalog data is reused; a newer catalog revision fetches
+  current marker metadata without re-reading an unchanged axis. Existing comment
+  polling provides the five-second fallback, with no additional timer. Successful
+  local management wakes active saved views of the same base. Legacy servers omit
+  the hint and use a 15-second cache window on the existing refresh cycle.
+- Hints contain no marker labels or coordinates and cannot authorize an anchor.
+  Normal scope/generation/revision verification still gates catalog reads, cache
+  reset fences late results, and access is rechecked after asynchronous work.
 - Cache version 19 preserves all stores and fences older workers that cannot
   decode marker targets. Revocation clears cached marker metadata while retaining
   unsent local work for recovery.
@@ -92,6 +107,22 @@ data blocks a replacement save. Broader repair/export and account-wide access to
 results after the original view becomes unavailable remain work.
 
 ## Verification
+
+The current-overlay/refresh increment passes **2,491 plugin tests in 206 suites**,
+preview build/main types, changed-source lint (three existing warnings), whitespace
+and the frozen test-type gate (206 known errors/45 signatures versus baseline
+207/46). Eight source interoperability cases render current shared markers using
+both actual providers/load orders and grouped/ungrouped views. All six actual
+HTTP tests pass, including revision-hint delivery and unchanged-catalog reuse in
+the real session. Focused checks cover no-thread panes, no reads on scroll, dense
+256-marker identity retention, stale/archived/detached rejection, legacy refresh,
+late sync callbacks, cache resets and access loss during the final async fence.
+
+The companion server passes 549 tests across the 13 collaboration modules,
+including 18 marker cases. Native availability was checked and the Mac was locked;
+no native layout, physical-touch, desktop/mobile or performance acceptance is
+claimed. The build retains its 15 existing Svelte warnings. No vault installation
+or production deployment occurred.
 
 The management interface passes **2,478 plugin tests in 206 suites**, preview
 build/main types, changed-source lint (five existing warnings), whitespace checks
@@ -150,10 +181,11 @@ desktop/mobile or physical keyboard/touch acceptance.
 
 ## Remaining work
 
-Current-marker overlays independent of discussion presence, side-by-side
-current-versus-captured position UI, automatic metadata refresh/change delivery,
-base-wide placement/matching, local marker promotion, direct point picking and
-broader recovery controls remain. The picker provides explicit refresh; it does not yet subscribe to live
-metadata changes. Overlapping overlay polish also remains. The Time & Line fork
+Side-by-side current-versus-captured position comparison, base-wide placement/
+matching, local marker promotion, direct point picking and broader recovery
+controls remain. The picker and management form still use explicit refresh so
+an in-progress selection/edit is never silently replaced; the timeline overlays
+refresh automatically through active discussion polling. Overlapping overlay
+polish and native layout/resource measurements remain. The Time & Line fork
 has not changed in this increment. Native desktop/mobile, accessibility, recovery
 UI and resource acceptance remain before enabling this feature for users.

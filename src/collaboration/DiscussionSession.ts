@@ -1,6 +1,7 @@
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { TimelineMarkerManagement } from "./TimelineMarkerManagement";
+import { parseTimelineMarkerVersion, type TimelineMarkerVersion } from "./DiscussionProtocol";
 import { parseTimelineRange, validateTimelineTimeZone, type TimelineRange } from "./TimelineRange";
 import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
@@ -44,7 +45,13 @@ export class DiscussionSession {
 	readonly outbox: DiscussionOutbox;
 	readonly inbox: DiscussionInbox;
 	readonly pictures = new DiscussionPictures(this);
-	readonly markerManagement = new TimelineMarkerManagement(this, () => {
+	readonly markerManagement = new TimelineMarkerManagement(this, (scopeId, status) => {
+		if (status === "accepted" && !this.closed) {
+			const baseId = parseDiscussionScope(scopeId)?.entryId;
+			for (const [id, entry] of this.entries) if (baseId && parseDiscussionScope(id)?.entryId === baseId) {
+				this.timelineMarkerVersions.delete(id); this.timelineMarkerFreshUntil.delete(id); entry.sync.wake();
+			}
+		}
 		if (!this.closed) { this.invalidate(); this.broadcast(); this.notify(); }
 	});
 	private entries = new Map<string, Entry>();
@@ -69,6 +76,8 @@ export class DiscussionSession {
 	private baseDefinitionFlights = new Map<string, Promise<BaseDefinitionCatalog>>();
 	private timelineAxisFlights = new Map<string, Promise<TimelineAxisContext>>();
 	private timelineMarkerFlights = new Map<string, Promise<TimelineMarkerCatalog>>();
+	private timelineMarkerVersions = new Map<string, TimelineMarkerVersion>();
+	private timelineMarkerFreshUntil = new Map<string, number>();
 	private baseRecordTypes: BaseRecordType[] = [];
 	private lastPublish = 0;
 
@@ -211,7 +220,7 @@ export class DiscussionSession {
 		if (entry && entry.kind !== kind) throw new Error("Reopen comments after the file type changes.");
 		if (!entry) {
 			const sync = new DiscussionSync(this.store, this.transport, entryId, status => this.syncChanged(entryId, status), undefined, undefined,
-				() => this.reauthorizeAfterReset(entryId));
+				() => this.reauthorizeAfterReset(entryId), version => this.observeTimelineMarkerVersion(entryId, version));
 			entry = { kind, listeners: new Set(), sync, permissionChecked: 0, unavailable: false, people: [] };
 			this.entries.set(entryId, entry);
 		}
@@ -671,6 +680,43 @@ export class DiscussionSession {
 			}
 		})()).finally(() => { if (this.timelineAxisFlights.get(scopeId) === flight) this.timelineAxisFlights.delete(scopeId); });
 		this.timelineAxisFlights.set(scopeId, flight); return flight;
+	}
+	private observeTimelineMarkerVersion(scopeId: string, value: TimelineMarkerVersion): void {
+		const scope = parseDiscussionScope(scopeId); if (this.closed || !scope?.viewId || !this.permission(scopeId)?.read) return;
+		const version = parseTimelineMarkerVersion(value, scope.entryId, scope.viewId), previous = this.timelineMarkerVersions.get(scopeId);
+		if (previous?.generation === version.generation && previous.definition_id === version.definition_id &&
+			(previous.registry_revision > version.registry_revision || previous.catalog_revision > version.catalog_revision)) return;
+		this.timelineMarkerVersions.set(scopeId, version);
+		this.observeBaseRevision(scopeId, version.generation, version.registry_revision);
+	}
+	/** The active discussion worker supplies version hints. Reuse verified cache
+	 * when unchanged; legacy servers refresh at most once per 15 seconds. No new
+	 * timer or scroll-triggered network path is introduced. Hints never authorize
+	 * a target: missing/mismatched proofs use the normal verified catalog reads. */
+	readTimelineMarkerMetadata(scopeId: string): Promise<{ axis: TimelineAxisContext; catalog: TimelineMarkerCatalog }> {
+		return this.trackLocal((async () => {
+			const scope = parseDiscussionScope(scopeId), generation = this.knownDocumentGeneration(scopeId);
+			const current = () => !this.closed && !!generation && this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+			if (!scope?.viewId || !current()) throw new Error("Saved view access is unavailable.");
+			const checkpoint = await this.store.checkpoint(scopeId), version = this.timelineMarkerVersions.get(scopeId);
+			if (version && version.generation !== generation) throw new Error("The base generation changed. Refresh synchronization before showing shared markers.");
+			const [rawAxis, rawCatalog] = await Promise.all([this.store.preference("timelineAxis:" + scopeId), this.store.preference("timelineMarkers:" + scopeId)]);
+			const matches = (value: { definition_id: string; generation: string; registry_revision: number }) => value.generation === generation && value.registry_revision >= this.baseRegistryRevision(scopeId) &&
+				(version ? value.definition_id === version.definition_id && value.generation === version.generation && value.registry_revision >= version.registry_revision : Date.now() < (this.timelineMarkerFreshUntil.get(scopeId) ?? 0));
+			let axis: TimelineAxisContext | undefined, catalog: TimelineMarkerCatalog | undefined;
+			try { const cached = parseTimelineAxisContext(rawAxis, scope.entryId, scope.viewId); if (matches(cached)) axis = cached; } catch { /* Verify missing or incompatible proof. */ }
+			try { const cached = parseTimelineMarkerCatalog(rawCatalog, scope.entryId, scope.viewId); if (matches(cached) && (!version || cached.catalog_revision >= version.catalog_revision)) catalog = cached; } catch { /* Verify missing or incompatible proof. */ }
+			if (!current()) throw new Error("Saved view access changed.");
+			const result = await Promise.all([axis ?? this.readTimelineAxis(scopeId), catalog ?? this.readTimelineMarkers(scopeId)]);
+			const completed = await this.store.checkpoint(scopeId), latest = this.timelineMarkerVersions.get(scopeId), verifiedAxis = result[0], verifiedCatalog = result[1];
+			if (!current() || completed.generation !== checkpoint.generation ||
+				verifiedAxis.definition_id !== verifiedCatalog.definition_id || verifiedAxis.generation !== verifiedCatalog.generation || verifiedAxis.registry_revision !== verifiedCatalog.registry_revision ||
+				latest && (latest.definition_id !== verifiedCatalog.definition_id || latest.generation !== verifiedCatalog.generation || latest.registry_revision > verifiedCatalog.registry_revision || latest.catalog_revision > verifiedCatalog.catalog_revision)) {
+				throw new Error("Shared marker verification changed. Refresh the view.");
+			}
+			this.timelineMarkerFreshUntil.set(scopeId, Date.now() + 15000);
+			return { axis: verifiedAxis, catalog: verifiedCatalog };
+		})());
 	}
 	readTimelineMarkers(scopeId: string): Promise<TimelineMarkerCatalog> {
 		const existing = this.timelineMarkerFlights.get(scopeId); if (existing) return existing;

@@ -3,7 +3,7 @@ import type { App } from "obsidian";
 import { TimelineRangeModal } from "../../src/collaboration/ui/TimelineRangeModal";
 import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeWorkflow";
 import { readNativeTimelineAxis, timelineTargetMatchesAxis } from "../../src/collaboration/NativeTimelineRanges";
-import { renderTimelineDiscussionMarkers } from "../../src/collaboration/TimelineRangeMarkers";
+import { renderTimelineDiscussionMarkers, renderTimelineSharedMarkers } from "../../src/collaboration/TimelineRangeMarkers";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
@@ -173,6 +173,37 @@ function markerFixture() {
 	return { ...f, catalog, read, write, show, picker, anchor: timelineMarkerAnchor(catalog, catalog.markers[0]) };
 }
 function selectMarker(id: string) { const field = document.querySelector<HTMLSelectElement>('[aria-label="Marker"]')!; field.value = id; field.dispatchEvent(new Event("change")); return field; }
+
+test("shared definitions render and open without a discussion, using only verified cached metadata", () => {
+	const f = markerFixture(), marks = document.createElement("div"), open = jest.fn(), box = { left: 0, right: 600, top: 0, bottom: 400 } as DOMRect;
+	document.body.append(marks);
+	expect(renderTimelineSharedMarkers({ context: f.context, proof: f.proof, catalog: f.catalog, root: box, viewport: box, marks, limit: 64, current: () => true, open })).toBe(1);
+	const marker = marks.querySelector("button")!; expect(marker.textContent).toBe("Launch"); expect(marker.getAttribute("aria-label")).toContain("Shared marker: Launch");
+	marker.click(); expect(open).toHaveBeenCalledWith([f.catalog.markers[0]], marker, expect.any(Function)); expect(f.read).not.toHaveBeenCalled(); expect(f.readAxis).not.toHaveBeenCalled();
+	f.stale(); marker.click(); expect(open).toHaveBeenCalledTimes(1);
+});
+
+test("dense shared marker labels retain distinct identities in bounded nearby choosers", () => {
+	const f = markerFixture(), marks = document.createElement("div"), open = jest.fn(), box = { left: 0, right: 600, top: 0, bottom: 400 } as DOMRect;
+	const original = f.catalog.markers[0]; f.catalog.markers = Array.from({ length: 256 }, (_, i) => ({ ...original, id: id(100 + i), target: { ...original.target, marker_id: id(100 + i) } }));
+	document.body.classList.add("is-mobile");
+	try {
+		expect(renderTimelineSharedMarkers({ context: f.context, proof: f.proof, catalog: f.catalog, root: box, viewport: box, marks, limit: 2, current: () => true, open })).toBe(2);
+		const buttons = [...marks.querySelectorAll("button")]; for (const button of buttons) { expect(button.style.height).toBe("44px"); button.click(); }
+		const ids = open.mock.calls.flatMap(call => call[0].map((marker: { id: string }) => marker.id)); expect(new Set(ids).size).toBe(256);
+		expect(f.read).not.toHaveBeenCalled(); expect(marks.querySelectorAll(".relay-timeline-shared-marker-band")).toHaveLength(256);
+	} finally { document.body.classList.remove("is-mobile"); }
+});
+
+test.each(["archived", "detached", "axis", "scope", "stale"])("shared marker projection rejects %s metadata", reason => {
+	const f = markerFixture(), marks = document.createElement("div"), box = { left: 0, right: 600, top: 0, bottom: 400 } as DOMRect;
+	if (reason === "archived") f.catalog.markers[0].active = false;
+	if (reason === "detached") f.catalog.markers[0].placement.active = false;
+	if (reason === "axis") f.catalog.markers[0].target.axis_definition_id = id(99);
+	if (reason === "scope") f.catalog.view_id = id(99);
+	expect(renderTimelineSharedMarkers({ context: f.context, proof: f.proof, catalog: f.catalog, root: box, viewport: box, marks, limit: 64, current: () => reason !== "stale", open: jest.fn() })).toBe(0);
+	expect(marks.childElementCount).toBe(0);
+});
 
 test("marker picker saves an explicit marker identity/revision and allows read-only position inspection", async () => {
 	const f = markerFixture(); f.picker.open(); await flush();

@@ -36,7 +36,7 @@ function parseState(value: unknown, entryId: string): TimelineMarkerManagementSt
  * base prevents a lost create response from becoming a second promotion. */
 export class TimelineMarkerManagement {
 	private flights = new Map<string, Promise<TimelineMarkerReceipt>>();
-	constructor(private session: DiscussionSession, private changed: () => void) {}
+	constructor(private session: DiscussionSession, private changed: (scopeId: string, status: TimelineMarkerManagementState["status"] | "acknowledged") => void) {}
 	state(scopeId: string): Promise<TimelineMarkerManagementState | undefined> {
 		if (this.session.status === "closed") return Promise.reject(new Error("This discussion account is closed."));
 		const { key, entryId } = keyFor(scopeId);
@@ -56,7 +56,7 @@ export class TimelineMarkerManagement {
 			if (!previous) {
 				const pending: TimelineMarkerManagementState = { version: 1, scope_id: scopeId, request, status: "pending" };
 				if (!await this.session.store.comparePreference(key, raw, protocolJson(pending))) throw new Error("Another window started a marker save. Review that save before continuing.");
-				this.changed();
+				this.changed(scopeId, "pending");
 			}
 			return this.retry(scopeId);
 		})());
@@ -90,7 +90,7 @@ export class TimelineMarkerManagement {
 			const raw = await this.session.store.preference(key), current = parseState(raw, entryId);
 			if (!current || JSON.stringify(current.request) !== JSON.stringify(original.request)) return;
 			if (current.status === "accepted" || current.status === "rejected" && next.status !== "accepted") return current;
-			if (await this.session.store.comparePreference(key, raw, protocolJson(next))) { this.changed(); return next; }
+			if (await this.session.store.comparePreference(key, raw, protocolJson(next))) { this.changed(next.scope_id, next.status); return next; }
 		}
 		throw new Error("Another window updated marker recovery. Refresh its status.");
 	}
@@ -100,7 +100,7 @@ export class TimelineMarkerManagement {
 		return this.session.trackLocal((async () => {
 			const raw = await this.session.store.preference(key), state = parseState(raw, entryId);
 			if (!state || state.request.operation_id !== operationId || state.status === "pending") return false;
-			const cleared = await this.session.store.comparePreference(key, raw, null); if (cleared) this.changed(); return cleared;
+			const cleared = await this.session.store.comparePreference(key, raw, null); if (cleared) this.changed(scopeId, "acknowledged"); return cleared;
 		})());
 	}
 }

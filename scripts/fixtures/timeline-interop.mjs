@@ -12,7 +12,7 @@ import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface.ts";
 import { sha256Hex } from "../../src/contentDigest.ts";
 import { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments.ts";
 import { TimelineRangeWorkflow } from "../../src/collaboration/ui/TimelineRangeWorkflow.ts";
-import { renderTimelineDiscussionMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
+import { renderTimelineDiscussionMarkers, renderTimelineSharedMarkers } from "../../src/collaboration/TimelineRangeMarkers.ts";
 import { TimelineMarkerPicker } from "../../src/collaboration/ui/TimelineMarkerPicker.ts";
 import { TimelineMarkerManager } from "../../src/collaboration/ui/TimelineMarkerManager.ts";
 import { parseTimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol.ts";
@@ -256,6 +256,12 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		assert.deepEqual(managementRequest.command.placements, [{ view_id: uuid(4), axis_definition_id: uuid(40), axis_definition_revision: 1 }]);
 		assert.ok(document.body.textContent.includes("Marker save confirmed")); assert.equal(managementButton("Save marker").disabled, true);
 		manager.close(); assert.equal(document.querySelector(".relay-timeline-marker-dialog"), null); assert.deepEqual(writes, []);
+		const currentMarks = document.createElement("div"); root.append(currentMarks); let openedCurrent = false;
+		assert.equal(renderTimelineSharedMarkers({ context: rangeCommentContext, proof: axisProof, catalog: markerCatalog,
+			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks: currentMarks, limit: 64,
+			current: () => surface.current(), open: markers => { assert.equal(markers[0].id, uuid(60)); openedCurrent = true; } }), 1);
+		assert.ok(currentMarks.querySelector("button").getAttribute("aria-label").includes("Shared marker: Shared launch"));
+		currentMarks.querySelector("button").click(); assert.ok(openedCurrent); currentMarks.remove();
 		const sharedMarks = document.createElement("div"); root.append(sharedMarks);
 		assert.equal(renderTimelineDiscussionMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(61), anchor: capturedMarker }], lanes: new Map(),
 			root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks: sharedMarks, limit: 128, open: threads => assert.equal(threads[0].anchor.target.marker_id, uuid(60)) }), 1);

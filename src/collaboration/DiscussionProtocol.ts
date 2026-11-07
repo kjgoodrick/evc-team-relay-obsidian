@@ -87,7 +87,8 @@ export type DiscussionEvent = { kind: string; sequence: number; data: {
 	message_id?: string; message_revision?: number; message_deleted?: boolean;
 	view_id?: string;
 } };
-export type ChangesPage = { events: DiscussionEvent[]; cursor: string; has_more: boolean; view_id?: string; filtered?: true };
+export type TimelineMarkerVersion = BaseTargetContext & { catalog_revision: number };
+export type ChangesPage = { events: DiscussionEvent[]; cursor: string; has_more: boolean; view_id?: string; filtered?: true; timeline_markers?: TimelineMarkerVersion };
 
 function requireValue(condition: unknown): asserts condition {
 	if (!condition) throw new Error("Invalid discussion response");
@@ -374,7 +375,12 @@ export function parseHistory(value: unknown, after: number): HistoryPage {
 	return { revisions, ...pagination(value, revisions.map(r => r.revision), after) };
 }
 const eventKinds = new Set(["thread.create", "reply.create", "message.edit", "message.delete", "reaction.set", "thread.state", "thread.remove"]);
-export function parseChanges(value: unknown, viewId?: string): ChangesPage {
+export function parseTimelineMarkerVersion(value: unknown, entryId: string, viewId: string): TimelineMarkerVersion {
+	requireValue(isRecord(value) && isSequence(value.catalog_revision) && Object.keys(value).length === 7 &&
+		Object.keys(value).every(key => ["protocol_version", "entry_id", "view_id", "definition_id", "generation", "registry_revision", "catalog_revision"].includes(key)));
+	return { ...parseBaseTargetContext(value, entryId, viewId), catalog_revision: value.catalog_revision };
+}
+export function parseChanges(value: unknown, viewId?: string, entryId?: string): ChangesPage {
 	requireValue(isRecord(value) && array(value.events, 100) && typeof value.cursor === "string" &&
 		value.cursor.length > 0 && value.cursor.length <= 2048 && typeof value.has_more === "boolean");
 	requireValue(viewId === undefined ? value.view_id === undefined && value.filtered === undefined && (!value.has_more || value.events.length > 0) :
@@ -397,7 +403,12 @@ export function parseChanges(value: unknown, viewId?: string): ChangesPage {
 			state: d.state as "open" | "resolved", state_revision: d.state_revision, removed: d.removed, changed: d.changed, ...(viewId !== undefined ? { view_id: viewId } : {}),
 			...(messageEvent ? { message_id: d.message_id as string, message_revision: d.message_revision as number, message_deleted: d.message_deleted as boolean } : {}) } };
 	});
-	return { events, cursor: value.cursor, has_more: value.has_more, ...(viewId !== undefined ? { view_id: viewId, filtered: true as const } : {}) };
+	let timeline_markers: TimelineMarkerVersion | undefined;
+	if (value.timeline_markers !== undefined) {
+		requireValue(isId(viewId) && isId(entryId)); timeline_markers = parseTimelineMarkerVersion(value.timeline_markers, entryId, viewId);
+	}
+	return { events, cursor: value.cursor, has_more: value.has_more, ...(viewId !== undefined ? { view_id: viewId, filtered: true as const } : {}),
+		...(timeline_markers ? { timeline_markers } : {}) };
 }
 
 export function bodyFromText(text: string): MessageBody {

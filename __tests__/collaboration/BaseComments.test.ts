@@ -7,6 +7,7 @@ import type { BaseCommentContext } from "../../src/collaboration/BaseCommentCont
 import type { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import { parseTimelineMarkerCatalog } from "../../src/collaboration/TimelineMarkerProtocol";
 import type { PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 
 const mockMenus: { title: string; click(): void }[][] = [];
@@ -106,6 +107,32 @@ test.each([false, true])("timeline toolbar and cached discussion markers preserv
 		}
 		canComment = false; f.pane.invalidate(); await settle(); expect(f.buttons().some(button => button.textContent === "Comment on range")).toBe(false);
 		proof.axis.revision = 2; f.pane.invalidate(); await settle(); expect(f.root.querySelector(".relay-timeline-range-marker")).toBeNull();
+	} finally { f.close(); }
+});
+
+test("a timeline pane shows shared markers without threads and scrolling never rereads metadata", async () => {
+	const f = fixture(); await settle();
+	try {
+		const context = f.contexts[0], axis = { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "UTC" };
+		Object.assign(context.binding, { type: "sabidurian-timeline" });
+		const proof = { protocol_version: 1, entry_id: id(1), definition_id: id(3), generation: id(4), view_id: id(2), registry_revision: 1,
+			axis: { id: id(40), kind: "axis", revision: 1, fingerprint: "a".repeat(64), axis } };
+		const content = { kind: "point", label: "Shared launch", color: "#123abc", range: { version: 1, kind: "calendar", start: "2026-11-07", end: "2026-11-07", time_zone: "UTC", start_inclusive: true, end_inclusive: true } };
+		const { axis: _axis, ...common } = proof;
+		const catalog = parseTimelineMarkerCatalog({ ...common, catalog_revision: 1, markers: [{ id: id(60), revision: 1, active: true, content,
+			placement: { view_id: id(2), active: true, axis_definition_id: id(40), axis_definition_revision: 1, axis },
+			target: { type: "timeline_marker", marker_id: id(60), marker_revision: 1, axis_definition_id: id(40), axis_definition_revision: 1, axis, content } }] }, id(1), id(2));
+		const metadata = jest.fn().mockResolvedValue({ axis: proof, catalog }), choose = jest.fn();
+		Object.assign(f.session, { readTimelineMarkerMetadata: metadata, permission: () => ({ read: true, comment: true }), canAnchorBase: () => true });
+		f.session.anchorThreads.mockResolvedValue([]); Object.assign(f.host, { chooseTimelineMarker: choose });
+		Object.assign(f.surface, { rangeContext: () => ({ axis, effectiveTimeZone: "UTC", kinds: ["calendar"], current: () => true }),
+			rangeGeometry: () => ({ startX: 100, endX: 100, top: 40, bottom: 60, discontinuous: false, current: () => true }) });
+		f.pane.invalidate(); await settle();
+		const marker = f.root.querySelector<HTMLButtonElement>(".relay-timeline-shared-marker-button")!; expect(marker.textContent).toBe("Shared launch");
+		marker.click(); expect(choose).toHaveBeenCalledWith(context, id(60));
+		const reads = metadata.mock.calls.length; f.root.dispatchEvent(new Event("scroll")); await settle(); expect(metadata).toHaveBeenCalledTimes(reads);
+		metadata.mockResolvedValue({ axis: proof, catalog: { ...catalog, catalog_revision: 2, markers: [] } }); f.pane.invalidate(); await settle();
+		expect(f.root.querySelector(".relay-timeline-shared-marker-button")).toBeNull(); marker.click(); expect(choose).toHaveBeenCalledTimes(1);
 	} finally { f.close(); }
 });
 

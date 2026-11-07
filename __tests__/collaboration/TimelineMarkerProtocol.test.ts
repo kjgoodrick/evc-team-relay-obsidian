@@ -1,5 +1,5 @@
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
-import { bodyFromText, parseAnchor, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import { bodyFromText, parseAnchor, parseChanges, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { parseTimelineMarkerContent } from "../../src/collaboration/TimelineMarkerContent";
 import { parseTimelineMarkerCatalog, parseTimelineMarkerPage } from "../../src/collaboration/TimelineMarkerProtocol";
 import { DiscussionTransport, queuedEnvelope } from "../../src/collaboration/DiscussionTransport";
@@ -18,6 +18,17 @@ const wire = { protocol_version: 1, entry_id: id(1), definition_id: id(2), gener
 	catalog_revision: 3, markers: [marker], has_more: false, next_after: id(20) };
 const anchor: BaseAnchor = { version: 1, type: "base", definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 5, target };
 const scope = baseDiscussionScope(id(1), id(3));
+
+test("change pages carry only strictly scoped marker revision hints and preserve legacy responses", () => {
+	const version = { protocol_version: 1, entry_id: id(1), view_id: id(3), definition_id: id(2), generation: id(4), registry_revision: 5, catalog_revision: 3 };
+	const page = { events: [], cursor: "checkpoint", has_more: false, view_id: id(3), filtered: true };
+	expect(parseChanges(page, id(3))).toEqual(page);
+	expect(parseChanges({ ...page, timeline_markers: version }, id(3), id(1)).timeline_markers).toEqual(version);
+	for (const patch of [{ entry_id: id(99) }, { view_id: id(99) }, { catalog_revision: -1 }, { registry_revision: 0 }, { label: "Untrusted content" }]) {
+		expect(() => parseChanges({ ...page, timeline_markers: { ...version, ...patch } }, id(3), id(1))).toThrow();
+	}
+	expect(() => parseChanges({ events: [], cursor: "checkpoint", has_more: false, timeline_markers: version })).toThrow();
+});
 
 test("marker anchors preserve exact point coordinates, captured content and immutable revision", () => {
 	expect(parseAnchor(anchor)).toEqual(anchor);

@@ -430,7 +430,8 @@ export class DiscussionTransport implements DiscussionSender {
 		viewId = this.scopeView(entryId, viewId);
 		if (cursor !== undefined && (typeof cursor !== "string" || !cursor.length || cursor.length > 2048)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(entryId) + "/changes?limit=25" +
-			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor)) + this.viewQuery(viewId)), v => parseChanges(v, viewId));
+			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor)) + this.viewQuery(viewId) + (viewId ? "&timeline_markers=true" : "")),
+			v => parseChanges(v, viewId, parseDiscussionScope(entryId)!.entryId));
 	}
 
 	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number } = {}): Promise<unknown> {

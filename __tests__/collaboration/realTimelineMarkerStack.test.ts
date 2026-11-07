@@ -40,10 +40,11 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 			return response;
 		});
 		const factory = new IDBFactory(); let store = await DiscussionStore.open(identity, factory), session = new DiscussionSession(store, transport), outbox: DiscussionOutbox | undefined;
-		const ownerFactory = new IDBFactory(), managementRequests: string[] = []; let loseManagement = true;
+		const ownerFactory = new IDBFactory(), managementRequests: string[] = []; let loseManagement = true, catalogReads = 0;
 		const ownerTransport = new DiscussionTransport(ownerIdentity, ownerCredential, async (url, init) => {
 			const management = String(url).endsWith("/timeline-markers/commands");
 			if (management) managementRequests.push(String(init?.body));
+			if (String(url).endsWith("/timeline-markers/catalog")) catalogReads++;
 			const response = await fetch(url, init);
 			if (management && loseManagement && response.ok) { loseManagement = false; await response.text(); throw new TypeError("Lost marker save response"); }
 			return response;
@@ -117,7 +118,14 @@ run("actual marker HTTP and offline outbox preserve accepted targets through los
 				placements: [{ ...restore.command.placements[0], axis_definition_id: randomUUID() }] } })).rejects.toMatchObject({ code: "timeline_axis_unavailable", status: 409 });
 			expect(await ownerSession.markerManagement.state(scope)).toMatchObject({ status: "rejected", error: "timeline_axis_unavailable" });
 			expect(await ownerSession.markerManagement.acknowledge(scope, restore.operation_id)).toBe(true);
-			expect((await ownerSession.markerManagement.save(scope, { ...restore, operation_id: randomUUID() })).marker).toMatchObject({ active: true, revision: 4 });
+			const restored = await ownerSession.markerManagement.save(scope, { ...restore, operation_id: randomUUID() });
+			expect(restored.marker).toMatchObject({ active: true, revision: 4 });
+			expect((await ownerTransport.changes(scope)).timeline_markers).toMatchObject({ entry_id: f.markersEntry, view_id: axis.view_id, catalog_revision: restored.catalog_revision });
+			const cursor = await ownerStore.cursor(scope); await ownerSession.refresh();
+			for (let i = 0; i < 100 && await ownerStore.cursor(scope) === cursor; i++) await new Promise(resolve => setTimeout(resolve, 2));
+			expect(await ownerStore.cursor(scope)).not.toBe(cursor);
+			expect((await ownerSession.readTimelineMarkerMetadata(scope)).catalog.markers.find(marker => marker.id === markerId)?.revision).toBe(4);
+			const reads = catalogReads; await ownerSession.readTimelineMarkerMetadata(scope); expect(catalogReads).toBe(reads);
 		} finally { outbox?.stop(); await outbox?.settled(); await session.close(); await ownerSession.close(); }
 	}
 	expect((await content.read(f.markersEntry)).state).toEqual(saved.state);

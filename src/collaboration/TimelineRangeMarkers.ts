@@ -5,6 +5,68 @@ import type { TimelineAxisContext } from "./TimelineRangeProtocol";
 import { timelineRangeKey, timelineRangeLabel } from "./TimelineRange";
 import { nativeGroupTargetKey } from "./NativeBaseGroupComments";
 import { rangeLaneHandle, timelineTargetMatchesAxis, timelineTargetMatchesProof, timelineAxisMatches } from "./NativeTimelineRanges";
+import type { BaseAnchor } from "./DiscussionProtocol";
+import type { TimelineMarkerCatalog, TimelineViewMarker } from "./TimelineMarkerProtocol";
+
+/** Current shared definitions remain visible without discussions. Nearby labels
+ * may share a chooser; their UUIDs, revisions and exact positions stay distinct.
+ * Projection only consumes an already verified catalog and live bridge geometry. */
+export function renderTimelineSharedMarkers(options: {
+	context: BaseCommentContext; catalog?: TimelineMarkerCatalog; proof?: TimelineAxisContext;
+	root: DOMRect; viewport: DOMRect; marks: HTMLElement; limit: number; current(): boolean;
+	open(markers: TimelineViewMarker[], button: HTMLButtonElement, current: () => boolean): void;
+}): number {
+	const { context, catalog, proof, root, viewport, marks } = options;
+	if (!catalog || !proof || !options.current() || options.limit <= 0) return 0;
+	const native = context.surface.rangeContext();
+	if (!native || !timelineAxisMatches(context, proof, native) ||
+		catalog.definition_id !== proof.definition_id || catalog.generation !== proof.generation || catalog.view_id !== proof.view_id || catalog.registry_revision !== proof.registry_revision) return 0;
+	const leftEdge = Math.max(viewport.left, root.left), rightEdge = Math.min(viewport.right, root.right), topEdge = Math.max(viewport.top, root.top), bottomEdge = Math.min(viewport.bottom, root.bottom);
+	const width = Math.min(160, rightEdge - leftEdge), height = marks.ownerDocument.body.classList.contains("is-mobile") ? 44 : 28;
+	// Leave the native horizontal scrollbar reachable below the label rows.
+	const labelBottom = bottomEdge - 16;
+	if (width < 24 || labelBottom - topEdge < height) return 0;
+	const rows = Math.min(4, Math.floor((labelBottom - topEdge) / height));
+	type Item = { marker: TimelineViewMarker; anchor: BaseAnchor; geometry: NonNullable<ReturnType<BaseCommentContext["surface"]["rangeGeometry"]>>; left: number; right: number; top: number; bottom: number; x: number };
+	const items: Item[] = [];
+	for (const marker of catalog.markers) {
+		if (!marker.active || !marker.placement.active) continue;
+		const anchor: BaseAnchor = { version: 1, type: "base", definition_id: catalog.definition_id, generation: catalog.generation, view_id: catalog.view_id, registry_revision: catalog.registry_revision, target: marker.target };
+		if (!timelineTargetMatchesProof(anchor, proof)) continue;
+		const geometry = context.surface.rangeGeometry(marker.content.range, marker.target.axis); if (!geometry?.current()) continue;
+		const left = Math.max(Math.min(geometry.startX, geometry.endX), leftEdge), right = Math.min(Math.max(geometry.startX, geometry.endX), rightEdge);
+		const top = Math.max(geometry.top, topEdge), bottom = Math.min(geometry.bottom, bottomEdge);
+		if (right < left || left >= rightEdge || bottom <= top) continue;
+		items.push({ marker, anchor, geometry, left, right, top, bottom, x: Math.max(leftEdge, Math.min((left + right - width) / 2, rightEdge - width)) });
+	}
+	items.sort((a, b) => a.x - b.x || a.marker.id.localeCompare(b.marker.id));
+	const groups: { items: Item[]; x: number; row: number }[] = [], ends = Array<number>(rows).fill(-Infinity);
+	for (const item of items) {
+		const row = ends.findIndex(end => end + 4 <= item.x);
+		if (row >= 0 && groups.length < options.limit) { groups.push({ items: [item], x: item.x, row }); ends[row] = item.x + width; }
+		else {
+			// A crowded viewport retains every visible marker in a nearby chooser.
+			const nearest = groups.reduce((best, group) => Math.abs(group.x - item.x) < Math.abs(best.x - item.x) ? group : best, groups[0]);
+			if (nearest) nearest.items.push(item);
+		}
+		const span = marks.ownerDocument.createElement("div"); span.className = "relay-timeline-shared-marker-band"; span.setAttribute("aria-hidden", "true");
+		span.style.setProperty("--relay-marker-color", item.marker.content.color); span.classList.toggle("is-discontinuous", item.geometry.discontinuous);
+		span.dataset.startInclusive = String(item.marker.content.range.start_inclusive); span.dataset.endInclusive = String(item.marker.content.range.end_inclusive);
+		span.dataset.leftClipped = String(Math.min(item.geometry.startX, item.geometry.endX) < item.left); span.dataset.rightClipped = String(Math.max(item.geometry.startX, item.geometry.endX) > item.right);
+		span.style.left = item.left - root.left + "px"; span.style.top = item.top - root.top + "px"; span.style.width = Math.max(2, item.right - item.left) + "px"; span.style.height = item.bottom - item.top + "px"; marks.append(span);
+	}
+	for (const group of groups) {
+		const selected = group.items.map(item => item.marker), button = marks.ownerDocument.createElement("button"); button.type = "button"; button.className = "relay-timeline-shared-marker-button";
+		button.dataset.baseMarker = JSON.stringify(["shared-markers", selected.map(marker => [marker.id, marker.revision])]);
+		button.textContent = selected.length === 1 ? selected[0].content.label : selected.length + " nearby markers";
+		const description = selected.length === 1 ? "Shared marker: " + selected[0].content.label + " · " + timelineRangeLabel(selected[0].content.range) : selected.length + " shared markers nearby. Choose a marker to inspect its exact position.";
+		button.setAttribute("aria-label", description); button.title = description; button.style.setProperty("--relay-marker-color", selected.length === 1 ? selected[0].content.color : "var(--interactive-accent)");
+		button.style.left = group.x - root.left + "px"; button.style.top = labelBottom - root.top - height * (group.row + 1) + "px"; button.style.width = width + "px"; button.style.height = height + "px";
+		const current = () => options.current() && context.current() && group.items.every(item => item.geometry.current() && timelineTargetMatchesAxis(context, item.anchor, proof));
+		button.onclick = event => { event.stopPropagation(); if (current()) options.open(selected, button, current); }; marks.append(button);
+	}
+	return groups.length;
+}
 
 /** Synchronous projection from already authorized cached data. Scroll causes no
  * network, vault reads, axis verification, or source-note loading. */

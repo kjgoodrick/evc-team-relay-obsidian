@@ -12,7 +12,8 @@ import { TimelineBridgeClient } from "../bases/TimelineBridgeClient";
 import type { NativeBasesIntegrations } from "../bases/NativeBasesSurface";
 import { rangeLane, rangeLaneHandle, timelineTargetMatchesAxis, readNativeTimelineAxis } from "./NativeTimelineRanges";
 import type { TimelineAxisContext } from "./TimelineRangeProtocol";
-import { renderTimelineDiscussionMarkers } from "./TimelineRangeMarkers";
+import { renderTimelineDiscussionMarkers, renderTimelineSharedMarkers } from "./TimelineRangeMarkers";
+import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -127,6 +128,7 @@ export class BaseCommentPane {
 	private unavailableGroup = false;
 	private groupTargets = new Map<string, NativeBaseGroupTarget>();
 	private rangeAxis?: TimelineAxisContext;
+	private sharedMarkers?: TimelineMarkerCatalog;
 	private rangeLanes = new Map<string, NativeBaseGroupTarget>();
 	private toolsContext?: BaseCommentContext;
 	private toolsChosen?: NativeBaseHandle;
@@ -194,7 +196,7 @@ export class BaseCommentPane {
 	}
 	private detach(): void {
 		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.unavailableGroup = false;
-		this.groupTargets.clear(); this.rangeAxis = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
+		this.groupTargets.clear(); this.rangeAxis = undefined; this.sharedMarkers = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
 		this.toolbar.replaceChildren(); this.toolsContext = undefined; this.toolsChosen = undefined; this.toolsKey = undefined;
 		this.marks.replaceChildren(); this.updateMarkerTargets(new Set()); this.dataDirty = true;
 	}
@@ -225,8 +227,13 @@ export class BaseCommentPane {
 				if (!context.current() || this.closed || this.context !== context || version !== this.version) { this.invalidate(); return; }
 				const groupTargets = new Map<string, NativeBaseGroupTarget>(), groups = new Map<string, Promise<NativeBaseGroupTarget | undefined>>();
 				let rangeAxis: TimelineAxisContext | undefined;
+				let sharedMarkers: TimelineMarkerCatalog | undefined;
 				const rangeLanes = new Map<string, NativeBaseGroupTarget>();
-				if (threads.some(thread => thread.anchor?.type === "base" && (thread.anchor.target.type === "timeline_range" || thread.anchor.target.type === "timeline_marker"))) {
+				if ((context.binding.type === "sabidurian-timeline" || context.binding.type === "sabidurian-sequence") && context.session.readTimelineMarkerMetadata) {
+					try { const metadata = await context.session.readTimelineMarkerMetadata(context.entryId); rangeAxis = metadata.axis; sharedMarkers = metadata.catalog; }
+					catch { /* Metadata is optional for reading existing discussions; never guess current marker placement. */ }
+				}
+				if (!rangeAxis && threads.some(thread => thread.anchor?.type === "base" && (thread.anchor.target.type === "timeline_range" || thread.anchor.target.type === "timeline_marker"))) {
 					try { rangeAxis = await readNativeTimelineAxis(context); } catch { /* Retain discussions without projecting a guessed axis. */ }
 				}
 				for (let offset = 0; offset < threads.length; offset += 8) {
@@ -244,7 +251,7 @@ export class BaseCommentPane {
 					}));
 					if (!context.current() || this.closed || this.context !== context || version !== this.version) { this.invalidate(); return; }
 				}
-				this.threads = threads; this.groupTargets = groupTargets; this.rangeAxis = rangeAxis; this.rangeLanes = rangeLanes; this.dataDirty = false;
+				this.threads = threads; this.groupTargets = groupTargets; this.rangeAxis = rangeAxis; this.sharedMarkers = sharedMarkers; this.rangeLanes = rangeLanes; this.dataDirty = false;
 			}
 			if (!context.current()) { this.detach(); return; }
 			this.layer.hidden = false; this.toolbar.hidden = false; this.toolbar.classList.remove("is-unavailable"); this.renderTools(); this.renderMarkers();
@@ -378,6 +385,15 @@ export class BaseCommentPane {
 				if (threads.length === 1) { void this.host.openBaseThread(context, threads[0].id); return; }
 				const menu = new Menu();
 				for (const thread of threads) menu.addItem(item => item.setTitle((thread.state === "resolved" ? "Resolved" : "Open") + " · " + context.session.displayName(context.entryId, thread.author_id)).onClick(() => { if (current()) void this.host.openBaseThread(context, thread.id); }));
+				const box = button.getBoundingClientRect(); menu.showAtPosition({ x: box.left, y: box.bottom });
+			} });
+		const catalog = this.sharedMarkers;
+		count += renderTimelineSharedMarkers({ context, catalog, proof: this.rangeAxis, root, viewport, marks: this.marks, limit: Math.min(64, 128 - count),
+			current: () => this.sharedMarkers === catalog && this.context === context && !this.closed && context.session.permission(context.entryId)?.read === true,
+			open: (markers, button, current) => {
+				if (markers.length === 1) { this.host.chooseTimelineMarker(context, markers[0].id); return; }
+				const menu = new Menu();
+				for (const marker of markers) menu.addItem(item => item.setTitle(marker.content.label + " · " + marker.id.slice(-8)).onClick(() => { if (current()) this.host.chooseTimelineMarker(context, marker.id); }));
 				const box = button.getBoundingClientRect(); menu.showAtPosition({ x: box.left, y: box.bottom });
 			} });
 		for (const [element, { key, marker }] of presentations) {

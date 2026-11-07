@@ -1,5 +1,5 @@
 import { DiscussionFailure, type DiscussionIdentity } from "./DiscussionTransport";
-import { protocolJson, type ChangesPage, type MessageRead, type ThreadStateRead } from "./DiscussionProtocol";
+import { protocolJson, type ChangesPage, type MessageRead, type ThreadStateRead, type TimelineMarkerVersion } from "./DiscussionProtocol";
 import type { CachedEntity, CachePurge, DiscussionStore } from "./storage/DiscussionStore";
 import { parseDiscussionScope } from "./DiscussionScope";
 
@@ -32,7 +32,8 @@ export class DiscussionSync {
 
 	constructor(private store: DiscussionStore, private reader: DiscussionReader, readonly entryId: string,
 		private onChange: (status: SyncStatus) => void = () => {}, private now: () => number = Date.now,
-		private random: () => number = Math.random, private onReset: () => Promise<void> = async () => {}) {
+		private random: () => number = Math.random, private onReset: () => Promise<void> = async () => {},
+		private onTimelineMarkers: (version: TimelineMarkerVersion) => void = () => {}) {
 		if (!parseDiscussionScope(entryId) || ["serverId", "accountId", "shareId"].some(key =>
 			store.identity[key as keyof typeof reader.identity] !== reader.identity[key as keyof typeof reader.identity])) {
 			throw new Error("Discussion reader identity does not match its local store");
@@ -130,6 +131,7 @@ export class DiscussionSync {
 				if (!this.valid(generation)) return;
 				this.failures = 0;
 				if (!applied) continue; // Another window advanced or invalidated it.
+				if (page.timeline_markers) this.onTimelineMarkers(page.timeline_markers);
 				this.changed(page.has_more ? "syncing" : "current");
 				if (!page.has_more) { this.schedule(5000); return; }
 			} catch (error) {

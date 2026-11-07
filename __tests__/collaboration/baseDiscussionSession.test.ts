@@ -298,6 +298,64 @@ function markerRemote() {
 	transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "timeline_range", "timeline_marker"], baseRecordTypes: ["markdown"] });
 	return transport;
 }
+
+test("active discussion hints refresh changed markers without refetching unchanged axis or catalog metadata", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = markerRemote(), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	const hint = (catalog = markerCatalog()) => { const { markers: _markers, ...version } = catalog; return version; };
+	const poll = async (cursor: string, timeline_markers = hint()) => {
+		transport.changes.mockResolvedValue({ events: [], cursor, has_more: false, view_id: id(4), filtered: true, timeline_markers });
+		await session.refresh();
+		for (let i = 0; i < 100 && await store.cursor(scope) !== cursor; i++) await new Promise(resolve => setTimeout(resolve, 1));
+		expect(await store.cursor(scope)).toBe(cursor);
+	};
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await poll("markers-1");
+		expect((await session.readTimelineMarkerMetadata(scope)).catalog.catalog_revision).toBe(1);
+		const axes = transport.timelineAxis.mock.calls.length, catalogs = transport.timelineMarkers.mock.calls.length;
+		await poll("markers-same"); await session.readTimelineMarkerMetadata(scope);
+		expect(transport.timelineAxis).toHaveBeenCalledTimes(axes); expect(transport.timelineMarkers).toHaveBeenCalledTimes(catalogs);
+		const changed = markerCatalog(); changed.catalog_revision = 2; changed.markers[0].revision = 2; changed.markers[0].target.marker_revision = 2;
+		changed.markers[0].content.label = "Moved release"; changed.markers[0].target.content.label = "Moved release";
+		transport.timelineMarkers.mockResolvedValue(changed); await poll("markers-2", hint(changed));
+		expect((await session.readTimelineMarkerMetadata(scope)).catalog.markers[0].content.label).toBe("Moved release");
+		expect(transport.timelineAxis).toHaveBeenCalledTimes(axes); expect(transport.timelineMarkers).toHaveBeenCalledTimes(catalogs + 1);
+		await poll("markers-old", hint()); await session.readTimelineMarkerMetadata(scope);
+		expect(transport.timelineMarkers).toHaveBeenCalledTimes(catalogs + 1);
+		await store.clearRemoteScope(scope);
+		transport.timelineMarkers.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		await expect(session.readTimelineMarkerMetadata(scope)).rejects.toThrow();
+	} finally { await session.close(); }
+});
+
+test("legacy marker observation reuses proof for fifteen seconds and never caches a denied replacement", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = markerRemote(), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	const now = Date.now();
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh();
+		await session.readTimelineMarkerMetadata(scope); const calls = transport.timelineMarkers.mock.calls.length;
+		await session.readTimelineMarkerMetadata(scope); expect(transport.timelineMarkers).toHaveBeenCalledTimes(calls);
+		jest.spyOn(Date, "now").mockReturnValue(now + 16000);
+		transport.timelineMarkers.mockRejectedValue(new DiscussionFailure("reject", "target_unavailable", 404));
+		await expect(session.readTimelineMarkerMetadata(scope)).rejects.toMatchObject({ status: 404 });
+		expect(await store.preference("timelineMarkers:" + scope)).toBeNull();
+	} finally { jest.restoreAllMocks(); await session.close(); }
+});
+
+test("marker metadata rechecks access after its final asynchronous cache fence", async () => {
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = markerRemote(), session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	let complete: (() => void) | undefined;
+	try {
+		await session.start(); session.watch(scope, () => {}, "base"); await session.refresh(); await session.readTimelineMarkerMetadata(scope);
+		session.setForeground(false); await session.outbox.settled();
+		const checkpoint = store.checkpoint.bind(store);
+		jest.spyOn(store, "checkpoint").mockImplementationOnce(checkpoint).mockImplementationOnce(async id => {
+			const result = await checkpoint(id); await new Promise<void>(resolve => { complete = resolve; }); return result;
+		});
+		const read = session.readTimelineMarkerMetadata(scope); await until(() => !!complete);
+		jest.spyOn(session, "permission").mockReturnValue({ read: false, comment: false, edit: false, moderate: false });
+		complete!(); await expect(read).rejects.toThrow("verification changed");
+	} finally { complete?.(); jest.restoreAllMocks(); await session.close(); }
+});
 test("verified marker selections remain exact through offline restart, draft consumption and queued delivery", async () => {
 	const factory = new IDBFactory(), transport = markerRemote(); let store = await DiscussionStore.open(identity, factory);
 	let session = new DiscussionSession(store, transport as unknown as DiscussionTransport);

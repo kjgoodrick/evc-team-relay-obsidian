@@ -3,6 +3,7 @@ import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore
 import { DiscussionFailure } from "../../src/collaboration/DiscussionTransport";
 import { DiscussionSync, messageKey, threadKey, type DiscussionReader } from "../../src/collaboration/DiscussionSync";
 import { bodyFromText, type ChangesPage, type MessageRead } from "../../src/collaboration/DiscussionProtocol";
+import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -32,6 +33,22 @@ async function setup(remote: DiscussionReader = reader()) {
 	const worker = new DiscussionSync(store, remote, entry);
 	return { store, worker, close: async () => { worker.stop(); await worker.settled(); store.close(); } };
 }
+
+test("empty change pages deliver marker hints after checkpoint commit and stop fences late hints", async () => {
+	const remote = reader(), store = await DiscussionStore.open(identity, new IDBFactory()), observed = jest.fn();
+	const scope = baseDiscussionScope(entry, id(20)), version = { protocol_version: 1 as const, entry_id: entry, view_id: id(20), definition_id: id(21), generation: id(22), registry_revision: 1, catalog_revision: 2 };
+	const page = { events: [], cursor: "marker-only", has_more: false, view_id: id(20), filtered: true, timeline_markers: version };
+	remote.changes.mockResolvedValue(page);
+	const worker = new DiscussionSync(store, remote, scope, () => {}, undefined, undefined, undefined, observed);
+	try {
+		worker.resume(); await worker.settled(); expect(observed).toHaveBeenCalledWith(version); expect(await store.cursor(scope)).toBe("marker-only"); expect(remote.message).not.toHaveBeenCalled();
+		let finish!: (value: typeof page) => void;
+		remote.changes.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })); worker.wake();
+		for (let i = 0; i < 100 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 1));
+		worker.stop(); finish({ ...page, cursor: "late", timeline_markers: { ...version, catalog_revision: 3 } }); await worker.settled();
+		expect(observed).toHaveBeenCalledTimes(1); expect(await store.cursor(scope)).toBe("marker-only");
+	} finally { worker.stop(); await worker.settled(); store.close(); }
+});
 
 test("replays into an atomic cache/checkpoint and refreshes reactions without an edit revision", async () => {
 	const remote = reader(), { store, worker, close } = await setup(remote);
