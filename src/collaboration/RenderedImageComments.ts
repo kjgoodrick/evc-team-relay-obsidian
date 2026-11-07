@@ -9,8 +9,9 @@ import { renderedImageFit, type RenderedImageTarget } from "./anchors/renderedIm
 import { localTextAnchor, type ImageAnchor } from "./DiscussionProtocol";
 import type { ImageBox } from "./anchors/imageGeometry";
 import { resolveTextAnchor } from "./anchors/text";
+import type { ImagePlacementSurface } from "./ui/RenderedImagePlacement";
 
-type OpenImage = (context: ImageCommentContext, image: ImageOccurrence) => void;
+type OpenImage = (context: ImageCommentContext, image: ImageOccurrence, surface?: ImagePlacementSurface) => void;
 type Marker = { thread: AnchoredThread; anchor: ImageAnchor };
 type Record = { target: RenderedImageTarget; key: string; attempt: number; element: HTMLDivElement; clip: HTMLDivElement; controls: HTMLDivElement;
 	evidence?: RenderedImageEvidence; signature?: string; markers: { button: HTMLButtonElement; value: Marker }[]; current: () => boolean };
@@ -167,7 +168,9 @@ export class RenderedImageView {
 		record.controls.empty(); record.clip.empty(); record.markers = [];
 		const guarded = (action: () => void) => () => { if (this.context()?.session === context.session && record.current() && record.evidence?.valid()) action(); };
 		if (comment) record.controls.createEl("button", { text: "Comment on image", attr: { type: "button", "aria-label": "Comment on this image occurrence" } }).onclick = guarded(() => {
-			try { const writable = this.host.imageContext(this.view); this.open(writable, record.target.occurrence); } catch { this.invalidate(); }
+			try { const writable = this.host.imageContext(this.view); this.open(writable, record.target.occurrence, {
+				image, root: this.view.contentEl, current: () => record.current() && !!record.evidence?.valid(),
+			}); } catch { this.invalidate(); }
 		});
 		for (const value of matches) {
 			const { thread, anchor } = value;

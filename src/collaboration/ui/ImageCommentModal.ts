@@ -85,6 +85,7 @@ export class ImageCommentModal extends Modal {
 				} catch { this.failed("This image cannot be previewed."); return; }
 				this.basis = basis; this.canvas.classList.remove("is-unavailable");
 				const resized = this.options.basis && (this.options.basis.width !== basis.width || this.options.basis.height !== basis.height);
+				if (this.options.save && resized) { this.failed("The image dimensions changed. Close and select the image again before placing a comment."); return; }
 				if (this.options.changed || resized) {
 					this.statusEl!.setText("Image changed. The original annotation is retained with the discussion; its coordinates are not placed on this replacement.");
 					this.overlay!.classList.add("is-unavailable");

@@ -76,6 +76,12 @@ test("replacement images suppress stored coordinates and keep an explicit review
 	expect(button("Add comment")).toBeUndefined(); f.modal.close();
 });
 
+test("inline-to-preview handoff rejects changed dimensions instead of reusing the selected coordinates", async () => {
+	const f = fixture({ basis: { width: 400, height: 300, orientation: "display" }, geometry: { type: "pin", x: 0.2, y: 0.8 } }); await loaded();
+	expect(document.body.textContent).toContain("dimensions changed"); expect(button("Add comment").disabled).toBe(true);
+	button("Add comment").click(); await flush(); expect(f.save).not.toHaveBeenCalled(); expect(f.preview.release).toHaveBeenCalledTimes(1); f.modal.close();
+});
+
 test("late image loading after close releases the source without creating a new image or timer", async () => {
 	let finish!: (value: ImagePreview) => void;
 	const f = fixture({ load: () => new Promise(resolve => { finish = resolve; }) });

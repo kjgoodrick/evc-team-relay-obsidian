@@ -6,21 +6,23 @@ import type { DiscussionSession } from "./DiscussionSession";
 import { parseAnchor, wireTextAnchor, type ImageAnchor, type ImageFileAnchor } from "./DiscussionProtocol";
 import { captureTextAnchor } from "./anchors/text";
 import { imageAssetChanged, markdownImages, resolveImageOccurrence, type ImageOccurrence } from "./anchors/images";
-import { ImageAssets } from "./ImageAssets";
+import { ImageAssets, type ImagePreview } from "./ImageAssets";
 import { ImageCommentModal } from "./ui/ImageCommentModal";
+import { RenderedImagePlacement, type ImagePlacementSurface } from "./ui/RenderedImagePlacement";
+import type { ImageAsset, ImageBasis, ImageGeometry } from "./anchors/imageGeometry";
 import { RenderedImageComments } from "./RenderedImageComments";
 import { ImageFileOverlays } from "./ImageFileOverlays";
 
 export class ImageComments extends Component {
 	private assets: ImageAssets;
-	private modal?: ImageCommentModal;
+	private modal?: ImageCommentModal | RenderedImagePlacement;
 	private unobserve?: () => void;
 	private request = 0;
 	private stopped = false;
 	constructor(private host: DiscussionHost, private plugin: Plugin, shares: ShareRegistry) { super(); this.assets = new ImageAssets(plugin.app, shares); }
 	onload(): void {
-		this.addChild(new RenderedImageComments(this.host, this.plugin, this.assets, (context, image) => this.draft(context, image)));
-		this.addChild(new ImageFileOverlays(this.host, this.plugin, this.assets, file => { void this.commentFile(file); }));
+		this.addChild(new RenderedImageComments(this.host, this.plugin, this.assets, (context, image, surface) => this.draft(context, image, surface)));
+		this.addChild(new ImageFileOverlays(this.host, this.plugin, this.assets, (file, surface) => { void this.commentFile(file, surface); }));
 		this.plugin.addCommand({ id: "comment-image", name: "Comment on image", checkCallback: checking => {
 			const file = this.plugin.app.workspace.getActiveFile(), target = file ? this.host.targetFor(file) : undefined;
 			if (file && target?.kind === "image" && target.session?.canAnchorImageFiles) {
@@ -35,6 +37,8 @@ export class ImageComments extends Component {
 		this.registerEvent(this.plugin.app.vault.on("modify", changed));
 		this.registerEvent(this.plugin.app.vault.on("rename", changed));
 		this.registerEvent(this.plugin.app.vault.on("delete", changed));
+		this.registerEvent(this.plugin.app.workspace.on("layout-change", changed));
+		this.registerEvent(this.plugin.app.workspace.on("file-open", changed));
 	}
 	comment(view: MarkdownView): void {
 		this.request++;
@@ -53,7 +57,7 @@ export class ImageComments extends Component {
 			const box = view.contentEl.getBoundingClientRect(); menu.showAtPosition({ x: box.left + 24, y: box.top + 48 });
 		} catch { new Notice("Wait for the shared note and comment access to finish synchronizing, then try again."); }
 	}
-	private mount(context: ImageCommentContext | ImageFileCommentContext, modal: ImageCommentModal, retain?: () => void): void {
+	private mount(context: ImageCommentContext | ImageFileCommentContext, modal: ImageCommentModal | RenderedImagePlacement, retain?: () => void): void {
 		this.modal?.close(); this.unobserve?.(); this.modal = modal;
 		if ("text" in context) {
 			const changed = () => modal.validate(); context.text.observe(changed); this.unobserve = () => { context.text.unobserve(changed); retain?.(); };
@@ -61,7 +65,37 @@ export class ImageComments extends Component {
 		modal.open();
 	}
 	private closed(): void { this.unobserve?.(); this.unobserve = undefined; this.modal = undefined; }
-	private draft(context: ImageCommentContext, image: ImageOccurrence): void {
+	private author(context: ImageCommentContext | ImageFileCommentContext, asset: ImageAsset, current: () => boolean,
+		load: () => Promise<ImagePreview>, save: (basis: ImageBasis, geometry: ImageGeometry) => Promise<void>, surface?: ImagePlacementSurface): void {
+		const show = (geometry?: ImageGeometry, basis?: ImageBasis, inline?: ImagePlacementSurface) => {
+			const retain = "text" in context ? undefined : context.session.watch(context.entryId, () => this.modal?.validate(), "image");
+			const modal = () => new ImageCommentModal(this.plugin.app, { title: "Comment on image", current, load, geometry, basis, closed: () => this.closed(),
+				save: async (preview, measured, selected) => {
+					if (!current() || !preview.valid() || imageAssetChanged(asset, preview.asset)) throw new Error("Image changed");
+					await save(measured, selected);
+				} });
+			if (!inline) { this.mount(context, modal(), retain); return; }
+			try {
+				// The verified surface invalidates synchronously with source/version
+				// changes. Repaint only needs that proof and current comment access;
+				// resolving the relative source occurrence again belongs at Save.
+				const canPlace = () => !this.stopped && !!context.session.permission(context.entryId)?.comment &&
+					("text" in context ? context.session.canAnchorImages : context.session.canAnchorImageFiles);
+				this.mount(context, new RenderedImagePlacement({ surface: inline, current: canPlace, external: asset.kind === "external", closed: () => this.closed(),
+					save: async (measured, selected) => {
+						if (!current() || !inline.current()) throw new Error("Image changed");
+						await save(measured, selected);
+					}, preview: (selected, measured) => show(selected, measured),
+				}), retain);
+			} catch {
+				this.modal?.close(); // Unsupported transforms/preview decoding retain the full-size placement workflow.
+				show(geometry, basis);
+			}
+		};
+		show(undefined, undefined, surface);
+	}
+	private draft(context: ImageCommentContext, image: ImageOccurrence, surface?: ImagePlacementSurface): void {
+		this.request++;
 		try {
 			const asset = this.assets.describe(context.file, image.destination);
 			const frozen = { version: 1, type: "image", occurrence: wireTextAnchor(captureTextAnchor(context.text, context.entryId, context.generation, image.from, image.to)), asset,
@@ -71,14 +105,11 @@ export class ImageComments extends Component {
 				const resolved = resolveImageOccurrence(context.text, context.entryId, context.generation, frozen);
 				try { return resolved.status === "attached" && !imageAssetChanged(asset, this.assets.describe(context.file, resolved.image.destination)); } catch { return false; }
 			};
-			this.mount(context, new ImageCommentModal(this.plugin.app, { title: "Comment on image", current,
-				load: () => this.assets.load(context.file, image.destination, current), closed: () => this.closed(),
-				save: async (preview, basis, geometry) => {
-					if (!current() || !preview.valid() || imageAssetChanged(asset, preview.asset)) throw new Error("Image changed");
-					const anchor = parseAnchor({ ...frozen, asset: preview.asset, basis, geometry });
-					if (!await this.host.saveCommentSelection({ ...context, anchor })) throw new Error("Draft not saved");
-				},
-			}));
+			this.author(context, asset, current, () => this.assets.load(context.file, image.destination, current), async (basis, geometry) => {
+				if (!current()) throw new Error("Image changed");
+				const anchor = parseAnchor({ ...frozen, basis, geometry });
+				if (!await this.host.saveCommentSelection({ ...context, anchor })) throw new Error("Draft not saved");
+			}, surface);
 		} catch { new Notice("This image could not be selected. Check access and synchronization, then try again."); }
 	}
 	reveal(view: MarkdownView, session: DiscussionSession, entryId: string, anchor: ImageAnchor): boolean {
@@ -99,7 +130,7 @@ export class ImageComments extends Component {
 		} catch { new Notice("This image is unavailable. The original target and discussion are retained."); }
 		return true;
 	}
-	async commentFile(file: TFile): Promise<void> {
+	async commentFile(file: TFile, surface?: ImagePlacementSurface): Promise<void> {
 		const serial = ++this.request, target = this.host.targetFor(file), session = target.session, entryId = target.entryId;
 		if (!session || !entryId || target.kind !== "image" || !session.canAnchorImageFiles) return;
 		let release: (() => void) | undefined;
@@ -110,14 +141,11 @@ export class ImageComments extends Component {
 			const current = () => {
 				try { return context.current() && !imageAssetChanged(asset, this.assets.describeFile(file)); } catch { return false; }
 			};
-			this.mount(context, new ImageCommentModal(this.plugin.app, { title: "Comment on image file", current,
-				load: () => this.assets.loadFile(file, current), closed: () => this.closed(),
-				save: async (preview, basis, geometry) => {
-					if (!current() || !preview.valid() || imageAssetChanged(asset, preview.asset)) throw new Error("Image changed");
-					const anchor = parseAnchor({ version: 1, type: "image_file", generation: context.generation, asset: preview.asset, basis, geometry });
-					if (!await this.host.saveCommentSelection({ ...context, anchor })) throw new Error("Draft not saved");
-				},
-			}), release); release = undefined;
+			this.author(context, asset, current, () => this.assets.loadFile(file, current), async (basis, geometry) => {
+				if (!current()) throw new Error("Image changed");
+				const anchor = parseAnchor({ version: 1, type: "image_file", generation: context.generation, asset, basis, geometry });
+				if (!await this.host.saveCommentSelection({ ...context, anchor })) throw new Error("Draft not saved");
+			}, surface);
 		} catch { if (!this.stopped && serial === this.request) new Notice("This image is not ready for comments. Check comment access and image synchronization, then try again."); }
 		finally { release?.(); }
 	}

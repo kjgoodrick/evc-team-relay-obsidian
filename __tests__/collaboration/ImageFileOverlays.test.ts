@@ -45,7 +45,10 @@ test("bootstraps image permissions, draws exact-file geometry and opens its disc
 		const pin = f.contentEl.querySelector<HTMLButtonElement>(".relay-rendered-image-mark")!;
 		expect(pin.style.left).toBe("50px"); expect(pin.style.top).toBe("93.75px");
 		pin.click(); expect(f.host.openThread).toHaveBeenCalledWith(f.file, f.session, id(1), id(3));
-		f.contentEl.querySelector<HTMLButtonElement>(".relay-rendered-image-controls button")!.click(); expect(f.open).toHaveBeenCalledWith(f.file);
+		f.contentEl.querySelector<HTMLButtonElement>(".relay-rendered-image-controls button")!.click(); expect(f.open).toHaveBeenCalledWith(f.file, {
+			image: f.image, root: f.contentEl, current: expect.any(Function),
+		});
+		expect(f.open.mock.calls[0][1].current()).toBe(true);
 		document.dispatchEvent(new Event("scroll")); await settle();
 		expect(f.assets.verifyRenderedFile).toHaveBeenCalledTimes(1); expect(f.session.anchorThreads).toHaveBeenCalledTimes(1);
 	} finally { f.close(); }

@@ -732,6 +732,22 @@
 .relay-rendered-image-mark:focus-visible, .relay-rendered-image-controls button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
 .relay-rendered-image-evidence { font-family: var(--font-interface); font-size: var(--font-ui-smaller); background: var(--background-primary); color: var(--text-muted); padding: 2px 5px; border-radius: 3px; }
 .is-mobile .relay-rendered-image-controls button { min-height: 44px; }
+.relay-image-placement { z-index: 5; }
+.relay-image-placement-scene { position: absolute; overflow: hidden; pointer-events: auto; user-select: none; }
+.relay-image-placement-scene canvas { position: absolute; max-width: none; max-height: none; pointer-events: none; }
+.relay-image-placement-toolbar { position: absolute; left: 4px; right: 4px; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 6px; pointer-events: auto; max-height: 100%; overflow: auto; }
+.relay-image-placement-toolbar button { height: auto; white-space: normal; }
+.relay-image-placement-toolbar [aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }
+.relay-image-placement-status { flex-basis: 100%; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.relay-image-placement button.relay-image-placement-mark { position: absolute; min-width: 0; min-height: 0; margin: 0; padding: 0; border: 2px solid var(--interactive-accent); border-radius: 0; background: color-mix(in srgb, var(--interactive-accent) 15%, transparent); box-shadow: 0 0 0 1px var(--background-primary); cursor: move; }
+.relay-image-placement button.relay-image-placement-mark.pin { border-radius: 50%; transform: translate(-50%, -50%); background: var(--interactive-accent); }
+.relay-image-placement button.relay-image-placement-handle { position: absolute; width: 24px; height: 24px; min-height: 0; min-width: 0; padding: 0; margin: 0; transform: translate(-50%, -50%); border: 2px solid var(--interactive-accent); background: var(--background-primary); }
+.relay-image-placement [data-handle="nw"], .relay-image-placement [data-handle="se"] { cursor: nwse-resize; }
+.relay-image-placement [data-handle="ne"], .relay-image-placement [data-handle="sw"] { cursor: nesw-resize; }
+.relay-image-placement button[hidden] { display: none; }
+.relay-image-placement button:focus-visible { outline: 2px solid var(--text-normal); outline-offset: 2px; }
+.is-mobile .relay-image-placement-toolbar button { min-height: 44px; }
+.is-mobile .relay-image-placement button.relay-image-placement-handle, .is-mobile .relay-image-placement button.relay-image-placement-mark.pin { min-height: 44px; min-width: 44px; }
 .evc-bases-sync textarea { width: 100%; font-family: var(--font-monospace); }
 .evc-bases-sync .setting-item-control { flex-wrap: wrap; }
 .is-mobile .evc-bases-sync button { min-height: 44px; }

@@ -57,6 +57,8 @@ test("draws a saved pin only on the second occurrence, opens its thread and expo
 		pin.click(); expect(f.host.openThread).toHaveBeenCalledWith(f.file, f.session, id(1), id(3));
 		overlays[1].querySelector<HTMLButtonElement>(".relay-rendered-image-controls button")!.click();
 		expect(f.open.mock.calls[0][1].from).toBe(markdownImages(f.text.toString())[1].from);
+		expect(f.open.mock.calls[0][2]).toEqual({ image: f.images[1], root: f.contentEl, current: expect.any(Function) });
+		expect(f.open.mock.calls[0][2].current()).toBe(true);
 		const calls = f.assets.verifyRendered.mock.calls.length; document.dispatchEvent(new Event("scroll")); await settle();
 		expect(f.assets.verifyRendered).toHaveBeenCalledTimes(calls); expect(f.session.anchorThreads).toHaveBeenCalledTimes(1);
 	} finally { f.close(); }

@@ -6,15 +6,17 @@ import type { ImageFileAnchor } from "./DiscussionProtocol";
 import { imageAssetChanged } from "./anchors/images";
 import { renderedImageFit } from "./anchors/renderedImages";
 import type { ImageBox } from "./anchors/imageGeometry";
+import type { ImagePlacementSurface } from "./ui/RenderedImagePlacement";
 
 type Marker = { button: HTMLButtonElement; anchor: ImageFileAnchor };
+type OpenImage = (file: TFile, surface?: ImagePlacementSurface) => void;
 const owned = ".relay-rendered-images";
 
 /** Direct-file views have no Markdown occurrence mapping. Only the exact native
  * resource of the authorized managed file may receive its discussion overlay. */
 export class ImageFileOverlays extends Component {
 	private views = new Map<FileView, ImageFileOverlay>();
-	constructor(private host: DiscussionHost, private plugin: Plugin, private assets: ImageAssets, private open: (file: TFile) => void) { super(); }
+	constructor(private host: DiscussionHost, private plugin: Plugin, private assets: ImageAssets, private open: OpenImage) { super(); }
 	onload(): void {
 		this.register(this.host.onChange(() => this.reconcile()));
 		this.registerEvent(this.plugin.app.workspace.on("layout-change", () => this.reconcile()));
@@ -63,7 +65,7 @@ export class ImageFileOverlay {
 	private busy = false;
 	private closed = false;
 	private win: Window;
-	constructor(private host: DiscussionHost, private view: FileView, private assets: ImageAssets, private open: (file: TFile) => void) {
+	constructor(private host: DiscussionHost, private view: FileView, private assets: ImageAssets, private open: OpenImage) {
 		const root = view.contentEl, doc = root.ownerDocument; this.win = doc.defaultView ?? window;
 		this.layer = doc.createElement("div"); this.layer.className = "relay-rendered-images";
 		this.element = this.layer.createDiv({ cls: "relay-rendered-image" }); this.element.hidden = true;
@@ -143,7 +145,9 @@ export class ImageFileOverlay {
 		if (signature === this.signature) return; this.signature = signature;
 		this.controls.empty(); this.clip.empty(); this.markers = [];
 		const guarded = (action: () => void) => () => { if (this.current?.() && this.evidence?.valid() && context.current()) action(); };
-		if (canComment) this.controls.createEl("button", { text: "Comment on image", attr: { type: "button" } }).onclick = guarded(() => this.open(context.file));
+		if (canComment) this.controls.createEl("button", { text: "Comment on image", attr: { type: "button" } }).onclick = guarded(() => this.open(context.file, {
+			image, root: this.view.contentEl, current: () => this.image === image && this.evidence === evidence && !!this.current?.() && evidence.valid(),
+		}));
 		for (const thread of this.threads) {
 			if (thread.anchor?.type !== "image_file") continue;
 			const anchor = thread.anchor, changed = context.generation !== anchor.generation || imageAssetChanged(anchor.asset, evidence.asset) ||
