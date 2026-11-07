@@ -91,10 +91,10 @@ test("Bases drafts require an explicit target, survive sidebar recreation, and c
 		const draftId = "selection:" + scope + ":captured";
 		await store.saveDraft({ id: draftId, scopeId: scope, revision: 0, body: "Review status", target });
 		await store.setPreference("activeNewDraft:" + scope, draftId); drafts.update();
-		await until(() => parent.querySelector("textarea")?.value === "Review status");
+		await until(() => parent.querySelector("textarea")?.value === "Review status" && parent.querySelector("textarea")?.disabled === false);
 		expect(parent.textContent).toContain("Cell: status");
 		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
-		await until(() => parent.querySelector("textarea")?.value === "Review status");
+		await until(() => parent.querySelector("textarea")?.value === "Review status" && parent.querySelector("textarea")?.disabled === false);
 		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
 		await until(() => session.queue.mock.calls.length === 1);
 		expect(session.queue.mock.calls[0][0]).toMatchObject({ scopeId: scope, payload: { anchor: target } });
@@ -370,20 +370,23 @@ test("a corrupt saved target keeps draft text selectable and never submits as a 
 	} finally { composer.dispose(); store.close(); }
 });
 
-test("pending group drafts survive composer recreation and enqueue evidence without fabricating a verified anchor", async () => {
+test.each([false, true])("pending group drafts survive composer recreation and enqueue evidence without fabricating a verified anchor (range=%s)", async withRange => {
 	const { store, session, typed } = await fixture(), parent = document.createElement("div"), scope = baseDiscussionScope(entry, id(4));
 	const target = { version: 1, type: "base_group_pending", entry_id: entry, property: { source: "note", name: "status" }, capture: {
 		operation_id: id(5), definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 2, group_definition_id: id(8),
-		group_definition_revision: 2, record_id: id(9), record_generation: id(10), dependency: "AA==", time_zone: "UTC", value: { type: "text", value: "Done" } } };
+		group_definition_revision: 2, record_id: id(9), record_generation: id(10), dependency: "AA==", time_zone: "UTC", value: { type: "text", value: "Done" } },
+		...(withRange ? { range: { type: "timeline_range", axis_definition_id: id(60), axis_definition_revision: 2,
+			axis: { version: 1, renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null },
+			range: { version: 1, kind: "ordinal", start: "1", end: "2", start_inclusive: true, end_inclusive: true, unit: "property-value" } } } : {}) };
 	const draftId = "selection:" + scope + ":group", begin = jest.fn().mockResolvedValue(undefined);
 	await store.saveDraft({ id: draftId, scopeId: scope, revision: 0, body: "Offline group comment", target });
 	await store.setPreference("activeNewDraft:" + scope, draftId);
 	let drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
 	try {
-		await until(() => parent.querySelector("textarea")?.value === "Offline group comment");
-		expect(parent.textContent).toContain("Group: status (verification pending)");
+		await until(() => parent.querySelector("textarea")?.value === "Offline group comment" && parent.querySelector("textarea")?.disabled === false);
+		expect(parent.textContent).toContain(withRange ? "lane: status (verification pending)" : "Group: status (verification pending)");
 		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, scope, () => {}, undefined, begin);
-		await until(() => parent.querySelector("textarea")?.value === "Offline group comment");
+		await until(() => parent.querySelector("textarea")?.value === "Offline group comment" && parent.querySelector("textarea")?.disabled === false);
 		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
 		await until(() => session.queue.mock.calls.length === 1);
 		expect(session.queue.mock.calls[0][0]).toMatchObject({ scopeId: scope, type: "base.group.create", payload: { anchor: target } });

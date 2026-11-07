@@ -6,8 +6,8 @@ The bridge must advertise version one, `available`, both registered view types,
 pre-navigation checks and the `annotation` capability. The initial bridge without
 those additions is insufficient. Both plugins must be updated together.
 
-This is a development preview. Native Obsidian validation, new lane-specific
-range creation, shared milestones and timeline presence remain unfinished. It does not establish
+This is a development preview. Native Obsidian validation, outside-axis range
+navigation, shared milestones and timeline presence remain unfinished. It does not establish
 the complete desktop/mobile collaboration release.
 
 ## Supported behavior
@@ -63,23 +63,37 @@ lost permission prevents saving. Successful capture pins the original saved
 view, saves the target through the normal draft store, and opens the existing
 comment composer/offline outbox.
 
-New ranges created through this form span the saved view. New lane-specific range
-composition is still unfinished. Existing authorized lane ranges can display on
-their exact typed lane, and cannot fall back to a view-wide span. Saved markers
+The form offers the entire saved view or a supported typed lane. The chosen lane
+survives endpoint picking and cancellation. A removed, changed or ambiguous lane
+cannot silently become a whole-view target. Lane selection freezes its source
+evidence with the interval and axis identity; creation works offline after the
+saved view, group catalog and axis have been verified and cached. Delivery first
+obtains a group witness, persists it, and then sends the original interval with
+that exact verified lane. Losing either accepted response, reopening the cache or
+restarting the relay does not retarget or duplicate the comment. Axis/access
+changes retain rejected work for review. Cache version 18 preserves the stores
+and prevents older workers from stripping the new pending-range field.
+
+Authorized lane ranges display on their exact typed lane. Pending draft navigation
+also retains the original lane and never falls back to a view-wide span. Saved markers
 aggregate identical ranges, clip to the viewport, distinguish included/excluded
 endpoints and flag civil-axis DST discontinuities. Geometry refresh uses cached
 threads/axis proofs and does not fetch them on scroll. Changed-axis targets stay
 in discussions without misleading placement. Navigation respects dirty inspectors
 and the original saved-view identity; outside-axis reveal currently reports hidden.
 
-Validation: 2,377 plugin tests in 203 suites pass (15 opt-in tests skipped), as do
-the preview build/main types, changed-source lint and frozen test-type gate.
+Validation: **2,401 plugin tests in 203 suites** pass (15 opt-in tests skipped),
+with preview build/main types, changed-source lint (five existing warnings),
+whitespace checks and the frozen test-type gate (no new errors).
 Eight source interoperability cases exercise both real renderers, plugin load
-orders and grouping modes, including the actual confirmation workflow and marker
-renderer. The session port in that fixture supplies a verified axis; HTTP
-persistence/recovery has separate evidence. These are not native Obsidian tests.
+orders and grouping modes, including lane choice, endpoint picking, confirmation
+and saved lane markers. Their session port supplies a verified axis. Separate
+actual Python/Rust/client fixtures for Timeline and Sequence cover fresh
+unverified offline lane captures, both lost accepted responses, cache reopen,
+exact retries and relay restart. These are not native Obsidian tests.
 Range-specific PostgreSQL, desktop/mobile, physical touch and resource acceptance
-remain. Native availability was checked again November 6: the Mac was locked.
+remain. The last native availability check encountered a locked Mac; that is
+historical evidence, not a current lock-state check.
 
 `TimelineBridgeClient` discovers either plugin load order through the fork's
 request/ready workspace events. It validates the API shape, bounds surfaces and

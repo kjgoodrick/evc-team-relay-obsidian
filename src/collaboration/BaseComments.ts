@@ -1,5 +1,5 @@
 import { nativeGroupTargetKey, nativeGroupTargetLabel } from "./NativeBaseGroupComments";
-import type { PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
+import { pendingRangeLocation, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
 import { apiVersion, Component, FileView, Menu, Notice, type Plugin } from "obsidian";
 import { NativeBasesSurface, type NativeBaseHandle, type NativeBaseTarget, type NativeBaseGroupHandle, type NativeBaseGroupTarget } from "../bases/NativeBasesSurface";
 import type { BaseSyncHost } from "../bases/BaseSyncHost";
@@ -86,9 +86,10 @@ export class BaseComments extends Component {
 		if (!context || context.session !== session || context.baseEntryId !== scope.entryId || !context.current() ||
 			context.binding.snapshot.definition_id !== placement.definition_id || context.binding.snapshot.generation !== placement.generation) return false;
 		if (!context || context.entryId !== entryId || context.session !== session || !context.current()) return false;
-		if (anchor.type === "base" && anchor.target.type === "timeline_range") {
+		const rangeLocation = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor.target.type === "timeline_range" ? anchor : undefined;
+		if (rangeLocation) {
 			try {
-				if (!await this.host.verifyBaseTarget(context, anchor)) throw new Error("Timeline axis changed");
+				if (!await this.host.verifyBaseTarget(context, rangeLocation)) throw new Error("Timeline axis changed");
 				if (interrupted() || !navigating()) return true;
 				const result = await pane.revealRange(context, anchor, navigating);
 				if (result !== "revealed") new Notice(result === "busy" ? "Save or discard the task inspector changes before navigating to this discussion." :
@@ -405,13 +406,15 @@ export class BaseCommentPane {
 		if (target.type === "group") return context.groups?.reveal(target, current) ?? "unavailable";
 		return context.surface.reveal(target, current);
 	}
-	async revealRange(context: BaseCommentContext, anchor: BaseAnchor, navigating = this.navigationGuard()) {
+	async revealRange(context: BaseCommentContext, anchor: BaseAnchor | PendingBaseGroupAnchor, navigating = this.navigationGuard()) {
 		const current = () => navigating() && this.context === context && context.current();
-		if (!current() || anchor.target.type !== "timeline_range") return "unavailable";
-		const lane = anchor.target.lane ? await rangeLane(context, anchor) : undefined;
+		const location = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor;
+		if (!current() || location?.target.type !== "timeline_range") return "unavailable";
+		const needsLane = anchor.type === "base_group_pending" || !!location.target.lane;
+		const lane = needsLane ? await rangeLane(context, anchor) : undefined;
 		const handle = lane ? rangeLaneHandle(context, lane) : undefined;
-		if (!current() || anchor.target.lane && !handle) return "hidden";
-		return context.surface.revealRange(anchor.target.range, anchor.target.axis, current, handle?.element);
+		if (!current() || needsLane && !handle) return "hidden";
+		return context.surface.revealRange(location.target.range, location.target.axis, current, handle?.element);
 	}
 	close(): void {
 		if (this.closed) return; this.closed = true; this.action++;

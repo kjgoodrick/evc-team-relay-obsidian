@@ -419,6 +419,15 @@ export class DiscussionSession {
 				definition.property.source !== (capture.source_kind === "file" ? "file" : "note") ||
 				definition.revision !== capture.group_definition_revision || definition.property.source !== anchor.property.source ||
 				definition.property.name !== anchor.property.name) throw new Error("Review this group's saved selection before sending. Your draft is retained.");
+			if (anchor.range) {
+				const axis = await this.readTimelineAxis(command.scopeId), range = anchor.range;
+				if (this.closed || !this.canAnchorBase("timeline_range") || !this.permission(command.scopeId)?.comment ||
+					axis.definition_id !== capture.definition_id || axis.generation !== capture.generation || axis.view_id !== capture.view_id ||
+					axis.registry_revision < capture.registry_revision || axis.axis.id !== range.axis_definition_id ||
+					axis.axis.revision !== range.axis_definition_revision || JSON.stringify(axis.axis.axis) !== JSON.stringify(range.axis)) {
+					throw new Error("Review this range's saved axis before sending. Your draft and lane evidence are retained.");
+				}
+			}
 		} else queuedEnvelope(this.identity.shareId, command);
 		if (!this.canAttachPictures) {
 			for (const id of commandPictures(command.payload)) if (await this.store.pictureSource(id, command.scopeId) &&
@@ -449,6 +458,7 @@ export class DiscussionSession {
 				if (source.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this selection after refreshing the note’s comment context.");
 			}
 		}
+		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment access changed. Your draft is retained.");
 		await this.store.enqueue(command, Date.now(), draft);
 		if (this.closed) return;
 		this.broadcast(); if (this.foreground) this.outbox.wake(); this.notify();
@@ -656,14 +666,20 @@ export class DiscussionSession {
 		})()).finally(() => { if (this.timelineAxisFlights.get(scopeId) === flight) this.timelineAxisFlights.delete(scopeId); });
 		this.timelineAxisFlights.set(scopeId, flight); return flight;
 	}
-	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor?: BaseAnchor): Promise<BaseAnchor> {
+	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor?: BaseAnchor): Promise<BaseAnchor>;
+	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor: PendingBaseGroupAnchor): Promise<PendingBaseGroupAnchor>;
+	async captureTimelineRange(scopeId: string, selected: TimelineAxisContext, input: TimelineRange, laneAnchor?: BaseAnchor | PendingBaseGroupAnchor): Promise<BaseAnchor | PendingBaseGroupAnchor> {
 		const scope = parseDiscussionScope(scopeId);
 		if (!scope?.viewId || !this.canAnchorBase("timeline_range") || !this.permission(scopeId)?.comment) throw new Error("Open this saved view with comment permission first.");
 		const selection = parseTimelineAxisContext(selected, scope.entryId, scope.viewId), range = parseTimelineRange(input);
 		if ("time_zone" in range) validateTimelineTimeZone(range.time_zone);
-		const lane = laneAnchor === undefined ? undefined : parseAnchor(laneAnchor);
-		if (lane && (lane.type !== "base" || lane.target.type !== "group" || lane.definition_id !== selection.definition_id ||
+		const lane = laneAnchor === undefined ? undefined : parseLocalDiscussionAnchor(laneAnchor);
+		if (lane && lane.type !== "base_group_pending" && (lane.type !== "base" || lane.target.type !== "group" || lane.definition_id !== selection.definition_id ||
 			lane.view_id !== selection.view_id || lane.generation !== selection.generation)) throw new Error("The lane does not belong to this saved view.");
+		if (lane?.type === "base_group_pending" && (lane.range || lane.entry_id !== scope.entryId ||
+			lane.capture.definition_id !== selection.definition_id || lane.capture.view_id !== selection.view_id ||
+			lane.capture.generation !== selection.generation || lane.capture.registry_revision !== selection.registry_revision ||
+			!this.canAnchorBaseGroup(lane.property))) throw new Error("Select a current supported lane in this saved view.");
 		const binding = await this.readBaseContext(scopeId);
 		const context = await this.readTimelineAxis(scopeId);
 		if (this.closed || !this.canAnchorBase("timeline_range") || !this.permission(scopeId)?.comment ||
@@ -671,10 +687,15 @@ export class DiscussionSession {
 			context.definition_id !== selection.definition_id || context.generation !== selection.generation ||
 			context.axis.id !== selection.axis.id || context.axis.revision !== selection.axis.revision ||
 			context.axis.fingerprint !== selection.axis.fingerprint) throw new Error("The timeline axis changed. Select the range again; your draft is retained.");
-		return parseAnchor({ version: 1, type: "base", definition_id: context.definition_id, view_id: context.view_id,
+		const anchor = parseAnchor({ version: 1, type: "base", definition_id: context.definition_id, view_id: context.view_id,
 			generation: context.generation, registry_revision: context.registry_revision, target: { type: "timeline_range",
 				axis_definition_id: context.axis.id, axis_definition_revision: context.axis.revision, axis: context.axis.axis, range,
 				...(lane?.type === "base" ? { lane: lane.target } : {}) } }) as BaseAnchor;
+		if (lane?.type === "base_group_pending") {
+			if (!this.canAnchorBaseGroup(lane.property)) throw new Error("Lane comments are no longer enabled. Your selection is retained.");
+			return parseLocalDiscussionAnchor({ ...lane, range: anchor.target }) as PendingBaseGroupAnchor;
+		}
+		return anchor;
 	}
 	async baseDefinitionStatus(scopeId: string, anchor: BaseAnchor): Promise<string> {
 		if (anchor.target.type === "timeline_range") {

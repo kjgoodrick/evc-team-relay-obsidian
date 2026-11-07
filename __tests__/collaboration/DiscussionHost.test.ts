@@ -19,6 +19,7 @@ import type { NativeBaseGroupHandle } from "../../src/bases/NativeBasesSurface";
 import type { InboxItem } from "../../src/collaboration/InboxProtocol";
 import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
 import type { TimelineRange } from "../../src/collaboration/TimelineRange";
+import { pendingRangeLocation, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
@@ -223,7 +224,7 @@ test("native Bases discovery does not pin the sidebar; explicit capture pins and
 	} finally { s.close(); }
 });
 
-test.each(["success", "revoked", "changed-axis", "cancelled"])("native timeline range capture: %s preserves exact target and guards async completion", async outcome => {
+test.each([false, true].flatMap(withLane => ["success", "revoked", "changed-axis", "cancelled", ...(withLane ? ["changed-lane"] : [])].map(outcome => ({ withLane, outcome }))))("native timeline range capture: $outcome (lane: $withLane) preserves exact target and guards async completion", async ({ withLane, outcome }) => {
 	const s = await nativeBaseFixture(), saved = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
 	try {
 		const context = (await s.context())!; context.binding.type = "sabidurian-timeline";
@@ -232,21 +233,34 @@ test.each(["success", "revoked", "changed-axis", "cancelled"])("native timeline 
 		const native = { axis: proof.axis.axis, effectiveTimeZone: "UTC", kinds: ["calendar"], current: () => true };
 		Object.assign(s.surface, { rangeContext: () => native });
 		const range: TimelineRange = { version: 1, kind: "calendar", start: "2026-01-01", end: "2026-01-02", time_zone: "UTC", start_inclusive: true, end_inclusive: true };
-		const anchor: BaseAnchor = { version: 1, type: "base", definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
+		const location: BaseAnchor = { version: 1, type: "base", definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
 			target: { type: "timeline_range", axis_definition_id: id(40), axis_definition_revision: 1, axis: proof.axis.axis, range } };
-		let finish!: (anchor: BaseAnchor) => void, alive = true;
-		const capture = jest.fn(() => new Promise<BaseAnchor>(resolve => { finish = resolve; }));
+		const group: PendingBaseGroupAnchor = { version: 1, type: "base_group_pending", entry_id: id(3), property: { source: "note", name: "status" },
+			capture: { operation_id: id(41), definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1,
+				group_definition_id: id(42), group_definition_revision: 1, record_id: id(8), record_generation: id(9), dependency: "AA==", time_zone: "UTC", value: { type: "text", value: "Ready" } } };
+		if (location.target.type !== "timeline_range") throw new Error("fixture");
+		const anchor: BaseAnchor | PendingBaseGroupAnchor = withLane ? { ...group, range: location.target } : location;
+		let finish!: (anchor: BaseAnchor | PendingBaseGroupAnchor) => void, alive = true, laneAlive = true;
+		const lane: NativeBaseGroupHandle = { target: { type: "group", property: group.property, value: { type: "text", value: "Ready" } }, element: document.createElement("div"),
+			ambiguous: false, current: () => laneAlive, members: () => [] };
+		const captureGroup = jest.fn().mockResolvedValue(group);
+		Object.assign(context.groups!, { capture: captureGroup, canCapture: () => laneAlive });
+		const capture = jest.fn(() => new Promise<BaseAnchor | PendingBaseGroupAnchor>(resolve => { finish = resolve; }));
 		Object.assign(s.session, { captureTimelineRange: capture, readTimelineAxis: jest.fn().mockResolvedValue(proof) });
-		const pending = s.host.commentTimelineRange(context, proof, range, () => alive);
+		const pending = s.host.commentTimelineRange(context, proof, range, () => alive, withLane ? lane : undefined);
+		await Promise.resolve();
 		if (outcome === "revoked") s.readOnly();
 		if (outcome === "changed-axis") native.axis = { ...native.axis, start_property: { source: "note", name: "other" } };
 		if (outcome === "cancelled") alive = false;
+		if (outcome === "changed-lane") laneAlive = false;
 		finish(anchor); expect(await pending).toBe(outcome === "success");
-		expect(capture).toHaveBeenCalledWith(s.scope, proof, range);
+		if (withLane) { expect(captureGroup).toHaveBeenCalledWith(lane); expect(capture).toHaveBeenCalledWith(s.scope, proof, range, group); }
+		else { expect(captureGroup).not.toHaveBeenCalled(); expect(capture).toHaveBeenCalledWith(s.scope, proof, range); }
 		if (outcome === "success") {
 			expect(saved).toHaveBeenCalledWith({ file: s.file, session: s.session, entryId: s.scope, anchor });
-			expect(s.savedPreference).toHaveBeenCalled(); expect(await s.host.verifyBaseTarget(context, anchor)).toBe(true);
-			proof.axis.revision = 2; expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false);
+			const verification = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor)! : anchor;
+			expect(s.savedPreference).toHaveBeenCalled(); expect(await s.host.verifyBaseTarget(context, verification)).toBe(true);
+			proof.axis.revision = 2; expect(await s.host.verifyBaseTarget(context, verification)).toBe(false);
 		} else { expect(saved).not.toHaveBeenCalled(); expect(s.savedPreference).not.toHaveBeenCalled(); }
 		context.release();
 	} finally { s.close(); }

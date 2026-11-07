@@ -6,7 +6,8 @@ type Draft = Record<string, unknown>;
 export type TimelineRangeFormState = Record<string, string | boolean>;
 type Options = {
 	viewName: string; context: NativeTimelineContext; draft?: Draft; issue?: string; state?: TimelineRangeFormState;
-	current(): boolean; save(range: TimelineRange): Promise<boolean>;
+	lanes?: { id: string; label: string }[];
+	current(): boolean; save(range: TimelineRange, lane: string): Promise<boolean>;
 	pick(draft: Draft, precision: HistoricalPoint["precision"], state: TimelineRangeFormState): void; closed(): void;
 };
 const kinds: Record<TimelineRange["kind"], string> = { calendar: "Whole dates", instant: "Exact times", historical: "Historical dates", ordinal: "Sequence values" };
@@ -16,6 +17,7 @@ const object = (value: unknown): value is Draft => !!value && typeof value === "
 export class TimelineRangeModal extends Modal {
 	private controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
 	private kind!: HTMLSelectElement;
+	private lane!: HTMLSelectElement;
 	private fields!: HTMLElement;
 	private status!: HTMLElement;
 	private accept!: HTMLButtonElement;
@@ -26,9 +28,10 @@ export class TimelineRangeModal extends Modal {
 	constructor(app: App, private options: Options) { super(app); }
 	onOpen(): void {
 		this.setTitle("Comment on a timeline range"); this.contentEl.classList.add("relay-timeline-range-dialog");
-		this.contentEl.createEl("p", { text: "Discussion view: " + this.options.viewName + ". This range spans the view; it does not change any task dates." });
+		this.contentEl.createEl("p", { text: "Discussion view: " + this.options.viewName + ". Choose the entire view or a supported lane. Commenting does not change task dates." });
 		this.kind = this.select(this.contentEl, "kind", "Range type", this.options.context.kinds.map(value => [value, kinds[value]]));
 		this.kind.value = this.options.context.kinds.includes(this.options.draft?.kind as TimelineRange["kind"]) ? String(this.options.draft!.kind) : this.options.context.kinds[0];
+		this.lane = this.select(this.contentEl, "lane", "Range scope", [["", "Entire saved view"], ...(this.options.lanes ?? []).map(lane => [lane.id, lane.label])]);
 		this.fields = this.contentEl.createDiv();
 		this.status = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
 		this.pickButton = this.contentEl.createEl("button", { text: "Select endpoints on timeline", attr: { type: "button" } });
@@ -46,7 +49,12 @@ export class TimelineRangeModal extends Modal {
 		for (const [key, value] of Object.entries(this.options.state ?? {})) {
 			const field = this.controls.get(key); if (!field) continue;
 			if (typeof value === "boolean" && field.tagName === "INPUT") (field as HTMLInputElement).checked = value;
-			else if (typeof value === "string") field.value = value;
+			else if (typeof value === "string") {
+				if (key === "lane" && value && !Array.from(this.lane.options).some(option => option.value === value)) {
+					const option = this.contentEl.ownerDocument.createElement("option"); option.value = value; option.textContent = "Selected lane is unavailable"; option.disabled = true; this.lane.append(option);
+				}
+				field.value = value;
+			}
 		}
 		if (this.kind.value === "historical") { this.updatePrecision("start"); this.updatePrecision("end"); }
 		this.validate();
@@ -66,7 +74,7 @@ export class TimelineRangeModal extends Modal {
 		this.label(parent, key, text, select); return select;
 	}
 	private render(seed?: Draft): void {
-		this.fields.replaceChildren(); this.controls.clear(); this.controls.set("kind", this.kind);
+		this.fields.replaceChildren(); this.controls.clear(); this.controls.set("kind", this.kind); this.controls.set("lane", this.lane);
 		const kind = this.kind.value;
 		for (const endpoint of ["start", "end"] as const) {
 			const name = endpoint === "start" ? "Start" : "End", section = this.fields.createEl("fieldset"); section.createEl("legend", { text: name });
@@ -122,7 +130,7 @@ export class TimelineRangeModal extends Modal {
 		if (this.closed || this.saving || !this.options.current()) { this.validate(); return; }
 		let range: TimelineRange; try { range = parseTimelineRange(this.draft()); } catch { this.validate(); return; }
 		this.saving = true; this.validate();
-		try { if (await this.options.save(range)) { this.close(); return; } if (!this.closed) this.status.textContent = "The target could not be saved. Your values are retained; check synchronization and access, then try again."; }
+		try { if (await this.options.save(range, this.lane.value)) { this.close(); return; } if (!this.closed) this.status.textContent = "The target could not be saved. Your values are retained; check synchronization and access, then try again."; }
 		catch (error) { if (!this.closed) this.status.textContent = error instanceof Error ? error.message : "The target could not be saved. Your values are retained."; }
 		finally { this.saving = false; if (!this.closed) { const message = this.status.textContent; this.validate(); if (this.options.current()) this.status.textContent = message; } }
 	}

@@ -56,7 +56,7 @@ test("range drafts and commands survive reopening while older cache writers are 
 		expect((await store.getDraft("range-draft"))?.target).toEqual(anchor);
 		expect(JSON.parse(queuedEnvelope(id(2), (await store.pending(scope))[0])).command.anchor).toEqual(anchor);
 		await expect(new Promise((resolve, reject) => {
-			const old = factory.open("team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]), 16);
+			const old = factory.open("team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]), 17);
 			old.onerror = () => reject(old.error); old.onsuccess = () => { old.result.close(); resolve(undefined); };
 		})).rejects.toMatchObject({ name: "VersionError" });
 	} finally { store.close(); }

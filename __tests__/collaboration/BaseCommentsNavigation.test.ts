@@ -7,6 +7,7 @@ import type { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import { pendingRangeLocation, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 
 jest.mock("obsidian", () => ({ Component: class {}, FileView: class {}, Notice: class {}, apiVersion: "1.13.7" }));
 const id = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -67,14 +68,20 @@ test("clean navigation opens the original saved view and reveals the authorized 
 	} finally { f.close(); }
 });
 
-test.each(["never", "verify"] as const)("range navigation uses its own reveal path and respects late inspector changes (%s)", async stage => {
+test.each((["never", "verify"] as const).flatMap(stage => [false, true].map(pendingLane => ({ stage, pendingLane }))))("range navigation retains its lane and respects late inspector changes ($stage, pending: $pendingLane)", async ({ stage, pendingLane }) => {
 	const f = fixture(stage), revealRange = jest.fn().mockResolvedValue("revealed");
 	try {
 		f.anchor.target = { type: "timeline_range", axis_definition_id: id(20), axis_definition_revision: 1,
 			axis: { version: 1, renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null },
 			range: { version: 1, kind: "ordinal", start: "1", end: "2", unit: "property-value", start_inclusive: true, end_inclusive: true } };
+		const pending: PendingBaseGroupAnchor = { version: 1, type: "base_group_pending", entry_id: id(1), property: { source: "note", name: "status" }, range: f.anchor.target,
+			capture: { operation_id: id(30), definition_id: id(3), view_id: id(2), generation: id(4), registry_revision: 1,
+				group_definition_id: id(31), group_definition_revision: 1, record_id: id(32), record_generation: id(33), dependency: "AA==", time_zone: "UTC", value: { type: "text", value: "Ready" } } };
+		const selected = pendingLane ? pending : f.anchor;
 		Object.assign(f.pane, { revealRange });
-		expect(await f.comments.reveal(f.session, f.scope, f.anchor)).toBe(true);
+		expect(await f.comments.reveal(f.session, f.scope, selected)).toBe(true);
 		expect(f.pane.reveal).not.toHaveBeenCalled(); expect(revealRange).toHaveBeenCalledTimes(stage === "never" ? 1 : 0);
+		expect(f.host.verifyBaseTarget).toHaveBeenCalledWith(expect.anything(), pendingLane ? pendingRangeLocation(pending) : f.anchor);
+		if (stage === "never") expect(revealRange).toHaveBeenCalledWith(expect.anything(), selected, expect.any(Function));
 	} finally { f.close(); }
 });

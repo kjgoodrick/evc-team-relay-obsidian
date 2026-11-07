@@ -190,6 +190,50 @@ function groupRemote() {
 }
 const groupSelection = () => ({ group_definition_id: id(10), group_definition_revision: 2, record_id: id(20), record_generation: id(21),
 	dependency: "AA==", time_zone: "UTC", value: { type: "text" as const, value: "Done" } });
+function laneRangeRemote() {
+	const transport = groupRemote();
+	transport.capabilities.mockResolvedValue({ discussions: true, baseTargets: ["view", "group", "timeline_range"], baseRecordTypes: ["markdown"] });
+	const axis = { protocol_version: 1, entry_id: id(3), view_id: id(4), definition_id: id(5), generation: id(6), registry_revision: 2,
+		axis: { id: id(60), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1, renderer: "sabidurian-sequence",
+			start_property: { source: "note", name: "order" }, end_property: null, time_zone: null } } };
+	return Object.assign(transport, { timelineAxis: jest.fn().mockResolvedValue(axis) });
+}
+const laneRange = { version: 1 as const, kind: "ordinal" as const, start: "999999999999998.000000001", end: "999999999999998.000000002",
+	start_inclusive: true, end_inclusive: false, unit: "property-value" as const };
+
+test("a new lane range can be captured and queued offline after reopening verified view and source caches", async () => {
+	const factory = new IDBFactory(); let s = await open(factory, laneRangeRemote());
+	try {
+		await s.session.readBaseContext(scope, id(20)); await s.session.readBaseDefinitions(scope); const axis = await s.session.readTimelineAxis(scope);
+		await s.session.close();
+		const offline = laneRangeRemote();
+		for (const method of [offline.capabilities, offline.permissions, offline.baseTargetContext, offline.baseDefinitions, offline.timelineAxis, offline.changes]) method.mockRejectedValue(new DiscussionFailure("retry", "network_unavailable"));
+		s = await open(factory, offline);
+		const lane = await s.session.captureBaseGroupSelection(scope, groupSelection()), captured = await s.session.captureTimelineRange(scope, axis, laneRange, lane);
+		expect(captured.capture).toEqual(lane.capture); expect(captured.range).toMatchObject({ axis_definition_id: id(60), axis_definition_revision: 2, range: laneRange });
+		await s.store.saveDraft({ id: "lane-range", scopeId: scope, revision: 0, body: "Keep both targets", target: protocolJson(captured) });
+		const command = { operationId: id(30), scopeId: scope, type: "base.group.create" as const, dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Offline lane range"), anchor: captured }) };
+		await s.session.queue(command, { id: "lane-range", revision: 0 });
+		expect((await s.store.pending(scope))[0].payload).toEqual(command.payload); expect(await s.store.getDraft("lane-range")).toBeUndefined();
+		await s.session.close(); s = await open(factory, offline);
+		expect((await s.store.pending(scope))[0].payload).toEqual(command.payload);
+		await expect(s.session.captureTimelineRange(scope, axis, laneRange, { ...lane, capture: { ...lane.capture, view_id: id(99) } })).rejects.toThrow("current supported lane");
+	} finally { await s.session.close(); }
+});
+
+test("a changed range axis refuses a queued lane draft while retaining its original evidence", async () => {
+	const transport = laneRangeRemote(), s = await open(new IDBFactory(), transport);
+	try {
+		const axis = await s.session.readTimelineAxis(scope), lane = await s.session.captureBaseGroupSelection(scope, groupSelection());
+		const captured = await s.session.captureTimelineRange(scope, axis, laneRange, lane);
+		await s.store.saveDraft({ id: "lane-range", scopeId: scope, revision: 0, body: "Keep both targets", target: protocolJson(captured) });
+		transport.timelineAxis.mockResolvedValue({ ...axis, registry_revision: 3, axis: { ...axis.axis, revision: 3 } });
+		await expect(s.session.queue({ operationId: id(30), scopeId: scope, type: "base.group.create", dependsOn: [], payload: protocolJson({
+			type: "base.group.create", thread_id: id(31), message_id: id(32), body: bodyFromText("Keep"), anchor: captured }) }, { id: "lane-range", revision: 0 })).rejects.toThrow("draft and lane evidence are retained");
+		expect((await s.store.getDraft("lane-range"))!.target).toEqual(captured); expect(await s.store.pending(scope)).toHaveLength(0);
+	} finally { await s.session.close(); }
+});
 
 test("inventory group capabilities and queued selections survive offline reopen, then downgrade preserves pending work", async () => {
 	function fileRemote() {

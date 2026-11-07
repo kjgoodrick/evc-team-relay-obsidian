@@ -217,7 +217,7 @@ test("scope encoding and HTTP routing never substitute a different view or a loc
 	await expect(transport.changes(scope, undefined, id(5))).rejects.toMatchObject({ code: "invalid_local_target" });
 });
 
-test.each([8, 9, 10, 11, 12, 13])("schema upgrade from %i preserves earlier work and fences earlier protocol workers", async version => {
+test.each([8, 9, 10, 11, 12, 13, 14, 15, 16, 17])("schema upgrade from %i preserves earlier work and fences earlier protocol workers", async version => {
 	const factory = new IDBFactory(), name = "team-relay-discussions:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
 	await new Promise<void>((resolve, reject) => {
 		const open = factory.open(name, version);

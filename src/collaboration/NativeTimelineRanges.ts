@@ -3,6 +3,7 @@ import { parseTimelineAxis, type BaseAnchor } from "./DiscussionProtocol";
 import type { TimelineAxisContext } from "./TimelineRangeProtocol";
 import type { NativeBaseGroupHandle, NativeBaseGroupTarget, NativeTimelineContext } from "../bases/NativeBasesSurface";
 import { nativeGroupTargetKey } from "./NativeBaseGroupComments";
+import type { PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
 
 export function sameTimelineAxis(a: unknown, b: unknown): boolean {
 	try { return JSON.stringify(parseTimelineAxis(a)) === JSON.stringify(parseTimelineAxis(b)); } catch { return false; }
@@ -30,7 +31,8 @@ export function rangeTargetMatchesProof(anchor: BaseAnchor, proof: TimelineAxisC
 		anchor.registry_revision <= proof.registry_revision && target.axis_definition_id === proof.axis.id &&
 		target.axis_definition_revision === proof.axis.revision && sameTimelineAxis(target.axis, proof.axis.axis);
 }
-export async function rangeLane(context: BaseCommentContext, anchor: BaseAnchor): Promise<NativeBaseGroupTarget | undefined> {
+export async function rangeLane(context: BaseCommentContext, anchor: BaseAnchor | PendingBaseGroupAnchor): Promise<NativeBaseGroupTarget | undefined> {
+	if (anchor.type === "base_group_pending") return anchor.range ? context.groups?.native(anchor) : undefined;
 	return anchor.target.type === "timeline_range" && anchor.target.lane && context.groups ?
 		context.groups.native({ ...anchor, target: anchor.target.lane }) : undefined;
 }

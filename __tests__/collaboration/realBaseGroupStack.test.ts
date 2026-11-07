@@ -16,7 +16,7 @@ import { YSweetProvider } from "../../src/client/provider";
 import { BaseContentTransport } from "../../src/bases/BaseContentTransport";
 import { BaseRegistryTransport } from "../../src/bases/BaseRegistryTransport";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
-import { bodyFromText, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
+import { bodyFromText, parseAnchor, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import type { BaseGroupCapture } from "../../src/collaboration/BaseGroupProtocol";
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
@@ -164,31 +164,42 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 			captureSession = new DiscussionSession(store, rangeTransport); await captureSession.start(); captureSession.watch(scope, () => {}, "base");
 			await captureSession.refresh(); captureSession.setForeground(false); await captureSession.outbox.settled();
 			const axis = await captureSession.readTimelineAxis(scope);
+			await captureSession.readBaseContext(scope, localTarget.capture.record_id); await captureSession.readBaseDefinitions(scope);
 			const fixtures = JSON.parse(readFileSync(join(__dirname, "../fixtures/timeline-ranges-v1.json"), "utf8"));
 			const range = parseTimelineRange(fixtures.valid.find((item: { input: { kind: string } }) => item.input.kind === (viewType === "sabidurian-sequence" ? "ordinal" : "instant")).input);
 			offline = true; await captureSession.refresh();
-			rangeAnchor = await captureSession.captureTimelineRange(scope, axis, range, intentAnchor);
-			const rangeOperation = operation(rangeAnchor);
-			await store.saveDraft({ id: "range", scopeId: scope, revision: 1, body: "Offline range", target: protocolJson(rangeAnchor) });
+			const pendingLane = await captureSession.captureBaseGroupSelection(scope, localTarget.capture);
+			const pendingRange = await captureSession.captureTimelineRange(scope, axis, range, pendingLane);
+			expect(pendingRange.capture.operation_id).not.toBe(localTarget.capture.operation_id);
+			const rangeOperation: QueuedCommand = { operationId: randomUUID(), scopeId: scope, type: "base.group.create", dependsOn: [],
+				payload: protocolJson({ type: "base.group.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: pendingRange, body: bodyFromText("Offline range in a new lane capture") }) };
+			await store.saveDraft({ id: "range", scopeId: scope, revision: 1, body: "Offline range", target: protocolJson(pendingRange) });
 			await captureSession.queue(rangeOperation, { id: "range", revision: 1 }); await captureSession.close(); captureSession = undefined;
 			store = await DiscussionStore.open(storeIdentity, factory);
 			expect(await store.getDraft("range")).toBeUndefined();
-			let loseRangeResponse = true;
+			let loseRangeCapture = true, loseRangeResponse = true;
 			const lossyRange = new DiscussionTransport(identity, credential, async (url, options) => {
 				const response = await fetch(url, options);
-				if (loseRangeResponse && response.ok && String(url).endsWith("/commands")) {
-					loseRangeResponse = false; await response.text(); throw new Error("Lost accepted range response");
+				if (response.ok && (loseRangeCapture && String(url).endsWith("/group-targets") || loseRangeResponse && String(url).endsWith("/commands"))) {
+					if (String(url).endsWith("/group-targets")) loseRangeCapture = false; else loseRangeResponse = false;
+					await response.text(); throw new Error("Lost accepted lane/range response");
 				}
 				return response;
 			});
-			const firstClaim = (await store.claimNext("range-first"))!;
-			await expect(new DiscussionDelivery(store, lossyRange).send(firstClaim)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
-			await store.fail(rangeOperation.operationId, firstClaim.lease!, "network_unavailable", 0);
-			store.close(); store = await DiscussionStore.open(storeIdentity, factory);
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const claim = (await store.claimNext("range-attempt-" + attempt))!;
+				await expect(new DiscussionDelivery(store, lossyRange).send(claim)).rejects.toMatchObject({ action: "retry", code: "network_unavailable" });
+				await store.fail(rangeOperation.operationId, claim.lease!, "network_unavailable", 0);
+				store.close(); store = await DiscussionStore.open(storeIdentity, factory);
+				expect((await store.getOperation(rangeOperation.operationId))!.payload).toEqual(rangeOperation.payload);
+			}
 			const retry = (await store.claimNext("range-reopened"))!, result = await new DiscussionDelivery(store, lossyRange).send(retry);
 			if (!("thread_id" in result)) throw new Error("Expected range acceptance");
 			rangeThread = result.thread_id; await store.accept(rangeOperation.operationId, protocolJson(result));
-			expect(await transport.send(rangeOperation)).toEqual(result);
+			const prepared = prepareBaseGroupCommand(retry, retry.preparedAnchor);
+			rangeAnchor = parseAnchor((prepared.payload as Record<string, unknown>).anchor) as BaseAnchor;
+			expect(rangeAnchor.target).toMatchObject({ type: "timeline_range", range: pendingRange.range!.range, lane: { type: "group", value: pendingRange.capture.value } });
+			expect(await transport.send(prepared)).toEqual(result);
 			expect((await transport.thread(scope, rangeThread)).anchor).toEqual(rangeAnchor);
 		}
 		for (const provider of providers) provider.destroy();

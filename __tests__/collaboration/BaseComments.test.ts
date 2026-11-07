@@ -7,6 +7,7 @@ import type { BaseCommentContext } from "../../src/collaboration/BaseCommentCont
 import type { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import type { PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 
 const mockMenus: { title: string; click(): void }[][] = [];
 jest.mock("obsidian", () => ({ Menu: class {
@@ -99,6 +100,28 @@ test("range toolbar and cached markers preserve the saved axis without a network
 		f.root.dispatchEvent(new Event("scroll")); await settle(); expect(readAxis).toHaveBeenCalledTimes(reads);
 		canComment = false; f.pane.invalidate(); await settle(); expect(f.buttons().some(button => button.textContent === "Comment on range")).toBe(false);
 		proof.axis.revision = 2; f.pane.invalidate(); await settle(); expect(f.root.querySelector(".relay-timeline-range-marker")).toBeNull();
+	} finally { f.close(); }
+});
+
+test.each(["available", "missing", "duplicate"])("pending range navigation requires the exact lane: %s", async state => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0];
+		const pending: PendingBaseGroupAnchor = { version: 1, type: "base_group_pending", entry_id: id(1), property: { source: "note", name: "status" },
+			capture: { operation_id: id(40), definition_id: id(3), view_id: id(2), generation: id(4), registry_revision: 1, group_definition_id: id(41), group_definition_revision: 1,
+				record_id: id(5), record_generation: id(6), dependency: "AA==", time_zone: "UTC", value: { type: "text", value: "Ready" } },
+			range: { type: "timeline_range", axis_definition_id: id(42), axis_definition_revision: 1,
+				axis: { version: 1, renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null },
+				range: { version: 1, kind: "ordinal", start: "1", end: "2", unit: "property-value", start_inclusive: true, end_inclusive: true } } };
+		const lane: NativeBaseGroupHandle = { target: { type: "group", property: pending.property, value: { type: "text", value: "Ready" } }, element: f.row,
+			ambiguous: false, current: () => true, members: () => [] };
+		const native = jest.fn().mockResolvedValue(lane.target), reveal = jest.fn().mockReturnValue("revealed");
+		context.groups = { native, handles: () => state === "missing" ? [] : state === "duplicate" ? [lane, lane] : [lane] } as unknown as NativeBaseGroupComments;
+		Object.assign(f.surface, { revealRange: reveal });
+		expect(await f.pane.revealRange(context, pending)).toBe(state === "available" ? "revealed" : "hidden");
+		expect(native).toHaveBeenCalledWith(pending);
+		if (state === "available") expect(reveal).toHaveBeenCalledWith(pending.range!.range, pending.range!.axis, expect.any(Function), f.row);
+		else expect(reveal).not.toHaveBeenCalled();
 	} finally { f.close(); }
 });
 

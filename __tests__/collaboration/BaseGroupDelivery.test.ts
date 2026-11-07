@@ -5,7 +5,7 @@ import { DiscussionFailure, queuedEnvelope, type CommandResult, type DiscussionT
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { bodyFromText, parseAnchor, protocolJson, type BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
-import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
+import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
@@ -20,6 +20,11 @@ const anchor = (): BaseAnchor => ({ version: 1, type: "base", definition_id: id(
 	target: { type: "group", definition_id: id(8), definition_revision: 2, property: { source: "note", name: "status" }, group_id: id(11), witness_id: id(12), value: target().capture.value } });
 const command = (): QueuedCommand => ({ operationId: id(13), scopeId: scope, type: "base.group.create", dependsOn: [],
 	payload: protocolJson({ type: "base.group.create", thread_id: id(14), message_id: id(15), body: bodyFromText("Keep this offline comment"), anchor: target() }) });
+const rangeTarget = (): NonNullable<PendingBaseGroupAnchor["range"]> => ({ type: "timeline_range", axis_definition_id: id(60), axis_definition_revision: 2,
+	axis: { version: 1, renderer: "sabidurian-sequence", start_property: { source: "note", name: "order" }, end_property: null, time_zone: null },
+	range: { version: 1, kind: "ordinal", start: "999999999999998.000000001", end: "999999999999998.000000002", start_inclusive: true, end_inclusive: false, unit: "property-value" } });
+const rangeCommand = (): QueuedCommand => ({ ...command(), payload: protocolJson({ type: "base.group.create", thread_id: id(14), message_id: id(15),
+	body: bodyFromText("Range in this exact lane"), anchor: { ...target(), range: rangeTarget() } }) });
 const accepted = (op: QueuedCommand): CommandResult => ({ operation_id: op.operationId, scope_id: id(16), thread_id: id(14), sequence: 1,
 	state: "open", state_revision: 1, removed: false, changed: true });
 let store: DiscussionStore, factory: IDBFactory;
@@ -45,6 +50,47 @@ test("a local pending selection cannot masquerade as a server anchor or wire com
 		await expect(store.enqueue({ ...command(), ...patch })).rejects.toThrow();
 	}
 	expect(await store.pending(scope)).toHaveLength(0);
+});
+
+test("pending lane ranges preserve exact coordinates while only a verified receipt supplies the lane", () => {
+	const pending = parsePendingBaseGroupCommand(rangeCommand()).anchor;
+	expect(parseLocalDiscussionAnchor(pending)).toEqual(pending); expect(() => parseAnchor(pending)).toThrow();
+	const prepared = prepareBaseGroupCommand(rangeCommand(), anchor());
+	const wire = JSON.parse(queuedEnvelope(identity.shareId, prepared)).command.anchor;
+	expect(wire.registry_revision).toBe(3); expect(wire.target).toEqual({ ...rangeTarget(), lane: anchor().target });
+	expect(() => queuedEnvelope(identity.shareId, rangeCommand())).toThrow("invalid_local_command");
+	for (const range of [{ ...rangeTarget(), lane: anchor().target }, { ...rangeTarget(), axis_definition_revision: 3 },
+		{ ...rangeTarget(), range: { ...rangeTarget().range, unit: "pixels" } }, { ...rangeTarget(), type: "group" }]) {
+		expect(() => parseLocalDiscussionAnchor({ ...target(), range })).toThrow();
+	}
+});
+
+test("lane-range capture and send response loss recover across cache reopen without dropping the interval", async () => {
+	const op = rangeCommand(), original = parsePendingBaseGroupCommand(op).anchor;
+	await store.saveDraft({ id: "lane-range", scopeId: scope, revision: 0, body: "Keep", target: protocolJson(original) }, null);
+	await store.enqueue(op, Date.now(), { id: "lane-range", revision: 0 });
+	const transport = remote(); transport.captureBaseGroup.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+	transport.send.mockRejectedValueOnce(new DiscussionFailure("retry", "network_unavailable"));
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const leased = (await claim("range-" + attempt))!;
+		await expect(delivery(transport).send(leased)).rejects.toMatchObject({ action: "retry" });
+		await store.fail(op.operationId, leased.lease!, "network_unavailable", 0);
+		store.close(); store = await DiscussionStore.open(identity, factory);
+		expect(parsePendingBaseGroupCommand((await store.getOperation(op.operationId))!).anchor).toEqual(original);
+	}
+	const next = (await claim("range-restarted"))!, result = await delivery(transport).send(next); await store.accept(op.operationId, protocolJson(result));
+	expect(transport.captureBaseGroup).toHaveBeenCalledTimes(2); expect(transport.send).toHaveBeenCalledTimes(2);
+	expect(transport.send.mock.calls[0][0]).toEqual(transport.send.mock.calls[1][0]);
+	expect(transport.send.mock.calls[1][0].payload).toMatchObject({ anchor: { target: { ...rangeTarget(), lane: anchor().target } } });
+	expect(await store.getDraft("lane-range")).toBeUndefined(); expect((await store.getOperation(op.operationId))!.state).toBe("accepted");
+});
+
+test("a different verified group cannot replace a pending range's lane", async () => {
+	await store.enqueue(rangeCommand()); const leased = (await claim())!, transport = remote(), changed = anchor();
+	if (changed.target.type === "group") changed.target.value = { type: "text", value: "Other lane" };
+	transport.captureBaseGroup.mockResolvedValue(changed);
+	await expect(delivery(transport).send(leased)).rejects.toThrow(); expect(transport.send).not.toHaveBeenCalled();
+	expect((await store.getOperation(leased.operationId))!.preparedAnchor).toBeUndefined();
 });
 
 test("offline draft transfer and two phases survive reopen, retaining original evidence and exact command", async () => {
@@ -135,17 +181,17 @@ test("capture rejection retains the original comment and keeps dependent replies
 	expect(transport.send).not.toHaveBeenCalled(); expect(await store.nextWakeAt()).toBeUndefined();
 });
 
-test("picture recovery locally fences an unprepared group, but cannot bypass withdrawal once prepared", async () => {
+test.each([false, true])("picture recovery fences an unprepared group and preserves range intent, but requires withdrawal once prepared (range=%s)", async withRange => {
 	const image = await prepareLocalPicture(id(30), scope, new Uint8Array([1, 2, 3]).buffer);
 	await store.saveDraft({ id: "picture-draft", scopeId: scope, revision: 0, body: { text: "picture", mentions: [], pictures: [{ type: "picture", picture_id: id(30) }] } }, null, [image]);
-	const op = command(), payload = parsePendingBaseGroupCommand(op);
+	const op = withRange ? rangeCommand() : command(), payload = parsePendingBaseGroupCommand(op), expectedAnchor = payload.anchor;
 	payload.body.blocks.push({ type: "picture", picture_id: id(30) }); op.payload = protocolJson(payload);
 	await store.enqueue(op);
 	const upload = (await claim())!; expect(upload.type).toBe("picture.upload"); await store.accept(upload.operationId, {});
 	const claimed = (await claim())!;
 	await store.replacePicturesAfterWithdrawal(op, id(31), [{ oldId: id(30), newId: id(32) }], Date.now(), true);
 	expect(await store.prepareBaseGroup(op.operationId, claimed.lease!, protocolJson(anchor()))).toBeUndefined();
-	expect((await store.getOperation(id(31)))?.payload).toMatchObject({ anchor: target() });
+	expect((await store.getOperation(id(31)))?.payload).toMatchObject({ anchor: expectedAnchor });
 	const nextUpload = (await claim())!; await store.accept(nextUpload.operationId, {});
 	const next = (await claim())!; await store.prepareBaseGroup(next.operationId, next.lease!, protocolJson(anchor()));
 	await expect(store.replacePicturesAfterWithdrawal(next, id(33), [{ oldId: id(32), newId: id(34) }], Date.now(), true)).rejects.toThrow("advanced");

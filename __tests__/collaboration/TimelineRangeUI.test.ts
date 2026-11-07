@@ -9,6 +9,7 @@ import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeP
 import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import type { NativeTimelineContext, NativeTimelineSelection } from "../../src/bases/NativeBasesSurface";
 import type { AnchoredThread } from "../../src/collaboration/DiscussionSession";
+import type { NativeBaseGroupComments } from "../../src/collaboration/NativeBaseGroupComments";
 
 jest.mock("obsidian", () => ({ TFile: class {}, Notice: jest.fn(), Modal: class {
 	contentEl = document.createElement("div"); titleEl = document.createElement("h2");
@@ -55,7 +56,7 @@ afterEach(() => { document.body.replaceChildren(); jest.restoreAllMocks(); });
 
 test("whole-date endpoints and inclusivity are confirmed before opening the comment composer", async () => {
 	const f = form(); field("end-inclusive", false); button("Write comment").click(); await flush();
-	expect(f.save).toHaveBeenCalledWith({ ...calendar, end_inclusive: false }); expect(f.closed).toHaveBeenCalledTimes(1);
+	expect(f.save).toHaveBeenCalledWith({ ...calendar, end_inclusive: false }, ""); expect(f.closed).toHaveBeenCalledTimes(1);
 });
 
 test("invalid dates and offset-free exact times cannot save; explicit repeated-hour offsets are retained", async () => {
@@ -63,14 +64,14 @@ test("invalid dates and offset-free exact times cannot save; explicit repeated-h
 	field("kind", "instant"); field("start", "2026-11-01T01:30:00"); field("end", "2026-11-01T01:30:00-07:00");
 	expect(button("Write comment").disabled).toBe(true); field("start", "2026-11-01T01:30:00-06:00");
 	expect(button("Write comment").disabled).toBe(false); button("Write comment").click(); await flush();
-	expect(f.save).toHaveBeenCalledWith(expect.objectContaining({ kind: "instant", start: "2026-11-01T01:30:00.000-06:00", end: "2026-11-01T01:30:00.000-07:00" }));
+	expect(f.save).toHaveBeenCalledWith(expect.objectContaining({ kind: "instant", start: "2026-11-01T01:30:00.000-06:00", end: "2026-11-01T01:30:00.000-07:00" }), "");
 });
 
 test("historical endpoints expose CE/BCE and independent precision without a visible year zero", async () => {
 	const f = form(); field("kind", "historical"); field("start-era", "bce"); field("start-year", "2");
 	field("end-era", "bce"); field("end-year", "1"); field("end-precision", "day"); field("end-month", "2"); field("end-day", "29");
 	button("Write comment").click(); await flush();
-	expect(f.save).toHaveBeenCalledWith(expect.objectContaining({ kind: "historical", start: { precision: "year", year: -1 }, end: { precision: "day", year: 0, month: 2, day: 29 } }));
+	expect(f.save).toHaveBeenCalledWith(expect.objectContaining({ kind: "historical", start: { precision: "year", year: -1 }, end: { precision: "day", year: 0, month: 2, day: 29 } }), "");
 });
 
 test("a rejected capture retains editable values, and in-flight capture cannot be edited or sent twice", async () => {
@@ -93,7 +94,7 @@ test("workflow verifies the native/saved axis and preserves endpoints through ca
 	field("kind", "calendar");
 	button("Select endpoints on timeline").click(); f.select(); await flush();
 	expect(document.querySelectorAll(".relay-timeline-range-dialog")).toHaveLength(1);
-	button("Write comment").click(); await flush(); expect(save).toHaveBeenCalledWith(f.proof, calendar, expect.any(Function));
+	button("Write comment").click(); await flush(); expect(save).toHaveBeenCalledWith(f.proof, calendar, expect.any(Function), undefined);
 	workflow.close();
 });
 
@@ -101,6 +102,28 @@ test("closing the workflow cancels gestures and ignores late selection", async (
 	const f = fixture(), workflow = new TimelineRangeWorkflow({} as App, f.context, () => true, jest.fn());
 	await workflow.open(); button("Select endpoints on timeline").click(); workflow.close(); f.select(); await flush();
 	expect(f.stop).toHaveBeenCalledTimes(1); expect(document.querySelector(".relay-timeline-range-dialog")).toBeNull();
+});
+
+test.each([false, true])("selected lanes survive endpoint picking and stale lanes cannot become view-wide ranges (stale=%s)", async stale => {
+	const f = fixture(), save = jest.fn().mockResolvedValue(true); let laneCurrent = true;
+	const handle = { target: { type: "group" as const, property: { source: "note" as const, name: "status" }, value: { type: "text" as const, value: "Ready" } },
+		element: document.createElement("div"), ambiguous: false, members: () => [], current: () => laneCurrent };
+	f.context.groups = { handles: () => [handle], canCapture: () => laneCurrent } as unknown as NativeBaseGroupComments;
+	const workflow = new TimelineRangeWorkflow({} as App, f.context, () => true, save); await workflow.open();
+	const scope = document.querySelector<HTMLSelectElement>('[data-field="lane"]')!, key = scope.options[1].value; field("lane", key);
+	button("Select endpoints on timeline").click(); f.select(); await flush();
+	expect(document.querySelector<HTMLSelectElement>('[data-field="lane"]')!.value).toBe(key);
+	laneCurrent = !stale; button("Write comment").click(); await flush();
+	if (stale) { expect(save).not.toHaveBeenCalled(); expect(document.body.textContent).toContain("lane changed"); }
+	else expect(save).toHaveBeenCalledWith(f.proof, calendar, expect.any(Function), handle);
+	workflow.close();
+});
+
+test("duplicate typed lanes are omitted from capture choices instead of choosing a header", async () => {
+	const f = fixture(), handle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Ready" } }, current: () => true };
+	f.context.groups = { handles: () => [handle, { ...handle }], canCapture: () => true } as unknown as NativeBaseGroupComments;
+	const workflow = new TimelineRangeWorkflow({} as App, f.context, () => true, jest.fn()); await workflow.open();
+	expect(document.querySelector<HTMLSelectElement>('[data-field="lane"]')!.options).toHaveLength(1); workflow.close();
 });
 
 test.each(["axis", "view", "generation", "revision", "stale"])("%s mismatch refuses verified capture/placement", async reason => {

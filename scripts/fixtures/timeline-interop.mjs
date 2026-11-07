@@ -131,6 +131,7 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		for (const key of ["Enter", "ArrowRight", "Enter"]) status.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));
 		assert.equal(rangeStops, 1); assert.ok(selectedRange?.current()); assert.equal(selectedRange.draft.kind, sequence ? "ordinal" : "calendar");
 		const laneElement = grouped ? surface.groupHandles(() => null)[0].element : undefined;
+		if (laneElement) laneElement.getBoundingClientRect = () => ({ left: 100, right: 500, top: 100, bottom: 128, width: 400, height: 28 });
 		const geometry = surface.rangeGeometry(selectedRange.draft, rangeContext.axis, laneElement); assert.ok(geometry?.current());
 		assert.equal(surface.revealRange(selectedRange.draft, rangeContext.axis, () => true, laneElement), "revealed");
 		assert.equal(surface.revealRange(selectedRange.draft, rangeContext.axis, () => false, laneElement), "unavailable");
@@ -145,24 +146,39 @@ for (const type of ["sabidurian-timeline", "sabidurian-sequence"]) for (const pr
 		const axisProof = { protocol_version: 1, entry_id: uuid(2), definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1,
 			axis: { id: uuid(40), kind: "axis", revision: 1, fingerprint: "a".repeat(64), axis: rangeContext.axis } };
 		const rangeCommentContext = { file: base, surface, binding, baseEntryId: uuid(2), entryId: "synthetic-scope", current: () => surface.current(),
-			session: { permission: () => ({ read: true, comment: true }), canAnchorBase: () => true, readTimelineAxis: async () => axisProof } };
-		let savedRange;
-		const workflow = new TimelineRangeWorkflow(plugin.app, rangeCommentContext, () => true, async (proof, range, current) => {
-			assert.ok(current()); assert.equal(proof, axisProof); savedRange = range; return true;
+			session: { permission: () => ({ read: true, comment: true }), canAnchorBase: () => true, canAnchorBaseGroup: () => true, readTimelineAxis: async () => axisProof } };
+		if (grouped) {
+			const catalog = { protocol_version: 1, entry_id: uuid(2), view_id: uuid(4), definition_id: uuid(1), generation: uuid(3), registry_revision: 1,
+				computed_values: false, targets: [{ kind: "group", id: uuid(5), revision: 1, property: { source: "note", name: "status" }, fingerprint: "a".repeat(64) }] };
+			rangeCommentContext.groups = new NativeBaseGroupComments(rangeCommentContext, catalog, { resolve: () => null });
+		}
+		let savedRange, savedLane;
+		const workflow = new TimelineRangeWorkflow(plugin.app, rangeCommentContext, () => true, async (proof, range, current, lane) => {
+			assert.ok(current()); assert.equal(proof, axisProof); savedRange = range; savedLane = lane; return true;
 		});
 		await workflow.open();
 		const rangeButton = label => [...document.querySelectorAll(".relay-timeline-range-dialog button")].find(button => button.textContent === label);
+		const laneChoice = () => document.querySelector('.relay-timeline-range-dialog [data-field="lane"]');
+		let selectedLaneId;
+		if (grouped) {
+			assert.equal(laneChoice().options.length, 2); selectedLaneId = laneChoice().options[1].value;
+			laneChoice().value = selectedLaneId; laneChoice().dispatchEvent(new win.Event("change", { bubbles: true }));
+		}
 		assert.ok(rangeButton("Select endpoints on timeline")); rangeButton("Select endpoints on timeline").click();
 		const rangeStatus = root.querySelector(".sabidurian-range-selection-status"); assert.ok(rangeStatus);
 		for (const key of ["Enter", "ArrowRight", "Enter"]) rangeStatus.dispatchEvent(new win.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }));
+		if (grouped) assert.equal(laneChoice().value, selectedLaneId);
 		assert.equal(rangeButton("Write comment").disabled, false); rangeButton("Write comment").click();
 		for (let i = 0; i < 10; i++) await Promise.resolve();
 		assert.equal(savedRange.kind, sequence ? "ordinal" : "calendar"); workflow.close();
+		if (grouped) { assert.ok(savedLane.current()); assert.equal(savedLane.element, laneElement); }
+		else assert.equal(savedLane, undefined);
+		const savedLaneTarget = savedLane && { ...savedLane.target, definition_id: uuid(5), definition_revision: 1, group_id: uuid(42), witness_id: uuid(43) };
 		const rangeAnchor = { version: 1, type: "base", definition_id: uuid(1), generation: uuid(3), view_id: uuid(4), registry_revision: 1,
-			target: { type: "timeline_range", axis_definition_id: uuid(40), axis_definition_revision: 1, axis: rangeContext.axis, range: savedRange } };
+			target: { type: "timeline_range", axis_definition_id: uuid(40), axis_definition_revision: 1, axis: rangeContext.axis, range: savedRange, ...(savedLaneTarget ? { lane: savedLaneTarget } : {}) } };
 		const marks = document.createElement("div"); root.append(marks); let markerOpened = false;
 		assert.equal(renderTimelineRangeMarkers({ context: rangeCommentContext, proof: axisProof, threads: [{ id: uuid(41), anchor: rangeAnchor }],
-			lanes: new Map(), root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks, limit: 128,
+			lanes: new Map(savedLane ? [[uuid(41), savedLane.target]] : []), root: { left: 0, right: 1000, top: 0, bottom: 600 }, viewport: viewport.getBoundingClientRect(), marks, limit: 128,
 			open: (_threads, _button, current) => { assert.ok(current()); markerOpened = true; } }), 1);
 		marks.querySelector("button").click(); assert.ok(markerOpened); marks.remove();
 		assert.equal(host.data, source); assert.deepEqual(writes, []);

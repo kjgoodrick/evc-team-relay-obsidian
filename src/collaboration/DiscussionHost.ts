@@ -2,11 +2,11 @@ import { timelineRangeLabel, type TimelineRange } from "./TimelineRange";
 import type { TimelineAxisContext } from "./TimelineRangeProtocol";
 import { rangeLane, rangeMatchesAxis, readNativeTimelineAxis, timelineAxisMatches } from "./NativeTimelineRanges";
 import { TimelineRangeWorkflow } from "./ui/TimelineRangeWorkflow";
-import { NativeBaseGroupComments } from "./NativeBaseGroupComments";
+import { NativeBaseGroupComments, nativeGroupTargetKey } from "./NativeBaseGroupComments";
 import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
 import { baseGroupValueLabel } from "./BaseGroupValueBridge";
 import { isDocument } from "../Document";
-import type { LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
+import { pendingRangeLocation, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { Component, FileView, MarkdownView, Notice, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { AuthSession } from "../AuthSession";
@@ -424,16 +424,20 @@ export class DiscussionHost extends Component {
 		this.rangeWorkflow?.close();
 		const action = ++this.baseAction;
 		const workflow = new TimelineRangeWorkflow(this.plugin.app, context, () => !this.stopped && action === this.baseAction,
-			(proof, range, current) => this.commentTimelineRange(context, proof, range, current));
+			(proof, range, current, lane) => this.commentTimelineRange(context, proof, range, current, lane));
 		this.rangeWorkflow = workflow; void workflow.open();
 	}
-	async commentTimelineRange(context: BaseCommentContext, proof: TimelineAxisContext, range: TimelineRange, alive: () => boolean): Promise<boolean> {
+	async commentTimelineRange(context: BaseCommentContext, proof: TimelineAxisContext, range: TimelineRange, alive: () => boolean, lane?: NativeBaseGroupHandle): Promise<boolean> {
 		const native = context.surface.rangeContext(), action = this.baseAction;
+		const laneKey = lane && nativeGroupTargetKey(lane.target);
 		const current = () => !this.stopped && action === this.baseAction && alive() && !!native && timelineAxisMatches(context, proof, native) &&
-			context.session.permission(context.entryId)?.comment === true;
+			context.session.permission(context.entryId)?.comment === true && (!lane || lane.current() && nativeGroupTargetKey(lane.target) === laneKey && context.groups?.canCapture(lane) === true);
 		if (!current()) return false;
-		const anchor = await context.session.captureTimelineRange(context.entryId, proof, range);
-		if (!current() || !rangeMatchesAxis(context, anchor, proof) || anchor.registry_revision !== context.binding.snapshot.revision) return false;
+		const pending = lane ? await context.groups!.capture(lane) : undefined;
+		if (!current()) return false;
+		const anchor = pending ? await context.session.captureTimelineRange(context.entryId, proof, range, pending) : await context.session.captureTimelineRange(context.entryId, proof, range);
+		const location = anchor.type === "base_group_pending" ? pendingRangeLocation(anchor) : anchor;
+		if (!current() || !location || !rangeMatchesAxis(context, location, proof) || location.registry_revision !== context.binding.snapshot.revision) return false;
 		if (!await this.pinBaseContext(context, current)) return false;
 		return this.saveCommentSelection({ file: context.file, session: context.session, entryId: context.entryId, anchor });
 	}
@@ -634,7 +638,7 @@ export class DiscussionHost extends Component {
 		try { await this.open(); } catch { new Notice("The comment sidebar could not be opened."); }
 	}
 	targetLabel(session: DiscussionSession, entryId: string, anchor: LocalDiscussionAnchor): string | undefined {
-		if (anchor.type === "base_group_pending") return "Group: " + anchor.property.name + " · " + baseGroupValueLabel(anchor.capture.value) + " (verification pending)";
+		if (anchor.type === "base_group_pending") return (anchor.range ? timelineRangeLabel(anchor.range.range) + " · lane: " : "Group: ") + anchor.property.name + " · " + baseGroupValueLabel(anchor.capture.value) + " (verification pending)";
 		if (anchor.type !== "base" || parseDiscussionScope(entryId)?.viewId !== anchor.view_id) return;
 		const target = anchor.target;
 		if (target.type === "view") return "Entire saved view";
@@ -642,7 +646,7 @@ export class DiscussionHost extends Component {
 		if (target.type === "formula") return "Formula definition: " + target.property.name;
 		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
 		if (target.type === "group") return "Group: " + target.property.name + " · " + baseGroupValueLabel(target.value);
-		if (target.type === "timeline_range") return timelineRangeLabel(target.range);
+		if (target.type === "timeline_range") return timelineRangeLabel(target.range) + (target.lane ? " · lane: " + target.lane.property.name + " · " + baseGroupValueLabel(target.lane.value) : "");
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });
@@ -656,7 +660,7 @@ export class DiscussionHost extends Component {
 		try {
 			if (anchor.type === "base_group_pending") {
 				if (await this.baseComments?.reveal(session, entryId, anchor)) return;
-				if (available()) new Notice("This group selection is saved with your draft. Its original location is unavailable in the current view."); return;
+				if (available()) new Notice("This selection and its lane evidence are saved with your draft. Its original location is unavailable in the current view."); return;
 			}
 			if (anchor.type === "base") {
 				const scope = parseDiscussionScope(entryId);
