@@ -266,7 +266,7 @@ export class DiscussionHost extends Component {
 				native: anchor => {
 					if (!authorized() || anchor.definition_id !== binding.snapshot.definition_id || anchor.view_id !== binding.viewId || anchor.generation !== binding.snapshot.generation || anchor.registry_revision > binding.snapshot.revision) return;
 					const target = anchor.target; if (target.type === "view" || target.type === "property") return target;
-					if (target.type === "summary") return;
+					if (target.type === "summary" || target.type === "group") return;
 					if (target.type === "formula" || target.type === "formula_cell") {
 						const definition = formulas.get(target.property.name);
 						if (!definition || definition.id !== target.definition_id || definition.revision !== target.definition_revision) return;
@@ -501,6 +501,7 @@ export class DiscussionHost extends Component {
 		if (target.type === "property") return "Property header: " + target.property.source + "." + target.property.name;
 		if (target.type === "formula") return "Formula definition: " + target.property.name;
 		if (target.type === "summary") return "Summary: " + target.property.source + "." + target.property.name + " · " + target.summary;
+		if (target.type === "group") return "Group: " + target.property.source + "." + target.property.name;
 		const paths: string[] = [];
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId);
 		folder?.folderIndex.eachRecord((record, path) => { if (isBaseRecordType(record.type) && record.id === target.record_id) paths.push(path); });

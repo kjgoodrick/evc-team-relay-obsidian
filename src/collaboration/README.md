@@ -71,10 +71,22 @@ read grants and both threads after a fully offline reload. Native image-cell
 and CSV-record sends, draft reload and offline CSV queue/reload also passed.
 Native record tests use an owner; reviewer enforcement has actual HTTP evidence.
 
+Group protocol support now decodes bounded typed values, negotiates the explicit
+server capability, and submits immutable capture requests to the private-source
+backed endpoint. A group anchor contains both a stable group ID and the exact
+source witness used for its thread's authorization. Cache version 13 retains
+existing data and fences workers that cannot decode these anchors. The actual
+Python/Rust/Yjs fixture covers delete-only dependency waiting, lost capture
+responses, source denial, relay restart and retained verified anchors/drafts/
+queued comments through a database reopen. Native group selection, markers,
+navigation and new offline capture intents remain to implement; protocol support
+does not make the native group-comment feature ready for testing.
+
 Actual HTTP session tests cover separate views, offline restart/delivery, cache
 revocation/regrant and retained drafts. Desktop Obsidian tests capture/send all
 four target kinds, restore a cell draft, separate views and retain cached comments
-and queued offline work. Groups/lanes, formulas/summaries,
+and queued offline work. Formula cells and formula/summary definition discussions
+also have native preview evidence. Groups/lanes, computed values and group summaries,
 inline definitions, provisional identities, Time & Line, target-aware mention
 choices, native reviewer and mobile/resource acceptance remain unfinished. See
 the server's `docs/base-discussions-preview.md`, `realBaseDiscussionStack.test.ts`

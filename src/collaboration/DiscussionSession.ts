@@ -535,7 +535,7 @@ export class DiscussionSession {
 		this.baseDefinitionFlights.set(scopeId, flight); return flight;
 	}
 	async baseDefinitionStatus(scopeId: string, anchor: BaseAnchor): Promise<string> {
-		if (anchor.target.type !== "formula" && anchor.target.type !== "summary" && anchor.target.type !== "formula_cell") return "";
+		if (anchor.target.type !== "formula" && anchor.target.type !== "summary" && anchor.target.type !== "formula_cell" && anchor.target.type !== "group") return "";
 		try {
 			const catalog = await this.readBaseDefinitions(scopeId), target = anchor.target;
 			if (catalog.definition_id !== anchor.definition_id || catalog.generation !== anchor.generation || catalog.view_id !== anchor.view_id) return "This discussion belongs to an earlier saved-view identity. Its original target is retained.";
