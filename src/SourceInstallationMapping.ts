@@ -2,17 +2,19 @@ import { same } from "./client/managedRecovery";
 import type { RecoveryArchiveReader } from "./ManagedRecoveryArchive";
 import { ResourceAddress, RemoteFolderAddress } from "./ResourceAddress";
 import type { SettingsScope } from "./SettingsPersistence";
-import { parseSourceInstallationPlan, verifySourceInstallationPlan, type SourceInstallationPlan, type SourcePlanVerificationOptions } from "./SourceInstallationPlan";
+import { parseSourceInstallationPlan, sourceInstallationNativeRoot, verifySourceInstallationPlan, type SourceInstallationPlan, type SourcePlanVerificationOptions } from "./SourceInstallationPlan";
 import type { SourceMaterializationRequest } from "./SourceInstallationMaterialization";
 import { sourceInventoryCacheSync } from "./storage/source-document-cache";
 import type { SourceSelectionJournal } from "./storage/source-selection-journal";
+import type { SourceSelectionScope } from "./storage/source-selection-context";
 import type { VaultShareSettings } from "./VaultShare";
 
 export type SourceInstallationMappingSettings = Pick<SettingsScope<VaultShareSettings[]>, "readValue" | "readPersistedValue" | "mutateValue">;
 const folded = (path: string) => path.normalize("NFC").toLowerCase();
 const overlap = (left: string, right: string) => !left || !right || left === right || left.startsWith(right + "/") || right.startsWith(left + "/");
 
-function mappingSnapshot(input: unknown, plan: SourceInstallationPlan): VaultShareSettings[] {
+type MappingLocation = Pick<SourceInstallationPlan, "source" | "originalRoot" | "destinationRoot">;
+function mappingSnapshot(input: unknown, plan: MappingLocation): VaultShareSettings[] {
 	const address = ResourceAddress.parse(plan.source.s3rn);
 	if (!(address instanceof RemoteFolderAddress)) throw new Error("The installation has no managed folder identity");
 	const text = JSON.stringify(input);
@@ -49,7 +51,21 @@ function mappingInspection(settings: Pick<SourceInstallationMappingSettings, "re
  * mapping changed during an intervening network or native verification. */
 export async function verifySourceInstallationMapping(settings: Pick<SourceInstallationMappingSettings, "readValue" | "readPersistedValue">,
 	input: SourceInstallationPlan, options: SourcePlanVerificationOptions = {}): Promise<void> {
-	const plan = parseSourceInstallationPlan(input), { read, inspectSettings, check } = mappingInspection(settings, options);
+	return verifyDestinationMapping(settings, parseSourceInstallationPlan(input), options);
+}
+
+/** Startup for a committed source only reads its mapping. It must not recreate
+ * a removed row or overwrite a changed location from a stale restore request. */
+export async function verifySelectedSourceMapping(settings: Pick<SourceInstallationMappingSettings, "readValue" | "readPersistedValue">,
+	input: SourceSelectionScope, destination: string, options: SourcePlanVerificationOptions = {}): Promise<void> {
+	const source = { ...input, restoreGeneration: null }, root = sourceInstallationNativeRoot(destination);
+	sourceInventoryCacheSync(source);
+	return verifyDestinationMapping(settings, { source, originalRoot: root, destinationRoot: root }, options);
+}
+
+async function verifyDestinationMapping(settings: Pick<SourceInstallationMappingSettings, "readValue" | "readPersistedValue">,
+	plan: MappingLocation, options: SourcePlanVerificationOptions): Promise<void> {
+	const { read, inspectSettings, check } = mappingInspection(settings, options);
 	check(); const memory = mappingSnapshot(read(), plan), disk = mappingSnapshot(await inspectSettings(), plan); check();
 	const address = ResourceAddress.parse(plan.source.s3rn) as RemoteFolderAddress;
 	if (memory.find(row => row.guid === address.folderGuid)!.path !== plan.destinationRoot || !same(memory, disk)

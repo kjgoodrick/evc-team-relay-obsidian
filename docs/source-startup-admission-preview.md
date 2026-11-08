@@ -1,7 +1,9 @@
 # Source startup admission
 
 `admitSourceStartup(vault, path, scope, options, prepare?)` closes tracked native admission
-synchronously before its first asynchronous journal read. It drains already
+synchronously before its first asynchronous journal read for a new/same-root
+startup. A held old location uses the verified relocation path described below.
+It drains already
 admitted saves, opens a journal-selected context, rechecks the durable choice and
 the caller's current configuration, then releases the hold and returns that
 context. The optional preparation callback runs under the hold; its failure
@@ -22,8 +24,17 @@ native operations; journal reads retain their own bounded storage timeouts.
 A later successful retry reuses the held source, even after a module reload in
 the same host realm. Concurrent checks cannot release each other's hold, and a
 different server/endpoint cannot release a hold through a different scope.
-Changing a paused source's native location requires review instead of silently
-reassigning its hold. Other folders and vaults remain usable.
+Changing a paused source's native location requires a committed installation
+instead of a settings-only change. Other folders and vaults remain usable.
+
+After a reload, a hold may still name the original folder even though activation
+committed its replacement. Startup opens a fresh selection and requires the exact
+committed destination, then `releaseRetiredSourceHold` independently rereads its
+revision/root before releasing the old hold. The locations must be safe and
+disjoint. Pending/legacy/unbound choices, a different destination, competing
+review, account change or busy installer cannot release it. Startup immediately
+holds and drains the selected destination afterward. A preparation failure there
+keeps the destination paused for retry. This changes no files or caches.
 
 `borrowPausedSourceHold` gives the installer exclusive use of an existing
 source's barrier without creating a second overlapping hold. It requires the
@@ -33,8 +44,8 @@ barrier. A destination lease admits only writes inside its held root. The
 drain-only wrapper remains available for callers that need no write capability.
 Ending the lease leaves the source paused. The materialization coordinator uses
 these leases after validating its prepared journal/plan; otherwise it creates
-temporary holds. Final activation must explicitly hand off a paused original
-location before admitting the destination in the same host. See the
+temporary holds. Final activation can explicitly hand off a paused original
+location, or let startup reconcile its committed relocation after a reload. See the
 [mapping restart behavior](source-installation-mapping-preview.md).
 
 The location/lease checkpoint passes the full plugin regression: **4,487 tests
@@ -49,7 +60,9 @@ acceptance is enabled by these guards.
 Main startup, login restore, discovery and all share-creation/connection screens
 now await this gate through `prepareFolderSource` and the prepared registry API.
 Server attribution and connection settings are persisted under the hold before
-constructing a provider. Retry forces a disk comparison even when an earlier
+constructing a legacy provider. For a committed source, startup instead verifies
+the exact source/path and memory/disk mapping read-only: it cannot recreate a
+removed row or overwrite an intervening settings change. Retry forces a disk comparison even when an earlier
 failed save already changed memory. Folder movement, account/mode changes and
 unload refuse late preparation. Root shares use the same checks.
 
@@ -60,6 +73,23 @@ native writes. Its old settings and cache history survive preparation failure;
 old settings are removed only after construction succeeds. Cleanup failures
 pause the replacement. Explicit retry or a later login restore resumes that
 replacement instead of reopening the old settings row.
+
+Login restore also handles a committed new-folder mapping while the old instance
+still exists. It opens a fresh journal from that instance's captured source,
+checks the exact managed-folder/server identity, committed destination, disjoint
+roots and persisted mapping, then stops the old instance. Ordinary authenticated
+preparation must return the same selected source/revision; mapping, journal and
+mount identity are rechecked before constructing a fresh instance. It never
+relabels the old provider or reuses its cache. A failed handoff retains the saved
+destination and reports a retryable startup failure; unrelated folders continue.
+
+The relocation increment passes **114 focused tests**, including module-reload
+handoff, competing reviews, missing/changed disk mappings, unsafe locations,
+failed admission/retry and selected-source startup without settings writes.
+These are automated host/IndexedDB/settings checks, not native UI acceptance.
+Its full regression passes **4,558 tests across 308 suites**, with 41 tests in
+27 opt-in suites skipped. Main types, changed-source lint, the unchanged test-type
+ratchet and preview build pass (15 existing warnings).
 
 Relay settings show paused folders, the reason, and a serialized Retry control.
 Retry checks startup admission; it does not approve pending recovery, discard

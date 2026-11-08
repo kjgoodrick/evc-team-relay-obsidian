@@ -114,6 +114,66 @@ test("a restored source starts only at its committed native root after reopening
 	} finally { context.close(); }
 });
 
+test("startup after module reload retires the old hold only for the durably committed new root", async () => {
+	const s = fixture();
+	await activate(s.scope, "Restored Team", async () => {
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+	});
+	let reloaded!: typeof admitSourceStartup;
+	jest.isolateModules(() => { reloaded = require("../src/storage/source-startup-admission").admitSourceStartup; });
+	await expect(reloaded(s.vault, "Unexpected", s.scope, options)).rejects.toThrow("no verified installation");
+	await expect(write(s.vault)).rejects.toThrow("paused");
+	const prepare = jest.fn(async (context: SourceSelectionContext) => {
+		expect(context.nativeRoot).toBe("Restored Team");
+		await expect(write(s.vault, "Restored Team/Note.md")).rejects.toThrow("paused");
+	});
+	const context = await reloaded(s.vault, "Restored Team", s.scope, options, prepare);
+	try { expect(prepare).toHaveBeenCalledTimes(1); await write(s.vault); await write(s.vault, "Restored Team/Note.md"); }
+	finally { context.close(); }
+});
+
+test("a preparation failure after automatic handoff preserves the destination hold for the next retry", async () => {
+	const s = fixture();
+	await activate(s.scope, "Restored Team", async () => {
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+	});
+	await expect(admitSourceStartup(s.vault, "Restored Team", s.scope, options, async () => { throw new Error("Settings unavailable"); })).rejects.toThrow("Settings unavailable");
+	await expect(write(s.vault, "Restored Team/Note.md")).rejects.toThrow("paused");
+	await write(s.vault); const context = await admitSourceStartup(s.vault, "Restored Team", s.scope, options); context.close();
+	await write(s.vault, "Restored Team/Note.md");
+});
+
+test("a pending or cancelled review cannot use changed settings to retire the original hold", async () => {
+	const s = fixture(), journal = await SourceSelectionJournal.open(s.scope);
+	try {
+		const state = await journal.apply({ type: "begin", operationId: crypto.randomUUID(), reviewId: crypto.randomUUID(), expectedRevision: null, restoreGeneration: crypto.randomUUID() });
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+		await expect(admitSourceStartup(s.vault, "Restored Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+		await expect(write(s.vault)).rejects.toThrow("paused");
+		await journal.apply({ type: "cancel", expectedRevision: state.revision, reviewId: state.pending!.reviewId, operationId: crypto.randomUUID() });
+		await expect(admitSourceStartup(s.vault, "Restored Team", s.scope, options)).rejects.toThrow("without a committed installation");
+		await expect(write(s.vault)).rejects.toThrow("paused");
+	} finally { journal.close(); }
+});
+
+test("a competing review between handoff reads keeps the original barrier", async () => {
+	const s = fixture(); const state = await activate(s.scope, "Restored Team", async () => {
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+	});
+	const open = SourceSelectionContext.open; let reads = 0;
+	const spy = jest.spyOn(SourceSelectionContext, "open").mockImplementation(async scope => {
+		if (++reads === 2) {
+			const journal = await SourceSelectionJournal.open(scope);
+			try { await journal.apply({ type: "begin", operationId: crypto.randomUUID(), reviewId: crypto.randomUUID(), expectedRevision: state.revision, restoreGeneration: crypto.randomUUID() }); }
+			finally { journal.close(); }
+		}
+		return open(scope);
+	});
+	try { await expect(admitSourceStartup(s.vault, "Restored Team", s.scope, options)).rejects.toThrow("awaiting recovery"); }
+	finally { spy.mockRestore(); }
+	await expect(write(s.vault)).rejects.toThrow("paused");
+});
+
 test("an older preview choice without a durable native root remains held for review", async () => {
 	const s = fixture(); await activate(s.scope);
 	await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("no verified installation");

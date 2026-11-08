@@ -7,6 +7,7 @@ import { SourceSelectionContext } from "../src/storage/source-selection-context"
 import { SourceSelectionJournal } from "../src/storage/source-selection-journal";
 import { admitSourceStartup } from "../src/storage/source-startup-admission";
 import { RemoteFolderAddress, ResourceAddress } from "../src/ResourceAddress";
+import { RECOVERY_FOLDER } from "../src/conflictCopyPath";
 
 const id = () => crypto.randomUUID();
 const registries: ShareRegistry[] = [];
@@ -17,7 +18,8 @@ function fixture(initial: VaultShareSettings[] = []) {
 	const getRoot = (path: string) => { if (!roots.has(path)) roots.set(path, Object.assign(Object.create(TFolder.prototype) as TFolder, { path })); return roots.get(path)!; };
 	const vault = { getAbstractFileByPath: getRoot, getRoot: () => getRoot("/") };
 	const scope = (guid: string) => ({ hostAppId, serverId: "fixture", controlPlaneUrl: "https://fixture.test", s3rn: ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", guid)) });
-	const settingsScope = { readValue: () => settings, mutateValue: jest.fn(async (update: (current: VaultShareSettings[]) => VaultShareSettings[]) => { settings = update(settings); }) };
+	const settingsScope = { readValue: () => settings, readPersistedValue: jest.fn(async () => structuredClone(settings)),
+		mutateValue: jest.fn(async (update: (current: VaultShareSettings[]) => VaultShareSettings[]) => { settings = update(settings); }) };
 	const prepare = jest.fn(async (request: Readonly<FolderSourceRequest>) => admitSourceStartup(vault, request.path, scope(request.guid), { check: () => {} }));
 	const factory = jest.fn((path: string, guid: string, workspaceId?: string, _pending?: boolean, _restore?: boolean, _fresh?: boolean, sourceSelection?: SourceSelectionContext) => {
 		const folder = { path, entityGuid: guid, workspaceId, sourceSelection, dismantle: jest.fn(() => sourceSelection?.close()), goOffline: jest.fn() };
@@ -29,6 +31,71 @@ function fixture(initial: VaultShareSettings[] = []) {
 	return { registry, prepare, factory, scope, settingsScope, settings: () => settings };
 }
 afterEach(() => { registries.splice(0).forEach(registry => registry.destroy()); jest.restoreAllMocks(); });
+
+async function selectRestored(s: ReturnType<typeof fixture>, guid: string, destinationRoot = "Restored Team") {
+	const journal = await SourceSelectionJournal.open(s.scope(guid)), reviewId = id();
+	try {
+		let state = await journal.apply({ type: "begin", expectedRevision: (await journal.read()).revision, operationId: id(), reviewId, restoreGeneration: id() });
+		state = await journal.apply({ type: "prepare", expectedRevision: state.revision, operationId: id(), reviewId,
+			preparation: { archive: { path: `${RECOVERY_FOLDER}/fixture`, manifestSha256: "a".repeat(64) }, plan: { id: id(), sha256: "b".repeat(64) } } });
+		state = await journal.apply({ type: "start", expectedRevision: state.revision, operationId: id(), reviewId });
+		await journal.apply({ type: "commit", expectedRevision: state.revision, operationId: id(), reviewId, destinationRoot });
+		await s.settingsScope.mutateValue(rows => rows.map(row => row.guid === guid ? { ...row, path: destinationRoot } : row));
+	} finally { journal.close(); }
+}
+
+test("restoring a committed new mapping retires the original instance before constructing a fresh selected source", async () => {
+	const s = fixture(), guid = id(), old = await s.registry.newPrepared("Team", guid, "relay-onprem", undefined, undefined, "fixture");
+	await selectRestored(s, guid); const prepare = s.prepare.getMockImplementation()!;
+	s.prepare.mockImplementationOnce(async request => { expect(old.dismantle).toHaveBeenCalledTimes(1); return prepare(request); });
+	await s.registry.restorePrepared(); const restored = s.registry.toArray()[0];
+	expect(restored).not.toBe(old); expect(restored.path).toBe("Restored Team"); expect(restored.entityGuid).toBe(guid);
+	expect(restored.sourceSelection!.choice.kind).toBe("source"); expect(restored.sourceSelection!.nativeRoot).toBe("Restored Team");
+	expect(s.registry.startupFailures).toEqual([]); expect(s.settings()).toHaveLength(1);
+	await s.registry.restorePrepared(); expect(s.registry.toArray()).toEqual([restored]); expect(old.dismantle).toHaveBeenCalledTimes(1);
+});
+
+test.each(["legacy", "pending", "different root", "disk mapping", "server", "overlap"])("an unverified %s relocation cannot retire or reuse the original instance", async kind => {
+	const s = fixture(), guid = id(), old = await s.registry.newPrepared("Team", guid, "relay-onprem", undefined, undefined, "fixture");
+	if (kind !== "legacy" && kind !== "pending") await selectRestored(s, guid, kind === "overlap" ? "Team/Restored" : "Restored Team");
+	else {
+		if (kind === "pending") {
+			const journal = await SourceSelectionJournal.open(s.scope(guid));
+			try { await journal.apply({ type: "begin", expectedRevision: null, operationId: id(), reviewId: id(), restoreGeneration: id() }); } finally { journal.close(); }
+		}
+		await s.settingsScope.mutateValue(rows => rows.map(row => ({ ...row, path: "Restored Team" })));
+	}
+	if (kind === "different root") await s.settingsScope.mutateValue(rows => rows.map(row => ({ ...row, path: "Unexpected" })));
+	if (kind === "server") await s.settingsScope.mutateValue(rows => rows.map(row => ({ ...row, onpremServerId: "other" })));
+	if (kind === "disk mapping") s.settingsScope.readPersistedValue.mockResolvedValueOnce(s.settings().map(row => ({ ...row, path: "Team" })));
+	s.factory.mockClear(); await s.registry.restorePrepared();
+	expect(old.dismantle).not.toHaveBeenCalled(); expect(s.factory).not.toHaveBeenCalled(); expect(s.registry.toArray()).toEqual([old]);
+	expect(old.goOffline).toHaveBeenCalled(); expect(s.registry.startupFailures).toHaveLength(1);
+});
+
+test("an interrupted relocation keeps the new mapping and retry creates a fresh selected instance", async () => {
+	const s = fixture(), guid = id(), old = await s.registry.newPrepared("Team", guid, "relay-onprem", undefined, undefined, "fixture");
+	await selectRestored(s, guid); s.prepare.mockRejectedValueOnce(new Error("Synthetic source outage"));
+	await s.registry.restorePrepared(); expect(s.registry.toArray()).toEqual([]); expect(s.settings()[0].path).toBe("Restored Team");
+	expect(s.registry.startupFailures[0].message).toContain("outage");
+	const restored = await s.registry.retryStartup(guid); expect(restored.path).toBe("Restored Team"); expect(restored.sourceSelection!.choice.kind).toBe("source");
+	expect(old.dismantle).toHaveBeenCalledTimes(1); expect(s.registry.startupFailures).toEqual([]);
+});
+
+test("a new review while relocation admission waits prevents construction and preserves the saved destination", async () => {
+	const s = fixture(), guid = id(), old = await s.registry.newPrepared("Team", guid, "relay-onprem", undefined, undefined, "fixture");
+	await selectRestored(s, guid); const prepare = s.prepare.getMockImplementation()!; let candidate: SourceSelectionContext | undefined;
+	s.prepare.mockImplementationOnce(async request => {
+		candidate = await prepare(request);
+		const journal = await SourceSelectionJournal.open(s.scope(guid));
+		try { await journal.apply({ type: "begin", operationId: id(), expectedRevision: candidate.revision, reviewId: id(), restoreGeneration: id() }); }
+		finally { journal.close(); }
+		return candidate;
+	});
+	s.factory.mockClear(); await s.registry.restorePrepared();
+	expect(s.factory).not.toHaveBeenCalled(); expect(old.dismantle).toHaveBeenCalledTimes(1); expect(() => candidate!.check()).toThrow("closed");
+	expect(s.settings()[0].path).toBe("Restored Team"); expect(s.registry.startupFailures).toHaveLength(1);
+});
 
 test("a prepared registry refuses synchronous construction and passes the journal context to its awaited factory", async () => {
 	const s = fixture(), guid = id();

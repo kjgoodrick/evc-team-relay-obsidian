@@ -7,6 +7,7 @@ import { FolderAddress, RemoteFolderAddress, ResourceAddress } from "../Resource
 import { resolveShareFolder, toSharePath } from "../vaultRootPath";
 import { admitSourceStartup } from "./source-startup-admission";
 import type { SourceSelectionContext } from "./source-selection-context";
+import { verifySelectedSourceMapping } from "../SourceInstallationMapping";
 
 export interface FolderPreparationHost {
 	vault: Vault;
@@ -45,5 +46,8 @@ export async function prepareFolderSource(host: FolderPreparationHost, request: 
 	if (!source) { await persist(); return; }
 	const address = input.workspaceId ? new RemoteFolderAddress(input.workspaceId, input.guid) : new FolderAddress(input.guid);
 	return admitSourceStartup(host.vault, input.path, { hostAppId: host.hostAppId, serverId: source.serverId,
-		controlPlaneUrl: source.controlPlaneUrl, s3rn: ResourceAddress.serialize(address) }, { check }, persist);
+		controlPlaneUrl: source.controlPlaneUrl, s3rn: ResourceAddress.serialize(address) }, { check }, async context => {
+		if (context.choice.kind === "source") await verifySelectedSourceMapping(host.settings, context.scope, input.path, { check });
+		else await persist();
+	});
 }

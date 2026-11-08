@@ -103,7 +103,24 @@ export async function admitSourceStartup(vault: object, path: string, input: Sou
 	if (typeof path !== "string") throw new Error("Invalid source startup path");
 	const all = registry(), scopes = all.get(vault) ?? new Map<string, StartupHold>(); all.set(vault, scopes);
 	let entry = scopes.get(identity);
-	if (entry && entry.path !== path.normalize("NFC").toLowerCase()) throw new Error("The paused source location changed. Review its original location before synchronizing.");
+	if (entry && entry.path !== path.normalize("NFC").toLowerCase()) {
+		// Mapping may have committed before a reload lost the recovery UI's
+		// in-memory handoff. Settings alone never authorize this path change:
+		// require the durable selected root, then reread its exact revision in
+		// the retirement helper. Pending/legacy/unbound decisions stay held.
+		if (entry.busy) throw new Error("The paused source location changed while its hold is in use. Wait before synchronizing.");
+		const previousPath = entry.path;
+		let selected: SourceSelectionContext | undefined;
+		try {
+			check(); selected = await SourceSelectionContext.open(scope); check();
+			if (selected.choice.kind !== "source") throw new Error("The paused source location changed without a committed installation");
+			selected.assertNativeRoot(path); await selected.assertCurrent(); check();
+			await releaseRetiredSourceHold(vault, previousPath, scope, { revision: selected.revision!, destinationRoot: path }, { check, signal, timeoutMs });
+		} finally { selected?.close(); }
+		// This immediately closes destination admission and drains any writes
+		// admitted before startup. A failed read leaves that new hold in place.
+		return admitSourceStartup(vault, path, scope, { check, signal, timeoutMs }, prepare);
+	}
 	if (entry?.busy) throw new Error("Source startup is already being checked. Wait before retrying.");
 	if (!entry) {
 		const hold = holdNativeSourceWrites(vault, path);

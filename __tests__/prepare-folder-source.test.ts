@@ -6,6 +6,7 @@ import { prepareFolderSource, type FolderPreparationHost } from "../src/storage/
 import { SourceSelectionJournal } from "../src/storage/source-selection-journal";
 import { RemoteFolderAddress, ResourceAddress } from "../src/ResourceAddress";
 import { trackNativeDocumentWrite } from "../src/storage/native-document-writes";
+import { RECOVERY_FOLDER } from "../src/conflictCopyPath";
 
 const id = () => crypto.randomUUID();
 function deferred() { let finish!: () => void; return { promise: new Promise<void>(resolve => { finish = resolve; }), finish: () => finish() }; }
@@ -23,6 +24,25 @@ async function fixture(path = "Team") {
 	return { host, request, root, backend, scope, credentials, identity, mode: (value: boolean) => { enabled = value; }, changeAccount: () => { current = false; } };
 }
 const write = (host: FolderPreparationHost, path = "Team/Note.md") => trackNativeDocumentWrite(host.vault, path, async () => {});
+
+test.each(["saved", "missing", "disk changed"])("committed-source startup verifies a %s mapping without rewriting it", async kind => {
+	const s = await fixture("Restored Team"), journal = await SourceSelectionJournal.open(s.identity), reviewId = id();
+	try {
+		let state = await journal.apply({ type: "begin", operationId: id(), expectedRevision: null, reviewId, restoreGeneration: id() });
+		state = await journal.apply({ type: "prepare", operationId: id(), expectedRevision: state.revision, reviewId,
+			preparation: { archive: { path: `${RECOVERY_FOLDER}/fixture`, manifestSha256: "a".repeat(64) }, plan: { id: id(), sha256: "b".repeat(64) } } });
+		state = await journal.apply({ type: "start", operationId: id(), expectedRevision: state.revision, reviewId });
+		await journal.apply({ type: "commit", operationId: id(), expectedRevision: state.revision, reviewId, destinationRoot: "Restored Team" });
+		if (kind !== "missing") await s.scope.mutateValue(() => [{ path: s.request.path, guid: s.request.guid, relay: s.request.workspaceId, onpremServerId: s.request.serverId }]);
+		if (kind === "disk changed") {
+			const disk = await s.backend.loadData(); disk.sharedFolders[0].path = "Team"; await s.backend.saveData(disk);
+		}
+		s.backend.saveData.mockClear();
+		if (kind === "saved") { const context = await prepareFolderSource(s.host, s.request); expect(context!.nativeRoot).toBe("Restored Team"); context!.close(); }
+		else { await expect(prepareFolderSource(s.host, s.request)).rejects.toThrow("mapping"); await expect(write(s.host, "Restored Team/Note.md")).rejects.toThrow("paused"); }
+		expect(s.backend.saveData).not.toHaveBeenCalled();
+	} finally { journal.close(); s.scope.destroy(); }
+});
 
 test.each(["Team", ""])("folder preparation persists attribution before releasing native admission for %s", async path => {
 	const s = await fixture(path), waiting = deferred(), reached = deferred(), save = s.backend.saveData.getMockImplementation()!;

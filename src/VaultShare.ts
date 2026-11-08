@@ -27,7 +27,9 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
-import type { SourceSelectionContext } from "./storage/source-selection-context";
+import { SourceSelectionContext } from "./storage/source-selection-context";
+import { verifySelectedSourceMapping } from "./SourceInstallationMapping";
+import { sourceInstallationNativeRoot } from "./SourceInstallationPlan";
 import { sourceDocumentCacheSync } from "./storage/source-document-cache";
 import { trackNativeSourceMutation, waitForNativeDocumentWrites } from "./storage/native-document-writes";
 import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
@@ -3717,13 +3719,36 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 		const input = Object.freeze({ ...request });
 		const operation = this.sourceCreationTail.then(async () => {
 			let selection: SourceSelectionContext | undefined, constructed: VaultShare | undefined, validating: VaultShare | undefined, transferred = false, retired = false;
+			let replacement = input.replace, relocation: SourceSelectionContext | undefined, previousPath = input.path;
 			let retiredGuid = input.retiredGuid ?? this.sourceRetryRequests.get(input.guid)?.retiredGuid;
 			const root = resolveShareFolder(this.vaultApi, input.path);
 			try {
 				if (this.sourceRegistryClosed) throw new Error("Shared-folder startup was closed.");
 				if (!ResourceAddress.isValidUUID(input.guid)) throw new Error("Invalid shared-folder identifier.");
+				// A login/reload can see the newly committed settings while the old
+				// instance still occupies its original root. Only a fresh journal
+				// decision and matching disk/memory mapping authorize retiring it.
+				if (input.isRestore && !replacement) {
+					const old = this.locate(folder => folder.entityGuid === input.guid && folder.path !== input.path);
+					if (old) {
+						validating = old;
+						if (!old.sourceSelection || !this.prepareSource || !input.serverId || !input.workspaceId) throw new Error("The shared source cannot be relocated without durable admission");
+						previousPath = old.path;
+						const oldRoot = sourceInstallationNativeRoot(previousPath).toLowerCase(), newRoot = sourceInstallationNativeRoot(input.path).toLowerCase();
+						if (oldRoot === newRoot || oldRoot.startsWith(newRoot + "/") || newRoot.startsWith(oldRoot + "/")) throw new Error("The restored source locations overlap");
+						relocation = await SourceSelectionContext.open(old.sourceSelection.scope);
+						relocation.assertFolder(old.sourceSelection.scope.hostAppId, input.serverId, ResourceAddress.serialize(new RemoteFolderAddress(input.workspaceId, input.guid)));
+						if (relocation.choice.kind !== "source") throw new Error("The shared source has no committed relocation");
+						relocation.assertNativeRoot(input.path);
+						await verifySelectedSourceMapping(this.persistedShares, relocation.scope, input.path, { check: () => {
+							if (this.sourceRegistryClosed || !this.toArray().includes(old) || old.path !== previousPath) throw new Error("The shared folder changed during relocation");
+							relocation!.check();
+						} });
+						await relocation.assertCurrent(); replacement = old;
+					}
+				}
 				const existing = this.locate(folder => folder.path === input.path && folder.entityGuid === input.guid);
-				if (existing && existing !== input.replace) {
+				if (existing && existing !== replacement) {
 					if ((input.serverId && existing.sourceSelection?.scope.serverId !== input.serverId) ||
 						(input.workspaceId && existing.workspaceId !== input.workspaceId)) throw new Error("This shared folder is already connected with a different source configuration.");
 					validating = existing;
@@ -3735,10 +3760,11 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 				const validateMount = () => {
 					if (this.sourceRegistryClosed) throw new Error("Shared-folder startup was closed.");
 					if (!root || toSharePath(root.path) !== input.path || resolveShareFolder(this.vaultApi, input.path) !== root) throw new Error("The local folder moved or became unavailable during startup.");
-					if (input.replace && !retired) {
-						if (!this.toArray().includes(input.replace) || input.replace.path !== input.path) throw new Error("The shared folder changed during source preparation.");
-						const collision = this.locate(folder => folder !== input.replace && folder.entityGuid === input.guid);
+					if (replacement && !retired) {
+						if (!this.toArray().includes(replacement) || replacement.path !== previousPath) throw new Error("The shared folder changed during source preparation.");
+						const collision = this.locate(folder => folder !== replacement && folder.entityGuid === input.guid);
 						if (collision) throw new Error("This shared folder is already connected elsewhere.");
+						if (relocation) { this._assertPathFree(input.path); this._assertNoNestingConflict(input.path); }
 					} else {
 						this._assertNotMountedElsewhere(input.guid); this._assertPathFree(input.path); this._assertNoNestingConflict(input.path);
 					}
@@ -3747,12 +3773,19 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 				// Stop the old session before startup admission drains native work.
 				// Its connection settings and cached history remain available if
 				// preparation fails; a retry opens a fresh session.
-				if (input.replace) {
-					input.replace.dismantle(); this.backing.delete(input.replace); retired = true;
-					retiredGuid ??= input.replace.entityGuid;
+				if (replacement) {
+					replacement.dismantle(); this.backing.delete(replacement); retired = true;
+					retiredGuid ??= replacement.entityGuid;
+					if (validating === replacement) validating = undefined;
 				}
 				selection = await this.prepareSource?.({ path: input.path, guid: input.guid, workspaceId: input.workspaceId, serverId: input.serverId });
 				await selection?.assertCurrent(); validateMount();
+				if (relocation) {
+					if (!selection || selection.revision !== relocation.revision || selection.inventory?.identity !== relocation.inventory?.identity) throw new Error("The restored source changed during startup");
+					selection.assertNativeRoot(input.path); await relocation.assertCurrent();
+					await verifySelectedSourceMapping(this.persistedShares, relocation.scope, input.path, { check: () => { selection!.check(); validateMount(); } });
+					await selection.assertCurrent(); validateMount();
+				}
 				const folder = this._create(input.path, input.guid, input.workspaceId, input.hasPendingUpdates, input.isRestore, input.freshlyCreated, selection);
 				constructed = folder;
 				transferred = true;
@@ -3769,7 +3802,7 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 					this.notifySubscribers();
 				}
 				throw error;
-			} finally { if (!transferred) selection?.close(); }
+			} finally { relocation?.close(); if (!transferred) selection?.close(); }
 		});
 		this.sourceCreationTail = operation.then(() => undefined, () => undefined);
 		return operation;

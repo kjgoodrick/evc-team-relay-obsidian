@@ -60,7 +60,10 @@ location's paused startup hold. It refuses overlapping or unexpected locations
 and a hold still borrowed by installation. A hold already at the destination is
 left for ordinary startup admission. Repeating a completed handoff is harmless.
 The registry must stop the old instance and create a fresh instance at the
-committed location; this helper does not do that itself.
+committed location; this helper does not do that itself. Ordinary login restore
+now performs that guarded retargeting when an old instance survives the mapping
+change. Startup also reconciles a held original location after module reload;
+see [source startup admission](source-startup-admission-preview.md).
 
 ## Required host integration and limits
 
@@ -71,7 +74,7 @@ in one host realm. A fresh inventory read is **not** a remote writer lease;
 document CRDT edits need not change inventory metadata. The coordinator must not
 be exposed as a ready-to-use restore action until that admission protocol exists.
 
-Recovery UI, durable operation-intent/resume flow, registry retargeting, server
+Recovery UI, durable operation-intent/resume flow, integrated registry acceptance, server
 maintenance/client admission, off-host backup and physical desktop/mobile
 acceptance remain. Mobile still needs a host-supported exclusive-publication
 adapter. Cache seeds retain the existing Canvas sync format; Canvas comments
