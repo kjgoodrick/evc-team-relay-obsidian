@@ -43,6 +43,7 @@ export class ManagedIndexTransport {
 	private destroyed = false;
 	private connected = false;
 	private generation = 0;
+	private readonly selectedBinding?: RestoreBinding;
 	private readonly changed = (_update: Uint8Array, origin: unknown) => {
 		if (origin !== this && this.connected) this.schedule(100);
 	};
@@ -54,7 +55,11 @@ export class ManagedIndexTransport {
 		private credentials: () => { endpoint: string; token: string },
 		private status: (connected: boolean) => void,
 		private failed: (error: Error) => void,
-	) { this.doc.on("update", this.changed); }
+		selectedBinding?: RestoreBinding,
+	) {
+		this.selectedBinding = selectedBinding === undefined ? undefined : Object.freeze(restoreMetadata(selectedBinding));
+		this.doc.on("update", this.changed);
+	}
 
 	start(): void {
 		this.stopped = false;
@@ -71,7 +76,7 @@ export class ManagedIndexTransport {
 	destroy(): void { this.destroyed = true; this.stop(); this.doc.off("update", this.changed); }
 
 	registered(path: string, id: string): boolean {
-		return !this.restoreReview && this.doc.getMap<ManagedManifest>(BASE).get("snapshot")?.records[path]?.id === id;
+		return !this.restoreReview && this.selectedSnapshotMatches() && this.doc.getMap<ManagedManifest>(BASE).get("snapshot")?.records[path]?.id === id;
 	}
 
 	async claim(path: string, record: ItemRecord): Promise<boolean> {
@@ -174,7 +179,13 @@ export class ManagedIndexTransport {
 	private check(generation = this.generation, binding?: RestoreBinding): void {
 		if (this.stopped || generation !== this.generation) throw new Error("File inventory context changed. Local work is retained.");
 		if (this.restoreReview) throw new Error(restoreMessage);
+		if (!this.selectedSnapshotMatches()) throw new Error(restoreMessage);
 		if (binding && restoreGeneration(binding.restoreGeneration) !== restoreGeneration(restoreBinding(this.snapshot).restoreGeneration)) throw new Error(restoreMessage);
+	}
+	private selectedSnapshotMatches(): boolean {
+		const snapshot = this.doc.getMap<ManagedManifest>(BASE).get("snapshot");
+		return this.selectedBinding === undefined || !snapshot
+			|| restoreGeneration(restoreBinding(snapshot).restoreGeneration) === restoreGeneration(this.selectedBinding.restoreGeneration);
 	}
 	private restoreHeader(binding: RestoreBinding): Record<string, string> {
 		const generation = restoreGeneration(binding.restoreGeneration);
@@ -186,7 +197,7 @@ export class ManagedIndexTransport {
 		this.check(generation, restoreBinding(base));
 		const prior = restoreGeneration(restoreBinding(base).restoreGeneration), next = restoreGeneration(restoreBinding(snapshot).restoreGeneration);
 		if (prior === next) return;
-		if (!hadSnapshot && !this.doc.getMap("filemeta_v0").size && !this.doc.getMap("docactivity_v0").size && !this.conflicts.length) return;
+		if (this.selectedBinding === undefined && !hadSnapshot && !this.doc.getMap("filemeta_v0").size && !this.doc.getMap("docactivity_v0").size && !this.conflicts.length) return;
 		const review: ManagedRestoreReview = { id: crypto.randomUUID(), createdAt: new Date().toISOString(),
 			...(hadSnapshot ? { before: base } : {}), observed: snapshot,
 			local: this.doc.getMap<ItemRecord>("filemeta_v0").toJSON() as Records,
@@ -197,14 +208,15 @@ export class ManagedIndexTransport {
 	}
 
 	isBlocked(path: string, id?: string): boolean {
-		if (this.restoreReview) return true;
+		if (this.restoreReview || !this.selectedSnapshotMatches()) return true;
 		const record = id ? { id } as ItemRecord : this.doc.getMap<ItemRecord>("filemeta_v0").get(path) ?? this.snapshot.records[path];
 		return this.conflicts.some(c => touches(c, path, record) || !!select(this.snapshot.records, c)[path]);
 	}
 
 	get snapshot(): ManagedManifest {
-		const snapshot = this.doc.getMap<ManagedManifest>(BASE).get("snapshot") ?? { records: {}, permissions: {}, activity: {}, owner: false };
-		return this.restoreReview ? { ...snapshot, permissions: {}, owner: false } : snapshot;
+		const snapshot = this.doc.getMap<ManagedManifest>(BASE).get("snapshot") ?? { records: {}, permissions: {}, activity: {}, owner: false,
+			...(this.selectedBinding === undefined ? {} : { restore_guard: true, restore_generation: restoreGeneration(this.selectedBinding.restoreGeneration) }) };
+		return this.restoreReview || !this.selectedSnapshotMatches() ? { ...snapshot, permissions: {}, owner: false } : snapshot;
 	}
 
 	private async exclusive<T>(action: () => Promise<T>): Promise<T> {
@@ -316,7 +328,7 @@ export class ManagedIndexTransport {
 			base.activity[id] !== value && Object.entries(current).some(([path, record]) => record.id === id && !this.isBlocked(path, id)) && (base.owner || Object.entries(base.records).some(([path, record]) => record.id === id && base.permissions[path] === "write"))));
 		try {
 			const dirty = changes.length || Object.keys(activity).length;
-			if (dirty && binding.restoreGeneration) this.observe(await this.manifest(await this.request()), base, hadSnapshot, generation);
+			if (dirty && (binding.restoreGeneration || this.selectedBinding !== undefined && !hadSnapshot)) this.observe(await this.manifest(await this.request()), base, hadSnapshot, generation);
 			let response = await this.request(dirty ? { changes, activity } : undefined, binding);
 			this.check(generation, binding);
 			const added: StructuralConflict[] = [];

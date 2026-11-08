@@ -639,13 +639,14 @@ export class VaultShare extends ProviderBacked {
 			const discovery = await discoverDocumentRecovery(host, this.resourceAddress, check); check();
 			const sourceDiscovery: SourceRecoveryDiscovery = sourceContext
 				? await discoverSourceRecovery({ hostAppId: host, share: this.resourceAddress, ...sourceContext }, check)
-				: { status: "unavailable", documents: [], unassociated: 0, unreadable: 0 };
+				: { status: "unavailable", documents: [], inventories: [], unassociated: 0, unreadable: 0 };
 			check();
 			const capture = async (): Promise<RecoveryCapture> => {
 				check();
 				if (sourceContext) {
 					const current = await discoverSourceRecovery({ hostAppId: host, share: this.resourceAddress, ...sourceContext }, check); check();
-					if (current.status !== sourceDiscovery.status || JSON.stringify(current.documents) !== JSON.stringify(sourceDiscovery.documents)) {
+					if (current.status !== sourceDiscovery.status || JSON.stringify(current.documents) !== JSON.stringify(sourceDiscovery.documents)
+						|| JSON.stringify(current.inventories) !== JSON.stringify(sourceDiscovery.inventories)) {
 						throw new Error("The retained source cache inventory changed during recovery capture. Local history is retained; review and retry.");
 					}
 				}
@@ -682,13 +683,22 @@ export class VaultShare extends ProviderBacked {
 							text: source.type === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
 					} finally { doc.destroy(); }
 				}
-				return { files, documents, index: Y.encodeStateAsUpdate(crdt) };
+				const inventories: NonNullable<RecoveryCapture["inventories"]> = [];
+				for (const inventory of sourceDiscovery.inventories) {
+					const stored = await readDocumentRecoverySnapshot(inventory.cacheName); check();
+					if (!stored.exists || stored.custom.find(item => item.key === SOURCE_CACHE_IDENTITY)?.value !== inventory.sourceIdentity) {
+						throw new Error("An inventory cache association changed during recovery capture. Local history is retained; review and retry.");
+					}
+					inventories.push({ cacheKey: inventory.cacheName, update: stored.update, cacheMetadata: encodeDocumentRecoveryMetadata(inventory.cacheName, stored) });
+				}
+				return { files, documents, inventories, index: Y.encodeStateAsUpdate(crdt) };
 			};
 			const backup = await prepareRecoveryBackup(this.recoveryIO(check), capture, {
 				kind: "managed-restore-source-copy", version: 1, shareId, sharePath, serverId: server ?? null, hostAppId: host,
 				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText), cacheDiscovery: discovery, sourceCacheDiscovery: sourceDiscovery,
 				coverage: { nativeFiles: "loaded files within the shared folder, excluding recovery directories",
 					documentCaches: "known legacy histories plus separately retained source generations with matching vault/server/endpoint/share/document identity",
+					inventoryCaches: "separately retained inventory generations with matching vault/server/endpoint/share identity",
 					excluded: ["unassociated or other-device caches", "discussion drafts and outbox", "Bases request queues and registry", "previous recovery directories"],
 					authorizesResume: false },
 			});

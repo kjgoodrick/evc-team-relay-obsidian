@@ -47,10 +47,12 @@ function buildProvider(
 	clientToken: DocumentGrant,
 	ydoc: Y.Doc,
 	beforeConnect?: () => boolean,
+	managedIndexBinding?: RestoreBinding,
 ): YSweetProvider {
 	const provider = new YSweetProvider(clientToken.url, clientToken.docId, ydoc, {
 		connect: false,
 		beforeConnect,
+		managedIndexBinding,
 		params: { token: clientToken.token },
 		disableBc: true,
 		// no cap — see YSweetProvider's maxConnectionErrors default.
@@ -132,6 +134,7 @@ export class ProviderBacked extends Loggable {
 	private restorePaused = false;
 	private restorePersistence?: LocalDocumentStore;
 	private readonly restoreBinding: RestoreBinding;
+	private readonly sourceSelectionExplicit: boolean;
 	private detachAuthSession?: () => void;
 	private detachProfileRefresh?: () => void;
 	// accountId last used to seed awareness/doc-identity, so a later auth
@@ -156,10 +159,11 @@ export class ProviderBacked extends Loggable {
 		public onpremServerId?: string,
 		// Immutable selection for a separately opened source cache. Existing
 		// automatic documents retain the original lineage by omitting it.
-		initialRestoreBinding: RestoreBinding = {},
+		initialRestoreBinding?: RestoreBinding,
 	) {
 		super();
-		this.restoreBinding = Object.freeze(restoreMetadata(initialRestoreBinding));
+		this.restoreBinding = Object.freeze(restoreMetadata(initialRestoreBinding ?? {}));
+		this.sourceSelectionExplicit = initialRestoreBinding !== undefined;
 		this.authSession = authSession;
 		// Per-server, NOT the plugin-wide `authSession.currentUser` — that
 		// field only ever reflects whichever server is `activeServerId`
@@ -184,6 +188,7 @@ export class ProviderBacked extends Loggable {
 
 		this._liveProvider = buildProvider(
 			this.issuedToken, this.crdtDoc, () => this.refreshStaleProviderToken(),
+			initialRestoreBinding === undefined ? undefined : this.restoreBinding,
 		);
 		this.seededAccountId = user?.accountId;
 		this.seededProfile = this.profileKey(user);
@@ -247,6 +252,7 @@ export class ProviderBacked extends Loggable {
 		const store = this.restorePersistence;
 		if (!store) return; // A low-level provider may have no local source store.
 		if (store.cacheIdentity !== undefined) {
+			if (!this.sourceSelectionExplicit) throw new Error("An identified source cache requires an explicit generation selection. Local history is retained.");
 			this.credentialCache.assertDocumentSourceCache(store.cacheIdentity, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
 		} else if (this.restoreBinding.restoreGeneration) {
 			throw new Error("A restored document requires a separate source cache. Original local history is retained.");

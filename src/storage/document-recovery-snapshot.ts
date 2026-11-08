@@ -99,7 +99,7 @@ export interface DocumentRecoveryIdentity { exists: boolean; appId?: unknown; s3
 
 /** Namespace discovery reads identity only, never comparison text or updates. */
 export async function readSourceDocumentRecoveryIdentity(name: string): Promise<{ exists: boolean; identity?: unknown }> {
-	if (!/^relay-source-v1-[a-f0-9]{64}$/.test(name)) throw new Error("Invalid source cache name");
+	if (!/^relay-(?:source|inventory)-v1-[a-f0-9]{64}$/.test(name)) throw new Error("Invalid source cache name");
 	const db = await openExisting(name);
 	if (!db) return { exists: false };
 	db.onversionchange = () => db.close();

@@ -3,6 +3,7 @@ import { ManagedIndexTransport, type ManagedManifest } from "../../src/client/Ma
 import { platformFetch } from "../../src/platformFetch";
 import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
 import type { BaseContentState } from "../../src/bases/BaseContentProtocol";
+import type { RestoreBinding } from "../../src/collaboration/RestoreGeneration";
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 const fetchMock = platformFetch as jest.MockedFunction<typeof platformFetch>;
 const response = (status: number, body: unknown) => ({ status, ok: status < 400, text: async () => JSON.stringify(body) }) as Response;
@@ -10,11 +11,11 @@ const note = (id: string): ItemRecord => ({ id, type: ItemKind.Document, version
 const empty = (): ManagedManifest => ({ records: {}, permissions: {}, activity: {}, owner: true });
 const transports: ManagedIndexTransport[] = [];
 const documents: Y.Doc[] = [];
-function setup(bytes?: Uint8Array, credentials = () => ({ endpoint: "https://cp.test/v1/managed/index/share", token: "grant" })) {
+function setup(bytes?: Uint8Array, credentials = () => ({ endpoint: "https://cp.test/v1/managed/index/share", token: "grant" }), binding?: RestoreBinding) {
 	const doc = new Y.Doc(); documents.push(doc);
 	if (bytes) Y.applyUpdate(doc, bytes);
 	const failed = jest.fn();
-	const transport = new ManagedIndexTransport(doc, credentials, jest.fn(), failed);
+	const transport = new ManagedIndexTransport(doc, credentials, jest.fn(), failed, binding);
 	transports.push(transport);
 	return { doc, transport, failed, records: doc.getMap<ItemRecord>("filemeta_v0") };
 }
@@ -23,6 +24,58 @@ afterEach(() => { transports.splice(0).forEach(t => t.destroy()); documents.spli
 
 const baseId = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const restored = (snapshot = empty(), generation = baseId(80)): ManagedManifest => ({ ...snapshot, restore_guard: true, restore_generation: generation });
+
+test.each([undefined, null, baseId(80)])("an explicitly selected empty inventory cannot adopt a different first generation (%s)", async selected => {
+	const s = setup(undefined, undefined, { restoreGeneration: selected });
+	const server = restored(empty(), baseId(81));
+	fetchMock.mockResolvedValueOnce(response(200, server));
+	await expect(s.transport.flush()).rejects.toThrow("restored");
+	expect(s.doc.getMap("managed_base_v1").has("snapshot")).toBe(false);
+	expect(s.transport.restoreReview).toMatchObject({ observed: server, local: {}, activity: {} });
+	expect(s.transport.owner).toBe(false); expect(s.transport.permissions).toEqual({});
+	await expect(s.transport.claim("Unsafe.md", note("new"))).rejects.toThrow("restored");
+	expect(fetchMock.mock.calls.map(call => call[1]?.method)).toEqual(["GET"]);
+});
+
+test("the selected first generation is immutable even before transport starts", async () => {
+	const binding = { restoreGeneration: baseId(80).toUpperCase() }, s = setup(undefined, undefined, binding);
+	binding.restoreGeneration = baseId(81);
+	fetchMock.mockResolvedValueOnce(response(200, restored()));
+	await s.transport.flush(); expect(s.transport.snapshot.restore_generation).toBe(baseId(80));
+	expect(s.transport.owner).toBe(true); expect(s.transport.restoreReview).toBeUndefined();
+});
+
+test.each([null, baseId(80)])("local changes before the first selected snapshot wait for a matching generation (%s)", async selected => {
+	const s = setup(undefined, undefined, { restoreGeneration: selected });
+	s.records.set("Pending.md", note("pending")); s.doc.getMap("docactivity_v0").set("pending", "unsent");
+	fetchMock.mockResolvedValueOnce(response(200, restored(empty(), baseId(81))));
+	await expect(s.transport.flush()).rejects.toThrow("restored");
+	expect(s.records.toJSON()).toEqual({ "Pending.md": note("pending") });
+	expect(s.transport.restoreReview?.activity).toEqual({ pending: "unsent" });
+	expect(fetchMock.mock.calls.map(call => call[1]?.method)).toEqual(["GET"]);
+});
+
+test.each([null, baseId(80)])("a matching first snapshot permits pending changes with the selected generation (%s)", async selected => {
+	const s = setup(undefined, undefined, { restoreGeneration: selected });
+	s.records.set("Pending.md", note("pending"));
+	const server = { ...empty(), restore_guard: true, restore_generation: selected };
+	fetchMock.mockResolvedValueOnce(response(200, server));
+	fetchMock.mockResolvedValueOnce(response(200, { ...server, records: { "Pending.md": note("pending") } }));
+	await s.transport.flush();
+	expect(fetchMock.mock.calls.map(call => call[1]?.method)).toEqual(["GET", "POST"]);
+	expect((fetchMock.mock.calls[1][1]?.headers as Record<string, string>)["X-Relay-Restore-Generation"]).toBe(selected ?? undefined);
+	expect(s.transport.registered("Pending.md", "pending")).toBe(true);
+});
+
+test("an inventory loaded with a different persisted generation cannot disclose authority or submit work", async () => {
+	const s = setup(undefined, undefined, { restoreGeneration: baseId(80) });
+	s.doc.getMap("managed_base_v1").set("snapshot", restored({ ...empty(), records: { "Other.md": note("other") } }, baseId(81)));
+	s.records.set("Pending.md", note("pending"));
+	await expect(s.transport.flush()).rejects.toThrow("restored");
+	await expect(s.transport.publishablePaths(["Pending.md"])).rejects.toThrow("restored");
+	expect(s.transport.registered("Other.md", "other")).toBe(false); expect(s.transport.isBlocked("Other.md")).toBe(true);
+	expect(s.transport.snapshot.owner).toBe(false); expect(fetchMock).not.toHaveBeenCalled();
+});
 
 function pausedInspection(credentials?: () => { endpoint: string; token: string }) {
 	const s = setup(undefined, credentials), before = { ...empty(), records: { "Old.md": note("one") } };

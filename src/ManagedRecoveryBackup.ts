@@ -3,7 +3,8 @@ import { sha256Hex } from "./contentDigest";
 
 export interface RecoveryFile { path: string; bytes: ArrayBuffer }
 export interface RecoveryDocument { id: string; cacheKey?: string; update: Uint8Array; text: string; unsaved?: string | null; cacheMetadata?: string }
-export interface RecoveryCapture { files: RecoveryFile[]; documents: RecoveryDocument[]; index: Uint8Array }
+export interface RecoveryInventory { cacheKey: string; update: Uint8Array; cacheMetadata: string }
+export interface RecoveryCapture { files: RecoveryFile[]; documents: RecoveryDocument[]; index: Uint8Array; inventories?: RecoveryInventory[] }
 export interface RecoveryIO {
 	mkdir(path: string): Promise<void>;
 	write(path: string, text: string): Promise<void>;
@@ -17,12 +18,15 @@ const equal = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => {
 };
 export function sameCapture(a: RecoveryCapture, b: RecoveryCapture): boolean {
 	return equal(a.index, b.index) && a.files.length === b.files.length && a.documents.length === b.documents.length
+		&& (a.inventories?.length ?? 0) === (b.inventories?.length ?? 0)
+		&& (a.inventories ?? []).every(d => (b.inventories ?? []).some(e => d.cacheKey === e.cacheKey && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)))
 		&& a.files.every(f => b.files.some(g => f.path === g.path && equal(f.bytes, g.bytes)))
 		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.cacheKey === e.cacheKey && d.text === e.text && d.unsaved === e.unsaved && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)));
 }
 
 function copyCapture(value: RecoveryCapture): RecoveryCapture {
 	return { files: value.files.map(file => ({ path: file.path, bytes: file.bytes.slice(0) })),
+		inventories: value.inventories?.map(inventory => ({ ...inventory, update: new Uint8Array(inventory.update) })),
 		documents: value.documents.map(doc => ({ ...doc, update: new Uint8Array(doc.update) })), index: new Uint8Array(value.index) };
 }
 
@@ -57,6 +61,12 @@ export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promi
 		addText(`${prefix}.txt`, doc.text);
 		if (doc.unsaved != null) addText(`${prefix}.unsaved.txt`, doc.unsaved);
 		if (doc.cacheMetadata !== undefined) addText(`${prefix}.cache.json`, doc.cacheMetadata);
+	}
+	for (const inventory of first.inventories ?? []) {
+		if (typeof inventory.cacheKey !== "string" || !/^relay-inventory-v1-[a-f0-9]{64}$/.test(inventory.cacheKey)) throw new Error("Recovery inventory has an unsafe cache key");
+		const prefix = `inventories/${inventory.cacheKey}`;
+		artifacts.push({ path: `${prefix}.yjs`, bytes: bytes(inventory.update) });
+		addText(`${prefix}.cache.json`, inventory.cacheMetadata);
 	}
 	artifacts.push({ path: "inventory.yjs", bytes: bytes(first.index) });
 	addText("recovery.json", metadataText);

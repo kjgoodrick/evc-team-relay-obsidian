@@ -1,4 +1,5 @@
 import { ManagedIndexTransport } from "./ManagedIndexTransport";
+import { restoreMetadata, type RestoreBinding } from "../collaboration/RestoreGeneration";
 import { AwarenessPublisher, type PresenceAvailability } from "./AwarenessPublisher";
 /**
  * WebSocket provider for a Yjs doc.
@@ -78,6 +79,8 @@ export type YSweetProviderParams = {
 	maxConnectionErrors?: number;
 	/** Recheck credentials immediately before opening any socket. */
 	beforeConnect?: () => boolean;
+	/** Explicit inventory selection, separate from the latest renewed grant. */
+	managedIndexBinding?: RestoreBinding;
 };
 
 export type ConnectionStatus =
@@ -413,6 +416,7 @@ export interface ConnectTrace {
 
 export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 	managedIndex?: ManagedIndexTransport;
+	private readonly managedIndexBinding?: RestoreBinding;
 	maxBackoffTime: number;
 	bcChannel: string;
 	url: string;
@@ -468,6 +472,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 			// good. Unbounded plus backoff is the safe default here.
 			maxConnectionErrors = Infinity,
 			beforeConnect = () => true,
+			managedIndexBinding,
 		}: YSweetProviderParams = {},
 	) {
 		super();
@@ -478,6 +483,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 
 		this.maxBackoffTime = maxBackoffTime;
 		this.beforeConnect = beforeConnect;
+		this.managedIndexBinding = managedIndexBinding === undefined ? undefined : Object.freeze(restoreMetadata(managedIndexBinding));
 		this.bcChannel = serverUrl + "/" + roomname;
 		this.url = serverUrl + "/" + roomname + "?" + url.encodeQueryParams(params);
 		this.roomname = roomname;
@@ -598,6 +604,7 @@ export class YSweetProvider extends ObservableV2<YSweetProviderEvents> {
 				() => { const parsed = new URL(this.url); const token = parsed.searchParams.get("token") ?? ""; parsed.search = ""; return { endpoint: parsed.toString(), token }; },
 				connected => { this.wsconnected = connected; this.synced = connected; this.emit("status", [this.connectionState]); },
 				error => this.emit("connection-error", [error as unknown as Event, this]),
+				this.managedIndexBinding,
 			);
 			this.managedIndex.start();
 			return;

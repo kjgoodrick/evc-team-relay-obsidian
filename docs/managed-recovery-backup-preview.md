@@ -103,6 +103,17 @@ matching source-cache catalog and each identity, so a newly created, removed or
 reassociated source cache makes the copy retryable; changed buffers and updates
 also fail verification. Unrelated caches are excluded without reading content.
 
+Matching generation-specific inventory caches are discovered in the same
+identity-only catalog pass. Each is saved separately as
+`inventories/<inventory-cache-name>.yjs` and `.cache.json`, preserving pending
+moves, activity, review state and raw custom metadata without merging it into
+the current `inventory.yjs`. `sourceCacheDiscovery.inventories` and the coverage
+description record what was found. Folder identities use their own format and
+namespace; source/document identities cannot masquerade as inventories. Their
+artifacts receive the same length/hash/readback and recapture verification, and
+unsafe or duplicate names are rejected before archive creation. New caches,
+identity changes or inventory edits during capture leave the review retryable.
+
 Coverage is explicit in `recovery.json`: unassociated/other-device caches,
 discussion drafts/outbox and Bases request queues/registry are not included.
 Their separate recovery exports remain necessary. This is a verified source copy,
@@ -116,7 +127,10 @@ association/context changes, unavailable catalogs, disk failures and
 retry. Dialog tests cover progress, success, errors and closing during a save.
 Multi-generation tests recover the Yjs histories independently, preserve separate
 buffers for the same document ID, and reject changed source catalogs, identities,
-editing histories, contexts and colliding/unsafe archive paths.
+editing histories, contexts and colliding/unsafe archive paths. Inventory cases
+independently restore each generation's records, activity and review, preserving
+the original inventory alongside them. Native/mobile acceptance of these new
+inventory namespaces is pending.
 
 Native/mobile filesystem acceptance remains pending. Capture still keeps the
 affected source data in memory; streaming and larger resumable archives remain

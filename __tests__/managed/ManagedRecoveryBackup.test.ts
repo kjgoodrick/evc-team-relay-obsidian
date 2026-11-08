@@ -17,7 +17,7 @@ import { platformFetch } from "../../src/platformFetch";
 import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
 import { RemoteFolderAddress, RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddress";
 import type { ManagedRestoreReview } from "../../src/client/ManagedIndexTransport";
-import { openSourceDocumentCache, sourceDocumentCache } from "../../src/storage/source-document-cache";
+import { openSourceDocumentCache, sourceDocumentCache, openSourceInventoryCache, sourceInventoryCache } from "../../src/storage/source-document-cache";
 import { SOURCE_CACHE_IDENTITY } from "../../src/storage/document-cache-binding";
 import { readManagedSource } from "../../src/client/readManagedSource";
 import type { ManagedRestoreInspection } from "../../src/client/ManagedIndexTransport";
@@ -120,7 +120,7 @@ test.each(["../escape", "/absolute", "C:/absolute", "Team/../escape", "Team\\esc
 	expect(await fs.readdir(root)).toEqual([]);
 });
 
-test.each(["identity", "file collision", "identity collision", "directory collision", "source cache key", "source collision"])("invalid capture %s cannot overwrite another recovery item", async kind => {
+test.each(["identity", "file collision", "identity collision", "directory collision", "source cache key", "source collision", "inventory key", "inventory collision"])("invalid capture %s cannot overwrite another recovery item", async kind => {
 	const state = capture();
 	if (kind === "identity") state.documents[0].id = "../escape";
 	if (kind === "file collision") state.files.push({ ...state.files[0], path: "team/local.md" });
@@ -129,6 +129,11 @@ test.each(["identity", "file collision", "identity collision", "directory collis
 	if (kind === "source cache key") state.documents[0].cacheKey = "../escape";
 	if (kind === "source collision") {
 		state.documents[0].cacheKey = "relay-source-v1-" + "a".repeat(64); state.documents.push({ ...state.documents[0] });
+	}
+	if (kind === "inventory key") state.inventories = [{ cacheKey: "../escape", update: state.index, cacheMetadata: "{}" }];
+	if (kind === "inventory collision") {
+		const inventory = { cacheKey: "relay-inventory-v1-" + "a".repeat(64), update: state.index, cacheMetadata: "{}" };
+		state.inventories = [inventory, { ...inventory }];
 	}
 	await expect(prepareRecoveryBackup(io(), async () => state, {})).rejects.toThrow();
 	expect(await fs.readdir(root)).toEqual([]);
@@ -386,6 +391,7 @@ test("paused-share archive preserves original and multiple restored histories wi
 	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress;
 	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: "test-server", controlPlaneUrl: "https://fixture.test", check: s.checkAuth });
 	const descriptors = [];
+	const inventories = [];
 	for (const label of ["first restored generation", "second restored generation"]) {
 		const identity = { hostAppId: s.host, serverId: "test-server", controlPlaneUrl: "https://fixture.test",
 			s3rn: ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, address.folderGuid, s.note.id)), restoreGeneration: crypto.randomUUID() };
@@ -393,6 +399,12 @@ test("paused-share archive preserves original and multiple restored histories wi
 		doc.getText("contents").insert(0, label); await store.close(); doc.destroy();
 		await s.share.unsavedStore.persistUnsaved(descriptor.bufferKey, label + " unsaved");
 		descriptors.push({ ...descriptor, label });
+		const inventoryIdentity = { ...identity, s3rn: ResourceAddress.serialize(address) };
+		const index = new Y.Doc(), inventory = await openSourceInventoryCache(inventoryIdentity, index);
+		index.getMap("filemeta_v0").set(label + ".md", s.note); index.getMap("docactivity_v0").set(s.note.id, label);
+		index.getMap("managed_base_v1").set("restoreReview", { label });
+		await inventory.markRestoreReview(); await inventory.close(); index.destroy();
+		inventories.push({ ...await sourceInventoryCache(inventoryIdentity), label });
 	}
 	const folder = await s.share.saveManagedRestoreRecoveryCopy();
 	expect(await fs.readFile(path.join(root, folder, `documents/${s.note.id}.txt`), "utf8")).toBe("OFFLINE EDIT IN INDEXEDDB");
@@ -403,26 +415,44 @@ test("paused-share archive preserves original and multiple restored histories wi
 		const recovered = new Y.Doc(); Y.applyUpdate(recovered, await fs.readFile(prefix + ".yjs"));
 		expect(recovered.getText("contents").toString()).toBe(descriptor.label); recovered.destroy();
 	}
+	for (const inventory of inventories) {
+		const prefix = path.join(root, folder, `inventories/${inventory.name}`), recovered = new Y.Doc();
+		Y.applyUpdate(recovered, await fs.readFile(prefix + ".yjs"));
+		expect(recovered.getMap("filemeta_v0").get(inventory.label + ".md")).toEqual(s.note);
+		expect(recovered.getMap("docactivity_v0").get(s.note.id)).toBe(inventory.label);
+		expect(recovered.getMap("managed_base_v1").get("restoreReview")).toEqual({ label: inventory.label }); recovered.destroy();
+		const cache = JSON.parse(await fs.readFile(prefix + ".cache.json", "utf8"));
+		expect(cache.custom).toEqual(expect.arrayContaining([
+			expect.objectContaining({ key: { type: "string", value: SOURCE_CACHE_IDENTITY }, value: { type: "string", value: inventory.identity } }),
+			expect.objectContaining({ key: { type: "string", value: "restoreReviewRequired" } }),
+		]));
+	}
 	const metadata = JSON.parse(await fs.readFile(path.join(root, folder, "recovery.json"), "utf8"));
-	expect(metadata.sourceCacheDiscovery.documents).toHaveLength(2); expect(fetchMock).not.toHaveBeenCalled();
+	expect(metadata.sourceCacheDiscovery.documents).toHaveLength(2); expect(metadata.sourceCacheDiscovery.inventories).toHaveLength(2);
+	expect(fetchMock).not.toHaveBeenCalled();
 	expect(s.transport.restoreReview).toEqual(s.review);
 });
 
-test.each(["identity", "edit", "context", "new cache"])("a source %s changing during archive leaves review retryable", async change => {
+test.each(["source", "inventory"].flatMap(kind => ["identity", "edit", "context", "new cache"].map(change => [kind, change])))("a %s %s changing during archive leaves review retryable", async (kind, change) => {
 	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress;
 	let invalidated = false;
 	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: "test-server", controlPlaneUrl: "https://fixture.test", check: () => { if (invalidated) throw new Error("Source context changed"); } });
 	const identity = { hostAppId: s.host, serverId: "test-server", controlPlaneUrl: "https://fixture.test",
-		s3rn: ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, address.folderGuid, s.note.id)), restoreGeneration: crypto.randomUUID() };
-	const doc = new Y.Doc(), store = await openSourceDocumentCache(identity, doc); cleanup.push(async () => { await store.close(); doc.destroy(); });
+		s3rn: ResourceAddress.serialize(kind === "inventory" ? address : new RemoteDocumentAddress(address.relayGuid, address.folderGuid, s.note.id)), restoreGeneration: crypto.randomUUID() };
+	const open = kind === "inventory" ? openSourceInventoryCache : openSourceDocumentCache;
+	const doc = new Y.Doc(), store = await open(identity, doc); cleanup.push(async () => { await store.close(); doc.destroy(); });
 	doc.getText("contents").insert(0, "retained source"); await store.set("path", "Note.md");
 	const write = s.vault.adapter.writeBinary; let changed = false;
 	s.vault.adapter.writeBinary = async (p, bytes) => {
 		await write(p, bytes); if (changed) return; changed = true;
 		if (change === "context") { invalidated = true; return; }
-		if (change === "edit") { doc.getText("contents").insert(0, "later "); await store.set("path", "Note.md"); return; }
+		if (change === "edit") {
+			if (kind === "inventory") doc.getMap("filemeta_v0").set("Later.md", s.note);
+			else doc.getText("contents").insert(0, "later ");
+			await store.set("path", "Note.md"); return;
+		}
 		if (change === "new cache") {
-			const newer = new Y.Doc(), created = await openSourceDocumentCache({ ...identity, restoreGeneration: crypto.randomUUID() }, newer);
+			const newer = new Y.Doc(), created = await open({ ...identity, restoreGeneration: crypto.randomUUID() }, newer);
 			newer.getText("contents").insert(0, "new retained generation"); await created.close(); newer.destroy(); return;
 		}
 		await new Promise<void>((resolve, reject) => {
