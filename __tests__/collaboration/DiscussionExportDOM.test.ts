@@ -48,3 +48,18 @@ test("closing or changing the saved view invalidates the writer and drops late c
 	expect(current()).toBe(true); f.invalidate(); expect(current()).toBe(false); expect(f.listeners.size).toBe(0);
 	finish("late-copy"); await settle(); expect(f.modal.contentEl.childElementCount).toBe(0);
 });
+
+test("scope selector switches to shared-folder export and disables both selectors during capture", async () => {
+	const f = fixture(); f.modal.onClose();
+	const session = { ...f.session, canExportCollection: true, saveDiscussionCollection: jest.fn<ReturnType<DiscussionSession["saveDiscussionCollection"]>, Parameters<DiscussionSession["saveDiscussionCollection"]>>(async () => "Collection") };
+	const modal = new DiscussionExportModal({} as App, session as unknown as DiscussionSession, id(3), "Current note", () => true, f.disk.io);
+	try {
+		modal.onOpen(); const select = modal.contentEl.querySelector("select")!, button = modal.contentEl.querySelector("button")!;
+		select.value = "folder"; select.dispatchEvent(new Event("change"));
+		expect(modal.contentEl.textContent).toContain("256 discussion scopes");
+		button.click(); expect(select.disabled).toBe(true); await settle();
+		expect(session.saveDiscussionCollection).toHaveBeenCalledWith(f.disk.io, expect.any(Function), true, expect.any(Function));
+		expect(session.saveDiscussionExport).not.toHaveBeenCalled();
+		expect(modal.contentEl.textContent).toContain("saved to Collection");
+	} finally { modal.onClose(); }
+});

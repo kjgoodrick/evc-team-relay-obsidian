@@ -735,3 +735,21 @@ test("export stops across authentication loss, even when access returns before t
 		expect(disk.folders).toHaveLength(0);
 	} finally { await f.close(); }
 });
+
+test("whole-folder export needs no open note and shares the session concurrency bound", async () => {
+	const { exportDisk, exportFixture } = await import("../mocks/DiscussionExport");
+	const store = await DiscussionStore.open(identity, new IDBFactory()), transport = remote(), disk = exportDisk();
+	const catalog = { format: "team-relay-discussion-export-catalog", version: 1, catalog_id: id(80), captured_at: exportFixture().captured_at,
+		exporter_id: identity.accountId, share_id: identity.shareId, collaboration_epoch: null, sequence: 0, scopes: [] };
+	Object.assign(transport, { exportCatalog: jest.fn(async () => catalog) });
+	transport.capabilities.mockResolvedValue({ discussions: true, export: true, exportCatalog: true } as never);
+	const session = new DiscussionSession(store, transport as unknown as DiscussionTransport);
+	try {
+		await session.start(); expect(session.canExportCollection).toBe(true);
+		const path = await session.saveDiscussionCollection(disk.io, () => true, false);
+		expect(disk.texts.has(path + "/COMPLETE.json")).toBe(true); expect(transport.permissions).not.toHaveBeenCalled();
+		expect(transport.send).not.toHaveBeenCalled(); expect(transport.sendOnline).not.toHaveBeenCalled();
+		const saving = session.saveDiscussionCollection(disk.io, () => true, false);
+		await expect(session.saveDiscussionCollection(disk.io, () => true, false)).rejects.toThrow("Another"); await saving;
+	} finally { await session.close(); }
+});

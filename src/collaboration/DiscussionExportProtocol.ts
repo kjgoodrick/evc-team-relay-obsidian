@@ -115,3 +115,28 @@ export function parseDiscussionExport(value: unknown, identity: ExportRequestIde
 		view_id: scope.viewId ?? null, collaboration_epoch: value.collaboration_epoch as string | null, sequence: value.sequence,
 		includes: { message_history: true, anchor_history: true, picture_bytes: false, removed_content: false }, records };
 }
+
+export type ExportCatalogScope = { scope_id: string; entry_id: string; path: string; kind: "note" | "image" | "base";
+	view_id: string | null; view_name: string | null; view_state: "active" | "archived" | null };
+export type DiscussionExportCatalog = { format: "team-relay-discussion-export-catalog"; version: 1; catalog_id: string;
+	captured_at: string; exporter_id: string; share_id: string; collaboration_epoch: string | null; sequence: number; scopes: ExportCatalogScope[] };
+export const DISCUSSION_EXPORT_CATALOG_MAX_BYTES = 2 * 1024 * 1024;
+export function parseExportCatalog(value: unknown, identity: { accountId: string; shareId: string }): DiscussionExportCatalog {
+	need(isRecord(value) && value.format === "team-relay-discussion-export-catalog" && value.version === 1 && isId(value.catalog_id) &&
+		time(value.captured_at) && value.exporter_id === identity.accountId && isId(identity.accountId) && value.share_id === identity.shareId && isId(identity.shareId) &&
+		nullableId(value.collaboration_epoch) && isSequence(value.sequence) && Array.isArray(value.scopes) && value.scopes.length <= 256 &&
+		new TextEncoder().encode(JSON.stringify(value)).byteLength <= DISCUSSION_EXPORT_CATALOG_MAX_BYTES);
+	let previous = ""; const identities = new Map<string, string>();
+	const scopes = value.scopes.map((row: unknown): ExportCatalogScope => {
+		need(isRecord(row) && isId(row.scope_id) && isId(row.entry_id) && typeof row.path === "string" && row.path.length > 0 && row.path.length <= 4096 &&
+			["note", "image", "base"].includes(String(row.kind)));
+		need(row.kind === "base" ? isId(row.view_id) && typeof row.view_name === "string" && row.view_name.length > 0 && row.view_name.length <= 512 &&
+			["active", "archived"].includes(String(row.view_state)) : row.view_id === null && row.view_name === null && row.view_state === null);
+		const key = row.entry_id + ":" + (row.view_id ?? ""); need(key > previous); previous = key;
+		need(!identities.has(row.scope_id) || identities.get(row.scope_id) === row.entry_id); identities.set(row.scope_id, row.entry_id);
+		return { scope_id: row.scope_id, entry_id: row.entry_id, path: row.path, kind: row.kind as ExportCatalogScope["kind"],
+			view_id: row.view_id as string | null, view_name: row.view_name as string | null, view_state: row.view_state as ExportCatalogScope["view_state"] };
+	});
+	return { format: "team-relay-discussion-export-catalog", version: 1, catalog_id: value.catalog_id, captured_at: value.captured_at,
+		exporter_id: identity.accountId, share_id: identity.shareId, collaboration_epoch: value.collaboration_epoch as string | null, sequence: value.sequence, scopes };
+}

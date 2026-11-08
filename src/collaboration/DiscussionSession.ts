@@ -1,4 +1,4 @@
-import { saveDiscussionExport } from "./DiscussionExport";
+import { saveDiscussionExport, saveDiscussionCollection } from "./DiscussionExport";
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
 import { baseRecordIds, parseBaseRecordContexts, type BaseRecordContexts } from "./BaseRecordContexts";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
@@ -83,6 +83,7 @@ export class DiscussionSession {
 	private inboxEnabled = false;
 	private searchEnabled = false;
 	private exportEnabled = false;
+	private exportCatalogEnabled = false;
 	private exporting = false;
 	private reattachEnabled = false;
 	private reattachments: DiscussionReattachment;
@@ -159,6 +160,20 @@ export class DiscussionSession {
 			}).finally(() => { stop(); this.exporting = false; }));
 	}
 
+	async saveDiscussionCollection(io: LocalWorkIO, visible: () => boolean, includePictures = true, progress?: (text: string) => void): Promise<string> {
+		if (!this.canExportCollection) throw new Error("Connect to a server with shared-folder discussion export enabled.");
+		if (this.exporting) throw new Error("Another discussion export is running. Wait for it to finish.");
+		const epoch = this.authenticationEpoch;
+		let valid = true;
+		const current = () => valid && visible() && this.canExportCollection && epoch === this.authenticationEpoch;
+		const stop = this.onChange(() => { if (!current()) valid = false; }); this.exporting = true;
+		return this.trackLocal(saveDiscussionCollection(this.transport, this.transport.identity, io, current, includePictures, progress)
+			.catch(error => {
+				if (!this.closed && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				throw error;
+			}).finally(() => { stop(); this.exporting = false; }));
+	}
+
 	async releaseLocalWorkRecovery(id: string): Promise<void> {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		if (!await this.trackLocal(this.store.releaseLocalWork(id))) throw new Error("The retained capture changed in another window. Refresh before reviewing it.");
@@ -183,6 +198,7 @@ export class DiscussionSession {
 	get status(): SessionStatus { return this.statusValue; }
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
+	get canExportCollection(): boolean { return this.canExport && this.exportCatalogEnabled; }
 	get canExport(): boolean { return this.online && this.exportEnabled; }
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
 	get canReattach(): boolean { return this.online && this.reattachEnabled; }
@@ -298,6 +314,7 @@ export class DiscussionSession {
 			this.inboxEnabled = capability.inbox === true;
 			this.searchEnabled = capability.search === true;
 			this.exportEnabled = capability.export === true;
+			this.exportCatalogEnabled = capability.exportCatalog === true;
 			this.reattachEnabled = capability.reattach === true;
 			this.baseKinds = capability.baseTargets ?? [];
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];

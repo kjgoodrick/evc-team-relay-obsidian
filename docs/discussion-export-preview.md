@@ -1,7 +1,8 @@
 # Shared discussion archive preview
 
 November 7, 2026. The comments sidebar can export posted discussions for the
-current note, directly opened image, or explicitly selected saved Bases view.
+current note, directly opened image, explicitly selected saved Bases view, or
+all readable discussion scopes in the shared folder.
 Read permission is sufficient. The server must advertise `discussion_export`
 (`COLLABORATION_EXPORT_ENABLED`, independently disabled by default).
 
@@ -75,7 +76,57 @@ may materialize the response before the plugin can inspect its length.
 Server contract, locks and PostgreSQL measurements:
 [server export preview](../../evc-team-relay/docs/discussion-export-preview.md).
 
-Share-wide collection, resumable/paged larger archives, reviewed import, coherent
+Resumable/paged larger archives, reviewed import, coherent
 service backup/restore and physical mobile/resource acceptance remain unfinished.
 This is a portable discussion copy, not a coherent service backup or an outbox.
 No migration, production deployment or live-vault installation is included.
+
+
+## Whole-folder collections
+
+Servers advertising `discussion_export_catalog` allow the dialog's **Export
+scope** selector to include all readable discussions in the shared folder.
+**Open comment storage → Export shared-folder discussions** also works with no
+active note. The operation uses the same account/session concurrency guard as
+single-scope export and does not send, edit, discard or replay local work.
+
+A read-locked catalog lists only scopes with a readable nonremoved thread. Bases
+views are separate entries, including authorized archived views; hidden record
+or formula dependencies do not reveal a scope's name/path. Catalog rows are
+bounded, ordered, unique and tied to account/share/scope/file/view identities.
+The client freezes that inventory before beginning the sequential captures.
+Each scope is reauthorized; its scope identity, kind, server epoch and sequence
+must agree with the catalog boundary. Renames may update captured paths without
+reinterpreting identity. Denied/disappearing scopes stop completion instead of
+being silently omitted.
+
+The collection folder contains `catalog.json`, a README, individual verified
+scope archives, and a collection manifest/completion marker. Its manifest binds
+the inventory and each child's verified completion bytes/hash. A failed later
+scope can leave usable earlier child archives, but no complete collection.
+Retries create a new folder. Inventory capture and per-scope snapshots have
+separate times and sequences; concurrent edits can appear in later snapshots,
+and new scopes created after the catalog are outside that inventory. The format
+explicitly records `atomic: false`; this is not a coherent service backup.
+
+Limits: 256 scopes, 10,000 catalog scan rows, 64 MiB total written text metadata,
+250 MiB selected picture files per collection and the existing 100 MiB per-scope
+picture limit. All child files use generated names. Larger/resumable collection
+support remains future work; no unbounded or silently partial export is added.
+
+Updated validation: **137 focused client tests** pass, and the full suite passes
+**3,378 tests / 254 suites**, with 29 tests / 20 opt-in suites skipped. Build/main
+types pass with 15 existing warnings; frozen test types remain at 206/45 with no
+new errors. Changed-source lint and whitespace checks pass. **24 server export/
+catalog tests** cover current/archived views, exact target restrictions, no writes,
+limits and removed content. PostgreSQL additionally proves catalog encoding
+finishes before a waiting discussion writer commits. Actual HTTP/MinIO/filesystem
+collection export verifies two scope archives and picture/completion hashes.
+
+Native Obsidian 1.13.7 exports from the storage panel with no note open. The
+collection contains one note with two revisions and separate Table and Timeline
+view archives, each with its own discussion. Collection/child completion,
+manifest and file hashes/lengths all verify; both source-file hashes are unchanged.
+The disposable vault is closed, the original window restored and API/relay
+processes stopped. Native large/interrupted/picture/mobile collection acceptance
+and reviewed import remain outstanding.

@@ -1,4 +1,4 @@
-import { DISCUSSION_EXPORT_MAX_BYTES, parseDiscussionExport } from "./DiscussionExportProtocol";
+import { DISCUSSION_EXPORT_MAX_BYTES, DISCUSSION_EXPORT_CATALOG_MAX_BYTES, parseDiscussionExport, parseExportCatalog } from "./DiscussionExportProtocol";
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { baseRecordIds, parseBaseRecordContexts } from "./BaseRecordContexts";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
@@ -189,11 +189,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; export?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -232,10 +232,18 @@ export class DiscussionTransport implements DiscussionSender {
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
 			...(formulaGroups === undefined ? {} : { baseFormulaGroups: formulaGroups === true && baseTargets.includes("group") }),
 			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
+			...(value.features.discussion_export_catalog === undefined ? {} : { exportCatalog: value.features.discussion_commands && value.features.discussion_export === true && value.features.discussion_export_catalog === true }),
 			...(value.features.discussion_export === undefined ? {} : { export: value.features.discussion_commands && value.features.discussion_export === true }),
 			...(value.features.discussion_search === undefined ? {} : { search: value.features.discussion_commands && value.features.discussion_search === true }),
 			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
 	}
+	async exportCatalog(current?: () => boolean) {
+		const value = await this.request(`/shares/${this.identity.shareId}/export-catalog`, undefined,
+			{ responseLimit: DISCUSSION_EXPORT_CATALOG_MAX_BYTES, boundedText: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, item => parseExportCatalog(item, this.identity));
+	}
+
 	async exportSnapshot(scopeId: string, current?: () => boolean) {
 		const scope = parseDiscussionScope(scopeId);
 		if (!scope) throw new DiscussionFailure("reject", "invalid_local_target");

@@ -1,3 +1,4 @@
+import { DiscussionExportModal } from "./DiscussionExport";
 import { Modal, type App } from "obsidian";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { DiscussionStorageUsage } from "../storage/CachePolicy";
@@ -13,6 +14,8 @@ const size = (bytes: number) => `${(bytes / mib).toLocaleString(undefined, { max
  * originals have independent ownership and are never disposable cache data. */
 export class CommentStorageModal extends Modal {
 	private work?: CommentLocalWorkModal;
+	private archive?: DiscussionExportModal;
+	private archiveButton?: HTMLButtonElement;
 	private live = true;
 	private busy = false;
 	private loading = false;
@@ -34,7 +37,7 @@ export class CommentStorageModal extends Modal {
 	private retained?: LocalWorkSummary;
 	constructor(app: App, private session: DiscussionSession, private context: () => boolean, private recoveryIO?: LocalWorkIO) { super(app); }
 	private current = () => this.live && this.context() && this.session.status !== "closed";
-	validate(): void { if (this.live && !this.current()) this.close(); else this.work?.validate(); }
+	validate(): void { if (this.live && !this.current()) this.close(); else { this.work?.validate(); this.archive?.validate(); } }
 	async onOpen(): Promise<void> {
 		this.setTitle("Comment storage on this device");
 		this.contentEl.createEl("p", { text: "Applies to this shared folder in this vault for the signed-in account. Saved drafts, queued changes and their original pictures are retained separately from downloaded pictures." });
@@ -43,6 +46,13 @@ export class CommentStorageModal extends Modal {
 			if (!this.current()) return;
 			this.work?.close(); this.work = new CommentLocalWorkModal(this.app, this.session, this.context); this.work.open();
 		};
+		this.archiveButton = this.contentEl.createEl("button", { text: "Export shared-folder discussions", attr: { type: "button" } });
+		this.archiveButton.onclick = () => {
+			if (!this.current() || !this.session.canExportCollection) return;
+			this.archive?.close();
+			this.archive = new DiscussionExportModal(this.app, this.session, undefined, "This shared folder", this.current, this.recoveryIO); this.archive.open();
+		};
+
 		this.summary = this.contentEl.createDiv();
 		this.status = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
 		const label = this.contentEl.createEl("label", { text: "Downloaded picture limit " });
@@ -77,6 +87,7 @@ export class CommentStorageModal extends Modal {
 	}
 	private controls(): void {
 		if (!this.live) return;
+		if (this.archiveButton) this.archiveButton.disabled = !this.session.canExportCollection;
 		if (this.limit) this.limit.disabled = this.busy || !this.usage;
 		if (this.save) this.save.disabled = this.busy || !this.usage || !this.dirty;
 		if (this.clear) this.clear.disabled = this.busy || !this.usage?.cachedPictures;
@@ -141,7 +152,7 @@ export class CommentStorageModal extends Modal {
 		finally { this.busy = false; if (this.current()) { await this.refresh(); this.controls(); } }
 	}
 	onClose(): void {
-		this.live = false; this.work?.close(); this.work = undefined; this.stop?.(); this.stop = undefined;
+		this.live = false; this.archive?.close(); this.archive = undefined; this.work?.close(); this.work = undefined; this.stop?.(); this.stop = undefined;
 		if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearTimeout(this.timer);
 		this.timer = undefined; this.contentEl.empty();
 	}

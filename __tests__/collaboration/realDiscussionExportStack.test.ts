@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
-import { saveDiscussionExport } from "../../src/collaboration/DiscussionExport";
+import { saveDiscussionExport, saveDiscussionCollection } from "../../src/collaboration/DiscussionExport";
 import { parseDiscussionExport } from "../../src/collaboration/DiscussionExportProtocol";
 import { bodyFromText, protocolJson, type MessageBody } from "../../src/collaboration/DiscussionProtocol";
 import { pictureHash } from "../../src/collaboration/PictureProtocol";
@@ -15,7 +15,7 @@ import type { LocalWorkIO } from "../../src/collaboration/LocalWorkRecovery";
 const fixturePath = process.env.EVC_EXPORT_FIXTURE;
 const integration = fixturePath ? test : test.skip;
 integration("real read-only archive keeps history/pictures, excludes removed bodies and denies revoked downloads", async () => {
-	const f = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string; picturePath?: string };
+	const f = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string; picturePath?: string; secondEntry: string };
 	if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(f.base)) throw new Error("Only the disposable loopback fixture is allowed");
 	const identity = { serverId: f.base, shareId: f.share, accountId: f.reviewer, scopeId: f.entry };
 	const reader = new DiscussionTransport(identity, async () => ({ accountId: f.reviewer, accessToken: f.token }), fetch);
@@ -41,6 +41,8 @@ integration("real read-only archive keeps history/pictures, excludes removed bod
 		await owner.send({ operationId: randomUUID(), scopeId: f.entry, type: "reply.create", dependsOn: [], payload: {
 			type: "reply.create", thread_id: thread, message_id: reply, body: protocolJson(bodyFromText("Removed private reply")) } });
 		await owner.sendOnline({ operationId: randomUUID(), scopeId: f.entry, payload: { type: "message.delete", thread_id: thread, message_id: reply, expected_revision: 1, reason: "Private moderation reason" } });
+		await owner.send({ operationId: randomUUID(), scopeId: f.secondEntry, type: "thread.create", dependsOn: [], payload: {
+			type: "thread.create", thread_id: randomUUID(), message_id: randomUUID(), anchor: { type: "note", version: 1 }, body: protocolJson(bodyFromText("Second scope")) } });
 		const before = await policy.read();
 		await policy.save(before, { file_rules: [{ user_id: f.reviewer, path: "", recursive: true, permission: "read" }], comment_rules: [] });
 		expect(await reader.permissions(f.entry)).toMatchObject({ read: true, comment: false }); expect((await reader.capabilities()).export).toBe(true);
@@ -55,6 +57,14 @@ integration("real read-only archive keeps history/pictures, excludes removed bod
 			expect(bytes.byteLength).toBe(file.size); expect(await pictureHash(bytes)).toBe(file.sha256);
 		}
 		expect(complete.manifestSha256).toBe(await pictureHash(new TextEncoder().encode(await io.read(path + "/manifest.json")).buffer));
+
+		const collection = await saveDiscussionCollection(reader, identity, io, () => true, !!f.picturePath);
+		const collectionManifest = JSON.parse(await io.read(collection + "/manifest.json"));
+		expect(collectionManifest.scopes).toHaveLength(2);
+		for (const scope of collectionManifest.scopes) {
+			const completion = await io.read(`${collection}/${scope.folder}/COMPLETE.json`);
+			expect(await pictureHash(new TextEncoder().encode(completion).buffer)).toBe(scope.completionSha256);
+		}
 		if (f.picturePath) {
 			expect(manifest.files.filter((file: { picture_id?: string }) => file.picture_id === picture)).toHaveLength(1);
 			const interrupted = { exportSnapshot: async (scopeId: string) => {
@@ -66,7 +76,7 @@ integration("real read-only archive keeps history/pictures, excludes removed bod
 			let completeCount = 0; for (const folder of folders) {
 				if ((await readdir(join(root, path.split("/")[0], folder))).includes("COMPLETE.json")) completeCount++;
 			}
-			expect(completeCount).toBe(1); await expect(reader.exportSnapshot(f.entry)).rejects.toMatchObject({ status: 404 });
+			expect(completeCount).toBe(2); await expect(reader.exportSnapshot(f.entry)).rejects.toMatchObject({ status: 404 });
 		}
 		const removed = await owner.exportSnapshot(f.entry);
 		expect(JSON.stringify(removed)).not.toMatch(/Removed private reply|Private moderation reason/);
