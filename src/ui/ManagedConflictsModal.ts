@@ -2,17 +2,26 @@ import { App, Modal, Notice, Setting } from "obsidian";
 import type { VaultShare } from "../VaultShare";
 import { CONFLICTS, select, type StructuralConflict } from "../client/managedRecovery";
 import { RECOVERY_FOLDER } from "../conflictCopyPath";
+import type { ManagedRestoreReview } from "../client/ManagedIndexTransport";
 
 export class ManagedConflictsModal extends Modal {
 	private busy = false;
 	private error = "";
 	private readonly changed = () => { if (!this.busy) this.render(); };
 	constructor(app: App, private share: VaultShare) { super(app); }
-	onOpen(): void { this.contentEl.addClass("evc-managed-conflicts"); this.share.crdtDoc.getMap(CONFLICTS).observe(this.changed); this.render(); }
-	onClose(): void { this.share.crdtDoc.getMap(CONFLICTS).unobserve(this.changed); this.contentEl.empty(); }
+	onOpen(): void { this.contentEl.addClass("evc-managed-conflicts"); this.share.crdtDoc.getMap(CONFLICTS).observe(this.changed); this.share.crdtDoc.getMap("managed_base_v1").observe(this.changed); this.render(); }
+	onClose(): void { this.share.crdtDoc.getMap(CONFLICTS).unobserve(this.changed); this.share.crdtDoc.getMap("managed_base_v1").unobserve(this.changed); this.contentEl.empty(); }
 	private render(): void {
 		this.contentEl.empty();
 		this.contentEl.createEl("h2", { text: "File and folder conflicts" });
+		const restore = this.share.crdtDoc.getMap<ManagedRestoreReview>("managed_base_v1").get("restoreReview");
+		if (restore) {
+			this.contentEl.createEl("h3", { text: "Shared folder restored" });
+			this.contentEl.createEl("p", { text: "Synchronization is paused for this shared folder. Local files, pending inventory changes and the previous inventory are retained. Ordinary conflict choices cannot resume synchronization after a restore." });
+			this.contentEl.createEl("p", { text: `${Object.keys(restore.local).length} local inventory entries were retained when the restore was detected. Further local edits stay on this device.` });
+			this.contentEl.createEl("p", { text: "Keep this local copy until recovery of the restored share is complete." });
+			return;
+		}
 		this.contentEl.createEl("p", { text: `Unrelated files continue syncing. Disputed files stay on this device until you choose. Each decision first saves file contents and local editing history under “${RECOVERY_FOLDER}”. These recovery files never sync.` });
 		if (this.error) this.contentEl.createEl("p", { text: this.error, cls: "mod-warning" });
 		const index = this.share._liveProvider.managedIndex;

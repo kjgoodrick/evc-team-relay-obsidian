@@ -60,3 +60,13 @@ test("a failed decision stays visible and buttons cannot start a second concurre
 	expect(doc.getMap(CONFLICTS).size).toBe(1);
 	expect([...modal.contentEl.querySelectorAll("button")].every(b => !b.disabled)).toBe(true); close();
 });
+
+test("restore review explains the share-wide pause and offers no ordinary layout replay", () => {
+	const s = fixture(); try {
+		s.doc.getMap("managed_base_v1").set("restoreReview", { id: "restore", local: s.conflict.local });
+		expect(s.modal.contentEl.textContent).toContain("Shared folder restored");
+		expect(s.modal.contentEl.textContent).toContain("Synchronization is paused");
+		expect(s.modal.contentEl.textContent).toContain("1 local inventory entries");
+		expect(s.modal.contentEl.querySelector("button")).toBeNull(); expect(s.resolve).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});

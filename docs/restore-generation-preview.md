@@ -1,7 +1,8 @@
 # Restore-generation client foundation
 
 This is a tested discussion-command, picture-upload, group-capture, inbox and
-timeline-marker, permission, Bases-content and saved-view restore guard, not a complete restore workflow.
+timeline-marker, permission, Bases-content, saved-view and inventory restore guard,
+not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
@@ -172,8 +173,8 @@ are documented in [the Bases implementation](../src/bases/README.md#restore-gene
 The actual restored HTTP scenario exercises explicit initialization review,
 lost acceptance/reopening/exact retry, older pending work, and historical receipt
 inspection. PostgreSQL verifies publication and withdrawal waiting across a
-restore both reject before receipt/content changes. Inventory mutation guards
-and full restored-work reconciliation remain.
+restore both reject before receipt/content changes. Full restored-work
+reconciliation remains.
 
 Saved-view repair binding and registry cache version 2 are documented in
 [the saved-view contract](../src/bases/README.md#saved-view-restore-binding).
@@ -184,3 +185,26 @@ The read-only repair receipt control preserves old intent without requiring
 synchronized source bytes or sending a mutation. The actual HTTP suite covers
 old-request rejection and fresh bound lost-response retry; PostgreSQL verifies
 waiting repair/replay restore rejection and read-only receipt authorization.
+
+## Inventory preservation
+
+Managed manifests and claims advertise the restore context. Batch/activity saves,
+automatic conflict retries, reviewed layout decisions and claims retain their
+original binding outside the canonical body. A known restored client preflights
+its next batch/claim before writing to a potentially downgraded server. Claims
+freeze their body before waiting behind another exchange; Bases acknowledgments
+also carry the original pending binding. Fresh empty clients may join a restored
+share; older or unproven local work is held for review.
+
+The private folder Y.Doc retains a `managed_base_v1.restoreReview` record with
+the previous and observed inventory plus the local records/activity at detection.
+Existing file metadata, conflicts and activity remain intact, including later
+local edits. A restored inventory cannot trigger automatic conflict rebasing,
+claim adoption or source-metadata acknowledgment. Read/write authority is withheld
+for inventory consumers, retries stop, and reopening reports the retained pause.
+The conflict dialog explains why ordinary layout choices cannot resume it.
+
+This checkpoint has no safe-resume or discard operation. Full inventory/CRDT/file
+reconciliation, verified byte recovery, minimum client versions, native acceptance
+and coordinated restore remain unfinished. The metadata record does not by itself
+back up source bytes, fence an older plugin cache worker or drain document sockets.

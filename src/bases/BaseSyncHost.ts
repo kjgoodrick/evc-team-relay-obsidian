@@ -143,13 +143,13 @@ export class BaseSyncHost extends Component {
 					publish: async (entryId, pending) => {
 						const accepted = await transport.publish(entryId, pending);
 						await store.requireBinding(entryId, pending);
-						if (slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, accepted.state);
+						if (slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, accepted.state, pending);
 						return accepted;
 					},
 					withdraw: async (entryId, pending) => {
 						const receipt = await transport.withdraw(entryId, pending);
 						await store.requireBinding(entryId, pending);
-						if (receipt.status === "accepted" && slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, receipt.result.state);
+						if (receipt.status === "accepted" && slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, receipt.result.state, pending);
 						return receipt;
 					},
 				}, lock); this.scan();
