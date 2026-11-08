@@ -171,7 +171,7 @@ test("version-1 upgrade preserves drafts/outbox and adds scope cleanup without t
 	} finally { store.close(); other.close(); }
 });
 
-test.each([19, 23])("version-%s upgrade preserves existing work and fences older clients", async version => {
+test.each([19, 23, 24])("version-%s upgrade preserves existing work and fences older clients", async version => {
 	const factory = new IDBFactory();
 	const opening = jest.spyOn(factory, "open").mockImplementationOnce(name => IDBFactory.prototype.open.call(factory, name, version));
 	const old = await DiscussionStore.open(identity, factory); opening.mockRestore();

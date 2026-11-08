@@ -5,7 +5,7 @@ import { sha256Hex } from "../contentDigest";
 import type { NativeBaseGroupHandle, NativeBaseGroupTarget } from "../bases/NativeBasesSurface";
 import { nativeBaseGroupValueKey, type NativeGroupLinkResolver } from "../bases/NativeBaseGroupValue";
 import type { BaseCommentContext } from "./BaseCommentContext";
-import type { BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
+import { supportsBaseGroupDefinition, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import type { BaseAnchor, BaseRecordType } from "./DiscussionProtocol";
 import type { PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
 import { baseGroupValueLabel, captureBaseGroupValue, revealBaseGroupValue } from "./BaseGroupValueBridge";
@@ -51,7 +51,8 @@ export class NativeBaseGroupComments {
 		...this.context.surface.groupSummaryHandles(this.sources.resolve)] : []; }
 	hit(node: Node): NativeBaseGroupHandle[] { return this.handles().filter(handle => handle.element.contains(node)); }
 	canCapture(handle: NativeBaseGroupHandle): boolean {
-		return this.context.current() && handle.current() && !!this.definition(handle.target) &&
+		const definition = this.definition(handle.target);
+		return this.context.current() && handle.current() && !!definition && supportsBaseGroupDefinition(this.catalog, definition) &&
 			(!handle.target.summary || !!this.summaryDefinition(handle.target) && this.context.session.canAnchorBase("group_summary")) &&
 			this.context.session.canAnchorBaseGroup(handle.target.property) && this.context.session.permission(this.context.entryId)?.comment === true;
 	}

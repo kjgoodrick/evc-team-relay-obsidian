@@ -44,6 +44,17 @@ const fixtures: ReturnType<typeof fixture>[] = [];
 function setup(value?: NativeBaseGroupValue) { const f = fixture(value); fixtures.push(f); return f; }
 afterEach(() => { fixtures.splice(0).forEach(f => f.doc.destroy()); });
 
+test("native formula groups require catalog eligibility and capture the exact synchronized snapshot", async () => {
+	const f = setup({ type: "number", value: 7 });
+	f.target.property = { source: "formula", name: "Bucket" }; f.catalog.targets[0].property = f.target.property;
+	expect(f.groups.canCapture(f.handle)).toBe(false);
+	f.catalog.formula_group_ids = [id(5)]; expect(f.groups.canCapture(f.handle)).toBe(true);
+	const result = await f.groups.capture(f.handle);
+	expect(result.property).toEqual(f.target.property); expect(result.capture.value).toEqual({ type: "number", value: 7 });
+	expect(result.capture.dependency).toBe(Buffer.from(Y.encodeSnapshot(Y.snapshot(f.doc))).toString("base64"));
+	f.catalog.formula_group_ids = []; expect(f.groups.canCapture(f.handle)).toBe(false);
+});
+
 test.each(["markdown", "image", "audio", "video", "pdf", "canvas", "file"] as BaseRecordType[])("file groups capture %s records without opening notes or reading content", async type => {
 	const f = setup({ type: "text", value: "png" });
 	f.target.property = { source: "file", name: "ext" }; f.catalog.targets[0].property = f.target.property;

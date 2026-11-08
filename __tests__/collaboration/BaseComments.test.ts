@@ -357,7 +357,7 @@ test("a mixed group header offers typed choices and never falls back to a record
 	} finally { f.close(); }
 });
 
-test.each(["cell", "group"] as const)("native container focus during a %s pointer gesture retains the exact target, while later focus changes clear it", async kind => {
+test.each(["cell", "group"] as const)("native container focus retains the exact %s target after a gesture and command palette, while Tab clears it", async kind => {
 	const f = fixture();
 	try {
 		await settle(); const context = f.contexts[0];
@@ -372,12 +372,31 @@ test.each(["cell", "group"] as const)("native container focus during a %s pointe
 		if (kind === "group") expect(f.host.commentBaseGroupHandle).toHaveBeenCalledWith(context, handle);
 		else expect(f.host.commentBaseHandle).toHaveBeenCalledWith(context, f.cellHandle);
 		window.dispatchEvent(new Event("pointerup"));
+		f.root.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true, bubbles: true }));
 		f.root.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-		expect(selected()).toBeUndefined();
+		expect(selected()).toBeDefined();
 		target.dispatchEvent(new Event("pointerdown", { bubbles: true }));
 		f.root.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
 		f.root.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
 		expect(selected()).toBeUndefined();
+	} finally { f.close(); }
+});
+
+test.each([true, false])("palette focus restoration cannot turn an unsupported formula group into a view (typed handle: %s)", async typed => {
+	const f = fixture();
+	try {
+		await settle(); const context = f.contexts[0];
+		const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "formula", name: "ambient" }, value: { type: "text", value: "Team/Note.md" } },
+			element: f.row, ambiguous: false, current: () => true, members: () => [] };
+		context.groups = { hit: (node: Node) => typed && node === f.row ? [handle] : [], handles: () => [handle], canCapture: () => false } as unknown as NativeBaseGroupComments;
+		Object.assign(f.surface, { hit: (node: Node) => node === f.root ? { target: { type: "view" }, element: f.root, current: () => true } : undefined });
+		f.row.dispatchEvent(new Event("pointerdown", { bubbles: true })); window.dispatchEvent(new Event("pointerup"));
+		f.root.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true, bubbles: true }));
+		f.root.dispatchEvent(new FocusEvent("focusin", { bubbles: true })); f.pane.comment();
+		expect(f.host.commentBaseHandle).not.toHaveBeenCalled(); expect(f.host.commentBaseGroupHandle).not.toHaveBeenCalled();
+		expect(f.buttons().some(button => button.textContent === "Comment on view")).toBe(false);
+		f.root.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		expect(f.buttons().some(button => button.textContent === "Comment on view")).toBe(true);
 	} finally { f.close(); }
 });
 

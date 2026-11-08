@@ -18,7 +18,7 @@ export function parseLocalDiscussionAnchor(value: unknown): LocalDiscussionAncho
 		Object.keys(value).every(key => ["version", "type", "entry_id", "property", "capture", "range", "summary"].includes(key)) &&
 		isId(value.entry_id) && isBaseDefinitionProperty(value.property));
 	const capture = copyBaseGroupCapture(value.capture);
-	requireValue(value.property.source === (capture.source_kind === "file" ? "file" : "note"));
+	requireValue((value.property.source === "file") === (capture.source_kind === "file"));
 	let range: PendingBaseGroupAnchor["range"];
 	if ("range" in value) {
 		requireValue(isRecord(value.range) && value.range.type === "timeline_range" && !("lane" in value.range));

@@ -165,6 +165,7 @@ export class BaseCommentPane {
 	private presence?: { session: DiscussionSession; entryId: string; signature: string };
 	private capture?: object;
 	private unavailableTarget = false;
+	private focusSelection?: Node;
 	constructor(private host: DiscussionHost, private view: FileView, private integrations?: NativeBasesIntegrations,
 		private targetsChanged?: (session: DiscussionSession, entryId: string) => void) {
 		const root = view.contentEl, doc = root.ownerDocument; this.win = doc.defaultView ?? window;
@@ -175,27 +176,27 @@ export class BaseCommentPane {
 		const listen = (target: EventTarget, event: string, fn: EventListener, capture = false) => {
 			target.addEventListener(event, fn, capture); this.cleanup.push(() => target.removeEventListener(event, fn, capture));
 		};
-		let focusFromPointer: Node | undefined;
-		const clearPointerFocus = () => { focusFromPointer = undefined; };
+		const clearPointerFocus = () => { this.focusSelection = undefined; };
 		const select = (event: Event) => {
 			const node = event.target as Node | null;
 			if (!node || !Number.isInteger(node.nodeType) || this.owns(node)) return;
-			// Native table/cards/list focus their surrounding container after a
-			// pointer selects a more precise target. Preserve that gesture only;
-			// later keyboard focus must still select or clear its own target.
-			if (event.type === "focusin" && focusFromPointer && node.contains(focusFromPointer)) return;
+			// Native views restore container focus when the command palette closes.
+			// This must retain the precise selection, including unsupported groups;
+			// container focus alone cannot substitute a whole-view comment. Explicit
+			// pointer selections and Tab navigation still select or clear targets.
+			if (event.type === "focusin" && this.focusSelection && node.contains(this.focusSelection)) return;
 			clearPointerFocus();
 			if (this.context?.surface.annotationSupported && event.type === "pointerdown") { this.action++; return; }
 			this.action++; this.unavailableGroup = false; this.chosenGroups = this.context?.groups?.hit(node) ?? [];
 			this.chosen = this.chosenGroups.length ? undefined : this.context?.surface.hit(node, event as PointerEvent);
 			this.unavailableTarget = !this.chosen && !this.chosenGroups.length && this.context?.surface.containsTargetArea(node) === true;
-			if (event.type === "pointerdown" && (this.chosen || this.chosenGroups.length)) focusFromPointer = node;
+			if (this.chosen || this.chosenGroups.length || this.unavailableTarget) this.focusSelection = node;
 			this.renderTools();
 		};
 		listen(root, "pointerdown", select, true); listen(root, "focusin", select, true);
-		listen(this.win, "pointerup", clearPointerFocus, true); listen(this.win, "pointercancel", clearPointerFocus, true); listen(this.win, "blur", clearPointerFocus);
+		listen(this.win, "pointercancel", clearPointerFocus, true);
 		listen(root, "wheel", () => { this.action++; }, true);
-		listen(root, "keydown", event => { clearPointerFocus(); if (!this.owns(event.target as Node)) this.action++; }, true);
+		listen(root, "keydown", event => { if ((event as KeyboardEvent).key === "Tab") clearPointerFocus(); if (!this.owns(event.target as Node)) this.action++; }, true);
 		listen(root, "scroll", () => this.invalidate(false), true); listen(this.win, "resize", () => this.invalidate(false));
 		listen(doc, "visibilitychange", () => this.invalidate(true, true));
 		const observer = new MutationObserver(records => {
@@ -227,6 +228,7 @@ export class BaseCommentPane {
 	}
 	private detach(): void {
 		this.capture = undefined;
+		this.focusSelection = undefined;
 		this.unavailableTarget = false;
 		this.cancelAnnotation(); this.context?.release(); this.context = undefined; this.chosen = undefined; this.chosenGroups = []; this.unavailableGroup = false;
 		this.groupTargets.clear(); this.rangeAxis = undefined; this.sharedMarkers = undefined; this.rangeLanes.clear(); this.threads = []; this.layer.hidden = true; this.toolbar.hidden = true; this.toolbar.classList.add("is-unavailable");
@@ -419,10 +421,11 @@ export class BaseCommentPane {
 		this.annotating = true;
 		const stop = context.surface.beginAnnotation(handle => {
 			if (this.context !== context || !context.current() || !handle.current() || !context.canComment(handle.target)) return;
-			this.chosen = handle; this.chosenGroups = []; this.unavailableGroup = false; this.action++; this.renderTools();
+			this.chosen = handle; this.chosenGroups = []; this.unavailableGroup = false; this.focusSelection = handle.element; this.action++; this.renderTools();
 		}, () => { this.annotating = false; this.annotationStop = undefined; if (!this.closed) this.renderTools(); }, location => {
 			if (this.context !== context || !context.current() || !location.current()) return;
 			this.chosen = undefined; this.chosenGroups = context.groups?.hit(location.element) ?? [];
+			this.focusSelection = location.element;
 			this.unavailableGroup = !this.chosenGroups.some(handle => context.groups?.canCapture(handle)); this.action++; this.renderTools();
 		});
 		if (!stop) { this.annotating = false; new Notice("Target selection is unavailable. Close the task inspector and refresh the view."); }

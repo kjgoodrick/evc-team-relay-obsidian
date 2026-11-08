@@ -44,7 +44,7 @@ for (const code of ["timeline_ranges_disabled", "timeline_axis_unavailable", "ti
 for (const code of ["timeline_markers_disabled", "timeline_marker_catalog_changed", "timeline_marker_changed", "timeline_marker_unavailable",
 	"timeline_marker_limit", "timeline_marker_placement_limit", "invalid_marker_placement", "base_editor_required", "base_generation_changed"]) errorCodes.add(code);
 for (const code of ["base_definition_targets_disabled", "base_formula_cells_disabled", "base_definition_targets_limit", "base_target_definition_changed", "base_target_definition_unavailable", "stale_base_revision"]) errorCodes.add(code);
-for (const code of ["base_groups_disabled", "base_group_summaries_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
+for (const code of ["base_groups_disabled", "base_formula_groups_disabled", "base_group_summaries_disabled", "base_group_adapter_unavailable", "base_group_value_unavailable", "base_group_value_changed", "base_group_source_changed",
 	"base_group_limit", "base_group_witness_limit", "base_group_identity_conflict", "operation_conflict"]) errorCodes.add(code);
 for (const code of ["pictures_disabled", "picture_identity_conflict", "picture_staging_quota", "picture_digest_mismatch", "picture_not_verified",
 	"picture_expired", "picture_too_large", "picture_output_too_large", "picture_too_many_pixels", "animated_picture_unsupported", "invalid_picture", "picture_changed"]) errorCodes.add(code);
@@ -188,7 +188,7 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[] }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
@@ -199,6 +199,8 @@ export class DiscussionTransport implements DiscussionSender {
 		let baseRecordTypes: BaseRecordType[] = [];
 		const definitionCatalog = value.features.discussion_base_definition_catalog === true;
 		const groupCapture = value.features.discussion_base_groups === true;
+		const formulaGroups = value.features.discussion_base_formula_groups;
+		if (formulaGroups !== undefined && typeof formulaGroups !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		const markerCapture = value.features.discussion_timeline_markers === true;
 		let baseFileGroupProperties: string[] | undefined;
 		const fileGroups = value.discussion_base_file_group_properties;
@@ -227,6 +229,7 @@ export class DiscussionTransport implements DiscussionSender {
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
+			...(formulaGroups === undefined ? {} : { baseFormulaGroups: formulaGroups === true && baseTargets.includes("group") }),
 			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
 			...(value.features.discussion_search === undefined ? {} : { search: value.features.discussion_commands && value.features.discussion_search === true }),
 			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
@@ -313,7 +316,10 @@ export class DiscussionTransport implements DiscussionSender {
 			const page = this.parse(value, item => parseBaseDefinitionPage(item, parseDiscussionScope(entryId)!.entryId, viewId, after));
 			if (result && (result.definition_id !== page.definition_id || result.generation !== page.generation || result.registry_revision !== page.registry_revision)) throw new DiscussionFailure("pause", "invalid_read_response");
 			if (!result) result = parseBaseDefinitionCatalog(page, parseDiscussionScope(entryId)!.entryId, viewId);
-			else result.targets.push(...page.targets);
+			else {
+				if ((result.formula_group_ids === undefined) !== (page.formula_group_ids === undefined)) throw new DiscussionFailure("pause", "invalid_read_response");
+				result.targets.push(...page.targets); result.formula_group_ids?.push(...page.formula_group_ids!);
+			}
 			if (result.targets.length > 256) throw new DiscussionFailure("pause", "invalid_read_response");
 			if (!page.has_more) return result;
 			after = page.next_after!;
@@ -544,7 +550,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "base_group_summaries_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "base_formula_groups_disabled", "base_group_summaries_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}

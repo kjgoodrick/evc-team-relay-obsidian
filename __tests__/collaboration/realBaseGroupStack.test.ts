@@ -31,6 +31,7 @@ async function until(check: () => boolean, label: string) {
 }
 
 run("actual group capture verifies delete-only dependencies, exact recovery, source permissions and relay restart", async () => {
+	const formula = process.env.EVC_BASE_GROUP_FORMULA === "1";
 	const viewType = process.env.EVC_BASE_GROUP_VIEW_TYPE ?? "table";
 	expect(["table", "sabidurian-timeline", "sabidurian-sequence"]).toContain(viewType);
 	const axisOptions = viewType === "sabidurian-sequence" ? { orderProp: "note.order" } : viewType === "sabidurian-timeline" ? { startDateProp: "note.start", timeZone: "America/Denver" } : {};
@@ -57,8 +58,8 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 	try {
 		const state = await content.read(f.baseEntry);
 		await content.publish(f.baseEntry, { operationId: randomUUID(), expected: state.state, bytes: new TextEncoder().encode(JSON.stringify({
-			views: [{ name: "Groups", type: viewType, ...axisOptions, groupBy: { property: "status", direction: "ASC" }, summaries: { "formula.total": "Average" } }],
-			formulas: { total: "2" },
+			views: [{ name: "Groups", type: viewType, ...axisOptions, groupBy: { property: formula ? "formula.bucket" : "status", direction: "ASC" }, summaries: { "formula.total": "Average" } }],
+			formulas: { total: "2", ...(formula ? { bucket: 'if(status.startsWith("Done"), formula.label, "Other")', label: "status" } : {}) },
 		})).buffer as ArrayBuffer });
 		const saved = await content.read(f.baseEntry), snapshot = await registry.inspect(f.baseEntry, saved.state.record.hash!, saved.state.generation!);
 		const view = snapshot.views[0].id!, scope = baseDiscussionScope(f.baseEntry, view);
@@ -69,6 +70,10 @@ run("actual group capture verifies delete-only dependencies, exact recovery, sou
 		await until(() => reviewer.text.toString() === owner.text.toString(), "reviewer receives metadata");
 		const context = await transport.baseTargetContext(scope, view, f.note), catalog = await transport.baseDefinitions(scope, view);
 		const definition = catalog.targets.find(item => item.kind === "group")!;
+		if (formula) {
+			expect((await transport.capabilities()).baseFormulaGroups).toBe(true);
+			expect(catalog.formula_group_ids).toEqual([definition.id]);
+		}
 		const request = (doc: Y.Doc, value: string): BaseGroupCapture => ({ operation_id: randomUUID(), definition_id: context.definition_id,
 			view_id: view, generation: context.generation, registry_revision: catalog.registry_revision,
 			group_definition_id: definition.id, group_definition_revision: definition.revision,

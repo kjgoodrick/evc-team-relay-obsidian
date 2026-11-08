@@ -6,6 +6,7 @@ import { commandPictures } from "../storage/PictureRecords";
 
 const failureHelp: Record<string, string> = {
 	base_groups_disabled: "Group comments are disabled on this server. Your saved comment and group selection are retained.",
+	base_formula_groups_disabled: "Formula group comments are disabled on this server. Your saved comment and selection are retained; retry after support is restored.",
 	base_group_source_changed: "The source of this group changed after selection. Your original comment and target are retained for review.",
 	base_group_value_changed: "This group no longer matches the captured source. Review the current group before choosing another target; your saved work is retained.",
 	base_group_value_unavailable: "This group value could not be verified. Your saved work is retained for review.",

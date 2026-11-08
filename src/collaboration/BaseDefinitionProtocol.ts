@@ -3,7 +3,7 @@ import { isBaseDefinitionProperty, isBaseProperty, isId, isRecord, isRevision, p
 
 export type BaseTargetDefinition = { id: string; kind: "formula" | "group"; revision: number; fingerprint: string; property: BaseDefinitionProperty } |
 	{ id: string; kind: "summary"; revision: number; fingerprint: string; property: BaseDefinitionProperty; summary: string };
-export type BaseDefinitionCatalog = BaseTargetContext & { computed_values: false; targets: BaseTargetDefinition[] };
+export type BaseDefinitionCatalog = BaseTargetContext & { computed_values: false; targets: BaseTargetDefinition[]; formula_group_ids?: string[] };
 export type BaseDefinitionPage = BaseDefinitionCatalog & { has_more: boolean; next_after: string | null };
 
 function requireValue(condition: unknown): asserts condition { if (!condition) throw new Error("Invalid Bases definition catalogue"); }
@@ -29,7 +29,15 @@ function definitions(value: unknown, revision: number, maximum: number): BaseTar
 export function parseBaseDefinitionCatalog(value: unknown, entryId: string, viewId: string): BaseDefinitionCatalog {
 	const context = parseBaseTargetContext(value, entryId, viewId);
 	requireValue(isRecord(value) && value.computed_values === false);
-	return { ...context, computed_values: false, targets: definitions(value.targets, context.registry_revision, 256) };
+	const targets = definitions(value.targets, context.registry_revision, 256), formulaGroups = value.formula_group_ids;
+	if (formulaGroups !== undefined) requireValue(Array.isArray(formulaGroups) && formulaGroups.length <= targets.length &&
+		new Set(formulaGroups).size === formulaGroups.length && formulaGroups.every(id => isId(id) &&
+			targets.some(target => target.id === id && target.kind === "group" && target.property.source === "formula")));
+	return { ...context, computed_values: false, targets, ...(formulaGroups === undefined ? {} : { formula_group_ids: [...formulaGroups as string[]] }) };
+}
+/** Eligibility is bound to this saved view and catalog revision, never a global formula name. */
+export function supportsBaseGroupDefinition(catalog: BaseDefinitionCatalog, definition: BaseTargetDefinition): boolean {
+	return definition.kind === "group" && (definition.property.source !== "formula" || catalog.formula_group_ids?.includes(definition.id) === true);
 }
 export function parseBaseDefinitionPage(value: unknown, entryId: string, viewId: string, after?: string): BaseDefinitionPage {
 	const result = parseBaseDefinitionCatalog(value, entryId, viewId);
