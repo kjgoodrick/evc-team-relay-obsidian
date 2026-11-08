@@ -164,6 +164,45 @@ test("retained local text is selectable without access, keeps selection on refre
 	} finally { pending.dispose(); store.close(); parent.remove(); }
 });
 
+test("restored pending work offers receipt inspection without retrying or changing the saved request", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div"); document.body.append(parent);
+	const checkSavedCommand = jest.fn().mockResolvedValue({ status: "unknown" });
+	const state = Object.assign(session, { canCheckSavedCommand: false, checkSavedCommand });
+	const pending = new PendingComments(parent, typed, entry, jest.fn());
+	await store.enqueue({ operationId: id(20), scopeId: entry, type: "reply.create", dependsOn: [], payload: {
+		type: "reply.create", thread_id: id(4), message_id: id(5), body: protocolJson(bodyFromText("Saved before restore")) } });
+	await store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+	const operation = (await store.getOperation(id(20)))!;
+	const find = (text: string) => [...parent.querySelectorAll("button")].find(button => button.textContent === text);
+	try {
+		pending.update([operation]);
+		expect(parent.textContent).toContain("server was restored");
+		expect(find("Retry original request")).toBeUndefined(); expect(find("Review delivery and edit")).toBeUndefined();
+		expect(find("Check server receipt")?.disabled).toBe(true);
+		state.canCheckSavedCommand = true; pending.update([operation]); find("Check server receipt")!.click();
+		await until(() => parent.textContent!.includes("does not prove"));
+		expect(checkSavedCommand).toHaveBeenCalledWith(operation, expect.any(Function));
+		expect(session.retryRejected).not.toHaveBeenCalled(); expect(session.queue).not.toHaveBeenCalled();
+		expect(await store.getOperation(id(20))).toEqual(operation);
+	} finally { pending.dispose(); store.close(); parent.remove(); }
+});
+
+test("a composer captures restore binding at the click, before asynchronous draft saves", async () => {
+	const { store, session, typed } = await fixture(), parent = document.createElement("div");
+	const state = Object.assign(session, { restoreBinding: { restoreGeneration: id(90) } });
+	await store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+	const composer = new CommentComposer(parent, typed, entry, "generation-draft", body => ({ type: "thread.create", payload: {
+		type: "thread.create", thread_id: id(4), message_id: id(5), anchor: { version: 1, type: "note" }, body } }));
+	try {
+		await until(() => !composer.textarea.disabled);
+		composer.textarea.value = "Keep the clicked generation"; composer.textarea.dispatchEvent(new Event("input"));
+		await until(() => parent.textContent!.includes("Draft saved"));
+		const sending = composer.submit(); state.restoreBinding = { restoreGeneration: id(91) }; await sending;
+		expect(session.queue.mock.calls[0][0].restoreGeneration).toBe(id(90));
+		expect((await store.pending(entry))[0].restoreGeneration).toBe(id(90));
+	} finally { composer.dispose(); store.close(); }
+});
+
 test("pending picture recovery is explicit, permission gated, and preserves the visible original", async () => {
 	const { store, session, typed } = await fixture(), parent = document.createElement("div");
 	const pending = new PendingComments(parent, typed, entry);

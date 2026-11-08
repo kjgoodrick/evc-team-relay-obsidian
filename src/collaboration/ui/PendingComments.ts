@@ -3,6 +3,7 @@ import { isRecord, parseBody, REACTIONS } from "../DiscussionProtocol";
 import type { OutboxOperation } from "../storage/DiscussionStore";
 import { commentBodyText, renderCommentBody } from "./CommentBody";
 import { commandPictures } from "../storage/PictureRecords";
+import { commandReceiptError, commandReceiptMessage } from "./CommandReceipt";
 
 const failureHelp: Record<string, string> = {
 	base_groups_disabled: "Group comments are disabled on this server. Your saved comment and group selection are retained.",
@@ -65,7 +66,7 @@ export class PendingComments {
 		for (const [id, card] of this.cards) if (!ids.has(id)) { card.el.remove(); this.cards.delete(id); }
 		for (const op of operations) {
 			const canRetry = this.session.online && !!this.session.permission(this.entryId)?.comment;
-			const signature = JSON.stringify([op, canRetry, this.session.canRepairPictures, this.session.canRecoverSavedCommand, this.session.participants(this.entryId)]);
+			const signature = JSON.stringify([op, canRetry, this.session.canRepairPictures, this.session.canRecoverSavedCommand, this.session.canCheckSavedCommand, this.session.participants(this.entryId)]);
 			let card = this.cards.get(op.operationId);
 			if (!card) {
 				card = { el: this.parent.createDiv({ cls: "relay-comment-pending-item" }), signature: "" };
@@ -96,6 +97,24 @@ export class PendingComments {
 				text.hidden = true; text.value = commentBodyText(body, name);
 				select.onclick = () => { text.hidden = false; text.focus(); text.select(); };
 			} catch { box.createEl("p", { text: "Saved local change could not be displayed. Its original data is still kept on this device." }); }
+		}
+		if (op.error === "restore_generation_changed") {
+			box.createEl("p", { text: "The server was restored after this request was saved. Its original text, pictures and target are retained. Check the current discussion before copying anything into a new comment." });
+			box.createEl("p", { cls: "relay-comment-muted", text: "This older request will not be retried automatically. A receipt describes what the server recorded; it does not guarantee the restored discussion still contains that change." });
+			if (op.type !== "picture.upload" && (op.type !== "base.group.create" || op.preparedAnchor !== undefined)) {
+				const check = box.createEl("button", { text: "Check server receipt", attr: { type: "button" } });
+				check.disabled = !this.session.canCheckSavedCommand;
+				const status = box.createDiv({ attr: { role: "status" } });
+				const current = () => !this.disposed && check.parentElement === box;
+				check.onclick = () => {
+					if (!current() || !this.session.canCheckSavedCommand) return;
+					check.disabled = true; status.setText("Checking the saved request…");
+					void this.session.checkSavedCommand(op, current).then(result => { if (current()) status.setText(commandReceiptMessage(result)); })
+						.catch(error => { if (current()) status.setText(commandReceiptError(error)); })
+						.finally(() => { if (current()) check.disabled = !this.session.canCheckSavedCommand; });
+				};
+			}
+			return;
 		}
 		let hasPictures = false;
 		try { hasPictures = op.type !== "picture.upload" && commandPictures(payload).length > 0; } catch { /* Keep malformed saved work for manual recovery. */ }

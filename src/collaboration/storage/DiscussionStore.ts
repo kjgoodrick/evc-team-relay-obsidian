@@ -440,11 +440,12 @@ export class DiscussionStore {
 		});
 	}
 	/** Retiring a sent draft must not replace a newer choice in another pane. */
-	async comparePreference(key: string, expected: Json | undefined, value: Json, live: () => boolean = () => true): Promise<boolean> {
+	async comparePreference(key: string, expected: Json | undefined, value: Json, live: () => boolean = () => true, binding?: RestoreBinding): Promise<boolean> {
 		requiredId(key); const previous = expected === undefined ? undefined : boundedJson(expected);
 		value = JSON.parse(boundedJson(value)) as Json;
 		return this.transaction(["preferences"], "readwrite", async tx => {
 			if (!live()) return false;
+			if (binding) await requireRestoreBinding(tx, binding);
 			const store = tx.objectStore("preferences"), current: Json | undefined = await request(store.get(key));
 			if (!live() || (current === undefined ? undefined : canonical(current)) !== previous) return false;
 			await request(store.put(value, key));
@@ -958,10 +959,11 @@ export class DiscussionStore {
 	}
 
 	/** Remote authorization loss clears cached content, never pending local text. */
-	async clearRemoteScope(scopeId: string, expected?: ScopeCheckpoint): Promise<boolean> {
+	async clearRemoteScope(scopeId: string, expected?: ScopeCheckpoint, expectedGeneration?: number): Promise<boolean> {
 		return this.transaction(["entities", "cursors", "generations", "preferences", "pictureCache"], "readwrite", async tx => {
 			const generations = tx.objectStore("generations");
 			const generation: number = await cacheGeneration(tx, scopeId);
+			if (expectedGeneration !== undefined && generation !== expectedGeneration) return false;
 			if (expected && (generation !== expected.generation ||
 				await request(tx.objectStore("cursors").get(scopeId)) !== expected.cursor)) return false;
 			const store = tx.objectStore("entities");

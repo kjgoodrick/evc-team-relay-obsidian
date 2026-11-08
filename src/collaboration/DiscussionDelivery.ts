@@ -26,9 +26,9 @@ export class DiscussionDelivery implements DiscussionSender {
 				if (!saved) throw new DiscussionFailure("retry", "local_operation_changed");
 			}
 			active();
-			return this.transport.send(prepareBaseGroupCommand(saved, saved.preparedAnchor));
+			return this.transport.send(prepareBaseGroupCommand(saved, saved.preparedAnchor), current);
 		}
-		if (operation.type !== "picture.upload") return this.transport.send(operation);
+		if (operation.type !== "picture.upload") return this.transport.send(operation, current);
 		if (!this.canUpload()) throw new DiscussionFailure("reject", "pictures_disabled");
 		let upload;
 		try { upload = parsePictureUpload(operation.payload); } catch { throw new DiscussionFailure("reject", "invalid_local_picture"); }

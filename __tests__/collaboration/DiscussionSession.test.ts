@@ -570,7 +570,7 @@ test("refreshing an offline draft keeps its originals and never submits the stal
 			return { state: "verified" };
 		});
 		await expect(session.onlineDraft(reference, { operationId: id(71), scopeId: entry, payload: { type: "reply.create", thread_id: id(5), message_id: id(72),
-			body: { version: 1, blocks: pictures }, reopen: true, expected_state_revision: 2 } })).rejects.toThrow("another view");
+			body: { version: 1, blocks: pictures }, reopen: true, expected_state_revision: 2 } })).rejects.toMatchObject({ code: "action_context_changed" });
 		const restored = (await store.getDraft("reply"))!;
 		expect(restored).toMatchObject({ revision: 1, body: { text: "Original" } });
 		expect(transport.sendOnline).not.toHaveBeenCalled(); expect(await store.pending(entry)).toEqual([]);

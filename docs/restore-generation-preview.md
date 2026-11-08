@@ -1,8 +1,8 @@
 # Restore-generation client foundation
 
-This is a tested transport/storage foundation, not a complete restore workflow.
-Do not activate a restore generation in a live deployment yet. Session lifecycle
-integration, user-facing reconciliation, guards for other mutations, and a
+This is a tested discussion-command restore guard, not a complete restore workflow.
+Do not activate a restore generation in a live deployment yet. Complete
+user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
 
 Each discussion operation may retain `restoreGeneration` as local metadata.
@@ -17,7 +17,12 @@ receipt is never proof that a request did not commit.
 before capability discovery. It rejects a late observation from another window
 and refuses to downgrade a known nonnull lineage to an unsupported/original
 server. Callers must stop workers and invalidate their in-memory context before
-using it; the ordinary session does not yet call it.
+using it. The ordinary session now performs this observation during startup,
+refresh and reconnect, before resuming old work. It retains the last learned
+binding for offline intent creation. Restore invalidation drains old workers,
+clears in-memory authority, broadcasts an invalidation signal to other windows,
+reloads the inbox and reauthorizes visible targets. Cached permission/directory
+reads use generation checks too, so a late old response cannot restore authority.
 
 When a new generation is observed, one IndexedDB transaction:
 
@@ -46,6 +51,14 @@ metadata and validate it on inspection. Their existing envelope format remains
 version 1/storageVersion 23; older strict readers reject requests containing the
 new field instead of silently losing their binding.
 
+Composers capture the binding at the Send click before awaiting local saves.
+Moderation, state changes and online replies retain the original binding for
+manual retries; durable target moves also check the binding in their completion
+transaction. Older pending cards explain restore review and offer receipt
+inspection, without presenting ordinary retry/replacement controls. Selecting
+and copying the saved text remains available. Reconciliation of original
+requests and their dependents into the restored service remains unfinished.
+
 Validation includes fake-IndexedDB multiwindow, rollback, unseen-scope response,
 dependency, picture preservation, inbox and online-draft tests. The real HTTP
 proof runs an isolated loopback control plane with a synthetic nonnull generation:
@@ -58,5 +71,7 @@ proof runs an isolated loopback control plane with a synthetic nonnull generatio
 
 That proof verifies old writes/withdrawals are rejected, old queued content stays
 local, explicitly bound new commands work, accepted retries stay idempotent, and
-receipt reads remain available. It does not restore database/object/CRDT backups
-or exercise the native Obsidian session lifecycle.
+receipt reads remain available. It also exercises the ordinary session against
+HTTP: startup quarantine, new delivery, online resolve, offline queue capture and
+reconnect delivery. It does not restore database/object/CRDT backups or supply
+native Obsidian/mobile acceptance evidence.

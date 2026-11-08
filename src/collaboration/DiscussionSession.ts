@@ -1,3 +1,4 @@
+import { restoreGeneration, type RestoreBinding } from "./RestoreGeneration";
 import { saveDiscussionExport, saveDiscussionCollection } from "./DiscussionExport";
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
 import { baseRecordIds, parseBaseRecordContexts, type BaseRecordContexts } from "./BaseRecordContexts";
@@ -77,6 +78,9 @@ export class DiscussionSession {
 	private discardedDraftListeners = new Set<(id: string) => void>();
 	private statusValue: SessionStatus = "starting";
 	private authenticationEpoch = 0;
+	private restoreLineage: string | null = null;
+	private restoreReconciling = false;
+	private restoreLoaded = false;
 	private enabled = false;
 	private textEnabled = false;
 	private blocksEnabled = false;
@@ -125,6 +129,10 @@ export class DiscussionSession {
 			this.channel.onmessage = event => {
 				if (!this.closed && isRecord(event.data) && event.data.type === "draft-discarded" && typeof event.data.id === "string" && event.data.id.length <= 512) {
 					this.draftDiscarded(event.data.id, false); return;
+				}
+				if (event.data === "restore" && !this.closed) {
+					const pending = this.startFlight ?? Promise.resolve();
+					void this.pauseForRestore().then(() => pending).then(() => this.start()).catch(() => {}); return;
 				}
 				if (event.data === "inbox" && !this.closed) { void this.inbox.reload(); return; }
 				if (event.data === "cache" && !this.closed) { this.notify(); return; }
@@ -224,8 +232,9 @@ export class DiscussionSession {
 		this.draftDiscarded(draft.id);
 	}
 	get status(): SessionStatus { return this.statusValue; }
-	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
-	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
+	get restoreBinding(): RestoreBinding { return this.restoreLineage === null ? {} : { restoreGeneration: this.restoreLineage }; }
+	get canQueue(): boolean { return !this.closed && !this.restoreReconciling && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
+	get online(): boolean { return !this.closed && !this.restoreReconciling && this.foreground && this.statusValue === "ready"; }
 	get canExportCollection(): boolean { return this.canExport && this.exportCatalogEnabled; }
 	get canExport(): boolean { return this.online && this.exportEnabled; }
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
@@ -353,6 +362,23 @@ export class DiscussionSession {
 		for (const entry of this.entries.values()) if (this.foreground) entry.sync.wake();
 	}
 
+	/** Invalidate synchronous UI intent and drain old readers before reauthorizing.
+	 * Local work stays in the store; only derived in-memory authority is cleared. */
+	private async pauseForRestore(): Promise<void> {
+		this.restoreReconciling = true; this.authenticationEpoch++; this.statusValue = "starting";
+		this.outbox.stop();
+		const flights: Promise<unknown>[] = [this.outbox.settled(), this.inbox.configure(this.inboxEnabled, "blocked", this.foreground)];
+		for (const entry of this.entries.values()) {
+			entry.sync.stop(); flights.push(entry.sync.settled());
+			if (entry.permissionFlight) flights.push(entry.permissionFlight);
+			entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined;
+			entry.baseRegistryRevision = undefined; entry.permissionChecked = 0;
+		}
+		for (const map of [this.baseContextFlights, this.baseRecordFlights, this.baseDefinitionFlights, this.timelineAxisFlights, this.timelineMarkerFlights]) flights.push(...map.values());
+		this.verifiedTargetCatalogs = new WeakMap(); this.timelineMarkerVersions.clear(); this.timelineMarkerFreshUntil.clear();
+		this.notify(); await Promise.allSettled(flights);
+	}
+
 	start(): Promise<void> {
 		if (this.closed) return Promise.resolve();
 		if (this.startFlight) return this.startFlight;
@@ -360,9 +386,17 @@ export class DiscussionSession {
 		return this.startFlight;
 	}
 	private async initialize(): Promise<void> {
-		const authenticationEpoch = this.authenticationEpoch;
+		let authenticationEpoch = this.authenticationEpoch;
 		const requiredAuthentication = this.statusValue === "authentication_required";
 		try {
+			const checkpoint = await this.store.restoreCheckpoint();
+			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
+			if (this.restoreLoaded && this.restoreLineage !== checkpoint.context.generation) {
+				const draining = this.pauseForRestore(); authenticationEpoch = this.authenticationEpoch;
+				await draining;
+				if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
+			}
+			this.restoreLineage = checkpoint.context.generation; this.restoreLoaded = true;
 			const cached = await this.store.preference("enabled");
 			if (this.closed) return;
 			this.enabled = cached === true;
@@ -381,6 +415,16 @@ export class DiscussionSession {
 			this.baseFormulaGroups = await this.store.preference("baseFormulaGroups") === true;
 			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
 			const capability = await this.transport.capabilities();
+			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
+			const changed = restoreGeneration(capability.restoreContext?.generation) !== checkpoint.context.generation;
+			let draining: Promise<void> | undefined;
+			if (changed) { draining = this.pauseForRestore(); authenticationEpoch = this.authenticationEpoch; }
+			const observed = await this.store.observeRestoreContext(capability.restoreContext, checkpoint.revision,
+				() => !this.closed && authenticationEpoch === this.authenticationEpoch);
+			if (observed.changed) this.channel?.postMessage("restore");
+			this.restoreLineage = observed.checkpoint.context.generation;
+			await draining;
+			if (this.restoreReconciling) await this.inbox.reload();
 			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
 			this.enabled = capability.discussions;
 			this.textEnabled = capability.textAnchors === true;
@@ -419,6 +463,7 @@ export class DiscussionSession {
 			else if (!requiredAuthentication) this.statusValue = error instanceof DiscussionFailure ? error.action === "retry" ? "offline" : "unavailable" : "error";
 		}
 		if (this.closed) return;
+		this.restoreReconciling = false;
 		await this.inbox.configure(this.enabled && this.inboxEnabled, this.statusValue === "ready" ? "online" : this.statusValue === "offline" ? "offline" : "blocked", this.foreground).catch(() => {});
 		if (this.closed) return;
 		if (this.foreground && this.canQueue) this.outbox.resume(); else this.outbox.stop();
@@ -460,7 +505,7 @@ export class DiscussionSession {
 	}
 	syncStatus(entryId: string): SyncStatus { return this.entries.get(entryId)?.sync.status ?? "stopped"; }
 	private syncChanged(id: string, status: SyncStatus): void {
-		if (this.closed) return;
+		if (this.closed || this.restoreReconciling) return;
 		const entry = this.entries.get(id);
 		if (entry && status === "unavailable") { entry.unavailable = true; entry.permission = undefined; entry.people = []; entry.documentGeneration = undefined; }
 		if (status === "unavailable") void this.inbox.forgetScope(id).catch(() => {});
@@ -484,78 +529,88 @@ export class DiscussionSession {
 		await this.refreshPermission(id, entry);
 	}
 	private async restorePermission(id: string, entry: Entry): Promise<void> {
+		const epoch = this.authenticationEpoch;
 		const cached = await this.store.preference("permission:" + id);
-		if (this.closed) return;
+		if (this.closed || epoch !== this.authenticationEpoch || this.restoreReconciling) return;
 		if (isRecord(cached) && ["read", "comment", "edit", "moderate"].every(key => typeof cached[key] === "boolean")) {
 			entry.permission = cached as unknown as DiscussionPermissions;
 		}
 		const people = await this.store.preference("people:" + id);
-		if (this.closed) return;
+		if (this.closed || epoch !== this.authenticationEpoch || this.restoreReconciling) return;
 		if (Array.isArray(people) && people.every(p => isRecord(p) && typeof p.id === "string" && typeof p.name === "string")) {
 			entry.people = people as unknown as DiscussionParticipant[];
 		}
 		const generation = await this.store.preference("documentGeneration:" + id);
-		if (this.closed) return;
+		if (this.closed || epoch !== this.authenticationEpoch || this.restoreReconciling) return;
 		entry.documentGeneration = isId(generation) ? generation : undefined;
 		this.notify();
 	}
 	private refreshPermission(id: string, entry: Entry): Promise<void> {
-		if (this.closed || !this.foreground || this.statusValue === "authentication_required" || entry.listeners.size === 0) return Promise.resolve();
+		if (this.closed || this.restoreReconciling || !this.foreground || this.statusValue === "authentication_required" || entry.listeners.size === 0) return Promise.resolve();
 		if (entry.permissionFlight) return entry.permissionFlight;
+		const epoch = this.authenticationEpoch;
+		const current = () => !this.closed && !this.restoreReconciling && epoch === this.authenticationEpoch;
 		entry.permissionFlight = (async () => {
+			let permissionProof: PreferenceVerification | undefined;
 			try {
 				if (!entry.permission) {
 					entry.permissionRestoreFlight = this.restorePermission(id, entry);
 					try { await entry.permissionRestoreFlight; } finally { entry.permissionRestoreFlight = undefined; }
 				}
-				if (!this.enabled) return;
+				if (!this.enabled || !current()) return;
+				permissionProof = await this.store.beginPreferenceVerification(id, "permission:" + id, uuid());
+				if (!current()) return;
 				const permission = await this.transport.permissions(id);
-				if (this.closed) return;
+				if (!current() || !await this.store.finishPreferenceVerification(id, "permission:" + id, permissionProof, protocolJson(permission), current)) return;
+				if (!current()) return;
 				entry.permission = permission; entry.unavailable = !permission.read;
 				if (permission.read) {
-					await this.store.setPreference("permission:" + id, protocolJson(permission));
 					if (entry.kind === "base" ? this.baseKinds.length > 0 : entry.kind === "image" ? this.imageFilesEnabled : this.textEnabled) {
+						const proof = await this.store.beginPreferenceVerification(id, "documentGeneration:" + id, uuid());
 						try {
+							if (!current()) return;
 							const context = entry.kind === "base" ? await this.fetchBaseContext(id) : await this.transport.anchorContext(id);
-							if (this.closed) return;
+							if (!current() || !await this.store.finishPreferenceVerification(id, "documentGeneration:" + id, proof, context.generation, current)) return;
+							if (!current()) return;
 							if (entry.documentGeneration !== context.generation) entry.baseRegistryRevision = undefined;
 							entry.documentGeneration = context.generation;
 							if ("registry_revision" in context) this.observeBaseRevision(id, context.generation, context.registry_revision);
-							await this.store.setPreference("documentGeneration:" + id, context.generation);
 						} catch (error) {
-							// A transient failure retains the last verified generation for offline
-							// capture. Existing drafts/queued anchors are never rewritten.
+							if (!current()) return;
+							// Transient failure retains verified offline authority. A stale
+							// pre-restore response cannot erase a newer window's context.
 							if (!(error instanceof DiscussionFailure) || error.action !== "retry") {
+								if (!await this.store.finishPreferenceVerification(id, "documentGeneration:" + id, proof, null, current)) return;
 								entry.documentGeneration = undefined;
-								await this.store.setPreference("documentGeneration:" + id, null);
 							}
 							if (error instanceof DiscussionFailure && (error.action === "authenticate" ||
 								error.action === "reject" && [403, 404].includes(error.status))) throw error;
 						}
 					}
-					// Directory pages include only users authorized for this entry.
-					// Keep prior offline names on a transient failure, never on revocation.
 					try {
+						const proof = await this.store.beginPreferenceVerification(id, "people:" + id, uuid());
 						const people: DiscussionParticipant[] = []; let after: string | undefined;
-						for (let page = 0; page < 20 && !this.closed; page++) {
+						for (let page = 0; page < 20 && current(); page++) {
 							const result = await this.transport.participants(id, after);
 							people.push(...result.participants); after = result.nextAfter;
 							if (!result.hasMore) break;
 						}
-						if (!this.closed) { entry.people = people; await this.store.setPreference("people:" + id, protocolJson(people)); }
-					} catch { /* Display stable fallbacks until the directory can refresh. */ }
-				} else { entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id); await this.inbox.forgetScope(id); }
-			} catch (error) {
-				if (this.closed) return;
-				if (error instanceof DiscussionFailure && [403, 404].includes(error.status)) {
-					entry.permission = undefined; entry.unavailable = true; entry.people = []; entry.documentGeneration = undefined; await this.store.clearRemoteScope(id);
-					await this.inbox.forgetScope(id);
-				} else if (error instanceof DiscussionFailure && error.action === "authenticate") {
-					this.requireAuthentication();
+						if (current() && await this.store.finishPreferenceVerification(id, "people:" + id, proof, protocolJson(people), current) && current()) entry.people = people;
+					} catch { /* Stable fallbacks remain until the directory can refresh. */ }
+				} else {
+					entry.people = []; entry.documentGeneration = undefined;
+					if (await this.store.clearRemoteScope(id, undefined, permissionProof.generation) && current()) await this.inbox.forgetScope(id);
 				}
+			} catch (error) {
+				if (!current()) return;
+				if (error instanceof DiscussionFailure && [403, 404].includes(error.status)) {
+					entry.permission = undefined; entry.unavailable = true; entry.people = []; entry.documentGeneration = undefined;
+					if (permissionProof && await this.store.clearRemoteScope(id, undefined, permissionProof.generation) && current()) await this.inbox.forgetScope(id);
+				} else if (error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
 			} finally {
-				entry.permissionChecked = Date.now(); entry.permissionFlight = undefined;
-				if (!this.closed) {
+				entry.permissionFlight = undefined;
+				if (current()) {
+					entry.permissionChecked = Date.now();
 					if (this.foreground && this.canQueue && entry.listeners.size && entry.permission?.read && !entry.unavailable) entry.sync.resume();
 					else entry.sync.stop();
 					this.notify();
@@ -695,6 +750,8 @@ export class DiscussionSession {
 		return { messages: rows.slice(0, limit).map(row => parseMessage(row.value)), hasMore: rows.length > limit };
 	}
 	async queue(command: QueuedCommand, draft?: Pick<Draft, "id" | "revision">): Promise<void> {
+		command = JSON.parse(JSON.stringify(command)) as QueuedCommand;
+		const epoch = this.authenticationEpoch;
 		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment permission is required.");
 		if (command.type === "base.group.create") {
 			const pending = parsePendingBaseGroupCommand(command), anchor = pending.anchor, capture = anchor.capture;
@@ -756,7 +813,7 @@ export class DiscussionSession {
 				if (source.generation !== this.documentGeneration(command.scopeId)) throw new Error("Review this selection after refreshing the note’s comment context.");
 			}
 		}
-		if (!this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment access changed. Your draft is retained.");
+		if (epoch !== this.authenticationEpoch || !this.canQueue || !this.permission(command.scopeId)?.comment) throw new Error("Comment access changed. Your draft is retained.");
 		await this.store.enqueue(command, Date.now(), draft);
 		if (this.closed) return;
 		this.broadcast(); if (this.foreground) this.outbox.wake(); this.notify();
@@ -1244,7 +1301,7 @@ export class DiscussionSession {
 		return this.trackLocal(this.reattachments.pending(scopeId, threadId));
 	}
 	async prepareReattachment(scopeId: string, threadId: string, revision: number, input: LocalDiscussionAnchor, visible: () => boolean = () => true): Promise<OnlineOperation> {
-		const local = parseLocalDiscussionAnchor(input), epoch = this.authenticationEpoch;
+		const local = parseLocalDiscussionAnchor(input), epoch = this.authenticationEpoch, binding = this.restoreBinding;
 		const current = () => visible() && epoch === this.authenticationEpoch && this.canReattach && this.permission(scopeId)?.comment === true;
 		return this.trackLocal((async () => {
 			if (!current()) throw new Error("Reconnect with comment access before moving this discussion.");
@@ -1256,7 +1313,7 @@ export class DiscussionSession {
 				if (!current() || verified.target.type !== "group" || verified.target.property.source !== local.property.source || verified.target.property.name !== local.property.name) throw new Error("The group selection changed. Select it again.");
 				anchor = resolvePendingBaseGroupAnchor(local, verified);
 			} else anchor = local;
-			return this.reattachments.prepare(scopeId, threadId, revision, anchor, current);
+			return this.reattachments.prepare(scopeId, threadId, revision, anchor, current, binding);
 		})());
 	}
 	async sendReattachment(operation: OnlineOperation, visible: () => boolean = () => true): Promise<void> {
@@ -1285,7 +1342,14 @@ export class DiscussionSession {
 	}
 	async onlineAction(operation: OnlineOperation): Promise<void> {
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");
-		const flight = this.transport.sendOnline(operation);
+		operation = JSON.parse(JSON.stringify(operation)) as OnlineOperation;
+		const epoch = this.authenticationEpoch, current = () => this.online && epoch === this.authenticationEpoch && this.permission(operation.scopeId)?.comment === true;
+		const flight = (async () => {
+			await this.store.requireRestoreBinding(operation);
+			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
+			await this.transport.sendOnline(operation, current);
+			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
+		})();
 		this.onlineFlights.add(flight);
 		try { await flight; } finally {
 			this.onlineFlights.delete(flight);
@@ -1423,6 +1487,8 @@ export class DiscussionSession {
 		})().finally(() => { if (!this.closed) { this.broadcast(); this.invalidate(); this.notify(); } }));
 	}
 	async onlineDraft(draft: Pick<Draft, "id" | "revision">, operation: OnlineOperation): Promise<void> {
+		operation = JSON.parse(JSON.stringify(operation)) as OnlineOperation;
+		const epoch = this.authenticationEpoch, current = () => epoch === this.authenticationEpoch && this.online;
 		if (!this.online || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect before changing this discussion.");
 		await this.trackLocal((async () => {
 			const saved = await this.store.getDraft(draft.id);
@@ -1430,15 +1496,18 @@ export class DiscussionSession {
 			// Upload before locking the online receipt. A rejected picture leaves the
 			// draft editable; a lost reply acknowledgment retries the exact command.
 			if (!await this.store.preference("online:" + draft.id)) {
+				await this.store.requireRestoreBinding(operation);
+				if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
 				for (const pictureId of commandPictures(operation.payload)) {
 					const source = await this.store.pictureSource(pictureId, operation.scopeId);
 					if (!source) continue; // Existing published picture; the server checks scope/access.
-					if (!this.online || !this.canAttachPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check picture permission before sending.");
+					if (!current() || !this.canAttachPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check picture permission before sending.");
 					await this.transport.uploadPicture(operation.scopeId, { type: "picture.upload", picture_id: pictureId, sha256: source.sha256, size: source.size }, source.bytes);
 				}
 			}
+			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
 			const exact = await this.store.prepareOnlineDraft(draft.id, draft.revision, operation);
-			if (this.closed) throw new Error("This discussion account is closed.");
+			if (!current()) throw new Error("This discussion account is closed.");
 			await this.onlineAction(exact);
 			await this.store.completeOnlineDraft(draft.id, draft.revision, exact.operationId);
 		})());

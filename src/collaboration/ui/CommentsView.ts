@@ -42,7 +42,7 @@ class DeleteCommentModal extends AccountModal {
 		const button = this.contentEl.createEl("button", { text: "Remove comment", cls: "mod-warning" });
 		button.onclick = () => {
 			if (this.message.author_id !== this.session.identity.accountId && !reason.value.trim()) { status.setText("Enter a reason for the removal."); return; }
-			this.operation ??= { operationId: uuid(), scopeId: this.entryId, payload: {
+			this.operation ??= { ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, payload: {
 				type: "message.delete", thread_id: this.threadId, message_id: this.message.id, expected_revision: this.message.revision,
 				...(reason.value.trim() ? { reason: reason.value.trim() } : {}),
 			} };
@@ -157,7 +157,7 @@ class ThreadCard {
 			button.disabled = !this.session.online;
 			button.onclick = () => {
 				if (!this.stateOperation || !isRecord(this.stateOperation.payload) || this.stateOperation.payload.expected_state_revision !== thread.state_revision) {
-					this.stateOperation = { operationId: uuid(), scopeId: this.entryId, payload: { type: "thread.state", thread_id: thread.id, expected_state_revision: thread.state_revision, state } };
+					this.stateOperation = { ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, payload: { type: "thread.state", thread_id: thread.id, expected_state_revision: thread.state_revision, state } };
 				}
 				button.disabled = true;
 				void this.session.onlineAction(this.stateOperation).then(() => { this.stateOperation = undefined; this.error.empty(); }).catch(() => {
@@ -168,7 +168,7 @@ class ThreadCard {
 		if (this.expanded && !this.composer) {
 			this.composer = new CommentComposer(this.composerContainer, this.session, this.entryId, `reply:${this.entryId}:${thread.id}`,
 				body => ({ type: "reply.create", payload: { type: "reply.create", thread_id: thread.id, message_id: uuid(), body: protocolJson(body) } }), "Reply");
-			this.composer.addOnlineAction("Send and reopen", async (body, draft) => {
+			this.composer.addOnlineAction("Send and reopen", async (body, draft, binding) => {
 				// Read the durable intent for every click. Recovery in this or
 				// another pane must not revive an old in-memory request identity.
 				const saved = await this.session.store.preference("online:" + draft.id);
@@ -176,7 +176,7 @@ class ThreadCard {
 				if (this.thread.state !== "resolved" && !pending) throw new Error("This discussion is already open.");
 				const serialized = JSON.stringify(body);
 				if (pending && isRecord(pending.payload) && JSON.stringify(pending.payload.body) !== serialized) throw new Error("Review the unconfirmed reply before changing it.");
-				const operation = pending ?? { operationId: uuid(), scopeId: this.entryId, payload: { type: "reply.create", thread_id: this.thread.id,
+				const operation = pending ?? { ...binding, operationId: uuid(), scopeId: this.entryId, payload: { type: "reply.create", thread_id: this.thread.id,
 					message_id: uuid(), body: protocolJson(body), reopen: true, expected_state_revision: this.thread.state_revision } };
 				await this.session.onlineDraft(draft, operation);
 			}, () => this.thread.state === "resolved" || !!this.composer?.hasUnconfirmedSend);
@@ -234,7 +234,7 @@ class ThreadCard {
 			button.disabled = !permission?.comment || !this.session.canQueue;
 			button.onclick = () => {
 				button.disabled = true;
-				void this.session.queue({ operationId: uuid(), scopeId: this.entryId, type: "reaction.set", dependsOn: [], payload: {
+				void this.session.queue({ ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, type: "reaction.set", dependsOn: [], payload: {
 					type: "reaction.set", thread_id: this.thread.id, message_id: message.id, emoji, present: !reaction?.mine,
 				} }).catch(() => { this.error.setText("Reaction could not be saved. Check your connection and permissions."); button.disabled = false; });
 			};

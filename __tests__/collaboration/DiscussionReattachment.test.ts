@@ -78,3 +78,20 @@ test("closing or losing access while reading local intent prevents a new network
 		expect(await f.controller.pending(scope, thread)).toEqual(op);
 	} finally { f.close(); }
 });
+
+test.each(["send", "recover"] as const)("%s retains a move when restore happens before its response is saved", async method => {
+	const f = await fixture();
+	try {
+		await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+		const operation = await f.controller.prepare(scope, thread, 1, note, () => true, { restoreGeneration: id(90) });
+		expect(operation.restoreGeneration).toBe(id(90));
+		const rotate = () => f.store.observeRestoreContext({ supported: true, generation: id(91) }, 1);
+		if (method === "send") f.transport.sendOnline.mockImplementationOnce(async op => { await rotate(); return outcome(op); });
+		else f.transport.withdrawOnline.mockImplementationOnce(async () => { await rotate(); return { status: "withdrawn" }; });
+		await expect(f.controller[method](operation, () => true)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(await f.controller.pending(scope, thread)).toEqual(operation);
+		f.transport.sendOnline.mockClear(); f.transport.withdrawOnline.mockClear();
+		await expect(f.controller.send({ ...operation, restoreGeneration: id(91) }, () => true)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(f.transport.sendOnline).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});

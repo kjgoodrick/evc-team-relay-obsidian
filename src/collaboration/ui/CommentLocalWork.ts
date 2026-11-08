@@ -121,8 +121,9 @@ export class CommentLocalWorkModal extends Modal {
 		card.createEl("h3", { text: `${operationLabels[operation.type]} · ${stateLabels[operation.state]}` });
 		card.createEl("p", { text: operationText(operation).slice(0, 1000) });
 		card.createEl("p", { text: `Saved ${new Date(operation.createdAt).toLocaleString()} · ${operation.dependsOn.length} dependencies` });
+		if (operation.error === "restore_generation_changed") card.createEl("p", { text: "Saved before the server was restored. This request is held for review; its original content is retained. Check the current discussion and its saved receipt before copying or sending new work." });
 		card.createEl("p", { text: operation.type === "reaction.set" ? "Cancellation checks delivery before retiring this change. It never sends an opposite reaction." : "This saved command is read-only here. Check delivery and review recovery from the original discussion before changing or sending it again." });
-		if (operation.type === "reaction.set") {
+		if (operation.type === "reaction.set" && operation.error !== "restore_generation_changed") {
 			const cancel = card.createEl("button", { text: "Cancel saved reaction", attr: { type: "button" } });
 			cancel.onclick = () => { if (!this.current()) return; this.reaction?.close(); this.reaction = new CancelReactionModal(this.app, this.session, operation, this.current); this.reaction.open(); };
 		}

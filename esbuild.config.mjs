@@ -238,5 +238,9 @@ if (watch) {
 		updateManifest();
 	}
 	copyToObsidian();
+	// Finish the build service before terminating Node; abrupt exit can leave
+	// esbuild's request goroutines waiting during shutdown after a valid build.
+	await context.dispose();
+	esbuild.stop();
 	process.exit(0);
 }

@@ -138,6 +138,8 @@ test("an offline pane restores cached authority without waiting for a pending ne
 		session = new DiscussionSession(store, transport as unknown as DiscussionTransport); await session.start();
 		session.watch(scope, () => {}, "base"); await session.scopeReady(scope);
 		expect(session.permission(scope)?.read).toBe(true); expect(session.knownDocumentGeneration(scope)).toBe(id(7));
+		// The cache is ready before the new guarded permission request starts.
+		await until(() => !!release);
 		expect(release).toBeDefined();
 	} finally { release?.(); await session.close(); }
 });

@@ -1,3 +1,4 @@
+import type { RestoreBinding } from "../RestoreGeneration";
 import { timelineRangeLabel } from "../TimelineRange";
 import { parseLocalDiscussionAnchor, type LocalDiscussionAnchor } from "../LocalDiscussionAnchor";
 import { v4 as uuid } from "uuid";
@@ -205,7 +206,7 @@ export class CommentComposer {
 	setEditingAvailable(available: () => boolean): void { this.editingAvailable = available; this.update(); }
 	get hasUnconfirmedSend(): boolean { return this.onlinePending; }
 	async flush(): Promise<boolean> { await this.ready; await this.attachmentFlight; await this.chain; return !this.saveFailed; }
-	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>, available: () => boolean = () => true): void {
+	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }, binding: RestoreBinding) => Promise<void>, available: () => boolean = () => true): void {
 		this.extraAvailable = available;
 		this.extra = this.send.parentElement!.createEl("button", { text: label, attr: { type: "button" } });
 		this.extra.addEventListener("click", () => { void this.submit(action); });
@@ -385,8 +386,9 @@ export class CommentComposer {
 			if (!this.disposed) this.status.setText("Could not save, or this draft changed in another window. Copy your text before reopening comments.");
 		}).finally(() => { if (!this.disposed) this.update(); }));
 	}
-	async submit(onlineAction?: (body: MessageBody, draft: { id: string; revision: number }) => Promise<void>): Promise<void> {
+	async submit(onlineAction?: (body: MessageBody, draft: { id: string; revision: number }, binding: RestoreBinding) => Promise<void>): Promise<void> {
 		if (this.localOptions || this.busy || this.disposed || this.discardReview || this.retiredTarget || this.composing || this.rich?.composing || this.needsEditReview || !this.sendAvailable()) return;
+		const binding = this.session.restoreBinding;
 		await this.ready;
 		if (this.busy || this.disposed || this.saveFailed || this.composing || this.rich?.composing || this.needsEditReview || !this.session.canQueue || !this.session.permission(this.entryId)?.comment) return;
 		if (this.onlinePending && !onlineAction) return;
@@ -397,10 +399,10 @@ export class CommentComposer {
 			await this.chain;
 			if (this.saveFailed || this.disposed || !this.sendAvailable()) return;
 			if (onlineAction) {
-				await onlineAction(body, { id: this.draftId, revision: this.revision });
+				await onlineAction(body, { id: this.draftId, revision: this.revision }, binding);
 			} else {
 				const command = this.command(body, this.target, this.editBaseRevision);
-				await this.session.queue({ operationId: uuid(), scopeId: this.entryId, type: command.type,
+				await this.session.queue({ ...binding, operationId: uuid(), scopeId: this.entryId, type: command.type,
 					payload: protocolJson(command.payload), dependsOn: command.dependsOn ?? [] }, { id: this.draftId, revision: this.revision });
 			}
 			this.revision = -1; this.savedValue = ""; this.textarea.value = ""; this.previousText = ""; this.mentions = []; this.onlinePending = false;
