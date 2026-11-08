@@ -291,6 +291,11 @@ restored-data drill or coordinator is claimed by this admission/pause test.
 
 ## Background source writes
 
+The next source-cache increment adds [explicit generation namespaces](source-cache-generation-preview.md)
+and normal provider reconnects against them. Original automatic sources remain
+paused. Reviewed activation, inventory/buffer selection and native replacement
+are still prerequisites to resumption.
+
 Native document writes and inventory acknowledgments also check durable review.
 They retain the document/share path, identity, server, account session and live
 provider selected before waiting. Renaming, deletion, structural recovery,

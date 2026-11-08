@@ -16,6 +16,7 @@ import {
 } from "./auth/RelayOnPremTokenProvider";
 import { AccessDeniedBackoff } from "./accessDeniedBackoff";
 import { restoreMetadata, type RestoreBinding } from "./collaboration/RestoreGeneration";
+import { assertSourceCacheBinding } from "./storage/source-document-cache";
 
 interface DocumentCredentialContext {
 	key: string; documentId: string; shareId: string; shareKey: string; probeKey: string; serverId: string;
@@ -85,6 +86,11 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	private restoreListeners = new Set<(documentId: string) => void>();
 	private documentServer(serverId?: string): string | undefined {
 		return serverId ?? this.defaultRelayOnPremServerId ?? this.relayOnPremProviders.keys().next().value;
+	}
+	assertDocumentSourceCache(metadata: string, documentId: string, serverId?: string, binding: RestoreBinding = {}): void {
+		const selected = this.documentServer(serverId), provider = selected ? this.relayOnPremProviders.get(selected) : undefined;
+		if (this.fileCacheDestroyed || !this.isRelayOnPremMode || !selected || !provider) throw new Error("The source cache server is unavailable. Local history is retained.");
+		assertSourceCacheBinding(metadata, documentId, selected, provider.controlPlaneEndpoint, binding);
 	}
 	private restoreKey(documentId: string, serverId?: string, binding: RestoreBinding = {}): string {
 		return JSON.stringify([this.documentServer(serverId) ?? "legacy", documentId, restoreMetadata(binding).restoreGeneration ?? null]);

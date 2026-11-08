@@ -17,6 +17,7 @@
 import * as Y from "yjs";
 import * as idb from "lib0/indexeddb";
 import { ObservableV2 } from "lib0/observable";
+import { bindDocumentCache, SOURCE_CACHE_IDENTITY } from "./document-cache-binding";
 
 const CUSTOM_STORE = "custom";
 const UPDATES_STORE = "updates";
@@ -205,15 +206,11 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 		this.destroy();
 	};
 
-	constructor(name: string, doc: Y.Doc) {
+	constructor(name: string, doc: Y.Doc, readonly cacheIdentity?: string) {
 		super();
 		this.doc = doc;
 		this.name = name;
 		if (doc.store.clients.size > 0) this._attachState = Y.encodeStateAsUpdate(doc);
-
-		this.whenSynced = new Promise((resolve) => {
-			this.once("synced", () => resolve(this));
-		});
 
 		this._dbref = idb
 			.openDB(name, (db) =>
@@ -224,6 +221,7 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 			)
 			.then(async (db) => {
 				this.db = db;
+				await bindDocumentCache(db, cacheIdentity);
 				await replayStoredUpdates(this);
 				// Metadata is read once here so the synchronous accessors
 				// (`serverSyncKnown`, `canRender`) have an answer without awaiting.
@@ -252,7 +250,14 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 				this.synced = true;
 				this.emit("synced", [this]);
 				return db;
-			});
+			}).catch(error => { this.db?.close(); this.db = null; throw error; });
+		this.whenSynced = this._dbref.then(() => {
+			if (!this.synced) throw new Error("Document cache was closed before loading finished");
+			return this;
+		});
+		// Some legacy callers subscribe to synced instead of awaiting startup.
+		// Keep the rejecting promise available without an unhandled rejection.
+		void this.whenSynced.catch(() => undefined);
 
 		this._updateHandler = (update: Uint8Array, origin: unknown) => {
 			// Updates we replayed ourselves are already on disk.
@@ -311,7 +316,7 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 	 * observable base class. Use `close()` to wait for the database to close.
 	 */
 	destroy(): void {
-		void this.close();
+		void this.close().catch(error => console.warn("Document cache did not close cleanly", error));
 	}
 
 	/** Stop persisting, drop all listeners and close the database. */
@@ -324,9 +329,8 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 		this.doc.off("destroy", this._destroyHandler);
 		this._destroyed = true;
 		return this._dbref.then(async (db) => {
-			if (this.pendingWrites.size) await Promise.all(this.pendingWrites);
-			db.close();
-			return super.destroy();
+			try { if (this.pendingWrites.size) await Promise.all(this.pendingWrites); }
+			finally { db.close(); super.destroy(); }
 		});
 	}
 
@@ -347,12 +351,14 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 		key: string | number | ArrayBuffer | Date,
 		value: string | number | ArrayBuffer | Date,
 	): Promise<unknown> {
+		if (key === SOURCE_CACHE_IDENTITY) throw new Error("Document cache identity is immutable");
 		const db = await this._dbref;
 		const [custom] = idb.transact(db, [CUSTOM_STORE]);
 		return idb.put(custom, value, key);
 	}
 
 	async del(key: string | number | ArrayBuffer | Date): Promise<void> {
+		if (key === SOURCE_CACHE_IDENTITY) throw new Error("Document cache identity is immutable");
 		const db = await this._dbref;
 		const [custom] = idb.transact(db, [CUSTOM_STORE]);
 		await idb.del(custom, key);

@@ -323,6 +323,8 @@ export class RelayOnPremTokenProvider {
 	 * otherwise long-lived (held by RelayCredentialCache for the plugin's lifetime),
 	 * so without this the old URL stays baked into `normalizedUrl` until reload.
 	 */
+	get controlPlaneEndpoint(): string { return this.normalizedUrl; }
+
 	updateControlPlaneUrl(controlPlaneUrl: string): void {
 		const normalized = controlPlaneUrl.replace(/\/+$/, "");
 		if (normalized !== this.normalizedUrl) {

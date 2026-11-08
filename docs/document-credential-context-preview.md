@@ -42,7 +42,9 @@ run. The disposable FastAPI/Rust scenario obtains a selected-generation grant
 through the actual cache for a new low-level peer while the original automatic
 source client and its offline edits remain paused.
 
-This isolates credentials, not local document histories. The legacy source-cache
-names, reviewed native-file replacement, safe resumed source selection, minimum
-client gates and coordinated restore remain separate requirements. Native/mobile
-acceptance is still pending; this checkpoint does not enable automatic resumption.
+This isolates credentials. An explicitly selected source can now use a
+[separate generation cache](source-cache-generation-preview.md) through the
+normal provider; automatic source clients still retain their original caches.
+Reviewed native-file replacement, safe activation, minimum client gates and
+coordinated restore remain separate requirements. Native/mobile acceptance is
+still pending; this checkpoint does not enable automatic resumption.

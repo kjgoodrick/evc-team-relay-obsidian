@@ -21,6 +21,7 @@ import { safeAvatarUrl } from "./presenceAvatar";
 import { decodeJwt } from "jose";
 import type { NotePresenceSurface } from "./collaboration/presence/PresenceSettings";
 import type { LocalDocumentStore } from "./storage/local-document-store";
+import { restoreMetadata, type RestoreBinding } from "./collaboration/RestoreGeneration";
 
 const EMPTY_TOKEN: DocumentGrant = {
 	token: "",
@@ -130,6 +131,7 @@ export class ProviderBacked extends Loggable {
 	private detachRestore?: () => void;
 	private restorePaused = false;
 	private restorePersistence?: LocalDocumentStore;
+	private readonly restoreBinding: RestoreBinding;
 	private detachAuthSession?: () => void;
 	private detachProfileRefresh?: () => void;
 	// accountId last used to seed awareness/doc-identity, so a later auth
@@ -152,8 +154,12 @@ export class ProviderBacked extends Loggable {
 		// VaultShareSettings.onpremServerId existed — RelayCredentialCache falls
 		// back to the default provider in that case.
 		public onpremServerId?: string,
+		// Immutable selection for a separately opened source cache. Existing
+		// automatic documents retain the original lineage by omitting it.
+		initialRestoreBinding: RestoreBinding = {},
 	) {
 		super();
+		this.restoreBinding = Object.freeze(restoreMetadata(initialRestoreBinding));
 		this.authSession = authSession;
 		// Per-server, NOT the plugin-wide `authSession.currentUser` — that
 		// field only ever reflects whichever server is `activeServerId`
@@ -174,7 +180,7 @@ export class ProviderBacked extends Loggable {
 
 		this.credentialCache = credentialCache;
 		this.issuedToken =
-			this.credentialCache.peekToken(ResourceAddress.serialize(this.resourceAddress), onpremServerId) || { ...EMPTY_TOKEN };
+			this.credentialCache.peekToken(ResourceAddress.serialize(this.resourceAddress), onpremServerId, this.restoreBinding) || { ...EMPTY_TOKEN };
 
 		this._liveProvider = buildProvider(
 			this.issuedToken, this.crdtDoc, () => this.refreshStaleProviderToken(),
@@ -217,7 +223,7 @@ export class ProviderBacked extends Loggable {
 
 	get restoreReviewRequired(): boolean {
 		return this.restorePaused || !!this.restorePersistence?.restoreReviewRequired
-			|| !!this.credentialCache?.isRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+			|| !!this.credentialCache?.isRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
 	}
 	/** Document caches retain their pause independently of folder inventory. */
 	protected retainRestoreReviewIn(store: LocalDocumentStore): void {
@@ -234,7 +240,20 @@ export class ProviderBacked extends Loggable {
 			await store.loadRestoreReview();
 			if (this.restorePersistence !== store || store._destroyed) throw new Error("Document cache was closed");
 		}
+		this.assertSourceCacheBinding();
 		if (this.restoreReviewRequired) { this.pauseForRestore(); throw new RelayRestoreRequiredError(); }
+	}
+	private assertSourceCacheBinding(): void {
+		const store = this.restorePersistence;
+		if (!store) return; // A low-level provider may have no local source store.
+		if (store.cacheIdentity !== undefined) {
+			this.credentialCache.assertDocumentSourceCache(store.cacheIdentity, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
+		} else if (this.restoreBinding.restoreGeneration) {
+			throw new Error("A restored document requires a separate source cache. Original local history is retained.");
+		}
+	}
+	private sourceCacheBindingCurrent(): boolean {
+		try { this.assertSourceCacheBinding(); return true; } catch { return false; }
 	}
 	protected pauseForRestore(): void {
 		if (this.restorePersistence && !this.restorePersistence.restoreReviewRequired) {
@@ -337,7 +356,7 @@ export class ProviderBacked extends Loggable {
 	private attachConnectionCloseHandler(): () => void {
 		const handler = (event: CloseEvent) => {
 			if (event?.code === 4412 && this.issuedToken.url.includes("/v1/managed/socket")) {
-				this.credentialCache.markRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+				this.credentialCache.markRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
 				this.pauseForRestore();
 				return;
 			}
@@ -423,15 +442,16 @@ export class ProviderBacked extends Loggable {
 			this.getVaultPath(),
 			this.applyRefreshedToken.bind(this),
 			this.getOnpremServerId(),
+			this.restoreBinding,
 		);
 	}
 
 	hasFreshProviderToken(): boolean {
-		if (this.restoreReviewRequired) return false;
+		if (this.restoreReviewRequired || !this.sourceCacheBindingCurrent()) return false;
 		if (!this.issuedToken) {
 			return false;
 		}
-		if (this.credentialCache.isDocumentGrantCurrent?.(this.issuedToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId()) === false) return false;
+		if (this.credentialCache.isDocumentGrantCurrent?.(this.issuedToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding) === false) return false;
 		const hasCurrentUrl = this._liveProvider.hasUrl(this.issuedToken.url);
 		const notExpired = Date.now() <= (this.issuedToken?.expiryTime || 0);
 		return hasCurrentUrl && notExpired;
@@ -445,15 +465,15 @@ export class ProviderBacked extends Loggable {
 	 * this grant by applyRefreshedToken() already.)
 	 */
 	private hasUsableProviderToken(): boolean {
-		if (this.restoreReviewRequired) return false;
-		if (this.issuedToken && this.credentialCache.isDocumentGrantCurrent?.(this.issuedToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId()) === false) return false;
+		if (this.restoreReviewRequired || !this.sourceCacheBindingCurrent()) return false;
+		if (this.issuedToken && this.credentialCache.isDocumentGrantCurrent?.(this.issuedToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding) === false) return false;
 		const expiry = this.issuedToken?.expiryTime ?? 0;
 		return !!this.issuedToken?.token && Date.now() + RECONNECT_TOKEN_MARGIN_MS <= expiry;
 	}
 
 	applyRefreshedToken(clientToken: DocumentGrant): void {
-		if (this.restoreReviewRequired) return;
-		if (this.credentialCache.isDocumentGrantCurrent?.(clientToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId()) === false) return;
+		if (this.restoreReviewRequired || !this.sourceCacheBindingCurrent()) return;
+		if (this.credentialCache.isDocumentGrantCurrent?.(clientToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding) === false) return;
 		// point the live provider connection at the freshly-issued token
 		this.issuedToken = clientToken;
 
@@ -557,7 +577,7 @@ export class ProviderBacked extends Loggable {
 
 	/** The control plane refuses this share's token (401/403); retries are backed off. */
 	get accessDenied(): boolean {
-		return this.credentialCache.isAccessDenied(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+		return this.credentialCache.isAccessDenied(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
 	}
 
 	public get connectionState(): ConnectionState {
@@ -585,7 +605,7 @@ export class ProviderBacked extends Loggable {
 		// above) schedule it AFTER calling this.
 		this.reconnectGate.cancel();
 		this._liveProvider.disconnect();
-		this.credentialCache.dropFromQueue(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+		this.credentialCache.dropFromQueue(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
 		this.broadcastState();
 	}
 

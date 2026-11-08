@@ -6,6 +6,7 @@ import type { AuthSession } from "../src/AuthSession";
 import type { App } from "obsidian";
 import { MockClock } from "./mocks/MockClock";
 import { platformFetch } from "../src/platformFetch";
+import { sourceDocumentCache } from "../src/storage/source-document-cache";
 
 jest.mock("../src/platformFetch");
 jest.mock("../src/logging", () => ({ namedLogger: () => jest.fn(), Loggable: class {}, instanceLabels: { set: jest.fn() } }));
@@ -29,6 +30,19 @@ function setup(app?: App) {
 beforeEach(() => fetch.mockReset().mockImplementation(async (url, options) => response(new URL(String(url)).hostname.split(".")[0],
 	(options?.headers as Record<string, string>)["X-Relay-Restore-Generation"] ?? null)));
 afterEach(() => { for (const cache of caches.splice(0)) cache.destroy(); jest.restoreAllMocks(); });
+
+test("loaded source identity must still match the selected server, endpoint, document and generation", async () => {
+	const s = setup(), selected = { restoreGeneration: generation };
+	const descriptor = await sourceDocumentCache({ hostAppId: "fixture", serverId: "a", controlPlaneUrl: "https://a.test", s3rn: address, ...selected });
+	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address, "a", selected)).not.toThrow();
+	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address, "b", selected)).toThrow("another server");
+	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address, "a")).toThrow("another server");
+	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address.replace(doc, crypto.randomUUID()), "a", selected)).toThrow("another server");
+	s.a.updateControlPlaneUrl("https://replacement.test");
+	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address, "a", selected)).toThrow("another server");
+	s.cache.removeRelayOnPremProvider("a");
+	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address, "a", selected)).toThrow("unavailable");
+});
 
 test("identical document IDs on two servers have independent requests, grants and callbacks", async () => {
 	const { cache } = setup(), callbackA = jest.fn(), callbackB = jest.fn();

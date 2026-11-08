@@ -11,6 +11,7 @@ import { SystemClock } from "../../src/Clock";
 import type { AuthSession } from "../../src/AuthSession";
 import type { IAuthProvider } from "../../src/auth/IAuthProvider";
 import { LocalDocumentStore } from "../../src/storage/local-document-store";
+import { openSourceDocumentCache, type SourceDocumentIdentity } from "../../src/storage/source-document-cache";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 
@@ -93,9 +94,20 @@ integration("managed document sockets reject original grants after generation ro
 		const bound = await grant("write", generation); expect(bound.restore_generation).toBe(generation);
 		const scoped = await writer.cache.getToken(ResourceAddress.serialize(address), "Note.md", () => {}, "fixture", { restoreGeneration: generation });
 		expect(scoped.restoreGeneration).toBe(generation); expect(writer.backing.restoreReviewRequired).toBe(true);
-		// Only a new low-level peer consumes the explicitly selected generation.
-		// The original automatic source client and its retained edits stay paused.
-		const fresh = await peer({ relay_url: scoped.url, token: scoped.token });
+		// A separately opened source cache consumes the explicitly selected
+		// generation through the normal provider and credential paths. The old
+		// automatic source client and its retained edits remain paused.
+		const sourceIdentity: SourceDocumentIdentity = { hostAppId: "actual-restore-fixture", serverId: "fixture", controlPlaneUrl: f.base,
+			s3rn: ResourceAddress.serialize(address), restoreGeneration: generation };
+		async function restoredSource() {
+			const backing = new StoredDocument(f.note, address, writer.cache, session, "fixture", { restoreGeneration: generation }); clients.push(backing);
+			const store = await openSourceDocumentCache(sourceIdentity, backing.crdtDoc); stores.push(store); backing.attachStore(store);
+			return { backing, store, provider: backing._liveProvider, text: backing.crdtDoc.getText("contents") };
+		}
+		const fresh = await restoredSource();
+		expect(fresh.text.toString()).toBe(""); expect(fresh.store.name).not.toBe(writer.store.name);
+		expect(await fresh.backing.bringOnline()).toBe(true);
+		await until(() => fresh.provider.synced, "selected source generation synchronization");
 		expect(fresh.text.toString()).toBe("content before rotation\n");
 		fresh.text.insert(fresh.text.length, "bound edit\n");
 		const currentReader = await peer(await grant("read", generation));
@@ -104,6 +116,12 @@ integration("managed document sockets reject original grants after generation ro
 		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
 		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
 		expect(uncached.text.toString()).toBe("UNCACHED CLIENT EDIT MUST STAY LOCAL\n");
+		fresh.backing.goOffline(); await fresh.store.close(); fresh.backing.dismantle();
+		const restoredRestart = await restoredSource();
+		expect(restoredRestart.text.toString()).toBe("content before rotation\nbound edit\n");
+		expect(await restoredRestart.backing.bringOnline()).toBe(true);
+		await until(() => restoredRestart.provider.synced, "selected source generation reconnect");
+		expect(writer.backing.restoreReviewRequired).toBe(true);
 		await writer.store.close();
 		const restarted = client(writer.store.name);
 		await expect(restarted.backing.ensureActiveProvider()).rejects.toThrow("restore review");
