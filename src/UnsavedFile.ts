@@ -152,6 +152,38 @@ export class UnsavedFileStore {
 		return result === undefined ? null : result.contents;
 	}
 
+	/** Inspect only selected keys, without loading their potentially large text
+	 * or touching other generations' buffers. Activation must refuse any saved
+	 * destination work rather than treating an empty source cache as consent. */
+	async countSavedBuffers(input: readonly string[], options: { check: () => void; signal?: AbortSignal; timeoutMs?: number }): Promise<number> {
+		if (!Array.isArray(input) || input.length > 10_000 || input.some(key => typeof key !== "string" || !key || key.length > 512)) throw new Error("Invalid saved-buffer inspection keys");
+		const keys = [...new Set(input)], checkContext = options.check, signal = options.signal, timeout = options.timeoutMs ?? 5000;
+		if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) throw new Error("Invalid saved-buffer inspection timeout");
+		const cancelled = () => Object.assign(new Error("Saved-buffer inspection was cancelled"), { name: "AbortError" });
+		const check = () => { if (signal?.aborted) throw cancelled(); checkContext(); };
+		check(); if (!keys.length) return 0;
+		const db = await this.database(); check();
+		return new Promise((resolve, reject) => {
+			const tx = db.transaction(UnsavedFileStore.STORE_NAME, "readonly"), store = tx.objectStore(UnsavedFileStore.STORE_NAME);
+			let count = 0, failure: unknown;
+			const abort = (error: unknown) => { failure ??= error; try { tx.abort(); } catch { /* A completed readonly transaction is still rechecked. */ } };
+			const onAbort = () => abort(cancelled());
+			const timer = window.setTimeout(() => abort(new Error("Saved-buffer inspection timed out")), timeout);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			const cleanup = () => { window.clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+			tx.oncomplete = () => { cleanup(); try { if (failure !== undefined) throw failure; check(); resolve(count); } catch (error) { reject(error); } };
+			tx.onabort = () => { cleanup(); reject(failure ?? tx.error ?? new Error("Unable to inspect saved buffers")); };
+			tx.onerror = () => { /* onabort reports the failure */ };
+			try {
+				check(); if (store.keyPath !== "guid" || store.autoIncrement) throw new Error("The saved-buffer store has an unsupported schema");
+				for (const key of keys) {
+					const request = store.count(key);
+					request.onsuccess = () => { try { check(); if (![0, 1].includes(request.result)) throw new Error("Invalid saved-buffer count"); count += request.result; } catch (error) { abort(error); } };
+				}
+			} catch (error) { abort(error); }
+		});
+	}
+
 	async discardUnsaved(guid: string): Promise<void> {
 		await this.withStore(
 			"readwrite",

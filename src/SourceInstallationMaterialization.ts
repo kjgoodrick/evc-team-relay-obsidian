@@ -1,10 +1,11 @@
 import { sha256Hex } from "./contentDigest";
 import type { RecoveryArchiveReader } from "./ManagedRecoveryArchive";
-import { sourceInstallationPath, verifySourceInstallationPlan, type SourcePlanVerificationOptions } from "./SourceInstallationPlan";
+import { sourceInstallationPath, verifySourceInstallationPlan, type SourcePlanVerificationOptions, type SourceInstallationPlan, type SourceInstallationReference } from "./SourceInstallationPlan";
 import { holdNativeSourceWrites } from "./storage/native-document-writes";
 import { sourceInventoryCacheSync, type SourceInventoryIdentity } from "./storage/source-document-cache";
-import type { SourceSelectionJournal } from "./storage/source-selection-journal";
+import type { SourceSelectionJournal, SourceSelectionState } from "./storage/source-selection-journal";
 import { borrowPausedSourceHold } from "./storage/source-startup-admission";
+import type { ManagedManifest } from "./client/ManagedIndexTransport";
 
 export const INSTALLATION_METADATA = ".relay-source-installation";
 export interface NativeInstallationStat { type: "file" | "folder"; size: number }
@@ -27,15 +28,41 @@ export interface SourceMaterializationRequest {
 	revision: string;
 	operationId: string;
 }
+export interface SourceMaterializationResult {
+	selection: SourceSelectionState;
+	reference: SourceInstallationReference;
+	destinationRoot: string;
+	created: number;
+	resumed: number;
+}
+export interface MaterializedSourceSession extends SourceMaterializationResult {
+	plan: SourceInstallationPlan;
+	inventorySnapshot: ManagedManifest;
+	assertCurrent(): Promise<void>;
+	verifyNative(): Promise<void>;
+}
 
 /** Copy a prepared source into its new native folder, or resume an interrupted
  * copy. This deliberately leaves the journal applying and ordinary sync paused.
  * Cache/mapping installation, current server admission and final activation are
  * separate steps. The caller must isolate untracked host/process writers too. */
 export async function materializeSourceInstallation(journal: SourceSelectionJournal, staging: RecoveryArchiveReader,
-	native: SourceNativeInstallationIO, input: SourceMaterializationRequest, options: SourcePlanVerificationOptions = {}) {
+	native: SourceNativeInstallationIO, input: SourceMaterializationRequest, options: SourcePlanVerificationOptions = {}): Promise<SourceMaterializationResult> {
+	return withMaterializedSourceInstallation(journal, staging, native, input, async session => ({ selection: session.selection,
+		reference: session.reference, destinationRoot: session.destinationRoot, created: session.created, resumed: session.resumed }), options);
+}
+
+/** Run the activation coordinator's remaining work while both native holds are
+ * still owned. The session's verifiers expire when the continuation settles.
+ * The callback must await its work and separately establish server/other-writer
+ * admission before any journal commit; this function cannot provide that. */
+export async function withMaterializedSourceInstallation<T>(journal: SourceSelectionJournal, staging: RecoveryArchiveReader,
+	native: SourceNativeInstallationIO, input: SourceMaterializationRequest, continueWith: (session: MaterializedSourceSession) => Promise<T>,
+	options: SourcePlanVerificationOptions = {}): Promise<T> {
 	const request = { ...input, source: { ...input.source } }, checkContext = options.check, signal = options.signal, timeoutMs = options.timeoutMs;
+	let closed = false;
 	const check = () => {
+		if (closed) throw new Error("The native installation session ended");
 		if (signal?.aborted) throw Object.assign(new Error("Source installation was cancelled"), { name: "AbortError" });
 		checkContext?.();
 	};
@@ -139,6 +166,15 @@ export async function materializeSourceInstallation(journal: SourceSelectionJour
 		await verifySourceInstallationPlan(staging, preparation.plan,
 			{ source: request.source, reviewId: request.reviewId, archive: preparation.archive }, { check, signal, timeoutMs });
 		await native.stat(root); await confirm();
-		return { selection: state, reference: verified.reference, destinationRoot: root, created, resumed };
-	} finally { destinationHold?.release(); originalHold.release(); }
+		return await continueWith(Object.freeze({
+			selection: JSON.parse(JSON.stringify(state)) as SourceSelectionState, reference: verified.reference, destinationRoot: root, created, resumed,
+			plan: JSON.parse(JSON.stringify(plan)) as SourceInstallationPlan, inventorySnapshot: JSON.parse(JSON.stringify(verified.inventorySnapshot)) as ManagedManifest,
+			assertCurrent: confirm,
+			verifyNative: async () => {
+				await inspect(true);
+				for (const entry of plan.entries) if (entry.file) await verifyFile(`${root}/${entry.path}`, entry.file.bytes, entry.file.sha256);
+				await native.stat(root); await confirm();
+			},
+		}));
+	} finally { closed = true; destinationHold?.release(); originalHold.release(); }
 }

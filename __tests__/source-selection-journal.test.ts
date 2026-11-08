@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { SourceSelectionJournal, type SourceSelectionState, type SourceSelectionCommand, type SourcePreparation } from "../src/storage/source-selection-journal";
 import { RemoteFolderAddress, ResourceAddress } from "../src/ResourceAddress";
 import { RECOVERY_FOLDER } from "../src/conflictCopyPath";
+import { watchSourceSelection } from "../src/storage/source-selection-events";
 
 const scope = () => ({ hostAppId: crypto.randomUUID(), serverId: "fixture", controlPlaneUrl: "https://fixture.test",
 	s3rn: ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", crypto.randomUUID())) });
@@ -30,6 +31,44 @@ test("activation stores its native root atomically with the selected generation 
 	expect(await journal.apply(command)).toEqual(selected);
 	await expect(journal.apply({ ...command, destinationRoot: "Original Team" })).rejects.toThrow("different work");
 	expect(await journal.read()).toEqual(selected);
+});
+
+test("read-only commit reconciliation survives reopen without writes or change notifications", async () => {
+	const value = scope(); let journal = await open(value), state = await journal.apply(begin());
+	state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	const receipt = { operationId: crypto.randomUUID(), reviewId: state.pending!.reviewId, restoreGeneration: state.pending!.restoreGeneration };
+	const selected = await journal.apply({ ...receipt, type: "commit", expectedRevision: state.revision, destinationRoot: "Restored Team" });
+	journal.close(); journal = await open(value);
+	const put = jest.spyOn(IDBObjectStore.prototype, "put"), add = jest.spyOn(IDBObjectStore.prototype, "add"), changed = jest.fn();
+	const stop = watchSourceSelection(journal.name, changed);
+	try {
+		expect(await journal.reconcileCommit(receipt)).toEqual(selected);
+		for (const mismatch of [{ operationId: crypto.randomUUID() }, { reviewId: crypto.randomUUID() }, { restoreGeneration: crypto.randomUUID() }]) {
+			await expect(journal.reconcileCommit({ ...receipt, ...mismatch })).rejects.toThrow("receipt");
+		}
+		expect(put).not.toHaveBeenCalled(); expect(add).not.toHaveBeenCalled(); expect(changed).not.toHaveBeenCalled();
+	} finally { stop(); }
+	const next = await journal.apply(begin(selected.revision));
+	await expect(journal.reconcileCommit(receipt)).rejects.toThrow("superseded"); expect(await journal.read()).toEqual(next);
+});
+
+test("reconciliation rejects an older rootless activation instead of admitting its source", async () => {
+	const journal = await open(); let state = await journal.apply(begin());
+	state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	const receipt = { operationId: crypto.randomUUID(), reviewId: state.pending!.reviewId, restoreGeneration: state.pending!.restoreGeneration };
+	const selected = await journal.apply({ ...receipt, type: "commit", expectedRevision: state.revision });
+	await expect(journal.reconcileCommit(receipt)).rejects.toThrow("does not match"); expect(await journal.read()).toEqual(selected);
+});
+
+test("an activation precondition lost while the transaction reads cannot save a commit or receipt", async () => {
+	const journal = await open(); let state = await journal.apply(begin());
+	state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	const receipt = { operationId: crypto.randomUUID(), reviewId: state.pending!.reviewId, restoreGeneration: state.pending!.restoreGeneration };
+	let checks = 0;
+	await expect(journal.apply({ ...receipt, type: "commit", expectedRevision: state.revision, destinationRoot: "Restored Team" }, {
+		check: () => { if (++checks > 1) throw new Error("Writer isolation was lost"); },
+	})).rejects.toThrow("isolation");
+	expect(await journal.read()).toEqual(state); await expect(journal.reconcileCommit(receipt)).rejects.toThrow("missing");
 });
 
 test.each(["", "/Team", "../Team", "Team/../Other", ".obsidian", "Team/.hidden", "TEAM/Relay Recovery (local only)", "Relay Recovery (local only)/Child", "Team/CON", "Team/e\u0301"])("unsafe activation root is refused: %s", async destinationRoot => {

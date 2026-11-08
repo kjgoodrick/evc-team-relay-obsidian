@@ -1,6 +1,7 @@
 import { holdNativeSourceWrites, type NativeSourceWriteHold, type NativeWriteWait } from "./native-document-writes";
 import { sourceCacheEndpoint, sourceInventoryCacheSync } from "./source-document-cache";
 import { SourceSelectionContext, type SourceSelectionScope } from "./source-selection-context";
+import { sourceInstallationNativeRoot } from "../SourceInstallationPlan";
 
 interface StartupHold { path: string; hold: NativeSourceWriteHold; busy: boolean }
 type StartupHolds = WeakMap<object, Map<string, StartupHold>>;
@@ -50,6 +51,36 @@ export function borrowPausedSourceHold(vault: object, path: string, scope: Sourc
 export function borrowPausedSourceDrain(vault: object, path: string, scope: SourceSelectionScope): Pick<NativeSourceWriteHold, "wait" | "release"> | undefined {
 	const hold = borrowPausedSourceHold(vault, path, scope);
 	return hold ? { wait: hold.wait, release: hold.release } : undefined;
+}
+
+/** After verified activation, retire only the original location's startup hold.
+ * A hold already at the selected destination remains for ordinary admission.
+ * This verifies the durable decision, not native/cache/server readiness; the
+ * activation coordinator must have established those before committing it. */
+export async function releaseRetiredSourceHold(vault: object, originalRoot: string, input: SourceSelectionScope,
+	selected: { revision: string; destinationRoot: string }, options: NativeWriteWait): Promise<boolean> {
+	const oldRoot = sourceInstallationNativeRoot(originalRoot), destination = sourceInstallationNativeRoot(selected.destinationRoot), revision = selected.revision;
+	const oldKey = oldRoot.normalize("NFC").toLowerCase(), newKey = destination.normalize("NFC").toLowerCase();
+	if (oldKey === newKey || oldKey.startsWith(newKey + "/") || newKey.startsWith(oldKey + "/")) throw new Error("The retired and selected source locations overlap");
+	const scope = { hostAppId: input.hostAppId, serverId: input.serverId, controlPlaneUrl: sourceCacheEndpoint(input.controlPlaneUrl), s3rn: input.s3rn };
+	const identity = sourceInventoryCacheSync({ ...scope, restoreGeneration: null }).identity, scopes = registry().get(vault), entry = scopes?.get(identity);
+	const checkContext = options.check, signal = options.signal, timeoutMs = options.timeoutMs;
+	const check = () => { if (signal?.aborted) throw Object.assign(new Error("Source handoff was cancelled"), { name: "AbortError" }); checkContext(); };
+	check();
+	if (entry && ![oldKey, newKey].includes(entry.path)) throw new Error("The paused source location changed before handoff");
+	const retiring = entry?.path === oldKey ? entry : undefined;
+	if (retiring?.busy) throw new Error("The original source hold is still in use");
+	if (retiring) retiring.busy = true;
+	let context: SourceSelectionContext | undefined;
+	try {
+		if (retiring) await retiring.hold.wait({ check, signal, timeoutMs });
+		check(); context = await SourceSelectionContext.open(scope); check();
+		if (context.choice.kind !== "source" || context.revision !== revision) throw new Error("The committed source decision changed before handoff");
+		context.assertNativeRoot(destination); await context.assertCurrent(); check();
+		if (!retiring) return false;
+		if (scopes?.get(identity) !== retiring) throw new Error("The paused source hold changed before handoff");
+		retiring.hold.release(); scopes!.delete(identity); return true;
+	} finally { if (retiring) retiring.busy = false; context?.close(); }
 }
 
 /** Close tracked native admission before reading a source journal. A pending,

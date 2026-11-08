@@ -59,7 +59,7 @@ describe("UnsavedFileStore transaction durability", () => {
 	beforeEach(installFakeIndexedDB);
 	afterEach(() => jest.restoreAllMocks());
 
-	it.each(["put", "delete", "get"] as const)("a late %s abort is reported and preserves the last committed buffer", async operation => {
+	it.each(["put", "delete", "get", "count"] as const)("a late %s abort is reported and preserves the last committed buffer", async operation => {
 		const store = new UnsavedFileStore();
 		await store.persistUnsaved("retained", "COMMITTED TEXT");
 		const original = IDBObjectStore.prototype[operation]; let succeeded = false;
@@ -73,12 +73,27 @@ describe("UnsavedFileStore transaction durability", () => {
 			return request;
 		});
 		const action = operation === "put" ? store.persistUnsaved("retained", "UNCOMMITTED TEXT")
-			: operation === "delete" ? store.discardUnsaved("retained") : store.readUnsaved("retained");
+			: operation === "delete" ? store.discardUnsaved("retained") : operation === "get" ? store.readUnsaved("retained") : store.countSavedBuffers(["retained"], { check: () => {} });
 		await expect(action).rejects.toThrow(); expect(succeeded).toBe(true);
 		spy.mockRestore();
 		expect(await store.readUnsaved("retained")).toBe("COMMITTED TEXT");
 		await store.persistUnsaved("retained", "RETRIED TEXT");
 		expect(await store.readUnsaved("retained")).toBe("RETRIED TEXT");
+	});
+
+	it("saved-buffer inspection counts exact unique keys without loading or changing text", async () => {
+		const store = new UnsavedFileStore(); await store.persistUnsaved("selected", ""); await store.persistUnsaved("older-generation", "Retained text");
+		const read = jest.spyOn(IDBObjectStore.prototype, "get"), all = jest.spyOn(IDBObjectStore.prototype, "getAll");
+		expect(await store.countSavedBuffers(["selected", "selected", "missing"], { check: () => {} })).toBe(1);
+		expect(read).not.toHaveBeenCalled(); expect(all).not.toHaveBeenCalled(); read.mockRestore(); all.mockRestore();
+		expect(await store.readUnsaved("older-generation")).toBe("Retained text"); expect(await store.readUnsaved("selected")).toBe("");
+	});
+
+	it("cancelled or oversized inspections do not open the buffer database", async () => {
+		const store = new UnsavedFileStore(), controller = new AbortController(), open = jest.spyOn(indexedDB, "open"); controller.abort();
+		await expect(store.countSavedBuffers(["selected"], { check: () => {}, signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+		await expect(store.countSavedBuffers(Array(10_001).fill("selected"), { check: () => {} })).rejects.toThrow("keys");
+		expect(open).not.toHaveBeenCalled();
 	});
 
 	it("an invalid record fails without stranding the next transaction", async () => {

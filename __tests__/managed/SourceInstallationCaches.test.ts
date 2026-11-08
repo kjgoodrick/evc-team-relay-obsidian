@@ -9,6 +9,8 @@ import { openSourceDocumentCache, openSourceInventoryCache, sourceDocumentCacheS
 import { SOURCE_CACHE_IDENTITY } from "../../src/storage/document-cache-binding";
 import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { ItemKind } from "../../src/ItemKinds";
+import { UnsavedFileStore } from "../../src/UnsavedFile";
+import { assertNoInstallationLocalWork } from "../../src/SourceInstallationLocalWork";
 
 const encode = (text: string) => new TextEncoder().encode(text).buffer;
 const journals: SourceSelectionJournal[] = [];
@@ -168,4 +170,31 @@ test("caller mutation after entry cannot change the source being imported", asyn
 	request.source.controlPlaneUrl = "https://other.test"; request.source.restoreGeneration = crypto.randomUUID(); request.revision = crypto.randomUUID();
 	expect(await result).toMatchObject({ created: 3, resumed: 0 });
 	expect((await readNote(f.noteIdentity)).text).toBe("Restored note");
+});
+
+test("activation preflight checks only the selected generation and preserves older buffers and upload claims", async () => {
+	const f = await fixture(), buffers = new UnsavedFileStore(), oldKey = sourceDocumentCacheSync({ ...f.noteIdentity, restoreGeneration: null }).bufferKey;
+	await buffers.persistUnsaved(oldKey, "Old offline work");
+	const selectedUploads = sourceInventoryCacheSync(f.source).name + "/pendingUploads";
+	const app = { loadLocalStorage: jest.fn((key: string) => key === selectedUploads ? {} : { retained: "old upload" }) };
+	await assertNoInstallationLocalWork(app, buffers, f.staged.plan);
+	expect(app.loadLocalStorage.mock.calls.every(([key]) => key === selectedUploads)).toBe(true);
+	expect(await buffers.readUnsaved(oldKey)).toBe("Old offline work");
+	const selected = sourceDocumentCacheSync(f.noteIdentity).bufferKey; await buffers.persistUnsaved(selected, "");
+	await expect(assertNoInstallationLocalWork(app, buffers, f.staged.plan)).rejects.toThrow("saved local buffers");
+	expect(await buffers.readUnsaved(selected)).toBe("");
+});
+
+test.each(["claim", "invalid object", "invalid scalar"])("activation refuses selected upload state without inspecting buffer bodies: %s", async kind => {
+	const f = await fixture(), value = kind === "claim" ? { "Note.md": "pending" } : kind === "invalid object" ? [] : "unrecognized";
+	const app = { loadLocalStorage: jest.fn((_key: string) => value) }, buffers = { countSavedBuffers: jest.fn(async () => 0) };
+	await expect(assertNoInstallationLocalWork(app, buffers, f.staged.plan)).rejects.toThrow("upload state");
+	expect(buffers.countSavedBuffers).not.toHaveBeenCalled(); expect(app.loadLocalStorage.mock.results[0].value).toBe(value);
+});
+
+test("a pending upload appearing during buffer inspection blocks activation", async () => {
+	const f = await fixture(); let value: Record<string, string> = {};
+	const app = { loadLocalStorage: (_key: string) => value }, buffers = { countSavedBuffers: async () => { value = { local: "new claim" }; return 0; } };
+	await expect(assertNoInstallationLocalWork(app, buffers, f.staged.plan)).rejects.toThrow("upload state");
+	expect(value).toEqual({ local: "new claim" });
 });

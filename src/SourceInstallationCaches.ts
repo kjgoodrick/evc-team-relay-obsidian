@@ -80,7 +80,7 @@ async function seedCache(descriptor: SourceCacheDescriptor, update: Uint8Array, 
 				}
 			});
 			const cleanup = () => { window.clearTimeout(timer); signal?.removeEventListener("abort", cancelled); };
-			tx.oncomplete = () => { cleanup(); try { check(); if (!outcome) throw unchanged(); resolve(outcome); } catch (error) { reject(error); } };
+			tx.oncomplete = () => { cleanup(); try { if (failure !== undefined) throw failure; check(); if (!outcome) throw unchanged(); resolve(outcome); } catch (error) { reject(error); } };
 			tx.onabort = () => { cleanup(); reject(failure ?? tx.error ?? new Error("Source cache installation was not committed")); };
 			tx.onerror = () => { /* onabort reports the failure */ };
 			if (signal?.aborted) cancelled();

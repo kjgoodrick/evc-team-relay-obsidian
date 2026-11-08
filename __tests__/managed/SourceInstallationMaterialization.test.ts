@@ -7,7 +7,7 @@ import * as Y from "yjs";
 import { FileSystemAdapter, Platform, type Vault } from "obsidian";
 import { createDesktopSourceInstallationIO } from "../../src/DesktopSourceInstallationIO";
 import { createDesktopSourceMaterializationIO } from "../../src/DesktopSourceMaterializationIO";
-import { INSTALLATION_METADATA, materializeSourceInstallation } from "../../src/SourceInstallationMaterialization";
+import { INSTALLATION_METADATA, materializeSourceInstallation, withMaterializedSourceInstallation, type MaterializedSourceSession } from "../../src/SourceInstallationMaterialization";
 import { prepareRecoveryBackup } from "../../src/ManagedRecoveryBackup";
 import { stageSourceInstallation } from "../../src/SourceInstallationStaging";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
@@ -15,14 +15,20 @@ import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress"
 import { ItemKind } from "../../src/ItemKinds";
 import { trackNativeSourceMutation } from "../../src/storage/native-document-writes";
 import { seedSourceInstallationCaches } from "../../src/SourceInstallationCaches";
-import { openSourceDocumentCache } from "../../src/storage/source-document-cache";
-import { admitSourceStartup } from "../../src/storage/source-startup-admission";
+import { openSourceDocumentCache, sourceDocumentCacheSync, sourceInventoryCacheSync } from "../../src/storage/source-document-cache";
+import { admitSourceStartup, releaseRetiredSourceHold } from "../../src/storage/source-startup-admission";
+import { stageSourceInstallationMapping } from "../../src/SourceInstallationMapping";
+import { Settings, SettingsScope } from "../../src/SettingsPersistence";
+import type { VaultShareSettings } from "../../src/VaultShare";
+import { activateSourceInstallation } from "../../src/SourceInstallationActivation";
+import { UnsavedFileStore } from "../../src/UnsavedFile";
 
 jest.mock("obsidian", () => ({ Platform: { isMobile: false }, FileSystemAdapter: class {} }));
 const encode = (text: string) => new TextEncoder().encode(text).buffer;
 const digest = (bytes: ArrayBuffer) => createHash("sha256").update(new Uint8Array(bytes)).digest("hex");
 let directory: string, vault: Vault;
 const journals: SourceSelectionJournal[] = [];
+const settingsScopes: SettingsScope<VaultShareSettings[]>[] = [];
 beforeEach(async () => {
 	directory = await fs.mkdtemp(path.join(os.tmpdir(), "relay-native-installation-")); Object.assign(Platform, { isMobile: false });
 	const adapter = new FileSystemAdapter(); adapter.getBasePath = () => directory;
@@ -35,6 +41,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	jest.restoreAllMocks(); journals.splice(0).forEach(journal => journal.close());
+	settingsScopes.splice(0).forEach(scope => scope.destroy());
 	await fs.rm(directory, { recursive: true, force: true });
 	await fs.rm(directory + "-moved", { recursive: true, force: true });
 });
@@ -70,6 +77,114 @@ async function reopen(f: Awaited<ReturnType<typeof fixture>>) {
 	const request = { ...f.request, revision: (await journal.read()).revision! };
 	return { journal, request, native: createDesktopSourceMaterializationIO(vault, f.staged.plan) };
 }
+
+async function activationFixture() {
+	const f = await fixture(), address = ResourceAddress.parse(f.request.source.s3rn) as RemoteFolderAddress;
+	const configuration = path.join(directory, "fixture-settings.json");
+	await fs.writeFile(configuration, JSON.stringify({ sharedFolders: [{ guid: address.folderGuid, path: "Team", relay: address.relayGuid, onpremServerId: f.request.source.serverId }] }));
+	const backend = { loadData: async () => JSON.parse(await fs.readFile(configuration, "utf8")) as { sharedFolders: VaultShareSettings[] },
+		saveData: jest.fn(async (data: { sharedFolders: VaultShareSettings[] }) => { await fs.writeFile(configuration, JSON.stringify(data)); }) };
+	const settings = new Settings(backend, { sharedFolders: [] as VaultShareSettings[] }); await settings.hydrate();
+	const scope = new SettingsScope<VaultShareSettings[]>(settings as unknown as Settings<unknown>, "sharedFolders"); settingsScopes.push(scope);
+	const local = new Map<string, unknown>(), buffers = new UnsavedFileStore();
+	const host = { settings: scope, app: { loadLocalStorage: jest.fn((key: string) => local.get(key)) }, buffers, checkIsolation: jest.fn() };
+	const request = { ...f.request, commitOperationId: crypto.randomUUID() };
+	const downloads = { revalidate: jest.fn(async () => structuredClone(f.staged.inventorySnapshot)) };
+	const bufferKey = sourceDocumentCacheSync({ ...request.source, s3rn: `${request.source.s3rn}:doc:${f.noteId}` }).bufferKey;
+	const run = () => activateSourceInstallation(f.journal, f.staging, f.native, request, host, downloads);
+	return { ...f, configuration, backend, settings, scope, local, buffers, host, request, downloads, bufferKey, run };
+}
+
+test("activation integrates native files, selected caches, saved mapping and fresh inventory under both holds", async () => {
+	const f = await activationFixture();
+	f.downloads.revalidate.mockImplementationOnce(async () => {
+		for (const target of ["Team/Note.md", "Restored Team/Notes/Note.md"]) await expect(trackNativeSourceMutation(vault, [target], async () => {})).rejects.toThrow("paused");
+		expect((await f.scope.readPersistedValue())![0].path).toBe("Restored Team");
+		return structuredClone(f.staged.inventorySnapshot);
+	});
+	const result = await f.run();
+	expect(result).toMatchObject({ destinationRoot: "Restored Team", reconciled: false, selection: { nativeRoot: "Restored Team", pending: null,
+		active: { kind: "source", restoreGeneration: f.request.source.restoreGeneration } } });
+	expect(f.downloads.revalidate).toHaveBeenCalledTimes(1); expect(f.host.checkIsolation).toHaveBeenCalled();
+	const doc = new Y.Doc(), store = await openSourceDocumentCache({ ...f.request.source, s3rn: `${f.request.source.s3rn}:doc:${f.noteId}` }, doc);
+	try { expect(doc.getText("contents").toString()).toBe(await fs.readFile(installed("Notes/Note.md"), "utf8")); }
+	finally { await store.close(); doc.destroy(); }
+	expect(await fs.readFile(path.join(directory, "Team", "Note.md"), "utf8")).toBe("Original offline work");
+});
+
+test("a committed retry preserves subsequent native edits, saved buffers and cache history without revalidation or installation", async () => {
+	const f = await activationFixture(), result = await f.run();
+	await fs.writeFile(installed("Notes/Note.md"), "Legitimate edit after activation");
+	await f.buffers.persistUnsaved(f.bufferKey, "New saved local work");
+	const doc = new Y.Doc(), store = await openSourceDocumentCache({ ...f.request.source, s3rn: `${f.request.source.s3rn}:doc:${f.noteId}` }, doc);
+	doc.getText("contents").insert(0, "New CRDT edit. "); await store.close(); doc.destroy();
+	const claim = jest.spyOn(f.native, "claim"), read = jest.spyOn(f.staging, "readBinary"), count = jest.spyOn(f.buffers, "countSavedBuffers");
+	f.downloads.revalidate.mockClear(); f.backend.saveData.mockClear(); f.host.checkIsolation.mockImplementation(() => { throw new Error("Providers already resumed"); });
+	expect(await f.run()).toEqual({ ...result, reconciled: true });
+	expect(claim).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled(); expect(count).not.toHaveBeenCalled();
+	expect(f.downloads.revalidate).not.toHaveBeenCalled(); expect(f.backend.saveData).not.toHaveBeenCalled();
+	expect(await fs.readFile(installed("Notes/Note.md"), "utf8")).toBe("Legitimate edit after activation");
+	expect(await f.buffers.readUnsaved(f.bufferKey)).toBe("New saved local work");
+	const reopened = new Y.Doc(), cache = await openSourceDocumentCache({ ...f.request.source, s3rn: `${f.request.source.s3rn}:doc:${f.noteId}` }, reopened);
+	try { expect(reopened.getText("contents").toString()).toBe("New CRDT edit. Restored source"); } finally { await cache.close(); reopened.destroy(); }
+});
+
+test("an activation reply lost after commit is reconciled once without a second commit", async () => {
+	const f = await activationFixture(), apply = f.journal.apply.bind(f.journal);
+	const saved = jest.spyOn(f.journal, "apply").mockImplementation(async (change, options) => {
+		const state = await apply(change, options); if (change.type === "commit") throw new Error("Lost activation reply"); return state;
+	});
+	expect(await f.run()).toMatchObject({ reconciled: true, selection: { pending: null } });
+	expect(saved.mock.calls.filter(([change]) => change.type === "commit")).toHaveLength(1);
+});
+
+test("a failed commit without a receipt stays applying and resumes only after rereading its revision", async () => {
+	const f = await activationFixture(), apply = f.journal.apply.bind(f.journal);
+	const saved = jest.spyOn(f.journal, "apply").mockImplementation(async (change, options) => {
+		if (change.type === "commit") throw new Error("Synthetic transaction failure"); return apply(change, options);
+	});
+	await expect(f.run()).rejects.toThrow("transaction failure"); saved.mockRestore();
+	const state = await f.journal.read(); expect(state.pending?.phase).toBe("applying");
+	f.request.revision = state.revision!; expect(await f.run()).toMatchObject({ reconciled: false, selection: { pending: null } });
+});
+
+test.each(["saved buffer", "upload", "mapping", "native bytes", "generation", "permissions", "isolation"])("a change during final revalidation blocks activation and preserves evidence: %s", async kind => {
+	const f = await activationFixture();
+	f.downloads.revalidate.mockImplementationOnce(async () => {
+		const fresh = structuredClone(f.staged.inventorySnapshot);
+		if (kind === "saved buffer") await f.buffers.persistUnsaved(f.bufferKey, "");
+		if (kind === "upload") f.local.set(sourceInventoryCacheSync(f.request.source).name + "/pendingUploads", { "Notes/Note.md": "pending" });
+		if (kind === "mapping") { const data = await f.backend.loadData(); data.sharedFolders[0].path = "Team"; await f.backend.saveData(data); }
+		if (kind === "native bytes") await fs.writeFile(installed("Notes/Note.md"), "External edit");
+		if (kind === "generation") fresh.restore_generation = crypto.randomUUID();
+		if (kind === "permissions") fresh.permissions["Notes/Note.md"] = "write";
+		if (kind === "isolation") f.host.checkIsolation.mockImplementation(() => { throw new Error("Isolation expired"); });
+		return fresh;
+	});
+	await expect(f.run()).rejects.toThrow(); expect((await f.journal.read()).pending?.phase).toBe("applying");
+	await expect(f.journal.reconcileCommit({ operationId: f.request.commitOperationId, reviewId: f.request.reviewId, restoreGeneration: f.request.source.restoreGeneration })).rejects.toThrow("missing");
+	if (kind === "saved buffer") expect(await f.buffers.readUnsaved(f.bufferKey)).toBe("");
+	if (kind === "mapping") expect((await f.backend.loadData()).sharedFolders[0].path).toBe("Team");
+	if (kind === "native bytes") expect(await fs.readFile(installed("Notes/Note.md"), "utf8")).toBe("External edit");
+});
+
+test("cancelling a slow final server read cannot cause a late activation", async () => {
+	const f = await activationFixture(), controller = new AbortController(); let release!: () => void, entered!: () => void;
+	const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+	f.downloads.revalidate.mockImplementationOnce(async () => { entered(); await gate; return structuredClone(f.staged.inventorySnapshot); });
+	const operation = activateSourceInstallation(f.journal, f.staging, f.native, f.request, f.host, f.downloads, { signal: controller.signal });
+	await started; controller.abort(); await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+	release(); await Promise.resolve(); expect((await f.journal.read()).pending?.phase).toBe("applying");
+	f.request.revision = (await f.journal.read()).revision!; expect(await f.run()).toMatchObject({ selection: { pending: null } });
+});
+
+test("invalid activation operations and a lost writer lease are refused before creating native files", async () => {
+	const f = await activationFixture();
+	await expect(activateSourceInstallation(f.journal, f.staging, f.native, { ...f.request, commitOperationId: f.request.operationId }, f.host, f.downloads)).rejects.toThrow("distinct");
+	f.host.checkIsolation.mockImplementation(() => { throw new Error("Isolation unavailable"); });
+	await expect(f.run()).rejects.toThrow("Isolation"); await expect(fs.stat(installed(""))).rejects.toMatchObject({ code: "ENOENT" });
+	expect((await f.journal.read()).pending?.phase).toBe("prepared");
+});
 
 test("real desktop installation preserves originals and source artifacts, creates implicit/empty directories, and stays paused", async () => {
 	const f = await fixture(), result = await materializeSourceInstallation(f.journal, f.staging, f.native, f.request);
@@ -152,6 +267,48 @@ test("a hold for an unexpected third location cannot be borrowed by the installa
 	await expect(admitSourceStartup(vault, "Unexpected", f.request.source, { check: () => {} })).rejects.toThrow("awaiting recovery");
 	await expect(materializeSourceInstallation(f.journal, f.staging, f.native, f.request)).rejects.toThrow("paused source location changed");
 	await expect(fs.stat(installed(""))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("the installation session keeps holds through cache/mapping/commit, then hands off only the retired location", async () => {
+	const f = await fixture(), address = ResourceAddress.parse(f.request.source.s3rn) as RemoteFolderAddress;
+	const configuration = path.join(directory, "fixture-settings.json");
+	await fs.writeFile(configuration, JSON.stringify({ sharedFolders: [{ guid: address.folderGuid, path: "Team", relay: address.relayGuid, onpremServerId: f.request.source.serverId }] }));
+	const settings = new Settings({ loadData: async () => JSON.parse(await fs.readFile(configuration, "utf8")) as { sharedFolders: VaultShareSettings[] },
+		saveData: async (data: { sharedFolders: VaultShareSettings[] }) => { await fs.writeFile(configuration, JSON.stringify(data)); } }, { sharedFolders: [] as VaultShareSettings[] });
+	await settings.hydrate(); const scope = new SettingsScope<VaultShareSettings[]>(settings as unknown as Settings<unknown>, "sharedFolders");
+	let retained!: MaterializedSourceSession;
+	try {
+		await expect(admitSourceStartup(vault, "Team", f.request.source, { check: () => {} })).rejects.toThrow("awaiting recovery");
+		const selected = await withMaterializedSourceInstallation(f.journal, f.staging, f.native, f.request, async session => {
+			retained = session; const request = { ...f.request, revision: session.selection.revision! };
+			await seedSourceInstallationCaches(f.journal, f.staging, request);
+			await stageSourceInstallationMapping(f.journal, f.staging, scope, request);
+			for (const target of ["Team/Note.md", "Restored Team/Note.md"]) await expect(trackNativeSourceMutation(vault, [target], async () => {})).rejects.toThrow("paused");
+			await session.verifyNative(); await session.assertCurrent();
+			// Synthetic coordinator transition exercises the local integration.
+			// Production activation still needs current server/writer admission.
+			return f.journal.apply({ type: "commit", expectedRevision: session.selection.revision, operationId: crypto.randomUUID(), reviewId: f.request.reviewId, destinationRoot: session.destinationRoot });
+		});
+		await expect(retained.assertCurrent()).rejects.toThrow("session ended"); await expect(retained.verifyNative()).rejects.toThrow("session ended");
+		await expect(trackNativeSourceMutation(vault, ["Team/Note.md"], async () => {})).rejects.toThrow("paused");
+		expect(await releaseRetiredSourceHold(vault, "Team", f.request.source, { revision: selected.revision!, destinationRoot: "Restored Team" }, { check: () => {} })).toBe(true);
+		const context = await admitSourceStartup(vault, "Restored Team", f.request.source, { check: () => {} });
+		try { expect(context.nativeRoot).toBe("Restored Team"); expect(context.binding?.restoreGeneration).toBe(f.request.source.restoreGeneration); }
+		finally { context.close(); }
+		expect((await scope.readPersistedValue())![0].path).toBe("Restored Team");
+		expect(await fs.readFile(path.join(directory, "Team", "Note.md"), "utf8")).toBe("Original offline work");
+	} finally { scope.destroy(); }
+});
+
+test("continuation snapshots cannot change the held session's revision or native verification targets", async () => {
+	const f = await fixture();
+	await withMaterializedSourceInstallation(f.journal, f.staging, f.native, f.request, async session => {
+		session.selection.revision = crypto.randomUUID(); session.plan.entries = [];
+		await session.assertCurrent();
+		await fs.writeFile(installed("Notes/Note.md"), "Changed outside the plugin");
+		await expect(session.verifyNative()).rejects.toThrow("changed");
+	});
+	expect((await f.journal.read()).pending?.phase).toBe("applying");
 });
 
 test("a failed publication leaves no partial final file and can resume", async () => {

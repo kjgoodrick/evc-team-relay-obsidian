@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import * as Y from "yjs";
-import { stageSourceInstallationMapping } from "../../src/SourceInstallationMapping";
+import { stageSourceInstallationMapping, verifySourceInstallationMapping } from "../../src/SourceInstallationMapping";
 import { Settings, SettingsScope } from "../../src/SettingsPersistence";
 import type { VaultShareSettings } from "../../src/VaultShare";
 import { prepareRecoveryBackup, type RecoveryIO } from "../../src/ManagedRecoveryBackup";
@@ -48,6 +48,24 @@ test("mapping writes and reads back only the selected path, preserves other sett
 	expect(f.disk()).toEqual(expected); expect(await f.journal.read()).toEqual(f.state);
 	expect(await stageSourceInstallationMapping(f.journal, f.io, f.scope, f.request)).toMatchObject({ resumed: true });
 	expect(f.backend.saveData).toHaveBeenCalledTimes(1);
+});
+
+test("final mapping inspection is read-only and refuses missing or changed destinations", async () => {
+	const f = await fixture();
+	await expect(verifySourceInstallationMapping(f.scope, f.staged.plan)).rejects.toThrow("mapping changed");
+	await stageSourceInstallationMapping(f.journal, f.io, f.scope, f.request); f.backend.saveData.mockClear();
+	await expect(verifySourceInstallationMapping(f.scope, f.staged.plan)).resolves.toBeUndefined();
+	const changed = f.disk(); changed.sharedFolders[0].path = "Team"; f.setDisk(changed);
+	await expect(verifySourceInstallationMapping(f.scope, f.staged.plan)).rejects.toThrow("mapping changed");
+	expect(f.disk()).toEqual(changed); expect(f.backend.saveData).not.toHaveBeenCalled();
+});
+
+test("final mapping inspection detects a concurrent in-memory edit and preserves it", async () => {
+	const f = await fixture(); await stageSourceInstallationMapping(f.journal, f.io, f.scope, f.request); f.backend.saveData.mockClear();
+	const read = f.scope.readPersistedValue.bind(f.scope);
+	jest.spyOn(f.scope, "readPersistedValue").mockImplementationOnce(async () => { const result = await read(); f.scope.readValue()[0].connect = true; return result; });
+	await expect(verifySourceInstallationMapping(f.scope, f.staged.plan)).rejects.toThrow("mapping changed");
+	expect(f.scope.readValue()[0].connect).toBe(true); expect(f.backend.saveData).not.toHaveBeenCalled();
 });
 
 test.each(["failed write", "lost acknowledgement"])("retry reconciles %s without rolling back a saved mapping", async mode => {

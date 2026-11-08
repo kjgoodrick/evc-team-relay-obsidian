@@ -32,6 +32,7 @@ type Change = { type: "begin"; reviewId: string; restoreGeneration: string | nul
 	| { type: "commit"; reviewId: string; destinationRoot?: string };
 export type SourceSelectionCommand = Change & { operationId: string; expectedRevision: string | null };
 interface Receipt { command: string; revision: string }
+interface CommitReconciliation { operationId: string; reviewId: string; restoreGeneration: string | null }
 
 const invalid = () => new Error("Invalid source selection journal. Retained work must be reviewed before synchronization.");
 function uuid(value: unknown): string {
@@ -168,9 +169,15 @@ export class SourceSelectionJournal {
 	}
 	close(): void { this.closed = true; this.db.close(); }
 	async read(): Promise<SourceSelectionState> { return this.transaction(); }
-	async apply(input: SourceSelectionCommand): Promise<SourceSelectionState> {
+	async apply(input: SourceSelectionCommand, options: { check?: () => void } = {}): Promise<SourceSelectionState> {
 		// Freeze/normalize the command before the first asynchronous boundary.
-		return this.transaction(command(input));
+		return this.transaction(command(input), undefined, options.check);
+	}
+	/** Reconcile a lost activation response without reinstalling files/caches or
+	 * replaying an old transition. Only the exact still-current commit receipt
+	 * can confirm success; subsequent edits to activated files are left alone. */
+	async reconcileCommit(input: CommitReconciliation): Promise<SourceSelectionState> {
+		return this.transaction(undefined, { operationId: uuid(input.operationId), reviewId: uuid(input.reviewId), restoreGeneration: generation(input.restoreGeneration) });
 	}
 	async assertActive(revision: string | null, choice: SourceChoice, nativeRoot?: string): Promise<void> {
 		const expectedRevision = revision === null ? null : uuid(revision);
@@ -183,13 +190,14 @@ export class SourceSelectionJournal {
 			throw new Error("The source selection changed or is awaiting recovery. Synchronization remains paused.");
 		}
 	}
-	private transaction(change?: SourceSelectionCommand): Promise<SourceSelectionState> {
+	private transaction(change?: SourceSelectionCommand, reconciliation?: CommitReconciliation, check?: () => void): Promise<SourceSelectionState> {
 		return new Promise((resolve, reject) => {
 			if (this.closed) { reject(new Error("The source selection journal is closed.")); return; }
+			check?.();
 			const tx = this.db.transaction(["selection", "receipts"], change ? "readwrite" : "readonly");
 			const states = tx.objectStore("selection"), receipts = tx.objectStore("receipts"), request = states.get("state");
 			const historyCount = receipts.count();
-			const receipt = change ? receipts.get(change.operationId) : undefined;
+			const receipt = change || reconciliation ? receipts.get((change ?? reconciliation)!.operationId) : undefined;
 			let result: SourceSelectionState, failure: unknown;
 			const timer = window.setTimeout(() => {
 				failure = new Error("The source selection journal did not respond. Recheck the saved decision before continuing.");
@@ -198,8 +206,21 @@ export class SourceSelectionJournal {
 			}, 5000);
 			const ready = () => {
 				try {
+					check?.();
 					if (request.result === undefined && historyCount.result > 0) throw invalid();
 					result = parse(request.result, this.scopeIdentity);
+					if (reconciliation) {
+						const accepted: Receipt | undefined = receipt!.result;
+						if (!accepted || typeof accepted !== "object" || Object.keys(accepted).length !== 2 || typeof accepted.command !== "string"
+							|| accepted.command.length > 16_384 || accepted.revision !== result.revision) throw new Error("The activation receipt is missing or superseded. Recheck the saved source decision.");
+						const saved = command(JSON.parse(accepted.command));
+						if (JSON.stringify(saved) !== accepted.command || saved.type !== "commit" || saved.operationId !== reconciliation.operationId
+							|| saved.reviewId !== reconciliation.reviewId || !saved.destinationRoot || saved.destinationRoot !== result.nativeRoot
+							|| result.pending || result.active.kind !== "source" || result.active.restoreGeneration !== reconciliation.restoreGeneration) {
+							throw new Error("The activation receipt does not match the selected source. Recovery remains unchanged.");
+						}
+						return;
+					}
 					if (!change) return;
 					const text = JSON.stringify(change), accepted: Receipt | undefined = receipt!.result;
 					if (accepted !== undefined) {

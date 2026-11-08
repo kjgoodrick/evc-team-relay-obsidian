@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { admitSourceStartup, borrowPausedSourceDrain } from "../src/storage/source-startup-admission";
+import { admitSourceStartup, borrowPausedSourceDrain, releaseRetiredSourceHold } from "../src/storage/source-startup-admission";
 import { SourceSelectionJournal } from "../src/storage/source-selection-journal";
 import { SourceSelectionContext } from "../src/storage/source-selection-context";
 import { trackNativeDocumentWrite } from "../src/storage/native-document-writes";
@@ -90,13 +90,14 @@ test("a journal I/O failure does not fall back to legacy admission", async () =>
 	const context = await admitSourceStartup(s.vault, "Team", s.scope, options); context.close(); await write(s.vault);
 });
 
-async function activate(scope: ReturnType<typeof fixture>["scope"], destinationRoot?: string) {
+async function activate(scope: ReturnType<typeof fixture>["scope"], destinationRoot?: string, beforeCommit?: () => Promise<void>) {
 	const journal = await SourceSelectionJournal.open(scope), reviewId = crypto.randomUUID();
 	try {
 		let state = await journal.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: null, reviewId, restoreGeneration: crypto.randomUUID() });
 		state = await journal.apply({ type: "prepare", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId,
 			preparation: { archive: { path: `${RECOVERY_FOLDER}/fixture`, manifestSha256: "a".repeat(64) }, plan: { id: crypto.randomUUID(), sha256: "b".repeat(64) } } });
 		state = await journal.apply({ type: "start", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId });
+		await beforeCommit?.();
 		return await journal.apply({ type: "commit", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId, ...(destinationRoot ? { destinationRoot } : {}) });
 	} finally { journal.close(); }
 }
@@ -135,4 +136,39 @@ test("a borrowed paused-source drain excludes concurrent startup and releases on
 		await journal.apply({ type: "cancel", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId });
 		const context = await admitSourceStartup(s.vault, "Team", s.scope, options); context.close(); await write(s.vault);
 	} finally { journal.close(); }
+});
+
+test("the committed destination and revision retire only the old hold and allow its handoff", async () => {
+	const s = fixture(), state = await activate(s.scope, "Restored Team", async () => {
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+	});
+	const selection = { revision: state.revision!, destinationRoot: "Restored Team" };
+	expect(await releaseRetiredSourceHold(s.vault, "Team", s.scope, selection, options)).toBe(true);
+	expect(await releaseRetiredSourceHold(s.vault, "Team", s.scope, selection, options)).toBe(false);
+	await write(s.vault); const context = await admitSourceStartup(s.vault, "Restored Team", s.scope, options); context.close();
+});
+
+test.each(["wrong revision", "wrong destination", "wrong original", "overlap", "pending review", "busy lease"])("an invalid handoff preserves the hold: %s", async kind => {
+	const s = fixture(), state = await activate(s.scope, "Restored Team", async () => {
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+	});
+	const selection = { revision: kind === "wrong revision" ? crypto.randomUUID() : state.revision!, destinationRoot: kind === "wrong destination" ? "Wrong" : kind === "overlap" ? "Team/Restored" : "Restored Team" };
+	const lease = kind === "busy lease" ? borrowPausedSourceDrain(s.vault, "Team", s.scope) : undefined;
+	if (kind === "pending review") {
+		const journal = await SourceSelectionJournal.open(s.scope);
+		try { await journal.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: crypto.randomUUID(), restoreGeneration: crypto.randomUUID() }); }
+		finally { journal.close(); }
+	}
+	try { await expect(releaseRetiredSourceHold(s.vault, kind === "wrong original" ? "Unexpected" : "Team", s.scope, selection, options)).rejects.toThrow(); }
+	finally { lease?.release(); }
+	await expect(write(s.vault)).rejects.toThrow("paused");
+});
+
+test("a destination hold is retained until its normal startup admission succeeds", async () => {
+	const s = fixture(), state = await activate(s.scope, "Restored Team", async () => {
+		await expect(admitSourceStartup(s.vault, "Restored Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+	});
+	expect(await releaseRetiredSourceHold(s.vault, "Team", s.scope, { revision: state.revision!, destinationRoot: "Restored Team" }, options)).toBe(false);
+	await expect(write(s.vault, "Restored Team/Note.md")).rejects.toThrow("paused");
+	const context = await admitSourceStartup(s.vault, "Restored Team", s.scope, options); context.close(); await write(s.vault, "Restored Team/Note.md");
 });
