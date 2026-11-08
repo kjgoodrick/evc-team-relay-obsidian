@@ -60,7 +60,9 @@ import { relative } from "path-browserify";
 import { Plugin } from "obsidian";
 
 // Core sync/data model
-import { VaultShare, ShareRegistry } from "./VaultShare";
+import { VaultShare, ShareRegistry, type FolderSourceRequest } from "./VaultShare";
+import { prepareFolderSource } from "./storage/prepare-folder-source";
+import type { SourceSelectionContext } from "./storage/source-selection-context";
 import { holdsOnlySyncedText, uploadsOnModify } from "./uploadOnModify";
 import type { VaultShareSettings } from "./VaultShare";
 import { ViewBindingRegistry } from "./ViewBindings";
@@ -108,7 +110,6 @@ import {
 	VIEW_TYPE_FILE_DIFF,
 } from "./fileDiff/fileDiffView";
 
-import { AttachmentSyncSettings } from "./AttachmentSyncSettings";
 import { FileHashCache, isAttachmentFile } from "./AttachmentFile";
 import { isDocument } from "./Document";
 import { TenantRegistry, type TenantSettings } from "./TenantRegistry";
@@ -242,6 +243,7 @@ export default class TeamRelayPlugin extends Plugin {
 	settingsPage!: RelaySettingsPage;
 	updater!: PluginUpdater;
 	private updaterBlockedStartup = false;
+	private sourceStartupClosed = false;
 	pluginSettings!: Settings<StoredSettings>;
 
 	// Persisted-settings namespaces
@@ -706,6 +708,7 @@ export default class TeamRelayPlugin extends Plugin {
 			this.pluginVault,
 			this._instantiateVaultShare.bind(this),
 			this.sharedFolderSettings,
+			this._prepareFolderSource.bind(this),
 		);
 
 		// Initialize relay-onprem token providers and share client if enabled
@@ -905,8 +908,11 @@ export default class TeamRelayPlugin extends Plugin {
 		this.basesSync = this.addChild(new BaseSyncHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
 		this.discussions = this.addChild(new DiscussionHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId, this.basesSync));
 
-		this.app.workspace.onLayoutReady(() => {
-			this.shareRegistry.restore();
+		const initializeLayout = async () => {
+			if (this.sourceStartupClosed) return;
+			await this.shareRegistry.restorePrepared();
+			if (this.sourceStartupClosed) return;
+			this.noticePausedSources();
 
 			const liveViews = new ViewBindingRegistry(
 				this.app,
@@ -1224,12 +1230,34 @@ export default class TeamRelayPlugin extends Plugin {
 			this.initializeRuntime();
 			void this._viewRegistry.refreshViews("init");
 			this.startupDurationMs = moment.now() - start;
-
+		};
+		this.app.workspace.onLayoutReady(() => {
+			void initializeLayout().catch(error => { if (!this.sourceStartupClosed) new Notice(`Relay startup paused: ${error instanceof Error ? error.message : String(error)}`); });
 		});
 	}
 
 	async reloadPlugin() {
 		await (this.app as unknown as ObsidianApp).reloadRelay?.();
+	}
+
+	private _prepareFolderSource(request: Readonly<FolderSourceRequest>): Promise<SourceSelectionContext | undefined> {
+		return prepareFolderSource({ vault: this.pluginVault, hostAppId: this.instanceAppId,
+			credentials: this.credentialCache, settings: this.sharedFolderSettings,
+			onpremEnabled: () => this.relayOnPremSettings.readValue().enabled,
+			check: () => { if (this.sourceStartupClosed) throw new Error("Shared-folder startup was closed."); } }, request);
+	}
+
+	private noticePausedSources(): void {
+		const count = this.shareRegistry.startupFailures.length;
+		if (count) new Notice(`${count} shared folder${count === 1 ? " is" : "s are"} paused. Open Relay settings to review and retry.`);
+	}
+
+	async retrySharedFolderStartup(guid: string): Promise<void> {
+		const folder = await this.shareRegistry.retryStartup(guid);
+		if (this.sourceStartupClosed) return;
+		await folder.bringOnline();
+		this.explorerDecorations?.refreshExistingRows();
+		await this._viewRegistry?.refreshViews("source startup retry");
 	}
 
 	private _instantiateVaultShare(
@@ -1239,28 +1267,15 @@ export default class TeamRelayPlugin extends Plugin {
 		hasPendingUpdates?: boolean,
 		isRestore?: boolean,
 		freshlyCreated?: boolean,
+		sourceSelection?: SourceSelectionContext,
 	): VaultShare {
+		if (this.sourceStartupClosed) throw new Error("Shared-folder startup was closed.");
+		if (this.relayOnPremSettings.readValue().enabled && !sourceSelection) throw new Error("The source must be prepared before opening this folder.");
 		// Address this folder's settings slice by its guid, not array index.
 		const folderSettings = new SettingsScope<VaultShareSettings>(
 			this.pluginSettings as unknown as Settings<unknown>,
 			`sharedFolders/[guid=${guid}]`,
 		);
-		const settings: VaultShareSettings = { guid: guid, path: path };
-		if (workspaceId) {
-			settings["relay"] = workspaceId;
-		}
-		void folderSettings.mutateValue((current) => {
-			return {
-				...current,
-				path,
-				guid,
-				...(workspaceId ? { relay: workspaceId } : {}),
-				...{
-					sync: current.sync ? current.sync : AttachmentSyncSettings.defaultCategoryFlags,
-				},
-			};
-		}, true);
-
 		const folder = new VaultShare(
 			this.instanceAppId,
 			guid,
@@ -1278,6 +1293,7 @@ export default class TeamRelayPlugin extends Plugin {
 			hasPendingUpdates,
 			isRestore,
 			freshlyCreated,
+			sourceSelection,
 		);
 		return folder;
 	}
@@ -1339,6 +1355,7 @@ export default class TeamRelayPlugin extends Plugin {
 
 	/** Whether a polled share still has a VaultShare, or still has its folder. */
 	private keepPollingShare = (shareId: string): boolean => {
+		if (this.sourceStartupClosed || this.shareRegistry.startupFailures.some(failure => failure.guid === shareId)) return false;
 		if (this.shareRegistry.locate((sf) => sf.entityGuid === shareId)) return true;
 		const path = this.pathOnlyPolledShares.get(shareId);
 		return path !== undefined && !!resolveShareFolder(this.app.vault, path);
@@ -1388,81 +1405,79 @@ export default class TeamRelayPlugin extends Plugin {
 				log(`Found ${rawShares.length} shares across all servers (${allShares.length} after folder-path dedup)`);
 
 				for (const share of allShares) {
-					if (share.kind === "folder") {
-						// Find existing by guid OR by path (settings may have old client-side guid)
-						const byGuid = this.shareRegistry.locate(
-							(sf) => sf.entityGuid === share.id
-						);
-						const byPath = !byGuid ? this.shareRegistry.locate(
-							(sf) => sf.path === share.path
-						) : undefined;
-						const existing = byGuid || byPath;
-
-						if (existing && (existing.entityGuid !== share.id || !existing.workspaceId)) {
-							// Migrate: guid mismatch or missing workspaceId — recreate
-							log(`Migrating VaultShare ${share.path} (guid: ${existing.entityGuid} → ${share.id})`);
-							this.shareRegistry.delete(existing);
-							const vaultShare = this.shareRegistry.new(
-								share.path,
-								share.id,
-								"relay-onprem",
-								false
+					if (this.sourceStartupClosed) return;
+					try {
+						if (share.kind === "folder") {
+							// Find existing by guid OR by path (settings may have old client-side guid)
+							const byGuid = this.shareRegistry.locate(
+								(sf) => sf.entityGuid === share.id
 							);
-							if (vaultShare) {
-								await vaultShare.setOnpremServerId(share.serverId);
-								// onpremServerId is set AFTER construction — the constructor's
-								// own gate never saw it, so trigger the connect explicitly.
-								void vaultShare.bringOnline();
-							}
-						} else if (!existing) {
-							// Only auto-create if the folder exists locally in vault
-							const vaultFolder = resolveShareFolder(this.app.vault, share.path);
-							if (vaultFolder) {
-								const vaultShare = this.shareRegistry.new(
+							const byPath = !byGuid ? this.shareRegistry.locate(
+								(sf) => sf.path === share.path
+							) : undefined;
+							const existing = byGuid || byPath;
+
+							if (existing && (existing.entityGuid !== share.id || !existing.workspaceId)) {
+								// Migrate: guid mismatch or missing workspaceId — recreate
+								log(`Migrating VaultShare ${share.path} (guid: ${existing.entityGuid} → ${share.id})`);
+								const vaultShare = await this.shareRegistry.newPrepared(
 									share.path,
 									share.id,
 									"relay-onprem",
-									true
+									false, undefined, share.serverId, existing
 								);
 								if (vaultShare) {
-									await vaultShare.setOnpremServerId(share.serverId);
 									void vaultShare.bringOnline();
 								}
-								log(`Created VaultShare for ${share.path} on server ${share.serverId}`);
-							} else {
-								log(`Share "${share.path}" not connected locally (folder not in vault)`);
+							} else if (!existing) {
+								// Only auto-create if the folder exists locally in vault
+								const vaultFolder = resolveShareFolder(this.app.vault, share.path);
+								if (vaultFolder) {
+									const vaultShare = await this.shareRegistry.newPrepared(
+										share.path,
+										share.id,
+										"relay-onprem",
+										true, undefined, share.serverId
+									);
+									if (vaultShare) {
+										void vaultShare.bringOnline();
+									}
+									log(`Created VaultShare for ${share.path} on server ${share.serverId}`);
+								} else {
+									log(`Share "${share.path}" not connected locally (folder not in vault)`);
+								}
+							} else if (existing && !existing.isOnline) {
+								// Folder exists with correct guid+workspaceId but not connected
+								log(`Connecting VaultShare ${share.path}`);
+								void existing.bringOnline();
 							}
-						} else if (existing && !existing.isOnline) {
-							// Folder exists with correct guid+workspaceId but not connected
-							log(`Connecting VaultShare ${share.path}`);
-							void existing.bringOnline();
 						}
-					}
 
-					// Register auto-sync shares (v1.8.1) - supports both doc and folder shares
-					if (share.web_published && share.web_sync_mode === "auto") {
-						if (this.webSyncManager) {
-							this.webSyncManager.registerAutoSyncShare(
-								share.path,
-								share.id,
-								share.serverId,
-								share.kind,
-								share.web_slug ?? undefined
-							);
-							log(`Registered auto-sync for ${share.kind} ${share.path} on server ${share.serverId}`);
+						// Register auto-sync shares (v1.8.1) - supports both doc and folder shares
+						if (share.web_published && share.web_sync_mode === "auto") {
+							if (this.webSyncManager) {
+								this.webSyncManager.registerAutoSyncShare(
+									share.path,
+									share.id,
+									share.serverId,
+									share.kind,
+									share.web_slug ?? undefined
+								);
+								log(`Registered auto-sync for ${share.kind} ${share.path} on server ${share.serverId}`);
+							}
 						}
-					}
 
-					// Inbound polling only for folders present in the vault; the
-					// rest are checked against this list (v1.9).
-					if (share.kind === "folder" && this.inboundSyncPoller) {
-						this.trackFolderShare(share.id, share.serverId, share.path, share.web_content_updated_at);
-					}
+						// Inbound polling only for folders present in the vault; the
+						// rest are checked against this list (v1.9).
+						if (share.kind === "folder" && this.inboundSyncPoller) {
+							this.trackFolderShare(share.id, share.serverId, share.path, share.web_content_updated_at);
+						}
+					} catch (error) { err(`Shared folder ${share.path} remains paused:`, error); }
 				}
 
 				// Deferred initial full-sync for stale auto-sync folder shares
 				const staleAutoSyncShares = allShares.filter(s => {
-					if (!s.web_published || s.kind !== "folder" || s.web_sync_mode !== "auto") return false;
+					if (!s.web_published || s.kind !== "folder" || s.web_sync_mode !== "auto" || this.shareRegistry.startupFailures.some(failure => failure.guid === s.id || failure.path === s.path)) return false;
 					if (!s.web_content_updated_at) return true;
 					return Date.now() - new Date(s.web_content_updated_at).getTime() > 6 * 60 * 60 * 1000;
 				});
@@ -1485,76 +1500,74 @@ export default class TeamRelayPlugin extends Plugin {
 					(relayOnPremSettings.servers.length > 0 ? relayOnPremSettings.servers[0].id : "default");
 
 				for (const share of shares) {
-					if (share.kind === "folder") {
-						// Find existing by guid OR by path (settings may have old client-side guid)
-						const byGuid = this.shareRegistry.locate(
-							(sf) => sf.entityGuid === share.id
-						);
-						const byPath = !byGuid ? this.shareRegistry.locate(
-							(sf) => sf.path === share.path
-						) : undefined;
-						const existing = byGuid || byPath;
-
-						if (existing && (existing.entityGuid !== share.id || !existing.workspaceId)) {
-							// Migrate: guid mismatch or missing workspaceId — recreate
-							log(`Migrating VaultShare ${share.path} (guid: ${existing.entityGuid} → ${share.id})`);
-							this.shareRegistry.delete(existing);
-							const vaultShare = this.shareRegistry.new(
-								share.path,
-								share.id,
-								"relay-onprem",
-								false
+					if (this.sourceStartupClosed) return;
+					try {
+						if (share.kind === "folder") {
+							// Find existing by guid OR by path (settings may have old client-side guid)
+							const byGuid = this.shareRegistry.locate(
+								(sf) => sf.entityGuid === share.id
 							);
-							if (vaultShare) {
-								await vaultShare.setOnpremServerId(defaultServerId);
-								// onpremServerId is set AFTER construction — the constructor's
-								// own gate never saw it, so trigger the connect explicitly.
-								void vaultShare.bringOnline();
-							}
-						} else if (!existing) {
-							// Only auto-create if the folder exists locally in vault
-							const vaultFolder = resolveShareFolder(this.app.vault, share.path);
-							if (vaultFolder) {
-								const vaultShare = this.shareRegistry.new(
+							const byPath = !byGuid ? this.shareRegistry.locate(
+								(sf) => sf.path === share.path
+							) : undefined;
+							const existing = byGuid || byPath;
+
+							if (existing && (existing.entityGuid !== share.id || !existing.workspaceId)) {
+								// Migrate: guid mismatch or missing workspaceId — recreate
+								log(`Migrating VaultShare ${share.path} (guid: ${existing.entityGuid} → ${share.id})`);
+								const vaultShare = await this.shareRegistry.newPrepared(
 									share.path,
 									share.id,
 									"relay-onprem",
-									true
+									false, undefined, defaultServerId, existing
 								);
 								if (vaultShare) {
-									await vaultShare.setOnpremServerId(defaultServerId);
 									void vaultShare.bringOnline();
 								}
-								log(`Created VaultShare for ${share.path}`);
-							} else {
-								log(`Share "${share.path}" not connected locally (folder not in vault)`);
+							} else if (!existing) {
+								// Only auto-create if the folder exists locally in vault
+								const vaultFolder = resolveShareFolder(this.app.vault, share.path);
+								if (vaultFolder) {
+									const vaultShare = await this.shareRegistry.newPrepared(
+										share.path,
+										share.id,
+										"relay-onprem",
+										true, undefined, defaultServerId
+									);
+									if (vaultShare) {
+										void vaultShare.bringOnline();
+									}
+									log(`Created VaultShare for ${share.path}`);
+								} else {
+									log(`Share "${share.path}" not connected locally (folder not in vault)`);
+								}
+							} else if (existing && !existing.isOnline) {
+								// Folder exists with correct guid+workspaceId but not connected
+								log(`Connecting VaultShare ${share.path}`);
+								void existing.bringOnline();
 							}
-						} else if (existing && !existing.isOnline) {
-							// Folder exists with correct guid+workspaceId but not connected
-							log(`Connecting VaultShare ${share.path}`);
-							void existing.bringOnline();
 						}
-					}
 
-					// Register auto-sync shares (v1.8.1) - supports both doc and folder shares
-					if (share.web_published && share.web_sync_mode === "auto") {
-						if (this.webSyncManager) {
-							this.webSyncManager.registerAutoSyncShare(
-								share.path,
-								share.id,
-								defaultServerId,
-								share.kind,
-								share.web_slug ?? undefined
-							);
-							log(`Registered auto-sync for ${share.kind} ${share.path}`);
+						// Register auto-sync shares (v1.8.1) - supports both doc and folder shares
+						if (share.web_published && share.web_sync_mode === "auto") {
+							if (this.webSyncManager) {
+								this.webSyncManager.registerAutoSyncShare(
+									share.path,
+									share.id,
+									defaultServerId,
+									share.kind,
+									share.web_slug ?? undefined
+								);
+								log(`Registered auto-sync for ${share.kind} ${share.path}`);
+							}
 						}
-					}
 
-					// Inbound polling only for folders present in the vault; the
-					// rest are checked against this list (v1.9).
-					if (share.kind === "folder" && this.inboundSyncPoller) {
-						this.trackFolderShare(share.id, defaultServerId, share.path, share.web_content_updated_at);
-					}
+						// Inbound polling only for folders present in the vault; the
+						// rest are checked against this list (v1.9).
+						if (share.kind === "folder" && this.inboundSyncPoller) {
+							this.trackFolderShare(share.id, defaultServerId, share.path, share.web_content_updated_at);
+						}
+					} catch (error) { err(`Shared folder ${share.path} remains paused:`, error); }
 				}
 			} else {
 				log("No share client available, skipping share load");
@@ -1883,14 +1896,16 @@ export default class TeamRelayPlugin extends Plugin {
 	}
 
 	private _handleAuthLogin() {
-		this.shareRegistry.restore();
-
-		// Load relay-onprem shares after login
-		if (this.shareClient || this.shareClientManager) {
-			void this.loadRelayOnPremShares();
-		}
-		this.relayRegistry?.signIn();
-		void this._viewRegistry.refreshViews("login");
+		void (async () => {
+			await this.shareRegistry.restorePrepared();
+			if (this.sourceStartupClosed || !this.authSession.isAuthenticated) return;
+			// Load relay-onprem shares after login
+			if (this.shareClient || this.shareClientManager) {
+				void this.loadRelayOnPremShares();
+			}
+			this.relayRegistry?.signIn();
+			void this._viewRegistry.refreshViews("login");
+		})().catch(error => { if (!this.sourceStartupClosed) new Notice(`Relay connection paused: ${error instanceof Error ? error.message : String(error)}`); });
 	}
 
 	async showSettingsTab(path: string = "/") {
@@ -2265,6 +2280,7 @@ export default class TeamRelayPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.sourceStartupClosed = true;
 		this.updater?.dispose();
 		if (this.updaterBlockedStartup) return;
 		this.presence?.unload();

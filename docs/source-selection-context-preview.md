@@ -32,16 +32,16 @@ selects the pure browser implementation and compares its hashes to WebCrypto for
 both namespaces, null/non-null generations, Unicode and maximum-length vault IDs.
 No file-content hashing is moved onto the synchronous constructor path.
 
-This is explicit constructor integration, not automatic startup or installation.
-The main factory still omits the context. It must first become able to await a
-journal read for restored and newly connected shares, handle blocked/corrupt
-journals in the UI, recheck current configuration and dispose contexts correctly.
+Main startup and creation now await source preparation and pass the resulting
+context to the factory; settings expose failed startup and retry. See
+[source startup admission](source-startup-admission-preview.md) for the current
+integration and verification. This does not implement native installation.
 Direct and retained grant-renewal callbacks now recheck the journal before
 applying a selected token; token requests await their initial callback and reject
 late results. An already-connected socket or another window is not continuously
 fenced by occasional journal reads. Complete network/native writer
 quiescence, shared admission coordination, verified installation artifacts and
-startup handling must be connected before activating the restore action. These
+installation recovery must be connected before activating the restore action. These
 APIs do not verify native files or permit a pending journal to be committed.
 
 The full regression passes 4,076 tests across 290 suites (40 tests/26 suites

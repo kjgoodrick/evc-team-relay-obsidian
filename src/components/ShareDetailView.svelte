@@ -664,12 +664,8 @@
 			live.shareRegistry,
 			async (folderPath: string) => {
 				try {
-					const vaultShare = live.shareRegistry.new(toSharePath(folderPath), share.id, "relay-onprem", true);
+					const vaultShare = await live.shareRegistry.newPrepared(toSharePath(folderPath), share.id, "relay-onprem", true, undefined, share.serverId);
 					if (vaultShare) {
-						await vaultShare.setOnpremServerId(share.serverId);
-						// onpremServerId is set AFTER construction, so the constructor's
-						// own auto-connect gate never saw it — connect explicitly now
-						// that the server is known.
 						void vaultShare.bringOnline();
 					}
 					live.explorerDecorations?.refreshExistingRows();

@@ -78,13 +78,8 @@
 					// freshlyCreated=true: this guid was just minted by the
 					// createShare() call above, so no other client can already
 					// have published a guid for anything in this folder.
-					const vaultShare = live.shareRegistry.new(share.path, share.id, "relay-onprem", false, true);
+					const vaultShare = await live.shareRegistry.newPrepared(share.path, share.id, "relay-onprem", false, true, server.id);
 					if (vaultShare) {
-						await vaultShare.setOnpremServerId(server.id);
-						// onpremServerId is set AFTER construction, same as
-						// ShareManagementModal's equivalent path -- the
-						// constructor's own auto-connect gate never saw it,
-						// so the connect has to be triggered explicitly here.
 						void vaultShare.bringOnline();
 					}
 					live.explorerDecorations?.refreshExistingRows();

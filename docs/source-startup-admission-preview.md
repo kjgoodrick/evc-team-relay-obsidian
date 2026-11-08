@@ -1,10 +1,12 @@
 # Source startup admission
 
-`admitSourceStartup(vault, path, scope, options)` closes tracked native admission
+`admitSourceStartup(vault, path, scope, options, prepare?)` closes tracked native admission
 synchronously before its first asynchronous journal read. It drains already
 admitted saves, opens a journal-selected context, rechecks the durable choice and
 the caller's current configuration, then releases the hold and returns that
-context. It never opens a source cache or writes a native file itself.
+context. The optional preparation callback runs under the hold; its failure
+keeps the hold. The journal and caller context are checked again afterward.
+The gate never opens a source cache or writes a native file itself.
 
 A pending, unavailable, blocked or corrupt journal leaves the hold in place.
 Cancellation, a drain timeout or a changed caller context does the same; a
@@ -16,21 +18,39 @@ different server/endpoint cannot release a hold through a different scope.
 Changing a paused source's native location requires review instead of silently
 reassigning its hold. Other folders and vaults remain usable.
 
-This gate is still internal. The main startup and share-creation paths do not yet
-call it. Integration must await source preparation before constructing a folder,
-handle interrupted journals visibly, retain previous connections/settings when
-preparation fails, serialize competing creations and close contexts on teardown.
-Shared-folder teardown now closes its context and fences late native callbacks.
+Main startup, login restore, discovery and all share-creation/connection screens
+now await this gate through `prepareFolderSource` and the prepared registry API.
+Server attribution and connection settings are persisted under the hold before
+constructing a provider. Retry forces a disk comparison even when an earlier
+failed save already changed memory. Folder movement, account/mode changes and
+unload refuse late preparation. Root shares use the same checks.
+
+The registry serializes competing creations, checks native/mount identity across
+awaits, closes unused contexts, and restores unrelated folders after an error.
+A replacement stops its previous session **before** startup admission drains
+native writes. Its old settings and cache history survive preparation failure;
+old settings are removed only after construction succeeds. Cleanup failures
+pause the replacement. Explicit retry or a later login restore resumes that
+replacement instead of reopening the old settings row.
+
+Relay settings show paused folders, the reason, and a serialized Retry control.
+Retry checks startup admission; it does not approve pending recovery, discard
+work, select a new generation or install files. The registry refuses synchronous
+construction when a preparer is installed. Shared-folder teardown closes its
+context and fences late native callbacks.
 The gate's successful read is not continuous permission to write: existing
 providers, other windows, older binaries and external editors still require
 quiescence or isolation before an installer can change native files. No automatic
 restore activation is enabled.
 
-Eight new startup cases and the combined 68-test constructor/native-admission
-selection pass. These cover an earlier native save, pending-journal module
-reload, cancelled/timed-out drains, a caller changing after journal reads,
-concurrent checks, foreign scopes and an unavailable journal. Main types, lint
-and the unchanged test-type ratchet pass. The preceding folder-lifecycle full
-regression passes 4,082 tests across 290 suites; the newly added startup suite is
-verified separately. Native/mobile startup acceptance and the main-factory wiring
-remain.
+The full regression passes **4,111 tests across 294 suites** (40 tests/26 suites
+skipped). The final login/cleanup-retry refinement also passes the 19-test
+registry selection, including disconnection when an existing session's journal
+changes. Real IndexedDB and settings persistence tests cover held
+saves, pending journals, failed saves/retry, changed folders/accounts/modes and
+unload; the compiled settings component covers errors, duplicate clicks and
+successful retry. Main/Svelte types, the unchanged test-type ratchet, Svelte
+event reachability and the preview build pass (15 existing build warnings).
+Changed TypeScript lint has no errors and three existing sentence-case warnings.
+The historical i18n parity script cannot read its old default baseline ref;
+it is not counted as passing. Native/mobile startup acceptance remains.

@@ -584,16 +584,13 @@ export class ShareManagementModal extends Modal {
 	 */
 	private async connectLocalFolder(folderPath: string): Promise<void> {
 		try {
-			const vaultShare = this.plugin.shareRegistry.new(
+			const vaultShare = await this.plugin.shareRegistry.newPrepared(
 				folderPath,
 				this.selectedShare!.id,
 				"relay-onprem",
-				true
+				true, undefined, this.selectedShare!.serverId
 			);
 			if (vaultShare) {
-				await vaultShare.setOnpremServerId(this.selectedShare!.serverId);
-				// onpremServerId is set AFTER construction — the constructor's
-				// own gate never saw it, so trigger the connect explicitly.
 				void vaultShare.bringOnline();
 			}
 			this.plugin.explorerDecorations?.refreshExistingRows();
@@ -1886,19 +1883,15 @@ export class ShareManagementModal extends Modal {
 			// createShare() call (the caller's Notice above confirms it), so
 			// no other client can already have published a guid for
 			// anything in this folder.
-			const vaultShare = this.plugin.shareRegistry.new(
+			const vaultShare = await this.plugin.shareRegistry.newPrepared(
 				folderPath,
 				shareGuid,
 				"relay-onprem",
 				false,
-				true
+				true, serverId
 			);
 
-			// Store the server ID in the shared folder settings
 			if (vaultShare) {
-				await vaultShare.setOnpremServerId(serverId);
-				// onpremServerId is set AFTER construction — the constructor's
-				// own gate never saw it, so trigger the connect explicitly.
 				void vaultShare.bringOnline();
 			}
 

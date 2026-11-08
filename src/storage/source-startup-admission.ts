@@ -19,7 +19,7 @@ function registry(): StartupHolds {
  * continuously authorize an already-started session; startup must separately
  * stop old providers/callbacks and pass the returned context to its constructor. */
 export async function admitSourceStartup(vault: object, path: string, input: SourceSelectionScope,
-	options: NativeWriteWait): Promise<SourceSelectionContext> {
+	options: NativeWriteWait, prepare?: (context: SourceSelectionContext) => Promise<void>): Promise<SourceSelectionContext> {
 	const scope = { hostAppId: input.hostAppId, serverId: input.serverId,
 		controlPlaneUrl: sourceCacheEndpoint(input.controlPlaneUrl), s3rn: input.s3rn };
 	const identity = sourceInventoryCacheSync({ ...scope, restoreGeneration: null }).identity;
@@ -44,6 +44,7 @@ export async function admitSourceStartup(vault: object, path: string, input: Sou
 		await entry.hold.wait({ check, signal, timeoutMs }); check();
 		context = await SourceSelectionContext.open(scope); check();
 		await context.assertCurrent(); check();
+		if (prepare) { await prepare(context); check(); await context.assertCurrent(); check(); }
 		entry.hold.release(); scopes.delete(identity);
 		return context;
 	} catch (error) { context?.close(); throw error; }

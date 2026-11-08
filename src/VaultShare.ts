@@ -82,7 +82,7 @@ import type { BaseSyncDelegate } from "./bases/BaseSyncHost";
 import { retiredBaseEntries } from "./bases/BaseContentProtocol";
 import { currentToggles } from "./featureToggleState";
 import { findNestingConflictPath } from "./vaultShareNesting";
-import { isRootSharePath, resolveShareFolder } from "./vaultRootPath";
+import { isRootSharePath, resolveShareFolder, toSharePath } from "./vaultRootPath";
 import { buildConflictCopyPath, isConflictCopyPath, RECOVERY_FOLDER } from "./conflictCopyPath";
 import { partitionByKnownGuid } from "./mintGate";
 import { DocActivityChannel } from "./docActivity";
@@ -3532,16 +3532,33 @@ type FolderBuilder = (
 	hasPendingUpdates?: boolean,
 	isRestore?: boolean,
 	freshlyCreated?: boolean,
+	sourceSelection?: SourceSelectionContext,
 ) => VaultShare;
+
+export interface FolderSourceRequest { path: string; guid: string; workspaceId?: string; serverId?: string }
+export type FolderSourcePreparer = (request: Readonly<FolderSourceRequest>) => Promise<SourceSelectionContext | undefined>;
+interface PreparedFolderRequest extends FolderSourceRequest {
+	hasPendingUpdates?: boolean;
+	freshlyCreated?: boolean;
+	isRestore?: boolean;
+	replace?: VaultShare;
+	retiredGuid?: string;
+}
 
 export class ShareRegistry extends NotifierSet<VaultShare> {
 	private shareFactory: FolderBuilder;
+	private sourceCreationTail: Promise<void> = Promise.resolve();
+	private sourceRegistryClosed = false;
+	private sourceFailures = new Map<string, { guid: string; path: string; message: string }>();
+	private sourceRetryRequests = new Map<string, PreparedFolderRequest>();
+	get startupFailures(): readonly { guid: string; path: string; message: string }[] { return [...this.sourceFailures.values()].map(value => ({ ...value })); }
 
 	constructor(
 		private relayRegistry: RelayRegistry,
 		private vaultApi: Vault,
 		shareFactory: FolderBuilder,
 		private persistedShares: SettingsScope<VaultShareSettings[]>,
+		private prepareSource?: FolderSourcePreparer,
 	) {
 		super();
 		this.shareFactory = shareFactory;
@@ -3588,6 +3605,8 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 	}
 
 	destroy() {
+		this.sourceRegistryClosed = true;
+		this.sourceRetryRequests.clear(); this.sourceFailures.clear();
 		this.toArray().forEach((folder) => {
 			folder.dismantle();
 		});
@@ -3600,7 +3619,94 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 	}
 
 	restore() {
+		if (this.prepareSource) throw new Error("Source startup must be awaited. Use restorePrepared before opening shared folders.");
 		this._restoreFrom(this.persistedShares.readValue());
+	}
+
+	/** Await each source's durable admission before constructing any of its
+	 * providers. Failed entries retain their settings and do not stop siblings. */
+	async restorePrepared(): Promise<void> {
+		for (const folder of this._dedupeByPath(this.persistedShares.readValue()).values()) {
+			if (!this._hasValidGuid(folder) || !resolveShareFolder(this.vaultApi, folder.path)) continue;
+			try {
+				const retry = [...this.sourceRetryRequests.values()].find(request => request.path === folder.path);
+				if (retry) await this.retryStartup(retry.guid);
+				else await this.prepareAndCreate({ path: folder.path, guid: folder.guid, workspaceId: folder.relay,
+					serverId: folder.onpremServerId, isRestore: true });
+			} catch (error) { this.warn(`Shared folder ${folder.path} remains paused: ${error instanceof Error ? error.message : String(error)}`); }
+		}
+	}
+
+	newPrepared(path: string, guid: string, workspaceId?: string, hasPendingUpdates?: boolean,
+		freshlyCreated?: boolean, serverId?: string, replace?: VaultShare): Promise<VaultShare> {
+		return this.prepareAndCreate({ path, guid, workspaceId, hasPendingUpdates, freshlyCreated, serverId, replace });
+	}
+	retryStartup(guid: string): Promise<VaultShare> {
+		const request = this.sourceRetryRequests.get(guid);
+		if (!request) return Promise.reject(new Error("This source no longer has a pending startup retry."));
+		const existing = this.locate(folder => folder.entityGuid === guid && folder.path === request.path);
+		return this.prepareAndCreate({ ...request, replace: existing ?? request.replace });
+	}
+	private prepareAndCreate(request: PreparedFolderRequest): Promise<VaultShare> {
+		const input = Object.freeze({ ...request });
+		const operation = this.sourceCreationTail.then(async () => {
+			let selection: SourceSelectionContext | undefined, constructed: VaultShare | undefined, validating: VaultShare | undefined, transferred = false, retired = false;
+			let retiredGuid = input.retiredGuid ?? this.sourceRetryRequests.get(input.guid)?.retiredGuid;
+			const root = resolveShareFolder(this.vaultApi, input.path);
+			try {
+				if (this.sourceRegistryClosed) throw new Error("Shared-folder startup was closed.");
+				if (!ResourceAddress.isValidUUID(input.guid)) throw new Error("Invalid shared-folder identifier.");
+				const existing = this.locate(folder => folder.path === input.path && folder.entityGuid === input.guid);
+				if (existing && existing !== input.replace) {
+					if ((input.serverId && existing.sourceSelection?.scope.serverId !== input.serverId) ||
+						(input.workspaceId && existing.workspaceId !== input.workspaceId)) throw new Error("This shared folder is already connected with a different source configuration.");
+					validating = existing;
+					await existing.sourceSelection?.assertCurrent();
+					if (this.sourceRegistryClosed || !this.toArray().includes(existing) || existing.path !== input.path || !root ||
+						toSharePath(root.path) !== input.path || resolveShareFolder(this.vaultApi, input.path) !== root) throw new Error("The shared folder changed during source preparation.");
+					this.sourceFailures.delete(input.guid); this.sourceRetryRequests.delete(input.guid); this.notifySubscribers(); return existing;
+				}
+				const validateMount = () => {
+					if (this.sourceRegistryClosed) throw new Error("Shared-folder startup was closed.");
+					if (!root || toSharePath(root.path) !== input.path || resolveShareFolder(this.vaultApi, input.path) !== root) throw new Error("The local folder moved or became unavailable during startup.");
+					if (input.replace && !retired) {
+						if (!this.toArray().includes(input.replace) || input.replace.path !== input.path) throw new Error("The shared folder changed during source preparation.");
+						const collision = this.locate(folder => folder !== input.replace && folder.entityGuid === input.guid);
+						if (collision) throw new Error("This shared folder is already connected elsewhere.");
+					} else {
+						this._assertNotMountedElsewhere(input.guid); this._assertPathFree(input.path); this._assertNoNestingConflict(input.path);
+					}
+				};
+				validateMount();
+				// Stop the old session before startup admission drains native work.
+				// Its connection settings and cached history remain available if
+				// preparation fails; a retry opens a fresh session.
+				if (input.replace) {
+					input.replace.dismantle(); this.backing.delete(input.replace); retired = true;
+					retiredGuid ??= input.replace.entityGuid;
+				}
+				selection = await this.prepareSource?.({ path: input.path, guid: input.guid, workspaceId: input.workspaceId, serverId: input.serverId });
+				await selection?.assertCurrent(); validateMount();
+				const folder = this._create(input.path, input.guid, input.workspaceId, input.hasPendingUpdates, input.isRestore, input.freshlyCreated, selection);
+				constructed = folder;
+				transferred = true;
+				if (retiredGuid && retiredGuid !== folder.entityGuid) {
+					await this.persistedShares.mutateValue(current => current.filter(value => value.guid !== retiredGuid), true);
+				}
+				this.sourceFailures.delete(input.guid); this.sourceRetryRequests.delete(input.guid); this.notifySubscribers(); return folder;
+			} catch (error) {
+				if (validating) { validating.sourceSelection?.close(); validating.goOffline(); }
+				if (constructed) { constructed.sourceSelection?.close(); constructed.goOffline(); }
+				if (!this.sourceRegistryClosed) {
+					this.sourceRetryRequests.set(input.guid, { ...input, replace: retired ? undefined : input.replace, retiredGuid });
+					this.sourceFailures.set(input.guid, { guid: input.guid, path: input.path, message: error instanceof Error ? error.message : String(error) });
+					this.notifySubscribers();
+				}
+				throw error;
+			} finally { if (!transferred) selection?.close(); }
+		});
+		this.sourceCreationTail = operation.then(() => undefined, () => undefined);
+		return operation;
 	}
 
 	/**
@@ -3714,7 +3820,9 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 		hasPendingUpdates?: boolean,
 		isRestore?: boolean,
 		freshlyCreated?: boolean,
+		sourceSelection?: SourceSelectionContext,
 	): VaultShare {
+		if (this.sourceRegistryClosed) throw new Error("Shared-folder startup was closed.");
 		const existing = this.locate(
 			(folder) => folder.path == path && folder.entityGuid == guid,
 		);
@@ -3725,7 +3833,8 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 		this._assertPathFree(path);
 		this._assertNoNestingConflict(path);
 
-		const folder = this.shareFactory(path, guid, workspaceId, hasPendingUpdates, isRestore, freshlyCreated);
+		const folder = sourceSelection ? this.shareFactory(path, guid, workspaceId, hasPendingUpdates, isRestore, freshlyCreated, sourceSelection)
+			: this.shareFactory(path, guid, workspaceId, hasPendingUpdates, isRestore, freshlyCreated);
 		this.backing.add(folder);
 		return folder;
 	}
@@ -3765,6 +3874,7 @@ export class ShareRegistry extends NotifierSet<VaultShare> {
 		// own doc comment on the VaultShare field).
 		freshlyCreated?: boolean,
 	) {
+		if (this.prepareSource) throw new Error("Source preparation must be awaited. Use newPrepared before opening a shared folder.");
 		// isRestore left undefined (falsy): every caller of this public method
 		// writes onpremServerId immediately after it returns -- the
 		// constructor must not race that write with its own auto-connect.

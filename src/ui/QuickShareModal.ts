@@ -176,20 +176,15 @@ export class QuickShareModal extends Modal {
 			// freshlyCreated=true: this guid was just minted by our own
 			// createShare() call above, so no other client can already have
 			// published a guid for anything in this folder.
-			const vaultShare = this.plugin.shareRegistry.new(
+			const vaultShare = await this.plugin.shareRegistry.newPrepared(
 				this.folderPath,
 				share.id,
 				"relay-onprem",
 				false,
-				true
+				true, this.selectedServerId
 			);
 
-			// Store server ID in settings
 			if (vaultShare) {
-				await vaultShare.setOnpremServerId(this.selectedServerId);
-				// onpremServerId is set AFTER construction, so the constructor's
-				// own auto-connect gate never saw it — createShare() above already
-				// proved we're logged in to this server, so it's safe to connect now.
 				void vaultShare.bringOnline();
 			}
 

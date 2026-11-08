@@ -1,6 +1,7 @@
 <script lang="ts">
 	import PluginUpdates from "./PluginUpdates.svelte";
 	import PresenceSettings from "./PresenceSettings.svelte";
+	import PausedSharedFolders from "./PausedSharedFolders.svelte";
 	import ModalBackBar from "./ModalBackBar.svelte";
 	import type TeamRelayPlugin from "src/main";
 	import type { VaultShare } from "src/VaultShare";
@@ -171,6 +172,7 @@
 	<AnnouncementBanner serviceStatus={live.serviceHealth.lastReport} onInstall={install} />
 {/if}
 <div class="vertical-tab-content" bind:this={contentEl}>
+	<PausedSharedFolders {live} />
 	{#if activeManageView}
 		<svelte:component
 			this={activeManageView.component}
