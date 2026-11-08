@@ -117,3 +117,29 @@ reconciliation. These are automated checks; the recovery UI is still unfinished.
 The full intent regression passes **4,568 tests across 308 suites**, with 41 tests
 in 27 opt-in suites skipped. Main types, changed-source lint, unchanged test-type
 ratchet and preview build pass (15 existing warnings).
+
+## HTTP and object-storage integration
+
+The opt-in `realManagedAttachments` fixture now runs the attachment-only recovery
+pipeline against actual loopback HTTP and disposable MinIO: authenticated bounded
+downloads, verified original-work backup, preparation with durable intent,
+exclusive native publication, selected inventory import, saved mapping and final
+activation. A fresh selected inventory transport then reads the actual server
+without a restore pause, conflicts or changed records. Both legacy and current
+attachment bytes match their captured revisions. Retrying after a later native
+edit preserves that edit. The server's object inventory proves that activation
+created no extra uploads; original local work remains unchanged.
+
+The fixture exposed and now covers legacy records with a verified hash but no
+MIME type/sync timestamp. Plan validation preserves those optional fields rather
+than requiring fabricated metadata, while retaining required attachment hashes,
+metadata validation and unknown-field rejection. The focused plan/content/staging
+set passes **107 tests**; the actual HTTP/MinIO proof passes separately.
+
+This fixture owns its sole server writer and temporary native directory. It does
+not demonstrate production writer isolation, live Markdown/Canvas source
+installation, a native Obsidian UI, or mobile filesystem behavior. Its HTTP
+process, database, bucket and rootless container are removed after completion.
+The final full regression passes **4,574 tests across 308 suites** (41 tests in
+27 opt-in suites skipped); main types, changed-source lint, unchanged test-type
+ratchet and preview build pass with the existing 15 warnings.

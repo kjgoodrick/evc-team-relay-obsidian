@@ -73,12 +73,16 @@ function record(value: unknown): ItemRecord {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw fail();
 	const input = value as Record<string, unknown>;
 	const plain = ["folder", "markdown", "canvas"].includes(String(input.type));
-	exact(input, plain ? ["id", "type", "version"] : ["id", "type", "version", "hash", "synctime", "mimetype"]);
+	const optional = ["hash", "synctime", "mimetype"].filter(key => Object.prototype.hasOwnProperty.call(input, key));
+	exact(input, ["id", "type", "version", ...optional]);
 	if (input.version !== 0 || !["folder", "markdown", "canvas", "image", "pdf", "audio", "video", "file"].includes(String(input.type))) throw fail();
 	uuid(input.id);
-	if (!plain && (typeof input.synctime !== "number" || !Number.isSafeInteger(input.synctime) || input.synctime < 0
-		|| typeof input.mimetype !== "string" || !input.mimetype || input.mimetype.length > 255)) throw fail();
-	if (!plain) digest(input.hash);
+	// Legacy managed records may lack optional MIME/time metadata. Preserve
+	// the exact visible record instead of inventing values that would dirty the
+	// newly selected inventory. Attachment bytes still require a verified hash.
+	if (optional.includes("synctime") && (typeof input.synctime !== "number" || !Number.isSafeInteger(input.synctime) || input.synctime < 0)) throw fail();
+	if (optional.includes("mimetype") && (typeof input.mimetype !== "string" || !input.mimetype || input.mimetype.length > 255)) throw fail();
+	if (!plain || optional.includes("hash")) digest(input.hash);
 	return { ...input } as unknown as ItemRecord;
 }
 

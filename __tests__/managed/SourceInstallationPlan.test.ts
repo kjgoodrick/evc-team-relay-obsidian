@@ -127,6 +127,26 @@ test("shared deep path prefixes use a bounded tree and preserve exact spellings"
 	expect(() => parseSourceInstallationPlan(plan)).toThrow();
 });
 
+test("legacy optional record metadata is preserved without inventing MIME types or timestamps", async () => {
+	const { plan } = await fixture();
+	delete plan.entries[2].record.synctime; delete plan.entries[2].record.mimetype;
+	plan.entries[1].record.hash = "d".repeat(64); plan.entries[1].record.synctime = 0;
+	const parsed = parseSourceInstallationPlan(plan);
+	expect(parsed.entries[2].record).toEqual(plan.entries[2].record);
+	expect(parsed.entries[1].record).toEqual(plan.entries[1].record);
+	expect(Object.keys(parsed.entries[2].record).sort()).toEqual(["hash", "id", "type", "version"]);
+});
+
+test.each(["missing hash", "bad time", "bad MIME", "unknown field", "bad optional plain hash"])("legacy metadata compatibility still rejects %s", async kind => {
+	const { plan } = await fixture(), entry = plan.entries[2].record as unknown as Record<string, unknown>;
+	if (kind === "missing hash") delete entry.hash;
+	if (kind === "bad time") entry.synctime = null;
+	if (kind === "bad MIME") entry.mimetype = 7;
+	if (kind === "unknown field") entry.unrecognized = true;
+	if (kind === "bad optional plain hash") plan.entries[1].record.hash = "invalid";
+	expect(() => parseSourceInstallationPlan(plan)).toThrow();
+});
+
 test("well-formed supplementary Unicode remains a valid native path", async () => {
 	const { plan } = await fixture(); plan.entries[1].path = "Notes/😀.md";
 	expect(parseSourceInstallationPlan(plan).entries[1].path).toBe("Notes/😀.md");

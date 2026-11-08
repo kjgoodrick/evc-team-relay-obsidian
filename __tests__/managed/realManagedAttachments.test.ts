@@ -14,8 +14,10 @@ import type { VaultShare } from "../../src/VaultShare";
 import type { AuthSession } from "../../src/AuthSession";
 import type { IAuthProvider } from "../../src/auth/IAuthProvider";
 import { MockClock } from "../mocks/MockClock";
+import { proveAttachmentSourceInstallation } from "../mocks/sourceInstallationHttpProof";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
+jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/obsidian"), FileSystemAdapter: class {} }));
 const fixturePath = process.env.EVC_MANAGED_ATTACHMENT_FIXTURE;
 const integration = fixturePath ? test : test.skip;
 
@@ -83,5 +85,8 @@ integration("actual attachment client checks uploads and reads verified distinct
 		expect(new TextDecoder().decode(await blobs.pullFile(file))).toBe("verified legacy attachment fixture");
 		file.syncMeta!.hash = "b".repeat(64); expect(await blobs.headFile(file)).toBe(false);
 		await expect(blobs.pullFile(file)).rejects.toThrow("409");
+		doc.getMap("filemeta_v0").set("Upload.png", { ...index.snapshot.records["Upload.png"], hash: revisions[1], synctime: 3, mimetype: "image/png" });
+		await index.flush(); expect(index.snapshot.records["Upload.png"].hash).toBe(revisions[1]); index.stop();
+		await proveAttachmentSourceInstallation(cache, f, credential.token);
 	} finally { blobs.destroy(); cache.destroy(); index.destroy(); doc.destroy(); }
 }, 30_000);

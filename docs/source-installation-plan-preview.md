@@ -23,6 +23,13 @@ require native bytes whose digest agrees with their inventory hash. Folder
 records cannot carry file bytes. This covers existing sync formats; it does not
 add Canvas or PDF commenting.
 
+Known hash/MIME/timestamp fields are preserved exactly when present. Legacy
+attachments may omit MIME type or sync time, matching the server's wire schema;
+the installer never invents those fields. Attachment hashes remain mandatory,
+and present metadata must pass its type/size checks. Unknown record fields still
+fail. Actual HTTP/MinIO recovery now covers both legacy and current attachment
+records through activation and selected-inventory reopen.
+
 Validation rejects duplicate identities, unknown fields/versions, missing source
 generation, noncanonical endpoints/IDs, unsafe paths, Unicode/case aliases in
 files or parent directories, file/directory collisions, hidden/system paths and
