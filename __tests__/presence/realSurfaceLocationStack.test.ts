@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import type { EmbeddedImage, EmbeddedImagesEvent } from "../../src/collaboration/presence/EmbeddedImageProtocol";
 import { readFileSync } from "node:fs";
 import { decodeJwt } from "jose";
-import { LocationChannel } from "../../src/collaboration/presence/LocationChannel";
+import { LocationChannel, type ObservationEvent } from "../../src/collaboration/presence/LocationChannel";
 import { basePresenceLocation } from "../../src/collaboration/presence/BasePresenceProtocol";
 import type { BasePresenceState, BaseStatesEvent } from "../../src/collaboration/presence/BasePositionProtocol";
 import type { NoteLocation, BaseLocation, ImageLocation, LocationEvent, SurfaceLocation, SurfaceRosterEvent, ImageStatesEvent } from "../../src/collaboration/presence/LocationProtocol";
@@ -24,12 +24,13 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 	function participant(token: string, instanceId: string) {
 		const claims = decodeJwt(token), events: LocationEvent[] = [], rosters: SurfaceRosterEvent[] = [], positions: ImageStatesEvent[] = [], opened: WebSocket[] = [];
 		const embeds: EmbeddedImagesEvent[] = [], basePositions: BaseStatesEvent[] = [];
+		const observations: ObservationEvent[] = [];
 		let acknowledgments = 0, refreshes = 0;
 		const channel = new LocationChannel({ serverUrl: f.base, accountId: claims.sub!, loginSessionId: claims.session_id as string, instanceId }, {
 			surfaceLocations: true, credential: async () => ({ accountId: claims.sub!, accessToken: token }),
 			location: event => events.push(event), roster: event => rosters.push(event),
 			imageStates: event => positions.push(event), imageEmbeds: event => embeds.push(event),
-			baseStates: event => basePositions.push(event),
+			baseStates: event => basePositions.push(event), observation: event => observations.push(event),
 			socket: url => {
 				const socket = new WebSocket(url), send = socket.send.bind(socket); sockets.push(socket); opened.push(socket);
 				expect(new URL(url).search).toBe("");
@@ -39,7 +40,7 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
 			},
 		});
 		channels.push(channel);
-		return { channel, events, rosters, positions, embeds, basePositions, opened, refreshes: () => refreshes, publish: async (location: SurfaceLocation | null) => {
+		return { channel, events, rosters, positions, embeds, basePositions, observations, opened, refreshes: () => refreshes, publish: async (location: SurfaceLocation | null) => {
 			const previous = acknowledgments; channel.publish(location); await until(() => acknowledgments > previous, "processed publication");
 		} };
 	}
@@ -134,6 +135,20 @@ run("actual image/Bases socket roster, Follow, hidden observation, reconnect and
         await until(() => viewer.rosters.at(-1)?.peers.length === 1, "image after note embed");
         publisher.channel.publishImageState(state);
         await until(() => viewer.positions.at(-1)?.peers.length === 1, "image pointer after embed");
+        // Additional note/image scopes remain independent of the foreground
+        // Base and reuse exactly the same authenticated socket.
+        expect(viewer.channel.supportsMultiWatch).toBe(true);
+        viewer.channel.watch(views[0]); viewer.channel.observe([image, note]);
+        await until(() => viewer.observations.some(event => event.type === "image_states" && event.peers.length === 1), "passive image pointer");
+        await until(() => viewer.observations.some(event => event.type === "image_embeds" && event.status === "available"), "passive note subscription");
+        await until(() => viewer.rosters.at(-1)?.scope?.kind === "base" && viewer.rosters.at(-1)?.status === "available", "independent foreground Base");
+        expect(viewer.rosters.at(-1)?.peers).toEqual([]);
+        await publisher.publish(note); publisher.channel.publishEmbeddedImage(embed);
+        await until(() => viewer.observations.some(event => event.type === "image_embeds" && event.peers.length === 1), "passive exact image embed");
+        expect(viewer.opened).toHaveLength(2); // Only the earlier deliberate reconnect.
+        await publisher.publish(image); publisher.channel.publishImageState(state);
+        viewer.channel.observe([]); viewer.channel.watch(image);
+        await until(() => viewer.rosters.at(-1)?.scope?.kind === "image" && viewer.rosters.at(-1)?.peers.length === 1, "foreground image after observer cleanup");
         const second = viewer.channel.follow(target, image);
 		await until(() => viewer.events.at(-1)?.subscriptionId === second && viewer.events.at(-1)?.location?.kind === "image", "explicit Follow restart");
 		const revoked = await fetch(`${f.base}/v1/managed/shares/${image.share_id}/rules`, { method: "PUT", headers: { Authorization: "Bearer " + f.ownerToken, "Content-Type": "application/json" },

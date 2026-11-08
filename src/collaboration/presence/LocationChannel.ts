@@ -11,6 +11,14 @@ import { exactFields, locationId, parseLocationTarget, parseNoteLocation, parseS
 
 export type LocationChannelStatus = "idle" | "connecting" | "ready" | "reconnecting" | "unsupported" | "authentication" | "unavailable";
 export type LocationIdentity = Readonly<{ serverUrl: string; accountId: string; loginSessionId: string; instanceId: string }>;
+export type ObservationEvent =
+	| ({ type: "roster" } & SurfaceRosterEvent)
+	| ({ type: "image_states" } & ImageStatesEvent)
+	| ({ type: "image_embeds" } & EmbeddedImagesEvent)
+	| ({ type: "base_states" } & BaseStatesEvent)
+	| { type: "reset"; scope: SurfaceLocation | null };
+type Observation = { scope: SurfaceLocation; id?: string; denied: boolean };
+const MAX_OBSERVATIONS = 8;
 type Credential = { accountId: string; accessToken: string };
 type Options = {
 	credential: () => Promise<Credential | undefined>;
@@ -23,6 +31,7 @@ type Options = {
 	imageStates?: (event: ImageStatesEvent) => void;
 	imageEmbeds?: (event: EmbeddedImagesEvent) => void;
 	baseStates?: (event: BaseStatesEvent) => void;
+	observation?: (event: ObservationEvent) => void;
 	fetcher?: (url: string, init: PlatformRequestInit) => Promise<Response>;
 	socket?: (url: string) => WebSocket;
 	random?: () => number;
@@ -55,6 +64,8 @@ export class LocationChannel {
 	private sentImageState?: string;
 	private imageTimer?: number;
 	private lastImageSent = 0;
+	private multiWatchSupported = false;
+	private observations = new Map<string, Observation>();
 	private desiredWatch: SurfaceLocation | null = null;
 	private watching?: { id: string; scope: SurfaceLocation };
 	private sentWatch?: string;
@@ -89,6 +100,7 @@ export class LocationChannel {
 	get supportsBaseStates(): boolean { return this.supportsSurfaceRoster && this.supportsBaseContext && this.baseStatesSupported; }
 	get supportsBaseTargetsV2(): boolean { return this.supportsBaseStates && this.baseTargetsV2Supported; }
 	get supportsImageStates(): boolean { return this.supportsSurfaceRoster && this.imageStatesSupported; }
+	get supportsMultiWatch(): boolean { return this.supportsSurfaceLocations && this.multiWatchSupported; }
 	get supportsEmbeddedImages(): boolean { return this.supportsSurfaceLocations && this.embedsSupported; }
 	publishBaseState(state: BasePresenceState | null): void {
 		const next = state === null ? null : parseBaseState(state);
@@ -177,6 +189,40 @@ export class LocationChannel {
 		if (!this.options.surfaceLocations) throw new Error("Unsupported presence scope");
 		this.setWatch(location === null ? null : parseNoteLocation(location));
 	}
+	/** Up to eight additional scopes share the existing connection. Ordinary
+	 * refreshes preserve denied subscriptions until explicit retry/reconnect. */
+	observe(locations: readonly SurfaceLocation[]): void {
+		if (!this.options.surfaceLocations || !this.options.observation) throw new Error("Unsupported presence observations");
+		const wanted = new Map<string, SurfaceLocation>();
+		for (const value of locations) {
+			const parsed = parseSurfaceLocation(value);
+			const scope = parsed.kind === "note" ? { ...parsed, surface: "reading" as const } : parsed;
+			wanted.set(JSON.stringify(scope), scope);
+		}
+		if (wanted.size > MAX_OBSERVATIONS) throw new Error("Too many presence observations");
+		for (const [key, observation] of this.observations) if (!wanted.has(key)) {
+			this.observations.delete(key);
+			if (observation.id && this.ready) this.send({ type: "unobserve", subscription_id: observation.id });
+			this.emitObservation({ type: "reset", scope: observation.scope });
+		}
+		for (const [key, scope] of wanted) if (!this.observations.has(key)) this.observations.set(key, { scope, denied: false });
+		this.flushObservations();
+	}
+	private emitObservation(event: ObservationEvent): void {
+		try { this.options.observation?.(event); } catch { /* Isolate UI. */ }
+	}
+	private flushObservations(): void {
+		if (!this.supportsMultiWatch) return;
+		for (const observation of this.observations.values()) {
+			if (observation.id || observation.denied) continue;
+			const scope = observation.scope;
+			if (scope.kind === "note" ? !this.supportsEmbeddedImages : !this.supportsSurfaceRoster) continue;
+			const id = uuid(); observation.id = id;
+			if (!this.send({ type: "observe", subscription_id: id, location: scope,
+				...(scope.kind === "image" && this.supportsImageStates ? { image_states: true } : {}),
+				...(scope.kind === "base" && this.supportsBaseStates ? { base_states: true, ...(this.supportsBaseTargetsV2 ? { base_target_version: 2 } : {}) } : {}) })) return;
+		}
+	}
 	private setWatch(next: SurfaceLocation | null): void {
 		if (JSON.stringify(next) === JSON.stringify(this.desiredWatch)) return;
 		this.desiredWatch = next;
@@ -192,7 +238,11 @@ export class LocationChannel {
 	}
 	/** Explicit retry or an authentication lifecycle event, never ordinary cursor updates. */
 	retry(): void {
-		if (this.ready && this.desiredWatch && !this.watching) { this.sentWatch = undefined; this.flushWatch(); return; }
+		if (this.ready) {
+			if (this.desiredWatch && !this.watching) { this.sentWatch = undefined; this.flushWatch(); }
+			for (const observation of this.observations.values()) observation.denied = false;
+			this.flushObservations(); return;
+		}
 		if (!this.active || this.status === "connecting" || this.status === "ready") return;
 		if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
 		this.retryTimer = undefined; this.attempts = 0; void this.connect();
@@ -203,7 +253,7 @@ export class LocationChannel {
 	}
 	stop(): void {
 		this.active = false; this.version++;
-		this.drop(); this.desired = null; this.desiredWatch = null; this.shareId = undefined; this.setStatus("idle");
+		this.drop(); this.observations.clear(); this.desired = null; this.desiredWatch = null; this.shareId = undefined; this.setStatus("idle");
 	}
 	private setStatus(status: LocationChannelStatus): void {
 		if (this.status === status) return;
@@ -220,6 +270,9 @@ export class LocationChannel {
 		// credential, response and callback. Do not retain timers or a live socket.
 		this.renewing = false; this.sent = undefined;
 		this.watching = undefined; this.sentWatch = undefined; this.protocolVersion = 1; this.rosterSupported = false; this.imageContextSupported = false; this.baseContextSupported = false;
+		this.multiWatchSupported = false;
+		for (const observation of this.observations.values()) { observation.id = undefined; observation.denied = false; }
+		this.emitObservation({ type: "reset", scope: null });
 		this.emitRoster(null, "unavailable");
 		const ws = this.ws; this.ws = undefined;
 		if (ws) { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; try { ws.close(); } catch { /* Already closed. */ } }
@@ -286,7 +339,8 @@ export class LocationChannel {
 			if (this.options.surfaceLocations) {
 				const extended = capability.features.presence_surface_locations_preview, roster = capability.features.presence_surface_roster_preview, image = capability.features.presence_image_context_preview, states = capability.features.presence_image_states_preview, embeds = capability.features.presence_embedded_images_preview;
 				const base = capability.features.presence_base_context_preview, baseStates = capability.features.presence_base_states_preview;
-				const baseTargets = capability.features.presence_base_targets_v2_preview;
+				const baseTargets = capability.features.presence_base_targets_v2_preview, multiWatch = capability.features.presence_multi_watch_preview;
+				if (multiWatch !== undefined && typeof multiWatch !== "boolean" || multiWatch === true && extended !== true) throw new ChannelFailure("unavailable");
 				if (baseTargets !== undefined && typeof baseTargets !== "boolean" || baseTargets === true && baseStates !== true) throw new ChannelFailure("unavailable");
 				if ([extended, roster, image, states, embeds, base, baseStates].some(value => value !== undefined && typeof value !== "boolean") || (roster === true || image === true || states === true || embeds === true || base === true || baseStates === true) && extended !== true || (states === true || baseStates === true) && roster !== true || baseStates === true && base !== true) throw new ChannelFailure("unavailable");
 				this.protocolVersion = extended === true ? 2 : 1;
@@ -297,6 +351,7 @@ export class LocationChannel {
 				this.baseTargetsV2Supported = baseTargets === true;
 				this.imageStatesSupported = states === true;
 				this.embedsSupported = embeds === true;
+				this.multiWatchSupported = multiWatch === true;
 			}
 			const ticket = await this.ticket(version);
 			if (!this.current(version)) return;
@@ -365,11 +420,12 @@ export class LocationChannel {
 					value.protocol_version !== this.protocolVersion || value.instance_id !== this.identity.instanceId || !publicSessionId(value.session_id) || !expiry(value.expires_at)) throw new Error();
 				if (this.deadline !== undefined) window.clearTimeout(this.deadline); this.deadline = undefined;
 				this.lastReceived = Date.now(); this.attempts = 0; this.setStatus("ready"); this.flushPresence();
-				this.flushWatch();
+				this.flushWatch(); this.flushObservations();
 				if (!this.ready) return;
 				this.armRefresh(value.expires_at); this.beat();
 			} else {
 				if (this.status !== "ready") throw new Error();
+				const observed = [...this.observations.values()].find(observation => observation.id !== undefined && observation.id === value.subscription_id);
 				if (value.type === "authenticated") {
 					if (!this.renewing || !exactFields(value, ["type", "expires_at"]) || !expiry(value.expires_at)) throw new Error();
 					this.renewing = false; if (this.deadline !== undefined) window.clearTimeout(this.deadline); this.deadline = undefined; this.armRefresh(value.expires_at);
@@ -386,31 +442,43 @@ export class LocationChannel {
 					}
 				} else if (value.type === "image_embeds") {
 					const available = value.status === "available";
-					if (!this.supportsEmbeddedImages || !this.options.imageEmbeds || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
+					if (!this.supportsEmbeddedImages || (!this.options.imageEmbeds && !this.options.observation) || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
 						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
 					const peers = available ? parseEmbeddedPeers(value.peers) : [];
-					if (this.watching?.id === value.subscription_id) {
+					if (observed) {
+						if (observed.scope.kind !== "note") throw new Error();
+						if (!available) { observed.id = undefined; observed.denied = true; }
+						this.emitObservation({ type: "image_embeds", scope: observed.scope, status: available ? "available" : "unavailable", peers });
+					} else if (this.watching?.id === value.subscription_id) {
 						const scope = this.watching.scope; if (scope.kind !== "note") throw new Error();
 						if (!available) this.watching = undefined;
 						this.emitEmbeddedImages(scope, available ? "available" : "unavailable", peers);
 					}
 				} else if (value.type === "base_states") {
 					const available = value.status === "available";
-					if (!this.supportsBaseStates || !this.options.baseStates || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
+					if (!this.supportsBaseStates || (!this.options.baseStates && !this.options.observation) || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
 						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
 					const peers = available ? parseBasePeers(value.peers) : [];
 					if (!this.supportsBaseTargetsV2 && peers.some(peer => peer.state.version === 2)) throw new Error();
-					if (this.watching?.id === value.subscription_id) {
+					if (observed) {
+						if (observed.scope.kind !== "base") throw new Error();
+						if (!available) { observed.id = undefined; observed.denied = true; }
+						this.emitObservation({ type: "base_states", scope: observed.scope, status: available ? "available" : "unavailable", peers });
+					} else if (this.watching?.id === value.subscription_id) {
 						const scope = this.watching.scope; if (scope.kind !== "base") throw new Error();
 						if (!available) { this.watching = undefined; this.emitRoster(scope, "unavailable"); }
 						this.emitBaseStates(scope, available ? "available" : "unavailable", peers);
 					}
 				} else if (value.type === "image_states") {
 					const available = value.status === "available";
-					if (!this.supportsImageStates || !this.options.imageStates || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
+					if (!this.supportsImageStates || (!this.options.imageStates && !this.options.observation) || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
 						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
 					const peers = available ? parseImagePeers(value.peers) : [];
-					if (this.watching?.id === value.subscription_id) {
+					if (observed) {
+						if (observed.scope.kind !== "image") throw new Error();
+						if (!available) { observed.id = undefined; observed.denied = true; }
+						this.emitObservation({ type: "image_states", scope: observed.scope, status: available ? "available" : "unavailable", peers });
+					} else if (this.watching?.id === value.subscription_id) {
 						const scope = this.watching.scope; if (scope.kind !== "image") throw new Error();
 						if (!available) { this.watching = undefined; this.emitRoster(scope, "unavailable"); }
 						this.emitImageStates(scope, available ? "available" : "unavailable", peers);
@@ -420,7 +488,11 @@ export class LocationChannel {
 					if (!this.supportsSurfaceRoster || !locationId(value.subscription_id) || !["available", "unavailable"].includes(String(value.status)) ||
 						!exactFields(value, available ? ["type", "subscription_id", "status", "peers"] : ["type", "subscription_id", "status"])) throw new Error();
 					const peers = available ? parseSurfacePeers(value.peers) : [];
-					if (this.watching?.id === value.subscription_id) {
+					if (observed) {
+						if (observed.scope.kind === "note") throw new Error();
+						if (!available) { observed.id = undefined; observed.denied = true; }
+						this.emitObservation({ type: "roster", scope: observed.scope, status: available ? "available" : "unavailable", peers });
+					} else if (this.watching?.id === value.subscription_id) {
 						const scope = this.watching.scope;
 						if (scope.kind === "note") throw new Error();
 						if (!available) this.watching = undefined;
