@@ -193,16 +193,10 @@ integration("offline picture dependencies recover a lost upload ack against real
 			await expect(reader.pictureContent(fixture.entry, pictureId, "content", picture.renditions.content!)).rejects.toMatchObject({ status: 404 });
 			await expect(reader.pictureContent(fixture.entry, pictureId, "thumbnail", picture.renditions.thumbnail!)).rejects.toMatchObject({ status: 404 });
 		}
-		const recoveryUrl = fixture.base + `/v1/collaboration/shares/${fixture.share}/entries/${fixture.entry}/threads/${threadId}/messages/${messageId}/moderation-pictures/${pictureId}`;
-		const recoveryRequest = { method: "POST", headers: { Authorization: "Bearer " + fixture.ownerToken, "Content-Type": "application/json" },
-			body: JSON.stringify({ reason: "Synthetic picture recovery proof" }) };
-		const recoveryMetadata = await fetch(recoveryUrl, recoveryRequest);
-		expect(recoveryMetadata.status).toBe(200); const recovered = await recoveryMetadata.json();
+		const recovered = await owner.moderationPicture(fixture.entry, threadId, messageId, pictureId, "Synthetic picture recovery proof");
 		expect(recovered.audit_id).toMatch(/^[0-9a-f-]{36}$/); expect(recovered.picture).toEqual(picture);
-		const recoveryBytes = await fetch(recoveryUrl + "/content", recoveryRequest);
-		expect(recoveryBytes.status).toBe(200); expect(recoveryBytes.headers.get("cache-control")).toBe("no-store");
-		expect(recoveryBytes.headers.get("x-discussion-audit-id")).toMatch(/^[0-9a-f-]{36}$/);
-		expect(await recoveryBytes.arrayBuffer()).toEqual(content);
+		const recoveryBytes = await owner.moderationPictureContent(fixture.entry, threadId, messageId, pictureId, "Synthetic picture recovery proof", "content", picture.renditions.content!);
+		expect(recoveryBytes.audit_id).toMatch(/^[0-9a-f-]{36}$/); expect(recoveryBytes.bytes).toEqual(content);
 
 		const secondId = randomUUID(), second = await prepareLocalPicture(secondId, fixture.entry, original);
 		await store.saveDraft({ id: "revoked-picture", scopeId: fixture.entry, revision: 0, body: { text: "Keep my picture", mentions: [], pictures: [{ type: "picture", picture_id: secondId }] } }, null, [second]);

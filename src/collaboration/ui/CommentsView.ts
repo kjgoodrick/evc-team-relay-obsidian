@@ -16,6 +16,7 @@ import { editableCommentDraft, type CommentDraft } from "./CommentDraft";
 import { copyToClipboard } from "../../utils/clipboard";
 import { DiscussionSearchPanel } from "./DiscussionSearchPanel";
 import { CommentHistoryModal } from "./CommentHistory";
+import { RemovedCommentsModal } from "./RemovedComments";
 import { TargetHistoryModal, commentTargetDescription } from "./ReattachComment";
 import { TimelineMarkerComparisonModal } from "./TimelineMarkerComparison";
 
@@ -67,6 +68,7 @@ class EditCommentModal extends AccountModal {
 }
 
 class ThreadCard {
+	private removedModal?: RemovedCommentsModal;
 	private markerComparison?: TimelineMarkerComparisonModal;
 	private targetStatus = uncheckedTarget();
 	private subscription: ThreadSubscription;
@@ -241,6 +243,15 @@ class ThreadCard {
 			history.title = this.session.online ? "Compare comment revisions" : "Reconnect to view comment history";
 			history.onclick = () => new CommentHistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();
 		}
+		if (message.deleted && this.session.canReviewRemoved?.(this.entryId)) {
+			const review = actions.createEl("button", { text: "Review removed comment", attr: { type: "button" } });
+			review.onclick = () => {
+				this.removedModal?.close();
+				this.removedModal = new RemovedCommentsModal(this.app, this.session, this.entryId, () => !this.disposed && this.host.current().session === this.session && this.host.current().entryId === this.entryId,
+					{ threadId: this.thread.id, messageId: message.id });
+				this.removedModal.open();
+			};
+		}
 		if (!message.deleted && permission?.comment) {
 			const draft = message.body ? editableCommentDraft(message.body, id => this.session.displayName(this.entryId, id)) : undefined;
 			if (message.author_id === this.session.identity.accountId && draft !== undefined) {
@@ -252,10 +263,12 @@ class ThreadCard {
 			}
 		}
 	}
-	dispose(): void { this.disposed = true; this.generation++; this.markerComparison?.close(); this.markerComparison = undefined; this.subscription.dispose(); this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
+	dispose(): void { this.disposed = true; this.generation++; this.removedModal?.close(); this.removedModal = undefined; this.markerComparison?.close(); this.markerComparison = undefined; this.subscription.dispose(); this.pictures.forEach(p => p.dispose()); this.pictures = []; this.composer?.dispose(); this.el.remove(); }
 }
 
 export class CommentsView extends ItemView {
+	private removedModal?: RemovedCommentsModal;
+	private removedButton?: HTMLButtonElement;
 	private exportModal?: DiscussionExportModal;
 	private exportButton?: HTMLButtonElement;
 	private session?: DiscussionSession;
@@ -309,6 +322,7 @@ export class CommentsView extends ItemView {
 		this.timer = window.setTimeout(() => { this.timer = undefined; void this.render().catch(() => { this.status?.setText("Comments could not be loaded. Refresh to retry."); }); }, 50);
 	}
 	private reset(): void {
+		this.removedModal?.close(); this.removedModal = undefined; this.removedButton = undefined;
 		this.exportModal?.close(); this.exportModal = undefined; this.exportButton = undefined;
 		this.search?.dispose(); this.search = undefined;
 		this.targetWatch?.(); this.targetWatch = undefined; this.targetEpoch++; this.targetCheck = undefined; this.targetStatuses.clear(); this.targetFilter = undefined; this.targetSummary = undefined;
@@ -341,6 +355,14 @@ export class CommentsView extends ItemView {
 			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
 			const storage = this.contentEl.createEl("button", { text: "Storage on this device" }); storage.onclick = () => { if (this.session) this.host.openCommentStorage(this.session); };
 			this.exportButton = this.contentEl.createEl("button", { text: "Export discussions", attr: { type: "button" } });
+			this.removedButton = this.contentEl.createEl("button", { text: "Review removed comments", attr: { type: "button" } });
+			this.removedButton.onclick = () => {
+				const session = this.session, scopeId = this.entryId;
+				if (!session || !scopeId || !session.canReviewRemoved(scopeId)) return;
+				this.removedModal?.close();
+				this.removedModal = new RemovedCommentsModal(this.app, session, scopeId, () => !this.closed && this.host.current().session === session && this.host.current().entryId === scopeId);
+				this.removedModal.open();
+			};
 			this.exportButton.onclick = () => {
 				const session = this.session, scopeId = this.entryId;
 				if (!session || !scopeId || !session.canExport || !session.permission(scopeId)?.read) return;
@@ -382,6 +404,8 @@ export class CommentsView extends ItemView {
 				target.kind === "base" ? anchor => this.host.targetLabel(session, entryId, anchor) : undefined);
 		}
 		if (this.exportButton) this.exportButton.disabled = !this.session.canExport || !this.session.permission(this.entryId)?.read;
+		if (this.removedButton) this.removedButton.hidden = !this.session.canReviewRemoved?.(this.entryId);
+		this.removedModal?.validate();
 		this.exportModal?.validate();
 
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");

@@ -15,6 +15,7 @@ import { inboxCursor, parseInboxPage, parseInboxSubscription, parseInboxReadStat
 import { parseSearchPage, searchEnvelope, searchRequest, type DiscussionSearchRequest } from "./DiscussionSearchProtocol";
 import { parseAnchorHistory, reattachmentAnchor } from "./ReattachmentProtocol";
 import { DiscussionFailure } from "./DiscussionFailure";
+import { moderationPageRequest, moderationReason, parseModerationHistory, parseModerationPicture, parseModerationCatalog } from "./ModerationProtocol";
 export { DiscussionFailure, type FailureAction } from "./DiscussionFailure";
 
 export interface DiscussionIdentity { serverId: string; accountId: string; shareId: string }
@@ -189,11 +190,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -231,6 +232,7 @@ export class DiscussionTransport implements DiscussionSender {
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
 			...(formulaGroups === undefined ? {} : { baseFormulaGroups: formulaGroups === true && baseTargets.includes("group") }),
+			...(value.features.discussion_moderation_catalog === undefined ? {} : { moderationRecovery: value.features.discussion_commands && value.features.discussion_moderation_recovery === true && value.features.discussion_moderation_catalog === true }),
 			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
 			...(value.features.discussion_export_catalog === undefined ? {} : { exportCatalog: value.features.discussion_commands && value.features.discussion_export === true && value.features.discussion_export_catalog === true }),
 			...(value.features.discussion_export === undefined ? {} : { export: value.features.discussion_commands && value.features.discussion_export === true }),
@@ -485,6 +487,37 @@ export class DiscussionTransport implements DiscussionSender {
 		this.viewQuery(viewId);
 		return this.parse(await this.request(this.scopePath(entryId) + `/threads/${threadId}/state`), v => this.scoped(parseThreadState(v, threadId), entryId, v, viewId));
 	}
+	async moderationCatalog(scopeId: string, reason: string, after = 0, limit = 20, current?: () => boolean) {
+		const body = JSON.stringify(moderationPageRequest(scopeId, reason, after, limit));
+		const value = await this.request(this.scopePath(scopeId) + "/moderation-catalog", body, { responseLimit: 64 * 1024, boundedText: true, audited: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, item => parseModerationCatalog(item, scopeId, after, limit));
+	}
+	private moderationPath(scopeId: string, threadId: string, messageId: string): string {
+		if (!parseDiscussionScope(scopeId) || !isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		return this.scopePath(scopeId) + `/threads/${threadId}/messages/${messageId}`;
+	}
+	async moderationHistory(scopeId: string, threadId: string, messageId: string, reason: string, after = 0, limit = 10, current?: () => boolean) {
+		const path = this.moderationPath(scopeId, threadId, messageId), body = JSON.stringify(moderationPageRequest(scopeId, reason, after, limit));
+		const value = await this.request(path + "/moderation-history", body, { responseLimit: 512 * 1024, boundedText: true, audited: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, item => parseModerationHistory(item, scopeId, threadId, messageId, after, limit));
+	}
+	async moderationPicture(scopeId: string, threadId: string, messageId: string, pictureId: string, reason: string, current?: () => boolean) {
+		if (!isId(pictureId)) throw new DiscussionFailure("reject", "invalid_local_target");
+		const path = this.moderationPath(scopeId, threadId, messageId) + `/moderation-pictures/${pictureId}`;
+		const value = await this.request(path, JSON.stringify(moderationReason(scopeId, reason)), { responseLimit: 16 * 1024, boundedText: true, audited: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, item => parseModerationPicture(item, scopeId, threadId, messageId, pictureId));
+	}
+	async moderationPictureContent(scopeId: string, threadId: string, messageId: string, pictureId: string, reason: string, variant: "content" | "thumbnail", expected: PictureRendition, current?: () => boolean): Promise<{ bytes: ArrayBuffer; audit_id: string }> {
+		if (!isId(pictureId) || !["content", "thumbnail"].includes(variant)) throw new DiscussionFailure("reject", "invalid_local_target");
+		const rendition = parsePictureRendition(expected, variant === "thumbnail");
+		const path = this.moderationPath(scopeId, threadId, messageId) + `/moderation-pictures/${pictureId}/${variant}`;
+		const value = await this.request(path, JSON.stringify(moderationReason(scopeId, reason)), { binary: rendition, audited: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return value as { bytes: ArrayBuffer; audit_id: string };
+	}
 	async history(entryId: string, threadId: string, messageId: string, after = 0, limit = 50) {
 		if (!isId(threadId) || !isId(messageId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		const query = this.page(after, limit);
@@ -508,7 +541,7 @@ export class DiscussionTransport implements DiscussionSender {
 			v => parseChanges(v, viewId, parseDiscussionScope(entryId)!.entryId));
 	}
 
-	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number; boundedText?: boolean; current?: () => boolean } = {}): Promise<unknown> {
+	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number; boundedText?: boolean; audited?: boolean; current?: () => boolean } = {}): Promise<unknown> {
 		let timer: number | undefined;
 		let ended = false;
 		const attempt = async () => {
@@ -523,7 +556,7 @@ export class DiscussionTransport implements DiscussionSender {
 			}
 			let response: Response;
 			try {
-				response = await this.fetcher(this.identity.serverId + "/v1/collaboration" + path, { method: options.method ?? (body === undefined ? "GET" : "POST"), sensitive: true,
+				response = await this.fetcher(this.identity.serverId + "/v1/collaboration" + path, { method: options.method ?? (body === undefined ? "GET" : "POST"), sensitive: true, ...(options.audited ? { cache: "no-store" as const } : {}),
 					headers: { Authorization: `Bearer ${credential.accessToken}`, "Content-Type": typeof body === "object" ? "application/octet-stream" : "application/json" }, body });
 			} catch (error) {
 				if (error instanceof RelayHttpError) throw new DiscussionFailure("retry", "server_unavailable", error.status, error.retryAfterMs);
@@ -534,7 +567,10 @@ export class DiscussionTransport implements DiscussionSender {
 				throw new DiscussionFailure("retry", "server_unavailable", response.status,
 					parseRetryAfterMs(response.headers.get("Retry-After")));
 			}
+			if (response.ok && options.audited && !response.headers.get("Cache-Control")?.split(",").some(part => part.trim().toLowerCase() === "no-store")) throw new DiscussionFailure("pause", "invalid_read_response");
 			if (response.ok && options.binary) {
+				const auditId = response.headers.get("X-Discussion-Audit-Id");
+				if (options.audited && !isId(auditId)) throw new DiscussionFailure("pause", "invalid_read_response");
 				const expected = options.binary;
 				if (response.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== expected.mime) throw new DiscussionFailure("pause", "invalid_picture_content");
 				let bytes: ArrayBuffer;
@@ -543,6 +579,7 @@ export class DiscussionTransport implements DiscussionSender {
 						const reader = response.body.getReader(), data = new Uint8Array(expected.size); let offset = 0;
 						try {
 							for (;;) {
+								if (ended || options.current && !options.current()) throw new DiscussionFailure("pause", "action_context_changed");
 								const chunk = await reader.read(); if (chunk.done) break;
 								if (offset + chunk.value.byteLength > data.byteLength) throw new DiscussionFailure("pause", "invalid_picture_content");
 								data.set(chunk.value, offset); offset += chunk.value.byteLength;
@@ -552,7 +589,7 @@ export class DiscussionTransport implements DiscussionSender {
 					} else bytes = await response.arrayBuffer();
 				} catch (error) { if (error instanceof DiscussionFailure) throw error; throw new DiscussionFailure("retry", "network_unavailable"); }
 				if (bytes.byteLength !== expected.size || await pictureHash(bytes) !== expected.sha256) throw new DiscussionFailure("pause", "invalid_picture_content");
-				return bytes;
+				return options.audited ? { bytes, audit_id: auditId } : bytes;
 			}
 			// Bound parsing even when a misconfigured proxy returns a large HTML page.
 			let raw: string;

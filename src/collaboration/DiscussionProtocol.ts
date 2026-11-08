@@ -379,7 +379,7 @@ export function parseHistory(value: unknown, after: number): HistoryPage {
 	requireValue(isRecord(value) && array(value.revisions, 100));
 	const revisions = value.revisions.map(r => {
 		requireValue(isRecord(r) && isRevision(r.revision) && nullableId(r.actor_id) && timestamp(r.created_at) &&
-			(r.reason === null || typeof r.reason === "string" && r.reason.length <= 512));
+			(r.reason === null || typeof r.reason === "string" && [...r.reason].length <= 512));
 		return { revision: r.revision, body: r.body === null ? null : parseBody(r.body), actor_id: r.actor_id as string | null,
 			created_at: r.created_at as string, reason: r.reason as string | null };
 	});

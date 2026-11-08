@@ -80,6 +80,7 @@ export class DiscussionSession {
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
+	private moderationRecoveryEnabled = false;
 	private inboxEnabled = false;
 	private searchEnabled = false;
 	private exportEnabled = false;
@@ -203,6 +204,42 @@ export class DiscussionSession {
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
 	get canReattach(): boolean { return this.online && this.reattachEnabled; }
 	get canRecoverSavedCommand(): boolean { return this.online && this.recoveryEnabled; }
+	canReviewRemoved(scopeId: string): boolean { return this.online && this.moderationRecoveryEnabled && this.permission(scopeId)?.read === true && this.permission(scopeId)?.moderate === true; }
+	/** Explicit administrative reads never enter the normal cache or outbox. */
+	private reviewRead<T>(scopeId: string, visible: () => boolean, read: (current: () => boolean) => Promise<T>): Promise<T> {
+		return this.trackLocal((async () => {
+			const epoch = this.authenticationEpoch, generation = this.knownDocumentGeneration(scopeId);
+			const current = () => visible() && this.canReviewRemoved(scopeId) && this.authenticationEpoch === epoch && this.knownDocumentGeneration(scopeId) === generation;
+			if (!parseDiscussionScope(scopeId) || !current()) throw new Error("Connect with moderator access to review removed comments.");
+			const checkpoint = await this.store.checkpoint(scopeId);
+			try {
+				if (!current()) throw new Error("This recovery review is no longer available.");
+				const value = await read(current);
+				const latest = await this.store.checkpoint(scopeId);
+				if (!current() || checkpoint.generation !== latest.generation) throw new Error("Recovery access changed. Start a new review.");
+				return value;
+			} catch (error) {
+				if (!this.closed && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				throw error;
+			}
+		})());
+	}
+	reviewRemovedCatalog(scopeId: string, reason: string, after: number, visible: () => boolean) {
+		return this.reviewRead(scopeId, visible, current => this.transport.moderationCatalog(scopeId, reason, after, 20, current));
+	}
+	reviewRemovedHistory(scopeId: string, threadId: string, messageId: string, reason: string, after: number, visible: () => boolean) {
+		return this.reviewRead(scopeId, visible, current => this.transport.moderationHistory(scopeId, threadId, messageId, reason, after, 10, current));
+	}
+	reviewRemovedPicture(scopeId: string, threadId: string, messageId: string, pictureId: string, reason: string, variant: "content" | "thumbnail", visible: () => boolean) {
+		return this.reviewRead(scopeId, visible, async current => {
+			const metadata = await this.transport.moderationPicture(scopeId, threadId, messageId, pictureId, reason, current);
+			if (!current()) throw new Error("Recovery access changed.");
+			const rendition = metadata.picture.renditions[variant];
+			if (!rendition) throw new Error("This retained picture is unavailable.");
+			const content = await this.transport.moderationPictureContent(scopeId, threadId, messageId, pictureId, reason, variant, rendition, current);
+			return { ...content, ...rendition };
+		});
+	}
 	async search(input: DiscussionSearchRequest): Promise<DiscussionSearchPage> {
 		const request = searchRequest(input);
 		if (!this.canSearch) throw new Error("Connect to a server with comment search enabled.");
@@ -311,6 +348,7 @@ export class DiscussionSession {
 			this.imageFilesEnabled = capability.imageFiles === true;
 			this.picturesEnabled = capability.pictures === true;
 			this.recoveryEnabled = capability.recovery === true;
+			this.moderationRecoveryEnabled = capability.moderationRecovery === true;
 			this.inboxEnabled = capability.inbox === true;
 			this.searchEnabled = capability.search === true;
 			this.exportEnabled = capability.export === true;

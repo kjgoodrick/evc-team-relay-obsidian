@@ -847,6 +847,11 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-comment-history-revisions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18em), 1fr)); gap: var(--size-4-3); }
 .relay-comment-history-revisions article { min-width: 0; padding: var(--size-4-3); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); overflow-wrap: anywhere; }
 .relay-comment-history-revisions pre { overflow: auto; }
+.relay-removed-comments form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--size-4-2); }
+.relay-removed-comments label { display: flex; flex-wrap: wrap; align-items: center; gap: var(--size-4-2); }
+.relay-removed-comments article { margin-block: var(--size-4-3); padding-block: var(--size-4-2); border-bottom: 1px solid var(--background-modifier-border); overflow-wrap: anywhere; }
+.relay-removed-comments pre { overflow: auto; }
+.relay-removed-comments img { max-width: 100%; height: auto; }
 .relay-comment-history-revisions p, .relay-comment-history-revisions li, .relay-comment-history-diff-text { white-space: pre-wrap; }
 .relay-comment-history-diff-text { overflow-wrap: anywhere; padding: var(--size-4-3); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
 .relay-comment-history-diff ins { text-decoration: underline; background: var(--text-selection); }
