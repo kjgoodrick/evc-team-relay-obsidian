@@ -1,4 +1,4 @@
-import type { App } from "obsidian";
+import { Notice, type App } from "obsidian";
 import { trackNativeDocumentWrite } from "../storage/native-document-writes";
 import { Document } from "src/Document";
 import { UnsavedFile } from "src/UnsavedFile";
@@ -62,7 +62,8 @@ export class HunkActionBar {
 				label: action.text,
 				onActivate: (e) => {
 					e.preventDefault();
-					void action.run(this.hunk).then(() => this.requestRebuild());
+					void action.run(this.hunk).then(() => this.requestRebuild())
+						.catch(error => new Notice(`Merge not completed: ${error instanceof Error ? error.message : String(error)}`));
 				},
 			}).renderInto(actionLine);
 		}
@@ -103,7 +104,7 @@ export class HunkActionBar {
 			return;
 		}
 		if (file instanceof UnsavedFile) {
-			file.unsavedText = newContent;
+			await file.writeContents(newContent);
 			return;
 		}
 		await trackNativeDocumentWrite(this.obsidianApp.vault, file.path, () => this.obsidianApp.vault.modify(file, newContent));

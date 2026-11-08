@@ -6,10 +6,12 @@ configured server, canonical control-plane endpoint and canonical folder address
 The journal uses a separate `relay-selection-v1-<sha256>` database; credentials
 and transient login sessions do not belong in its identity.
 
-This is an internal persistence component. Automatic shared-folder startup,
-document/Canvas/buffer selection, native installation and the restore dialog do
-not yet use it. There is no new activation action and no existing cache is
-opened, imported, removed or relabeled by this component.
+Automatic shared-folder startup now reads this journal through
+[startup admission](source-startup-admission-preview.md), and its context selects
+folder/document/Canvas/buffer namespaces. Pending journals remain paused with a
+visible startup reason and Retry control. Native installation and a reviewed
+activation action are still unfinished. The journal itself never opens,
+imports, removes or relabels an existing source cache.
 
 | State | Source admission | Next step |
 | --- | --- | --- |
@@ -49,7 +51,7 @@ Open/read/write waits are bounded; a timeout never grants fallback authority.
 An operation that timed out near commit is reconciled through its exact receipt.
 Input objects and returned snapshots cannot mutate stored state by reference.
 
-The native installer, startup admission, cross-window writer coordination,
+The native installer, cross-window writer coordination,
 selection-journal recovery export and user-facing recovery flow remain to be
 connected. A separate [native source write hold](native-source-write-hold-preview.md)
 now fences and drains registered text/attachment writes in one host realm;

@@ -3,6 +3,7 @@ import { StateField, EditorState, Compartment } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import {
 	App,
+	Notice,
 	MarkdownView,
 	editorInfoField,
 	Platform,
@@ -584,28 +585,30 @@ export class DocumentViewBinding<ViewType extends TextFileView>
 	 * click handler (`showMergeBanner()`) -- both open the same diff view and
 	 * clear the same UI once the user resolves the conflict. */
 	private async resolveMergeConflict(): Promise<boolean> {
-		const diskBuffer = await this.boundDocument.unsavedFile();
 		let stale: boolean;
+		let diskBuffer: TFile | undefined;
 		try {
 			stale = await this.boundDocument.refreshIfStale();
+			if (stale) diskBuffer = await this.boundDocument.unsavedFile();
 		} catch (e: unknown) {
 			console.warn(
 				"[Relay] resolveMergeConflict checkStale failed:",
 				(e as Error).message,
 			);
-			this.hideMergeButton();
-			return true;
+			new Notice(`Merge review could not continue: ${e instanceof Error ? e.message : String(e)}`);
+			return false;
 		}
 		if (!stale) {
 			this.hideMergeButton();
 			return true;
 		}
+		if (!diskBuffer) return false;
 		this._registry.launchDiffView({
 			leftFile: this.boundDocument,
 			rightFile: diskBuffer,
 			allowMergeActions: true,
 			onMergeResolved: async () => {
-				await this.boundDocument.clearUnsavedFile();
+				await this.boundDocument.clearUnsavedFile(diskBuffer as import("./UnsavedFile").UnsavedFile);
 				this.hideMergeButton();
 				// Re-sync the editor view with CRDT state once the diff is resolved.
 				if (

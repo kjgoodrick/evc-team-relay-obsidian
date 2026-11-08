@@ -30,7 +30,7 @@
  * whole VaultShare/IndexedDB/provider stack, none of which these reads touch.
  */
 
-import { describe, test, expect } from "@jest/globals";
+import { describe, test, expect, jest } from "@jest/globals";
 import { TFile, Vault } from "obsidian";
 import { Document } from "../src/Document";
 import { UnsavedFile } from "../src/UnsavedFile";
@@ -68,6 +68,18 @@ function diffState(
 ): DiffViewState {
 	return { leftFile, rightFile, allowMergeActions: true };
 }
+
+test("closing an unresolved merge never confirms it or discards its buffer", () => {
+	const state = { ...diffState(fakeDocument("Note.md", "remote"), new UnsavedFile(new Vault(), "local disk", "local")), onMergeResolved: jest.fn(async () => {}) };
+	viewWithState(state).onunload(); expect(state.onMergeResolved).not.toHaveBeenCalled();
+	expect((state.rightFile as UnsavedFile).unsavedText).toBe("local");
+});
+
+test("merge-buffer edits await their persistence and report save failures", async () => {
+	const save = jest.fn(async (_contents: string) => { throw new Error("disk full"); });
+	const file = new UnsavedFile(new Vault(), "local disk", "retained", save);
+	await expect(viewWithState().writeFile(file, "replacement")).rejects.toThrow("disk full"); expect(save).toHaveBeenCalledWith("replacement");
+});
 
 describe("FileDiffView tab title resolves each side's label by kind, not by field accident", () => {
 	test("Document vs UnsavedFile — the real merge-conflict pairing", () => {

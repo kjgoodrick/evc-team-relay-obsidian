@@ -18,7 +18,7 @@ import { namedLogger } from "src/logging";
 import { getPatchRegistry } from "../PatchRegistry";
 import diff_match_patch from "diff-match-patch";
 import { currentToggles } from "src/featureToggleState";
-import { MarkdownView, editorInfoField } from "obsidian";
+import { MarkdownView, editorInfoField, Notice, type TFile } from "obsidian";
 import { Document } from "src/Document";
 import { bindCommentEditor } from "../collaboration/EditorTextBinding";
 import { EmbeddedNoticeBar } from "src/ui/EmbeddedNoticeBar";
@@ -95,28 +95,30 @@ export class LiveCMPluginValue implements PluginValue {
 			"Merge conflict -- click to fix it",
 			async () => {
 				if (!this.document) return true;
-				const diskBuffer = await this.document.unsavedFile();
 				let stale: boolean;
+				let diskBuffer: TFile | undefined;
 				try {
 					stale = await this.document.refreshIfStale();
+					if (stale) diskBuffer = await this.document.unsavedFile();
 				} catch (e: unknown) {
 					this.warn("[mergeBanner] checkStale failed:", (e as Error).message);
-					return true;
+					new Notice(`Merge review could not continue: ${e instanceof Error ? e.message : String(e)}`);
+					return false;
 				}
 				if (!stale) {
 					return true;
 				}
+				if (!diskBuffer) return false;
 				this.connectionManager?.launchDiffView({
 					leftFile: this.document,
 					rightFile: diskBuffer,
 					allowMergeActions: true,
-					onMergeResolved: () => {
+					onMergeResolved: async () => {
 						if (this.destroyed || !this.editor || !this.document) {
 							return Promise.resolve();
 						}
-						void this.document.clearUnsavedFile();
-						void this.resync();
-						return Promise.resolve();
+						await this.document.clearUnsavedFile(diskBuffer as import("../UnsavedFile").UnsavedFile);
+						await this.resync();
 					},
 				});
 				return true;

@@ -128,6 +128,91 @@ test("a journal change during token acquisition disconnects the selected wrapper
 	} finally { await s.close(); }
 });
 
+test.each(["close", "journal"])("%s invalidation immediately disconnects every child sharing the source context", async mode => {
+	const value = scope(), context = await open(value), store = await journal(value);
+	const markdown = wrapper(value, context, "markdown", crypto.randomUUID()), canvas = wrapper(value, context, "canvas", crypto.randomUUID());
+	try {
+		await Promise.all([markdown.doc.awaitFirstSync(), canvas.doc.awaitFirstSync()]);
+		const first = jest.spyOn(markdown.doc._liveProvider, "disconnect"), second = jest.spyOn(canvas.doc._liveProvider, "disconnect");
+		if (mode === "close") context.close();
+		else { await begin(store); await expect(context.assertCurrent()).rejects.toThrow("changed"); }
+		expect(first).toHaveBeenCalledTimes(1); expect(second).toHaveBeenCalledTimes(1);
+		context.close(); expect(first).toHaveBeenCalledTimes(1); expect(second).toHaveBeenCalledTimes(1);
+	} finally { await markdown.close(); await canvas.close(); }
+});
+
+test("a dismantled child detaches its source invalidation listener", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID());
+	await s.doc.awaitFirstSync(); await s.close(); const offline = jest.spyOn(s.doc, "goOffline");
+	context.close(); expect(offline).not.toHaveBeenCalled();
+});
+
+test("a failed buffer save is reported, retains memory, and retries without loading older disk text", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID()), doc = s.doc as Document;
+	try {
+		await doc.awaitFirstSync(); await doc.setUnsavedFile("older saved text");
+		jest.spyOn(s.parent.unsavedStore, "persistUnsavedIfContents").mockRejectedValueOnce(new Error("storage quota"));
+		await expect(doc.setUnsavedFile("new local text")).rejects.toThrow("quota");
+		expect(doc._unsavedFile!.unsavedText).toBe("new local text"); expect(await s.parent.unsavedStore.readUnsaved(doc.entityGuid)).toBe("older saved text");
+		expect((await doc.unsavedFile(true) as UnsavedFile).unsavedText).toBe("new local text");
+		expect(await s.parent.unsavedStore.readUnsaved(doc.entityGuid)).toBe("new local text"); expect(s.parent.readContents).not.toHaveBeenCalled();
+	} finally { await s.close(); }
+});
+
+test("a failed clear retains the review text and can retry without blanking the review's object", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID()), doc = s.doc as Document;
+	try {
+		await doc.awaitFirstSync(); const file = await doc.setUnsavedFile("retained review") as UnsavedFile;
+		jest.spyOn(s.parent.unsavedStore, "discardUnsavedIfContents").mockRejectedValueOnce(new Error("delete aborted"));
+		await expect(doc.clearUnsavedFile(file)).rejects.toThrow("aborted"); expect(doc._unsavedFile).toBe(file); expect(file.unsavedText).toBe("retained review");
+		await doc.clearUnsavedFile(file); expect(doc._unsavedFile).toBeUndefined(); expect(file.unsavedText).toBe("retained review");
+		expect(await s.parent.unsavedStore.readUnsaved(doc.entityGuid)).toBeNull();
+	} finally { await s.close(); }
+});
+
+test("a queued stale clear cannot erase a newer buffer save, and an old merge cannot edit its replacement", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID()), doc = s.doc as Document;
+	try {
+		await doc.awaitFirstSync(); const old = await doc.setUnsavedFile("old review") as UnsavedFile;
+		const saving = doc.setUnsavedFile("newer review"), clearing = doc.clearUnsavedFile(old);
+		await saving; await expect(clearing).rejects.toThrow("changed"); await expect(old.writeContents("stale overwrite")).rejects.toThrow("changed");
+		expect(await s.parent.unsavedStore.readUnsaved(doc.entityGuid)).toBe("newer review");
+	} finally { await s.close(); }
+});
+
+test("another session's saved text prevents both stale clearing and unchecked overwrite", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID()), doc = s.doc as Document;
+	try {
+		await doc.awaitFirstSync(); const old = await doc.setUnsavedFile("initial") as UnsavedFile;
+		await new UnsavedFileStore().persistUnsaved(doc.entityGuid, "other session");
+		await expect(doc.clearUnsavedFile(old)).rejects.toThrow("another session");
+		await expect(doc.setUnsavedFile("local change")).rejects.toThrow("newer local buffer");
+		expect(await s.parent.unsavedStore.readUnsaved(doc.entityGuid)).toBe("other session"); expect(doc._unsavedFile!.unsavedText).toBe("local change");
+	} finally { await s.close(); }
+});
+
+test("reading a stored buffer does not rewrite it over a concurrent session's save", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID()), doc = s.doc as Document;
+	try {
+		await doc.awaitFirstSync(); await s.parent.unsavedStore.persistUnsaved(doc.entityGuid, "read snapshot");
+		const read = s.parent.unsavedStore.readUnsaved.bind(s.parent.unsavedStore);
+		jest.spyOn(s.parent.unsavedStore, "readUnsaved").mockImplementationOnce(async key => { const old = await read(key); await s.parent.unsavedStore.persistUnsaved(key, "concurrent save"); return old; });
+		const file = await doc.unsavedFile(true) as UnsavedFile; expect(file.unsavedText).toBe("read snapshot");
+		expect(await read(doc.entityGuid)).toBe("concurrent save"); await expect(doc.clearUnsavedFile(file)).rejects.toThrow("another session");
+		expect((await doc.unsavedFile(true) as UnsavedFile).unsavedText).toBe("concurrent save");
+	} finally { await s.close(); }
+});
+
+test("editing an owned merge buffer persists the new text before completion", async () => {
+	const value = scope(), context = await open(value), s = wrapper(value, context, "markdown", crypto.randomUUID()), doc = s.doc as Document;
+	try {
+		await doc.awaitFirstSync(); const file = await doc.setUnsavedFile("before partial merge") as UnsavedFile;
+		await file.writeContents("partial merge retained"); expect(doc._unsavedFile).toBe(file);
+		expect(await new UnsavedFileStore().readUnsaved(doc.entityGuid)).toBe("partial merge retained");
+		await doc.clearUnsavedFile(file); expect(await s.parent.unsavedStore.readUnsaved(doc.entityGuid)).toBeNull();
+	} finally { await s.close(); }
+});
+
 test.each(["direct", "retained"])("%s renewal callbacks recheck the journal before applying selected tokens", async mode => {
 	const value = scope(), { context, store } = await select(value, crypto.randomUUID()), s = wrapper(value, context, "markdown", crypto.randomUUID());
 	try {

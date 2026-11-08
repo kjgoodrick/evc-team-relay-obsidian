@@ -22,6 +22,13 @@ describe("UnsavedFileStore (: guid wire-format guard)", () => {
 		expect(readBack).toBe("unsaved contents");
 	});
 
+	it("a transient open failure can retry in the same store instance", async () => {
+		const store = new UnsavedFileStore(), spy = jest.spyOn(indexedDB, "open").mockImplementationOnce(() => { throw new Error("storage unavailable"); });
+		try { await expect(store.persistUnsaved("retry", "retained")).rejects.toThrow("unavailable"); }
+		finally { spy.mockRestore(); }
+		await store.persistUnsaved("retry", "retained"); expect(await store.readUnsaved("retry")).toBe("retained");
+	});
+
 	it("stores the record under a field literally named 'guid', matching the on-disk keyPath", async () => {
 		const store = new UnsavedFileStore();
 		await store.persistUnsaved("doc-guid-2", "other contents");
@@ -79,5 +86,35 @@ describe("UnsavedFileStore transaction durability", () => {
 		await expect(store.persistUnsaved(undefined as unknown as string, "invalid key")).rejects.toThrow();
 		await store.persistUnsaved("valid", "retained");
 		expect(await store.readUnsaved("valid")).toBe("retained");
+	});
+
+	it("conditional saves serialize competing sessions and conditional clear preserves a newer body", async () => {
+		const first = new UnsavedFileStore(), second = new UnsavedFileStore();
+		await first.persistUnsaved("shared", "initial");
+		const results = await Promise.all([first.persistUnsavedIfContents("shared", "initial", "first"), second.persistUnsavedIfContents("shared", "initial", "second")]);
+		expect(results.filter(Boolean)).toHaveLength(1);
+		const winner = await first.readUnsaved("shared"); expect(["first", "second"]).toContain(winner);
+		expect(await second.discardUnsavedIfContents("shared", "initial")).toBe(false); expect(await first.readUnsaved("shared")).toBe(winner);
+		expect(await first.discardUnsavedIfContents("shared", winner!)).toBe(true); expect(await first.readUnsaved("shared")).toBeNull();
+		expect(await second.persistUnsavedIfContents("shared", null, "new")).toBe(true);
+	});
+
+	it("a malformed stored body cannot be mistaken for a missing buffer or overwritten conditionally", async () => {
+		const store = new UnsavedFileStore();
+		await store.persistUnsaved("corrupt", null as unknown as string);
+		await expect(store.readUnsaved("corrupt")).rejects.toThrow("invalid");
+		await expect(store.persistUnsavedIfContents("corrupt", null, "replacement")).rejects.toThrow();
+		await expect(store.readUnsaved("corrupt")).rejects.toThrow("invalid");
+	});
+
+	it.each(["put", "delete"] as const)("conditional %s waits for commit and reports a late rollback", async operation => {
+		const store = new UnsavedFileStore(); await store.persistUnsaved("conditional", "retained");
+		const original = IDBObjectStore.prototype[operation];
+		const spy = jest.spyOn(IDBObjectStore.prototype, operation).mockImplementation(function (this: globalThis.IDBObjectStore, ...args: unknown[]) {
+			const request = Reflect.apply(original, this, args) as IDBRequest, transaction = this.transaction;
+			request.addEventListener("success", () => queueMicrotask(() => transaction.abort()), { once: true }); return request;
+		});
+		const action = operation === "put" ? store.persistUnsavedIfContents("conditional", "retained", "new") : store.discardUnsavedIfContents("conditional", "retained");
+		await expect(action).rejects.toThrow(); spy.mockRestore(); expect(await store.readUnsaved("conditional")).toBe("retained");
 	});
 });

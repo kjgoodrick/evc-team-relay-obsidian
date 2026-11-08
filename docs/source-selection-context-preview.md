@@ -36,6 +36,10 @@ Main startup and creation now await source preparation and pass the resulting
 context to the factory; settings expose failed startup and retry. See
 [source startup admission](source-startup-admission-preview.md) for the current
 integration and verification. This does not implement native installation.
+Closing or invalidating the shared context now immediately disconnects all of
+its providers; children detach their listeners when dismantled. Document buffers
+now use awaited, conditional persistence and retain failed work. See
+[document buffer recovery](document-buffer-recovery-preview.md).
 Direct and retained grant-renewal callbacks now recheck the journal before
 applying a selected token; token requests await their initial callback and reject
 late results. An already-connected socket or another window is not continuously

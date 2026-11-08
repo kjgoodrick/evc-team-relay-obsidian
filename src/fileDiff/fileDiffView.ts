@@ -4,6 +4,7 @@ import {
 	Workspace,
 	ItemView,
 	TFile,
+	Notice,
 	type ViewStateResult,
 	WorkspaceLeaf,
 } from "obsidian";
@@ -126,7 +127,7 @@ export class FileDiffView extends ItemView {
 	}
 
 	onunload(): void {
-		void this.viewState?.onMergeResolved?.();
+		// Closing a review is not a merge confirmation. Retain its buffer.
 	}
 
 	async writeFile(file: DiffViewFile, newContent: string): Promise<void> {
@@ -135,7 +136,7 @@ export class FileDiffView extends ItemView {
 			return;
 		}
 		if (file instanceof UnsavedFile) {
-			file.unsavedText = newContent;
+			await file.writeContents(newContent);
 			return;
 		}
 		await trackNativeDocumentWrite(this.app.vault, file.path, () => this.app.vault.modify(file, newContent));
@@ -181,6 +182,7 @@ export class FileDiffView extends ItemView {
 
 		if (this.diffResult.hunks.length === 0) {
 			await this.resolveByteIdenticalMismatch();
+			await this.viewState.onMergeResolved?.();
 			this.closeAndFocusOriginal();
 		}
 	}
@@ -245,7 +247,7 @@ export class FileDiffView extends ItemView {
 			label: `Keep Editor Contents`,
 			onActivate: (e) => {
 				e.preventDefault();
-				void this.acceptAllFrom("left");
+				void this.acceptAllFrom("left").catch(error => new Notice(`Merge not completed: ${error instanceof Error ? error.message : String(error)}`));
 			},
 		}).renderInto(actionLine);
 
@@ -255,7 +257,7 @@ export class FileDiffView extends ItemView {
 			label: `Accept All from Local Disk`,
 			onActivate: (e) => {
 				e.preventDefault();
-				void this.acceptAllFrom("right");
+				void this.acceptAllFrom("right").catch(error => new Notice(`Merge not completed: ${error instanceof Error ? error.message : String(error)}`));
 			},
 		}).renderInto(actionLine);
 	}
@@ -316,7 +318,8 @@ export class FileDiffView extends ItemView {
 				leftContent: this.leftContent || "",
 				rightContent: this.rightContent || "",
 				requestRebuild: () => {
-					void this.recomputeDiff().then(() => this.rerenderInPlace());
+					void this.recomputeDiff().then(() => this.rerenderInPlace())
+						.catch(error => new Notice(`Merge review remains open: ${error instanceof Error ? error.message : String(error)}`));
 				},
 			}).render(container);
 		}

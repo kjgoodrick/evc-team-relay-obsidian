@@ -34,6 +34,7 @@ export class UnsavedFile implements TFile {
 		public vault: Vault,
 		path: string,
 		public unsavedText: string,
+		private readonly saveContents?: (contents: string) => Promise<void>,
 	) {
 		this.path = path;
 		const parts = splitPath(path);
@@ -49,6 +50,10 @@ export class UnsavedFile implements TFile {
 
 	delete(): Promise<void> {
 		return Promise.resolve();
+	}
+	async writeContents(contents: string): Promise<void> {
+		if (this.saveContents) await this.saveContents(contents);
+		else this.unsavedText = contents;
 	}
 
 	moveTo(newPath: string): Promise<void> {
@@ -82,18 +87,30 @@ export class UnsavedFileStore {
 	private initDatabase(): Promise<IDBDatabase> {
 		return new Promise((resolve, reject) => {
 			const request = indexedDB.open(UnsavedFileStore.DB_NAME, 1);
+			let finished = false;
+			const fail = (error: unknown) => { if (finished) return; finished = true; window.clearTimeout(timer); reject(error); };
+			const timer = window.setTimeout(() => fail(new Error("Opening the local buffer store timed out")), 5000);
 			request.onupgradeneeded = (event) => {
+				if (finished) { request.transaction!.abort(); return; }
 				const db = (event.target as IDBOpenDBRequest).result;
 				db.createObjectStore(UnsavedFileStore.STORE_NAME, { keyPath: "guid" });
 			};
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = () => reject(request.error ?? new Error("Failed to open database"));
+			request.onsuccess = () => {
+				if (finished) { request.result.close(); return; }
+				finished = true; window.clearTimeout(timer);
+				const db = request.result, pending = this.pendingDatabase;
+				db.onversionchange = () => { db.close(); if (this.pendingDatabase === pending) this.pendingDatabase = null; };
+				resolve(db);
+			};
+			request.onblocked = () => fail(new Error("The local buffer store is blocked by another window"));
+			request.onerror = () => fail(request.error ?? new Error("Failed to open database"));
 		});
 	}
 
 	private async database(): Promise<IDBDatabase> {
 		if (!this.pendingDatabase) {
-			this.pendingDatabase = this.initDatabase();
+			const pending = this.initDatabase(); this.pendingDatabase = pending;
+			void pending.catch(() => { if (this.pendingDatabase === pending) this.pendingDatabase = null; });
 		}
 		return this.pendingDatabase;
 	}
@@ -131,7 +148,8 @@ export class UnsavedFileStore {
 			(store) => store.get(guid) as IDBRequest<{ contents: string } | undefined>,
 			"Failed to load disk buffer",
 		);
-		return result ? result.contents : null;
+		if (result !== undefined && (!result || typeof result.contents !== "string")) throw new Error("The saved document buffer is invalid. Retain it for recovery before continuing.");
+		return result === undefined ? null : result.contents;
 	}
 
 	async discardUnsaved(guid: string): Promise<void> {
@@ -140,5 +158,32 @@ export class UnsavedFileStore {
 			(store) => store.delete(guid),
 			"Failed to remove disk buffer",
 		);
+	}
+
+	/** Compare and delete in one transaction, so a different document/window's
+	 * newer buffer cannot be removed by an older merge confirmation. */
+	async discardUnsavedIfContents(guid: string, expected: string): Promise<boolean> {
+		return this.replaceUnsavedIfContents(guid, expected, null);
+	}
+	async persistUnsavedIfContents(guid: string, expected: string | null, contents: string): Promise<boolean> {
+		return this.replaceUnsavedIfContents(guid, expected, contents);
+	}
+	private async replaceUnsavedIfContents(guid: string, expected: string | null, contents: string | null): Promise<boolean> {
+		const db = await this.database();
+		return new Promise((resolve, reject) => {
+			const tx = db.transaction(UnsavedFileStore.STORE_NAME, "readwrite"), store = tx.objectStore(UnsavedFileStore.STORE_NAME);
+			let matched = false;
+			const request = store.get(guid) as IDBRequest<{ contents: string } | undefined>;
+			request.onsuccess = () => {
+				if (request.result !== undefined && (!request.result || typeof request.result.contents !== "string")) { tx.abort(); return; }
+				if ((request.result === undefined ? null : request.result.contents) !== expected) return;
+				matched = true;
+				if (contents === null) store.delete(guid);
+				else store.put({ guid, contents });
+			};
+			tx.oncomplete = () => resolve(matched);
+			tx.onabort = () => reject(tx.error ?? request.error ?? new Error("Failed to remove disk buffer"));
+			tx.onerror = () => { /* onabort reports the final transaction outcome */ };
+		});
 	}
 }

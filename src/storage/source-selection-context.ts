@@ -16,6 +16,7 @@ export class SourceSelectionContext {
 	readonly binding: Readonly<RestoreBinding> | undefined;
 	readonly inventory: Readonly<SourceCacheDescriptor> | undefined;
 	private unavailable = false;
+	private invalidationListeners = new Set<() => void>();
 	private constructor(private readonly journal: SourceSelectionJournal, scope: SourceSelectionScope, state: SourceSelectionState) {
 		this.scope = Object.freeze(scope); this.revision = state.revision; this.choice = Object.freeze({ ...state.active });
 		this.binding = this.choice.kind === "source" ? Object.freeze({ restoreGeneration: this.choice.restoreGeneration }) : undefined;
@@ -40,7 +41,12 @@ export class SourceSelectionContext {
 	async assertCurrent(): Promise<void> {
 		this.check();
 		try { await this.journal.assertActive(this.revision, this.choice); this.check(); }
-		catch (error) { this.unavailable = true; throw error; }
+		catch (error) { this.close(); throw error; }
+	}
+	onInvalidated(listener: () => void): () => void {
+		if (this.unavailable) { listener(); return () => {}; }
+		this.invalidationListeners.add(listener);
+		return () => { this.invalidationListeners.delete(listener); };
 	}
 	/** Validate the full scope even for legacy choices, which have no identity
 	 * metadata in their original caches. Never construct a cross-folder child. */
@@ -74,5 +80,12 @@ export class SourceSelectionContext {
 		if (!("folderGuid" in address)) throw new Error("Invalid selected folder");
 		return `${this.scope.hostAppId}-evc-team-relay/folders/${address.folderGuid}/pendingUploads`;
 	}
-	close(): void { this.unavailable = true; this.journal.close(); }
+	close(): void {
+		if (this.unavailable) return;
+		this.unavailable = true; this.journal.close();
+		const listeners = [...this.invalidationListeners]; this.invalidationListeners.clear();
+		for (const listener of listeners) {
+			try { listener(); } catch (error) { console.warn("Unable to disconnect a closed source session", error); }
+		}
+	}
 }

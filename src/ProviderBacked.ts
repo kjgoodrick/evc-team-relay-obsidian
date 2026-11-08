@@ -139,6 +139,7 @@ export class ProviderBacked extends Loggable {
 	private readonly sourceSelectionExplicit: boolean;
 	private detachAuthSession?: () => void;
 	private detachProfileRefresh?: () => void;
+	private detachSourceSelection?: () => void;
 	// accountId last used to seed awareness/doc-identity, so a later auth
 	// notification can tell "still nothing to seed" apart from "the right
 	// user just became resolvable" without re-running the seed on every
@@ -228,6 +229,10 @@ export class ProviderBacked extends Loggable {
 		this.detachRestore = credentialCache.onRestoreRequired?.(documentId => {
 			if (documentId === ResourceAddress.serialize(this.resourceAddress) && this.restoreReviewRequired) this.pauseForRestore();
 		});
+		// A folder and all of its open children share this context. Closing
+		// it must disconnect every socket, including an already-connected
+		// child that would otherwise not request another token for some time.
+		this.detachSourceSelection = selectionContext?.onInvalidated(() => this.goOffline());
 	}
 
 	get restoreReviewRequired(): boolean {
@@ -743,6 +748,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	dismantle(): void {
+		this.detachSourceSelection?.(); this.detachSourceSelection = undefined;
 		this.restorePersistence = undefined;
 		this.detachRestore?.();
 		this.reconnectGate.cancel();

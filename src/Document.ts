@@ -55,6 +55,10 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	};
 	_unsavedFile?: UnsavedFile;
 	_unsavedFileStore?: UnsavedFileStore;
+	private unsavedOperations: Promise<void> = Promise.resolve();
+	private unsavedDirty = false;
+	private unsavedPersistedText?: string | null;
+	private unsavedClosed = false;
 	_teardownCallbacks: Unsubscriber[] = [];
 	queuedTextOps: ((data: string) => string)[] = [];
 	private readonly sourceCache?: Readonly<SourceCacheDescriptor & { bufferKey: string }>;
@@ -272,41 +276,78 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	}
 
 	public async unsavedFile(read = false): Promise<TFile> {
-		if (!read && this._unsavedFile !== undefined) {
-			return this._unsavedFile;
-		}
-		try {
-			const storedContents = await this._parent.unsavedStore
-				.readUnsaved(this.bufferKey);
+		return this.queueUnsaved(async () => {
+			this.checkUnsavedOpen();
+			if (this._unsavedFile && (!read || this.unsavedDirty)) {
+				if (this.unsavedDirty) await this.persistUnsavedFile(this._unsavedFile);
+				return this._unsavedFile;
+			}
+			const storedContents = await this._unsavedFileStore!.readUnsaved(this.bufferKey);
+			this.checkUnsavedOpen();
+			this.unsavedPersistedText = storedContents;
 			const fileContents =
 				storedContents !== null
 					? storedContents
 					: await this._parent.readContents(this);
-			return this.setUnsavedFile(fileContents.replace(/\r\n/g, "\n"));
-		} catch (e: unknown) {
-			console.error(e);
-			throw e;
-		}
+			this.checkUnsavedOpen();
+			if (storedContents !== null) {
+				const contents = storedContents.replace(/\r\n/g, "\n");
+				if (!this._unsavedFile || this._unsavedFile.unsavedText !== contents) this._unsavedFile = this.createUnsavedFile(contents);
+				return this._unsavedFile;
+			}
+			return this.updateUnsavedFile(fileContents.replace(/\r\n/g, "\n"));
+		});
 	}
 
-	setUnsavedFile(contents: string): TFile {
-		if (this._unsavedFile) {
-			this._unsavedFile.unsavedText = contents;
-		} else {
-			this._unsavedFile = new UnsavedFile(this._parent.vaultApi, "local disk", contents);
+	private queueUnsaved<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this.unsavedOperations.then(operation);
+		this.unsavedOperations = result.then(() => {}, () => {});
+		return result;
+	}
+	private checkUnsavedOpen(): void {
+		if (this.unsavedClosed || !this._unsavedFileStore || !this._parent) throw new Error("This document buffer is closed. Reopen the document before continuing.");
+	}
+	private async persistUnsavedFile(file: UnsavedFile): Promise<void> {
+		const contents = file.unsavedText;
+		this.unsavedDirty = true;
+		const store = this._unsavedFileStore!;
+		if (this.unsavedPersistedText === undefined) {
+			this.unsavedPersistedText = await store.readUnsaved(this.bufferKey); this.checkUnsavedOpen();
 		}
-		this._parent.unsavedStore
-			.persistUnsaved(this.bufferKey, contents)
-			.catch((e: unknown) => {});
+		if (!await store.persistUnsavedIfContents(this.bufferKey, this.unsavedPersistedText, contents)) throw new Error("Another session saved a newer local buffer. Both copies are retained; review them before continuing.");
+		this.checkUnsavedOpen();
+		this.unsavedPersistedText = contents; this.unsavedDirty = false;
+	}
+	private async updateUnsavedFile(contents: string): Promise<TFile> {
+		this.checkUnsavedOpen();
+		if (!this._unsavedFile || this._unsavedFile.unsavedText !== contents) {
+			this._unsavedFile = this.createUnsavedFile(contents);
+		}
+		await this.persistUnsavedFile(this._unsavedFile);
 		return this._unsavedFile;
 	}
+	private createUnsavedFile(contents: string): UnsavedFile {
+		const file = new UnsavedFile(this._parent.vaultApi, "local disk", contents, next => this.queueUnsaved(async () => {
+			this.checkUnsavedOpen();
+			if (file !== this._unsavedFile) throw new Error("The local buffer changed. Reopen the merge review before editing it.");
+			file.unsavedText = next;
+			await this.persistUnsavedFile(file);
+		}));
+		return file;
+	}
+	setUnsavedFile(contents: string): Promise<TFile> {
+		return this.queueUnsaved(() => this.updateUnsavedFile(contents));
+	}
 
-	async clearUnsavedFile(): Promise<void> {
-		if (this._unsavedFile) {
-			this._unsavedFile.unsavedText = "";
-			this._unsavedFile = undefined;
-		}
-		await this._parent.unsavedStore.discardUnsaved(this.bufferKey).catch((e: unknown) => {});
+	async clearUnsavedFile(expected = this._unsavedFile): Promise<void> {
+		await this.queueUnsaved(async () => {
+			this.checkUnsavedOpen();
+			if (!expected) return;
+			if (expected !== this._unsavedFile || this.unsavedDirty || typeof this.unsavedPersistedText !== "string") throw new Error("The local buffer changed or has not been saved. Review it again before clearing it.");
+			const removed = await this._unsavedFileStore!.discardUnsavedIfContents(this.bufferKey, this.unsavedPersistedText);
+			if (!removed) throw new Error("The saved buffer changed in another session. Review it again before clearing it.");
+			this._unsavedFile = undefined; this.unsavedPersistedText = undefined;
+		});
 	}
 
 	/**
@@ -344,8 +385,6 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 			candidate = fn(candidate);
 			if (candidate !== contents) continue;
 
-			void this.clearUnsavedFile();
-			this.queuedTextOps = [];
 			if (beforePatch !== this.content) {
 				if (currentToggles().enableDeltaLogging) {
 					this.warn(
@@ -359,12 +398,14 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 				return true;
 			}
 			applyDiffToYText(this.crdtDoc, candidate, this);
+			await this.clearUnsavedFile(diskBuffer as UnsavedFile);
+			this.queuedTextOps = [];
 			return true;
 		}
 
 		this.queuedTextOps = [];
 		if (!stale) {
-			void this.clearUnsavedFile();
+			await this.clearUnsavedFile(diskBuffer as UnsavedFile);
 		}
 		return stale;
 	}
@@ -518,13 +559,13 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	}
 
 	dismantle() {
+		this.unsavedClosed = true;
 		this._teardownCallbacks.forEach((unsubscribe) => unsubscribe());
 		super.dismantle();
 		this.crdtDoc.destroy();
-		if (this._unsavedFile) {
-			this._unsavedFile.unsavedText = "";
-			this._unsavedFile = undefined;
-		}
+		// A merge pane may still hold this buffer. Never blank its text on
+		// teardown, especially when a failed save left it only in memory.
+		if (!this.unsavedDirty) this._unsavedFile = undefined;
 		this._unsavedFileStore = null as unknown as UnsavedFileStore | undefined;
 		this.firstSyncPromise?.destroy();
 		this.firstSyncPromise = null;
@@ -538,7 +579,9 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	}
 
 	public dispose(): void {
-		void this._unsavedFileStore?.discardUnsaved(this.bufferKey);
+		const store = this._unsavedFileStore, key = this.bufferKey;
+		void this.queueUnsaved(async () => { await store?.discardUnsaved(key); })
+			.catch(error => this.warn("Unable to remove document buffer; retained for recovery", error));
 	}
 
 	// Helper method to update file stats
