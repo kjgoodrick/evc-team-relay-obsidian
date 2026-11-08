@@ -6,6 +6,7 @@ import { BaseSyncRunner, type BaseSyncLock } from "../../src/bases/BaseSyncRunne
 import { retiredBaseEntries } from "../../src/bases/BaseContentProtocol";
 import { sha256Hex } from "../../src/contentDigest";
 import { isConflictCopyPath } from "../../src/conflictCopyPath";
+import { holdNativeSourceWrites } from "../../src/storage/native-document-writes";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 const id = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -72,6 +73,21 @@ test("a crash after native rename recovers its committed intent without moving t
 		expect(await s.controller.move(entryId, (await s.controller.review(entryId))!)).toBe(destination);
 		expect(s.vault.rename).toHaveBeenCalledTimes(1); expect((await s.store.get(entryId)).retirement?.move?.state).toBe("complete");
 	} finally { s.close(); }
+});
+
+test("a held retirement move retains its prepared intent and original file until a later retry", async () => {
+	const s = await fixture(), hold = holdNativeSourceWrites(s.vault, absolute);
+	try {
+		await s.controller.observe(entryId, path);
+		await expect(s.controller.move(entryId, (await s.controller.review(entryId))!)).rejects.toThrow("paused");
+		expect(s.vault.rename).not.toHaveBeenCalled(); expect(text(s.contents.get(absolute))).toBe("local edit");
+		const prepared = (await s.store.get(entryId)).retirement!.move!;
+		expect(prepared.state).not.toBe("complete"); expect(s.nodes.has(prepared.path)).toBe(false);
+		hold.release(); await s.restart();
+		expect(await s.controller.move(entryId, (await s.controller.review(entryId))!)).toBe(prepared.path);
+		expect(s.vault.rename).toHaveBeenCalledTimes(1); expect(text(s.contents.get(prepared.path))).toBe("local edit");
+		expect((await s.store.get(entryId)).retirement?.move?.state).toBe("complete");
+	} finally { hold.release(); s.close(); }
 });
 
 test.each(["edit", "replace"])("a %s after review cannot move a file under stale authorization", async action => {

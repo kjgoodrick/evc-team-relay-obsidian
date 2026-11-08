@@ -6,6 +6,7 @@ import type { ShareRegistry, VaultShare } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
 import { RECOVERY_FOLDER, isConflictCopyPath } from "../conflictCopyPath";
+import { trackNativeDocumentWrite } from "../storage/native-document-writes";
 import { baseId, basePath, encodeBaseBytes, retiredBaseEntries, type BaseCommandStatus } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseSyncRecord, type BaseStoreIdentity } from "./BaseSyncStore";
@@ -437,13 +438,14 @@ export class BaseSyncHost extends Component {
 	async export(folder: VaultShare, entryId: string): Promise<string> {
 		const slot = await this.requireSlot(folder), vault = this.plugin.app.vault;
 		let root = vault.getAbstractFileByPath(RECOVERY_FOLDER);
-		if (!root) { try { root = await vault.createFolder(RECOVERY_FOLDER); } catch { root = vault.getAbstractFileByPath(RECOVERY_FOLDER); } }
+		if (!root) { try { root = await trackNativeDocumentWrite(vault, RECOVERY_FOLDER, () => vault.createFolder(RECOVERY_FOLDER)); } catch { root = vault.getAbstractFileByPath(RECOVERY_FOLDER); } }
 		if (!(root instanceof TFolder)) throw new Error("The local recovery folder is unavailable.");
-		const path = `${RECOVERY_FOLDER}/Bases-${crypto.randomUUID()}`; await vault.createFolder(path);
+		const path = `${RECOVERY_FOLDER}/Bases-${crypto.randomUUID()}`; await trackNativeDocumentWrite(vault, path, () => vault.createFolder(path));
 		const write = async (name: string, record: unknown) => {
 			if (!slot.current()) throw new Error("Account changed. Export stopped; completed recovery files are retained.");
-			await vault.create(`${path}/${name}.json`, JSON.stringify({ format: "team-relay-bases-recovery", version: 1, identity: slot.store!.identity, record },
-				(_key, value: unknown) => Object.prototype.toString.call(value) === "[object ArrayBuffer]" ? { encoding: "base64", bytes: encodeBaseBytes(value as ArrayBuffer) } : value, 2));
+			const target = `${path}/${name}.json`, text = JSON.stringify({ format: "team-relay-bases-recovery", version: 1, identity: slot.store!.identity, record },
+				(_key, value: unknown) => Object.prototype.toString.call(value) === "[object ArrayBuffer]" ? { encoding: "base64", bytes: encodeBaseBytes(value as ArrayBuffer) } : value, 2);
+			await trackNativeDocumentWrite(vault, target, () => vault.create(target, text));
 		};
 		// Recovery records are immutable. Revisions select the history that
 		// already existed at this captured current record, even if another

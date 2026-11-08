@@ -5,6 +5,7 @@ import { BaseContentFailure } from "./BaseContentTransport";
 import { NativeBaseFile } from "./NativeBaseFile";
 import { sameBaseBytes, type BaseLocalFile, type BaseSyncLock } from "./BaseSyncRunner";
 import type { BaseSyncRecord, BaseSyncStore } from "./BaseSyncStore";
+import { trackNativeDocumentWrite, trackNativeSourceMutation } from "../storage/native-document-writes";
 
 export interface BaseRetirementAccess {
 	/** Requires an explicit current tombstone, no replacement and no local move. */
@@ -77,7 +78,7 @@ export class BaseRetirementController {
 			this.check(entryId, retired.path);
 			// Rename preserves the entire live file, including an edit arriving
 			// after the final read. The reviewed snapshot is also already durable.
-			await this.vault.rename(file, destination);
+			await trackNativeSourceMutation(this.vault, [file.path, destination], () => this.vault.rename(file, destination));
 			this.check(entryId, retired.path);
 			if (this.vault.getAbstractFileByPath(destination) !== file || file.path !== destination) throw new Error("Check the recovery folder before continuing.");
 			await this.store.completeRetirementMove(entryId, record.retirement!.move!.path);
@@ -86,7 +87,7 @@ export class BaseRetirementController {
 	}
 	private async ensureFolder(path: string): Promise<void> {
 		let folder = this.vault.getAbstractFileByPath(path);
-		if (!folder) { try { folder = await this.vault.createFolder(path); } catch { folder = this.vault.getAbstractFileByPath(path); } }
+		if (!folder) { try { folder = await trackNativeDocumentWrite(this.vault, path, () => this.vault.createFolder(path)); } catch { folder = this.vault.getAbstractFileByPath(path); } }
 		if (!(folder instanceof TFolder)) throw new Error("The local recovery folder is unavailable.");
 	}
 }

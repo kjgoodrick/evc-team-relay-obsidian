@@ -27,7 +27,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
-import { trackNativeDocumentWrite, waitForNativeDocumentWrites } from "./storage/native-document-writes";
+import { trackNativeDocumentWrite, trackNativeSourceMutation, waitForNativeDocumentWrites } from "./storage/native-document-writes";
 import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
@@ -600,11 +600,11 @@ export class VaultShare extends ProviderBacked {
 				for (const part of path.split("/")) {
 					parent = parent ? `${parent}/${part}` : part; check();
 					const exists = await this.vaultApi.adapter.exists(parent); check();
-					if (!exists) { await this.vaultApi.createFolder(parent); check(); }
+					if (!exists) { await trackNativeDocumentWrite(this.vaultApi, parent, () => this.vaultApi.createFolder(parent)); check(); }
 				}
 			},
-			write: async (path, text) => { check(); await this.vaultApi.adapter.write(path, text); check(); },
-			writeBinary: async (path, bytes) => { check(); await this.vaultApi.adapter.writeBinary(path, bytes); check(); },
+			write: async (path, text) => { check(); await trackNativeDocumentWrite(this.vaultApi, path, () => this.vaultApi.adapter.write(path, text)); check(); },
+			writeBinary: async (path, bytes) => { check(); await trackNativeDocumentWrite(this.vaultApi, path, () => this.vaultApi.adapter.writeBinary(path, bytes)); check(); },
 			readBinary: async path => { check(); const bytes = await this.vaultApi.adapter.readBinary(path); check(); return bytes; },
 		};
 	}
@@ -740,7 +740,7 @@ export class VaultShare extends ProviderBacked {
 						const target = `${backup.path}/originals/${file.path}`;
 						await mkdir(target.slice(0, target.lastIndexOf("/")));
 						(this.recoveryMoves ??= new Map()).set(file.path, target);
-						await this.vaultApi.rename(file, target);
+						await trackNativeSourceMutation(this.vaultApi, [file.path, target], () => this.vaultApi.rename(file, target));
 					}
 					// Catch editor changes during disk operations before tearing down any
 					// live document. On failure its IndexedDB history is still intact.
@@ -975,7 +975,8 @@ export class VaultShare extends ProviderBacked {
 					continue;
 				}
 				await this.ensureParentDir(to);
-				await this.fileOps.renameFile(source, normalizePath(this.absolutePath(to)));
+				const target = normalizePath(this.absolutePath(to));
+				await trackNativeSourceMutation(this.vaultApi, [source.path, target], () => this.fileOps.renameFile(source, target));
 				console.debug(`[VaultShare] ${this.path}: followed server move ${from} -> ${to}`);
 			} catch (e: unknown) {
 				// The move failed, so the old root is still on disk: keep it out of adoption.
@@ -1005,7 +1006,7 @@ export class VaultShare extends ProviderBacked {
 				const x = new Uint8Array(a);
 				const y = new Uint8Array(b);
 				if (x.some((byte, i) => byte !== y[i])) continue;
-				await this.fileOps.trashFile(file);
+				await this.trashFile(file);
 			}
 			const folders = inside
 				.filter((file): file is TFolder => file instanceof TFolder)
@@ -1015,7 +1016,7 @@ export class VaultShare extends ProviderBacked {
 			for (const folder of folders) {
 				const live = this.vaultApi.getAbstractFileByPath(folder.path);
 				if (live instanceof TFolder && live.children.length === 0) {
-					await this.fileOps.trashFile(live);
+					await this.trashFile(live);
 				}
 			}
 		} catch (e: unknown) {
@@ -1826,8 +1827,8 @@ export class VaultShare extends ProviderBacked {
 		if (file instanceof TFile) {
 			await this.ensureParentDir(path, diffLog);
 		}
-		await this.fileOps
-			.renameFile(file, normalizePath(this.absolutePath(path)))
+		const target = normalizePath(this.absolutePath(path));
+		await trackNativeSourceMutation(this.vaultApi, [file.path, target], () => this.fileOps.renameFile(file, target))
 			.then(() => {
 				doc.relocate(path, this);
 			});
@@ -2460,10 +2461,8 @@ export class VaultShare extends ProviderBacked {
 		label: string,
 	): Promise<string> {
 		const conflictDocPath = buildConflictCopyPath(doc.entryPath, label);
-		await this.vaultApi.adapter.write(
-			normalizePath(this.absolutePath(conflictDocPath)),
-			content,
-		);
+		const target = normalizePath(this.absolutePath(conflictDocPath));
+		await trackNativeDocumentWrite(this.vaultApi, target, () => this.vaultApi.adapter.write(target, content));
 		return conflictDocPath;
 	}
 
@@ -2474,7 +2473,8 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	makeFolder(path: string): Promise<void> {
-		return this.vaultApi.adapter.mkdir(normalizePath(this.absolutePath(path)));
+		const target = normalizePath(this.absolutePath(path));
+		return trackNativeDocumentWrite(this.vaultApi, target, () => this.vaultApi.adapter.mkdir(target));
 	}
 
 	containsPath(path: string): boolean {
@@ -3169,7 +3169,7 @@ export class VaultShare extends ProviderBacked {
 		const creation = Promise.resolve().then(async () => {
 			let node: TFolder;
 			try {
-				node = await this.vaultApi.createFolder(path);
+				node = await trackNativeDocumentWrite(this.vaultApi, path, () => this.vaultApi.createFolder(path));
 			} catch (error: unknown) {
 				// Another creator won this path. Its object belongs to that creator.
 				const existing = this.vaultApi.getAbstractFileByPath(path);
@@ -3198,7 +3198,7 @@ export class VaultShare extends ProviderBacked {
 					if (candidate.children.length !== 0) continue;
 					discarded.add(candidate);
 					try {
-						await this.fileOps.trashFile(candidate);
+						await this.trashFile(candidate);
 					} catch (error: unknown) {
 						this.warn("could not remove discarded folder creation", candidate.path, error);
 					}
@@ -3338,7 +3338,7 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	async trashFile(file: TAbstractFile): Promise<void> {
-		await this.fileOps.trashFile(file);
+		await trackNativeDocumentWrite(this.vaultApi, file.path, () => this.fileOps.trashFile(file));
 	}
 
 	renameEntry(tfile: TAbstractFile, oldPath: string) {

@@ -5,6 +5,7 @@ import { BaseContentFailure } from "../../src/bases/BaseContentTransport";
 import { BaseSyncStore } from "../../src/bases/BaseSyncStore";
 import { BaseSyncRunner, sameBaseBytes, type BaseSyncAccess, type BaseSyncLock } from "../../src/bases/BaseSyncRunner";
 import { NativeBaseFile, baseText, nativeBaseLock } from "../../src/bases/NativeBaseFile";
+import { holdNativeSourceWrites } from "../../src/storage/native-document-writes";
 import { TFile, type Vault } from "obsidian";
 Object.assign(globalThis, { IDBKeyRange });
 
@@ -233,6 +234,28 @@ function nativeFixture(value: string) {
 		data: () => data, edit: (value: string) => { data = value; }, setCurrent: (value: boolean) => { current = value; },
 		setFile: (value: TFile | null) => { found = value; }, before: (fn: () => void) => { beforeProcess = fn; } };
 }
+
+test.each(["create", "process"])("a source hold blocks Bases %s and permits a reviewed retry after release", async method => {
+	const s = nativeFixture("original"); if (method === "create") s.setFile(null);
+	const before = await s.adapter.read(), hold = holdNativeSourceWrites(s.vault, path);
+	try {
+		await expect(s.adapter.replace(before, bytes("remote"))).rejects.toThrow("paused");
+		expect(s.vault.create).not.toHaveBeenCalled(); expect(s.vault.process).not.toHaveBeenCalled(); expect(s.data()).toBe("original");
+	} finally { hold.release(); }
+	await expect(s.adapter.replace(before, bytes("remote"))).resolves.toBe(true); expect(s.data()).toBe("remote");
+});
+
+test("a Bases native process stays tracked until the host finishes, even after its transaction callback", async () => {
+	const s = nativeFixture("original"), before = await s.adapter.read(); let finish!: () => void;
+	s.vault.process.mockImplementationOnce(async (_file, action) => {
+		s.edit(action(s.data())); await new Promise<void>(resolve => { finish = resolve; }); return s.data();
+	});
+	const save = s.adapter.replace(before, bytes("remote")), hold = holdNativeSourceWrites(s.vault, path);
+	try {
+		expect(s.data()).toBe("remote"); expect(() => hold.release()).toThrow("still running");
+		await expect(hold.wait({ check: () => {}, timeoutMs: 5 })).rejects.toThrow("still running");
+	} finally { finish(); await save; await hold.wait({ check: () => {} }); hold.release(); }
+});
 
 test("native replacement checks bytes at the process callback, not at the earlier read", async () => {
 	const s = nativeFixture("original"), before = await s.adapter.read(); s.before(() => s.edit("concurrent"));

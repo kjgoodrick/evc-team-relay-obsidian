@@ -3,6 +3,7 @@ import { BASE_CONTENT_LIMIT, copyBaseBytes } from "./BaseContentProtocol";
 import { BaseContentFailure } from "./BaseContentTransport";
 import { sameBaseBytes, type BaseLocalFile, type BaseSyncLock } from "./BaseSyncRunner";
 import type { BaseStoreIdentity } from "./BaseSyncStore";
+import { trackNativeDocumentWrite } from "../storage/native-document-writes";
 
 /** Fatal, BOM-preserving UTF-8 decoding. Never replace malformed bytes with
  * replacement characters just to make a file eligible for native text writes. */
@@ -35,7 +36,7 @@ export class NativeBaseFile {
 		if (before.bytes === null) {
 			if (file) return false;
 			let created: TFile;
-			try { created = await this.vault.create(this.path, text); }
+			try { created = await trackNativeDocumentWrite(this.vault, this.path, () => this.vault.create(this.path, text)); }
 			catch (error) { this.check(); if (this.vault.getAbstractFileByPath(this.path)) return false; throw error; }
 			// Native creation has no synchronous transaction callback. A delete,
 			// rename or account change can arrive while it is in flight. Preserve
@@ -48,11 +49,11 @@ export class NativeBaseFile {
 		// decoding by the host produces a conflict instead of normalization.
 		const expected = baseText(before.bytes), changed = new Error("Bases local contents changed");
 		try {
-			await this.vault.process(file, data => {
+			await trackNativeDocumentWrite(this.vault, this.path, () => this.vault.process(file, data => {
 				this.check();
 				if (file.path !== this.path || this.vault.getAbstractFileByPath(this.path) !== file || data !== expected) throw changed;
 				return text;
-			}); return true;
+			})); return true;
 		} catch (error) { if (error === changed) return false; throw error; }
 	}
 }

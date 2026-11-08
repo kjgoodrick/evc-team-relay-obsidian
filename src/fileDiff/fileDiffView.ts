@@ -1,4 +1,5 @@
 import { structuredPatch } from "diff";
+import { trackNativeDocumentWrite } from "../storage/native-document-writes";
 import {
 	Workspace,
 	ItemView,
@@ -137,7 +138,7 @@ export class FileDiffView extends ItemView {
 			file.unsavedText = newContent;
 			return;
 		}
-		await this.app.vault.modify(file, newContent);
+		await trackNativeDocumentWrite(this.app.vault, file.path, () => this.app.vault.modify(file, newContent));
 	}
 
 	private async readContent(file: DiffViewFile): Promise<string> {

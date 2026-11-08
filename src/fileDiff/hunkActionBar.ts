@@ -1,4 +1,5 @@
 import type { App } from "obsidian";
+import { trackNativeDocumentWrite } from "../storage/native-document-writes";
 import { Document } from "src/Document";
 import { UnsavedFile } from "src/UnsavedFile";
 import type { DiffViewFile } from "./fileDiffView";
@@ -105,7 +106,7 @@ export class HunkActionBar {
 			file.unsavedText = newContent;
 			return;
 		}
-		await this.obsidianApp.vault.modify(file, newContent);
+		await trackNativeDocumentWrite(this.obsidianApp.vault, file.path, () => this.obsidianApp.vault.modify(file, newContent));
 	}
 
 	private async overwriteFile2WithFile1(hunk: DiffHunk): Promise<void> {

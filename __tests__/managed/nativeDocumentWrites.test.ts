@@ -1,4 +1,4 @@
-import { holdNativeSourceWrites, trackNativeDocumentWrite, waitForNativeDocumentWrites } from "../../src/storage/native-document-writes";
+import { holdNativeSourceWrites, isNativeSourceWriteHeld, trackNativeDocumentWrite, trackNativeSourceMutation, waitForNativeDocumentWrites } from "../../src/storage/native-document-writes";
 
 function deferred() {
 	let resolve!: () => void, reject!: (error: Error) => void;
@@ -6,6 +6,64 @@ function deferred() {
 	return { promise, resolve, reject };
 }
 const check = () => {};
+
+test.each([
+	["Team/Old.md", "Elsewhere/New.md"],
+	["Elsewhere/Old.md", "Team/New.md"],
+	["TEAM", "Moved"],
+])("a move touching a held source at %s or %s never reaches native I/O", async (from, to) => {
+	const vault = {}, hold = holdNativeSourceWrites(vault, "Team/Old.md"), native = jest.fn(async () => {});
+	// The incoming case holds its destination, the others hold a descendant/source.
+	const destinationHold = to.startsWith("Team/") ? holdNativeSourceWrites(vault, to) : undefined;
+	try {
+		await expect(trackNativeSourceMutation(vault, [from, to], native)).rejects.toMatchObject({ code: "native_source_write_held" });
+		expect(native).not.toHaveBeenCalled();
+		await hold.wait({ check }); await destinationHold?.wait({ check });
+	} finally { destinationHold?.release(); hold.release(); }
+});
+
+test("a directory move registers both ends synchronously and drains for descendant readers and holds", async () => {
+	const vault = {}, pending = deferred();
+	let source!: ReturnType<typeof holdNativeSourceWrites>, destination!: ReturnType<typeof holdNativeSourceWrites>;
+	const save = trackNativeSourceMutation(vault, ["Team", "Archive"], () => {
+		source = holdNativeSourceWrites(vault, "team/Note.md");
+		destination = holdNativeSourceWrites(vault, "Archive/Note.md");
+		return pending.promise;
+	});
+	try {
+		expect(() => source.release()).toThrow("still running"); expect(() => destination.release()).toThrow("still running");
+		await expect(waitForNativeDocumentWrites(vault, "Archive/Note.md", { check, timeoutMs: 5 })).rejects.toThrow("still running");
+		await expect(source.write("Team/Note.md", async () => {})).rejects.toThrow("still running");
+		await waitForNativeDocumentWrites(vault, "Teammate/Note.md", { check, timeoutMs: 5 });
+	} finally { pending.resolve(); await save; await source.wait({ check }); await destination.wait({ check }); source.release(); destination.release(); }
+});
+
+test.each(["sync", "async"])("a %s move failure cleans up both paths without hiding the error", async mode => {
+	const vault = {}, pending = deferred();
+	const save = trackNativeSourceMutation(vault, ["Team", "Archive", "Team"], () => {
+		if (mode === "sync") throw new Error("move failed"); return pending.promise;
+	});
+	const failed = expect(save).rejects.toThrow("move failed"); if (mode === "async") pending.reject(new Error("move failed"));
+	await failed;
+	for (const path of ["Team/Note.md", "Archive/Note.md"]) await waitForNativeDocumentWrites(vault, path, { check, timeoutMs: 5 });
+});
+
+test.each([[], ["Team", "../escape"], Array.from({ length: 65 }, (_, index) => `File${index}`)].map(paths => [paths]))("invalid operation paths cannot partially admit a mutation", async paths => {
+	const vault = {}, native = jest.fn(async () => {});
+	await expect(trackNativeSourceMutation(vault, paths, native)).rejects.toThrow("Invalid"); expect(native).not.toHaveBeenCalled();
+	await waitForNativeDocumentWrites(vault, "Team", { check, timeoutMs: 5 });
+});
+
+test("a narrow owner cannot mutate an ancestor, and hold errors survive module reload", async () => {
+	const vault = {}, hold = holdNativeSourceWrites(vault, "Team/Subfolder");
+	let loaded!: typeof import("../../src/storage/native-document-writes");
+	jest.isolateModules(() => { loaded = require("../../src/storage/native-document-writes"); });
+	try {
+		await expect(hold.write("Team", async () => {})).rejects.toThrow("outside");
+		try { await loaded.trackNativeSourceMutation(vault, ["Elsewhere", "Team"], async () => {}); throw new Error("unexpected admission"); }
+		catch (error) { expect(isNativeSourceWriteHeld(error)).toBe(true); }
+	} finally { hold.release(); }
+});
 
 test("a recovery hold closes admission before draining and keeps installation writes exclusive", async () => {
 	const vault = {}, old = deferred(), install = deferred(), denied = jest.fn(async () => {});

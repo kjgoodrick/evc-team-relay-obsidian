@@ -8,6 +8,14 @@ type Writes = WeakMap<object, Map<string, Set<Promise<void>>>>;
 interface Barrier { path: string }
 type Barriers = WeakMap<object, Set<Barrier>>;
 export interface NativeWriteWait { check: () => void; signal?: AbortSignal; timeoutMs?: number }
+export class NativeSourceWriteHeldError extends Error {
+	readonly code = "native_source_write_held";
+	constructor() { super("Native source writes are paused for recovery."); this.name = "NativeSourceWriteHeldError"; }
+}
+/** Code-based recognition also works after a plugin module reload. */
+export function isNativeSourceWriteHeld(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "native_source_write_held";
+}
 export interface NativeSourceWriteHold {
 	wait(options: NativeWriteWait): Promise<void>;
 	write<T>(path: string, write: () => Promise<T>): Promise<T>;
@@ -40,6 +48,7 @@ function canonical(path: string, root = false): string {
 	return path.normalize("NFC").toLowerCase();
 }
 function contains(root: string, path: string): boolean { return root === "" || path === root || path.startsWith(root + "/"); }
+function intersects(left: string, right: string): boolean { return contains(left, right) || contains(right, left); }
 function pending(vault: object, matches: (path: string) => boolean): Promise<void>[] {
 	return [...new Set([...(registry().get(vault) ?? [])].flatMap(([path, writes]) => matches(path) ? [...writes] : []))];
 }
@@ -51,9 +60,9 @@ function pending(vault: object, matches: (path: string) => boolean): Promise<voi
 export function holdNativeSourceWrites(vault: object, path: string): NativeSourceWriteHold {
 	const root = canonical(path, true), all = barriers();
 	const holds = all.get(vault) ?? new Set<Barrier>(); all.set(vault, holds);
-	if ([...holds].some(hold => contains(hold.path, root) || contains(root, hold.path))) throw new Error("This native source already has a recovery hold.");
+	if ([...holds].some(hold => intersects(hold.path, root))) throw new Error("This native source already has a recovery hold.");
 	const hold = { path: root }; holds.add(hold);
-	const matches = (candidate: string) => contains(root, canonical(candidate));
+	const matches = (candidate: string) => intersects(root, canonical(candidate));
 	const check = () => { if (!holds.has(hold)) throw new Error("The native source recovery hold was released."); };
 	return {
 		wait: options => {
@@ -62,9 +71,9 @@ export function holdNativeSourceWrites(vault: object, path: string): NativeSourc
 		},
 		write: async (target, write) => {
 			check();
-			if (!matches(target)) throw new Error("Recovery write is outside its native source hold.");
+			if (!contains(root, canonical(target))) throw new Error("Recovery write is outside its native source hold.");
 			if (pending(vault, matches).length) throw new Error("A native source write is still running. Drain it before installation.");
-			return trackWrite(vault, target, write, hold);
+			return trackWrite(vault, [target], write, hold);
 		},
 		release: () => {
 			if (!holds.has(hold)) return;
@@ -75,25 +84,36 @@ export function holdNativeSourceWrites(vault: object, path: string): NativeSourc
 }
 
 export async function trackNativeDocumentWrite<T>(vault: object, path: string, write: () => Promise<T>): Promise<T> {
-	return trackWrite(vault, path, write);
+	return trackWrite(vault, [path], write);
 }
-async function trackWrite<T>(vault: object, path: string, write: () => Promise<T>, owner?: Barrier): Promise<T> {
-	const target = canonical(path);
-	if ([...(barriers().get(vault) ?? [])].some(hold => hold !== owner && contains(hold.path, target))) throw new Error("Native source writes are paused for recovery.");
+/** Register both ends of a move before calling the native API. Directory
+ * operations also overlap a hold/reader for any of their descendants. */
+export async function trackNativeSourceMutation<T>(vault: object, paths: readonly string[], write: () => Promise<T>): Promise<T> {
+	return trackWrite(vault, paths, write);
+}
+async function trackWrite<T>(vault: object, affected: readonly string[], write: () => Promise<T>, owner?: Barrier): Promise<T> {
+	if (!Array.isArray(affected) || !affected.length || affected.length > 64) throw new Error("Invalid native source operation paths");
+	const names = [...new Set(affected)], targets = names.map(path => canonical(path));
+	if ([...(barriers().get(vault) ?? [])].some(hold => hold !== owner && targets.some(target => intersects(hold.path, target)))) throw new NativeSourceWriteHeldError();
 	const all = registry();
-	let paths = all.get(vault); if (!paths) { paths = new Map(); all.set(vault, paths); }
-	let pending = paths.get(path); if (!pending) { pending = new Set(); paths.set(path, pending); }
+	const paths = all.get(vault) ?? new Map<string, Set<Promise<void>>>(); all.set(vault, paths);
 	let finish!: () => void;
 	const settled = new Promise<void>(resolve => { finish = resolve; });
-	pending.add(settled);
+	const entries = names.map(path => {
+		let pending = paths.get(path); if (!pending) { pending = new Set(); paths.set(path, pending); }
+		pending.add(settled); return { path, pending };
+	});
 	try { return await write(); }
-	finally { pending.delete(settled); if (!pending.size && paths.get(path) === pending) paths.delete(path); finish(); }
+	finally {
+		for (const { path, pending } of entries) { pending.delete(settled); if (!pending.size && paths.get(path) === pending) paths.delete(path); }
+		finish();
+	}
 }
 
 export async function waitForNativeDocumentWrites(vault: object, path: string,
 	options: NativeWriteWait): Promise<void> {
 	const target = canonical(path);
-	return waitForWrites(vault, candidate => canonical(candidate) === target, options);
+	return waitForWrites(vault, candidate => intersects(canonical(candidate), target), options);
 }
 async function waitForWrites(vault: object, matches: (path: string) => boolean, options: NativeWriteWait): Promise<void> {
 	const timeout = options.timeoutMs ?? 10_000;

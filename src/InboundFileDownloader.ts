@@ -11,6 +11,7 @@ import { dirname, join } from "path-browserify";
 import { namedLogger } from "./logging";
 import { isTransientRelayFailure } from "./relayRequestErrors";
 import { sha256Hex } from "./contentDigest";
+import { isNativeSourceWriteHeld, trackNativeDocumentWrite } from "./storage/native-document-writes";
 import type { RelayOnPremShareClientManager } from "./RelayOnPremShareClientManager";
 import type { WebSyncManager } from "./WebSyncManager";
 
@@ -256,8 +257,9 @@ export class InboundFileDownloader {
 		const parentDir = normalizePath(dirname(vaultPath));
 		if (parentDir && parentDir !== "." && parentDir !== "/") {
 			try {
-				await this.vault.adapter.mkdir(parentDir);
-			} catch {
+				await trackNativeDocumentWrite(this.vault, parentDir, () => this.vault.adapter.mkdir(parentDir));
+			} catch (error) {
+				if (isNativeSourceWriteHeld(error)) throw error;
 				// Directory may already exist
 			}
 		}
@@ -265,7 +267,7 @@ export class InboundFileDownloader {
 		// Write to vault with echo-loop guard
 		this.writingPaths.add(vaultPath);
 		try {
-			await this.vault.adapter.writeBinary(vaultPath, content);
+			await trackNativeDocumentWrite(this.vault, vaultPath, () => this.vault.adapter.writeBinary(vaultPath, content));
 			shareManifest[relativePath] = serverSha256;
 			log("Wrote sync-artifact to vault", { vaultPath, sha256: serverSha256 });
 		} catch (err: unknown) {
@@ -273,6 +275,8 @@ export class InboundFileDownloader {
 				vaultPath,
 				error: err instanceof Error ? err.message : String(err),
 			});
+			// Keep the poller's watermark unchanged so recovery pauses retry.
+			if (isNativeSourceWriteHeld(err)) throw err;
 		} finally {
 			this.writingPaths.delete(vaultPath);
 		}
@@ -295,7 +299,7 @@ export class InboundFileDownloader {
 		if (!conflict) return;
 		const abstractFile = this.vault.getAbstractFileByPath(conflict.vaultPath);
 		if (abstractFile instanceof TFile) {
-			await this.fileManager.trashFile(abstractFile);
+			await trackNativeDocumentWrite(this.vault, abstractFile.path, () => this.fileManager.trashFile(abstractFile));
 		}
 		this.conflicts.delete(key);
 	}

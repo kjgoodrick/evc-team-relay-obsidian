@@ -30,6 +30,7 @@ import { RelayHttpError } from "src/relayRequestErrors";
 import type { RelayOnPremShareClientManager } from "src/RelayOnPremShareClientManager";
 import type { WebSyncManager } from "src/WebSyncManager";
 import type { FileManager, Vault } from "obsidian";
+import { holdNativeSourceWrites } from "../src/storage/native-document-writes";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -422,6 +423,21 @@ describe("InboundFileDownloader", () => {
 			`${SHARE_PATH}/note.md`,
 			content,
 		);
+	});
+
+	test.each(["folder", "write"])("a recovery hold at %s admission retains unfinished inbound work for retry", async boundary => {
+		clientManager.getFilesIndex.mockResolvedValue([
+			{ path: "note.md", sha256: "sha-held", size: 8, updated_at: "2026-01-01T00:00:00Z", type: "sync-artifact" },
+		]);
+		let hold: ReturnType<typeof holdNativeSourceWrites> | undefined;
+		if (boundary === "folder") hold = holdNativeSourceWrites(vault, SHARE_PATH);
+		else vault.adapter.mkdir.mockImplementationOnce(async () => { hold = holdNativeSourceWrites(vault, `${SHARE_PATH}/note.md`); });
+		try {
+			await expect(downloader.downloadShare(SHARE_ID, SERVER_ID)).rejects.toThrow("paused");
+			expect(vault.adapter.writeBinary).not.toHaveBeenCalled(); expect(downloader.isInboundWriting(`${SHARE_PATH}/note.md`)).toBe(false);
+		} finally { hold?.release(); }
+		await expect(downloader.downloadShare(SHARE_ID, SERVER_ID)).resolves.toBe("ran"); expect(vault.adapter.writeBinary).toHaveBeenCalledTimes(1);
+		await downloader.downloadShare(SHARE_ID, SERVER_ID); expect(vault.adapter.writeBinary).toHaveBeenCalledTimes(1);
 	});
 
 	test("skips items whose sha256 is unchanged since last download", async () => {
@@ -984,6 +1000,16 @@ describe("InboundFileDownloader", () => {
 
 			expect(downloader.getConflicts()).toHaveLength(1);
 			expect(vault.delete).not.toHaveBeenCalled();
+		});
+
+		test("a recovery hold preserves a conflict and its native file until resolution can retry", async () => {
+			conflictSetup(); await downloader.downloadShare(SHARE_ID, SERVER_ID);
+			const hold = holdNativeSourceWrites(vault, SHARE_PATH);
+			try {
+				await expect(downloader.resolveTakeServer(SHARE_ID, "note.md")).rejects.toThrow("paused");
+				expect(fileManager.trashFile).not.toHaveBeenCalled(); expect(downloader.getConflicts()).toHaveLength(1);
+			} finally { hold.release(); }
+			await downloader.resolveTakeServer(SHARE_ID, "note.md"); expect(fileManager.trashFile).toHaveBeenCalledTimes(1); expect(downloader.getConflicts()).toHaveLength(0);
 		});
 
 		test("resolveTakeServer() then the next sync cycle downloads the server version", async () => {
