@@ -4,7 +4,7 @@ import { sourceInstallationPath, verifySourceInstallationPlan, type SourcePlanVe
 import { holdNativeSourceWrites } from "./storage/native-document-writes";
 import { sourceInventoryCacheSync, type SourceInventoryIdentity } from "./storage/source-document-cache";
 import type { SourceSelectionJournal } from "./storage/source-selection-journal";
-import { borrowPausedSourceDrain } from "./storage/source-startup-admission";
+import { borrowPausedSourceHold } from "./storage/source-startup-admission";
 
 export const INSTALLATION_METADATA = ".relay-source-installation";
 export interface NativeInstallationStat { type: "file" | "folder"; size: number }
@@ -68,10 +68,10 @@ export async function materializeSourceInstallation(journal: SourceSelectionJour
 	}
 	const marker = new TextEncoder().encode(JSON.stringify({ format: "team-relay-native-installation", version: 1,
 		plan: verified.reference, reviewId: plan.reviewId, scope, destinationRoot: root })).buffer;
-	const originalHold = borrowPausedSourceDrain(owner, plan.originalRoot, plan.source) ?? holdNativeSourceWrites(owner, plan.originalRoot);
+	const originalHold = borrowPausedSourceHold(owner, plan.originalRoot, plan.source, root) ?? holdNativeSourceWrites(owner, plan.originalRoot);
 	let destinationHold: ReturnType<typeof holdNativeSourceWrites> | undefined;
 	try {
-		destinationHold = holdNativeSourceWrites(owner, root);
+		destinationHold = borrowPausedSourceHold(owner, root, plan.source, plan.originalRoot) ?? holdNativeSourceWrites(owner, root);
 		await originalHold.wait({ check, signal, timeoutMs });
 		await destinationHold.wait({ check, signal, timeoutMs });
 		await confirm();

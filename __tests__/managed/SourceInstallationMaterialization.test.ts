@@ -135,6 +135,25 @@ test("recovery can use a hold left by paused startup without releasing the origi
 	await expect(trackNativeSourceMutation(vault, ["Team/Note.md"], async () => {})).rejects.toThrow("paused");
 });
 
+test("a restart at an already-mapped destination can resume remaining writes under its paused hold", async () => {
+	const f = await fixture();
+	const interrupted = { ...f.native, createFileExclusive: async (name: string, bytes: ArrayBuffer) => {
+		await f.native.createFileExclusive(name, bytes); throw new Error("Simulated interruption");
+	} };
+	await expect(materializeSourceInstallation(f.journal, f.staging, interrupted, f.request)).rejects.toThrow("interruption");
+	await expect(admitSourceStartup(vault, "Restored Team", f.request.source, { check: () => {} })).rejects.toThrow("awaiting recovery");
+	const next = await reopen(f);
+	expect(await materializeSourceInstallation(next.journal, f.staging, next.native, next.request)).toMatchObject({ created: 1, resumed: 1 });
+	await expect(trackNativeSourceMutation(vault, ["Restored Team/Note.md"], async () => {})).rejects.toThrow("paused");
+});
+
+test("a hold for an unexpected third location cannot be borrowed by the installation", async () => {
+	const f = await fixture();
+	await expect(admitSourceStartup(vault, "Unexpected", f.request.source, { check: () => {} })).rejects.toThrow("awaiting recovery");
+	await expect(materializeSourceInstallation(f.journal, f.staging, f.native, f.request)).rejects.toThrow("paused source location changed");
+	await expect(fs.stat(installed(""))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test("a failed publication leaves no partial final file and can resume", async () => {
 	const f = await fixture(), nativeFS = require("fs/promises") as typeof fs, link = nativeFS.link;
 	let failed = false;

@@ -12,14 +12,19 @@ function registry(): StartupHolds {
 	return host[key] as StartupHolds;
 }
 
-/** Let the recovery installer drain an existing paused-startup hold without
- * dropping its barrier or competing for a second overlapping hold. Releasing
- * this lease only ends its exclusive use; the source remains paused. */
-export function borrowPausedSourceDrain(vault: object, path: string, scope: SourceSelectionScope): Pick<NativeSourceWriteHold, "wait" | "release"> | undefined {
+/** Let the recovery installer use an existing paused-startup hold without
+ * dropping its barrier or competing for a second overlapping hold. A verified
+ * plan can name its other root so recovery works after a settings handoff too.
+ * Releasing this lease only ends its exclusive use; the source remains paused. */
+export function borrowPausedSourceHold(vault: object, path: string, scope: SourceSelectionScope,
+	alternativeRoot?: string): NativeSourceWriteHold | undefined {
 	const identity = sourceInventoryCacheSync({ ...scope, restoreGeneration: null }).identity;
 	const entry = registry().get(vault)?.get(identity);
 	if (!entry) return undefined;
-	if (entry.path !== path.normalize("NFC").toLowerCase()) throw new Error("The paused source location changed. Review its original location before installation.");
+	if (entry.path !== path.normalize("NFC").toLowerCase()) {
+		if (alternativeRoot !== undefined && entry.path === alternativeRoot.normalize("NFC").toLowerCase()) return undefined;
+		throw new Error("The paused source location changed. Review its original location before installation.");
+	}
 	if (entry.busy) throw new Error("The paused source is already being checked. Wait before installing it.");
 	entry.busy = true; let released = false, waiting = 0;
 	const check = () => { if (released || registry().get(vault)?.get(identity) !== entry) throw new Error("The paused-source recovery lease ended"); };
@@ -29,12 +34,22 @@ export function borrowPausedSourceDrain(vault: object, path: string, scope: Sour
 			try { await entry.hold.wait({ ...options, check: () => { check(); checkContext(); } }); }
 			finally { waiting--; }
 		},
+		write: async (target, action) => {
+			check(); waiting++;
+			try { return await entry.hold.write(target, () => { check(); return action(); }); }
+			finally { waiting--; }
+		},
 		release: () => {
 			if (released) return;
-			if (waiting) throw new Error("The paused-source drain has not settled");
+			if (waiting) throw new Error("The paused-source operation has not settled");
 			check(); released = true; entry.busy = false;
 		},
 	};
+}
+
+export function borrowPausedSourceDrain(vault: object, path: string, scope: SourceSelectionScope): Pick<NativeSourceWriteHold, "wait" | "release"> | undefined {
+	const hold = borrowPausedSourceHold(vault, path, scope);
+	return hold ? { wait: hold.wait, release: hold.release } : undefined;
 }
 
 /** Close tracked native admission before reading a source journal. A pending,

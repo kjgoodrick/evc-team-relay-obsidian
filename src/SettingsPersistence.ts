@@ -90,6 +90,14 @@ export class Settings<T> extends Notifier<T> {
 		return this.currentValue;
 	}
 
+	/** Read persisted state without overwriting the current in-memory settings.
+	 * Recovery uses this to reconcile a save whose acknowledgement was lost. */
+	async persistedSnapshot(): Promise<T> {
+		if (!this.hydrated) throw new Error("Settings must be loaded before inspecting persisted state");
+		const onDisk = await this.backend.loadData();
+		return { ...this.defaultValue, ...(onDisk ?? {}) };
+	}
+
 	async mutate(updater: (current: T) => T): Promise<void> {
 		if (!this.hydrated) {
 			this.warn("update requested before initial load completed");
@@ -396,6 +404,12 @@ export class SettingsScope<
 		const updated = updater(current);
 		if (!force && JSON.stringify(current) === JSON.stringify(updated)) return;
 		await this.writeValue(updated);
+	}
+
+	/** Inspect the saved namespace without hydrating or changing other settings. */
+	async readPersistedValue(): Promise<T | undefined> {
+		this.requireLive(); const snapshot = await this.parentSettings.persistedSnapshot(); this.requireLive();
+		return this.read(snapshot as PlainObject);
 	}
 
 	/** Re-applies the current value through `mutateValue()`, forcing a change notification even if nothing changed. */

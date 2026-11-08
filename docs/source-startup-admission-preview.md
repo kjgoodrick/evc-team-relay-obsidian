@@ -25,14 +25,17 @@ different server/endpoint cannot release a hold through a different scope.
 Changing a paused source's native location requires review instead of silently
 reassigning its hold. Other folders and vaults remain usable.
 
-`borrowPausedSourceDrain` gives the installer exclusive use of an existing
-source's drain barrier without creating a second overlapping hold. It requires
-the exact scope and original location, excludes simultaneous startup/recovery
-checks, and cannot release the underlying barrier. Ending the lease leaves the
-original source paused. The materialization coordinator uses this lease after
-validating its prepared journal/plan; otherwise it creates its normal temporary
-original-folder hold. Final mapping activation must explicitly hand off the
-paused original location before admitting the destination in the same host.
+`borrowPausedSourceHold` gives the installer exclusive use of an existing
+source's barrier without creating a second overlapping hold. It requires the
+exact scope and one of the verified plan's original/destination locations,
+excludes simultaneous startup/recovery checks, and cannot release the underlying
+barrier. A destination lease admits only writes inside its held root. The
+drain-only wrapper remains available for callers that need no write capability.
+Ending the lease leaves the source paused. The materialization coordinator uses
+these leases after validating its prepared journal/plan; otherwise it creates
+temporary holds. Final activation must explicitly hand off a paused original
+location before admitting the destination in the same host. See the
+[mapping restart behavior](source-installation-mapping-preview.md).
 
 The location/lease checkpoint passes the full plugin regression: **4,487 tests
 across 307 suites**, with 41 tests in 27 opt-in suites skipped. The final exact-root
