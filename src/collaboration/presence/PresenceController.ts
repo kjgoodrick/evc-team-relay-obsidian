@@ -115,7 +115,7 @@ export class PresenceController extends Component {
 	get surfaceName(): "note" | "image" | "Bases view" { return this.locations?.baseActive ? "Bases view" : this.locations?.imageActive ? "image" : "note"; }
 	get description(): string { return this.surfaceName !== "note" && this.status !== "idle" ? descriptions[this.status].replace(/\bnote\b/g, this.surfaceName) : descriptions[this.status]; }
 	get canRetry(): boolean { return this.visible && !!this.active && ["unavailable", "capacity"].includes(this.status) ||
-		!!this.locations && (["authentication", "unavailable", "unsupported"].includes(this.locations.status) || this.locations.surfaceActive && this.locations.surfaceState === "unavailable" || this.locations.embeddedUnavailable); }
+		!!this.locations && (["authentication", "unavailable", "unsupported"].includes(this.locations.status) || this.locations.surfaceActive && this.locations.surfaceState === "unavailable" || this.locations.embeddedUnavailable || this.locations.imageObserverUnavailable); }
 	get navigationDescription(): string {
 		return this.locations?.ready ? (this.locations.supportsBases ? "Follow can move between shared notes, supported images and saved Bases views." : this.locations.supportsImages ? "Follow can move between shared notes and images." : "Follow can move between shared notes.") : this.locations?.status === "connecting" || this.locations?.status === "reconnecting" ?
 			"Connecting across notes. Current-note navigation is available." : "Follow is currently limited to this note.";
@@ -202,6 +202,11 @@ export class PresenceController extends Component {
 			const owner = view?.containerEl.ownerDocument;
 			const foreground = !!view?.containerEl.isConnected && !!owner?.hasFocus() && !owner.hidden && !this.blurred.has(owner);
 			this.locations?.update(view, foreground && !this.registry.isShutDown, this.visible);
+			if (this.locations) {
+				const images: FileView[] = [];
+				this.plugin.app.workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof FileView) images.push(leaf.view); });
+				this.locations.setImageObservers(images);
+			}
 			const reading = surface === "reading" && noteView ? readingCommentBinding(noteView) : undefined;
 			const bound = !!candidate && (surface === "editor" ? candidate.isTracking :
 				reading?.documentId === candidate.boundDocument.entityGuid && reading.text === candidate.boundDocument.crdtText);

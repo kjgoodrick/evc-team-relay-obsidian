@@ -4,6 +4,7 @@ import { FileView, MarkdownView, TFile, type Plugin, type WorkspaceLeaf, type Ma
 import { createHash, webcrypto } from "node:crypto";
 import { StringValue } from "../mocks/nativeBaseValues";
 import type { BasePresenceState } from "../../src/collaboration/presence/BasePositionProtocol";
+import type { ImagePresenceState } from "../../src/collaboration/presence/LocationProtocol";
 import type { AuthSession } from "../../src/AuthSession";
 import { Account } from "../../src/Account";
 import { ProviderBacked } from "../../src/ProviderBacked";
@@ -106,7 +107,10 @@ function fixture(crossNote = false, withImage = false, withBase = false) {
 			eachRecord: (callback: (record: { id: string; type: string }, path: string) => void) => { notes.forEach(note => callback({ id: note.doc.entityGuid, type: "markdown" }, note.view.file!.path)); if (withImage) callback(imageRecord, imageFile.path); if (base) callback(base.record, base.file.path); } } };
 	if (crossNote) for (const note of notes) Object.assign(note.binding.boundDocument, { vaultShare: folder });
 	const events = new Map<string, Set<() => void>>();
-	const workspace = { trigger: jest.fn(), offref: (ref: unknown) => { if (typeof ref === "function") ref(); }, getActiveViewOfType: (type: typeof FileView | typeof MarkdownView) => active && (active instanceof type || type === FileView && active instanceof MarkdownView) ? active : null, on: (name: string, fn: () => void) => {
+	const extraViews: FileView[] = [];
+	const workspace = { iterateAllLeaves: (callback: (leaf: Pick<WorkspaceLeaf, "view">) => void) => {
+		for (const view of [...notes.map(note => note.view), ...(withImage ? [imageView] : []), ...extraViews]) callback({ view });
+	}, trigger: jest.fn(), offref: (ref: unknown) => { if (typeof ref === "function") ref(); }, getActiveViewOfType: (type: typeof FileView | typeof MarkdownView) => active && (active instanceof type || type === FileView && active instanceof MarkdownView) ? active : null, on: (name: string, fn: () => void) => {
 		const listeners = events.get(name) ?? new Set(); listeners.add(fn); events.set(name, listeners);
 		return () => listeners.delete(fn);
 	} };
@@ -143,7 +147,7 @@ function fixture(crossNote = false, withImage = false, withBase = false) {
 		const stop = bindCommentEditor(editor, () => ({ documentId: note.doc.entityGuid, text: note.text }));
 		return { editor, stop };
 	});
-	return { controller, notes, editors, extensions, processors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select, base, workspace,
+	return { controller, notes, editors, extensions, processors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select, base, workspace, extraViews,
 		image: { file: imageFile, view: imageView, element: imageElement, record: imageRecord, location: imageLocation }, vault,
 		logout: () => { account = undefined; authListeners.forEach(fn => fn()); },
 		fileEvent: (event: "rename" | "delete" | "modify") => { if (event === "delete") deleted = true; events.get(event)?.forEach(fn => fn()); },
@@ -607,6 +611,54 @@ test("verified host publishes image geometry and renders peers while privacy wit
 		expect(f.image.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent).toBe("Peer");
 		f.logout(); expect(f.image.view.contentEl.querySelector(".relay-image-presence")).toBeNull(); expect(f.controller.peers).toEqual([]);
 	} finally { f.close(); network.close(); }
+});
+
+test.each(["denial", "bytes", "blur", "logout"] as const)("direct-image split panes reuse one watch and clear together on %s", async failure => {
+	const network = crossNetwork(true, () => f.image.location), f = fixture(true, true);
+	const root = document.body.appendChild(document.createElement("div")), image = root.appendChild(f.image.element.cloneNode() as HTMLImageElement);
+	Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
+	const passive = Object.assign(Object.create(FileView.prototype), f.image.view, { contentEl: root, containerEl: root }) as FileView;
+	f.extraViews.push(passive);
+	let shown = true;
+	const box = (element: HTMLElement) => {
+		Object.defineProperties(element, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: 250 }, clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: 250 } });
+		element.getBoundingClientRect = () => new DOMRect(0, 0, 400, 250);
+		element.getClientRects = () => [element.getBoundingClientRect()] as unknown as DOMRectList;
+	};
+	try {
+		for (const element of [root, image, f.image.view.contentEl, f.image.element]) box(element);
+		root.getClientRects = () => (shown ? [root.getBoundingClientRect()] : []) as unknown as DOMRectList;
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(f.image.view);
+		await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster(); socket.imageState();
+		const painted = async () => {
+			await until(() => [root, f.image.view.contentEl].every(element => element.querySelector(".relay-image-presence")));
+			for (const element of [root, f.image.view.contentEl]) box(element.querySelector<HTMLElement>(".relay-image-presence")!);
+			window.dispatchEvent(new Event("resize"));
+			await until(() => [root, f.image.view.contentEl].every(element => element.querySelector(".relay-image-presence-pointer")?.textContent === "Peer"));
+		};
+		await painted();
+		const reads = f.vault.readBinary.mock.calls.length;
+		for (let i = 0; i < 10; i++) { f.controller.refresh(); socket.imageState(); }
+		image.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 125 }));
+		await settled(); await settled();
+		expect(socket.frames.filter(frame => frame.type === "image_state").every(frame => !frame.state || !(frame.state as ImagePresenceState).pointer)).toBe(true);
+		expect(f.vault.readBinary).toHaveBeenCalledTimes(reads);
+		expect(jest.mocked(platformFetch).mock.calls.filter(([url]) => String(url).includes("/image-location?"))).toHaveLength(1);
+		expect(socket.frames.filter(frame => frame.type === "watch")).toHaveLength(1); expect(network.sockets).toHaveLength(1);
+		await f.controller.setVisible(false); expect(root.querySelector(".relay-image-presence-pointer")).not.toBeNull();
+		shown = false; f.controller.refresh(); expect(root.querySelector(".relay-image-presence")).toBeNull();
+		shown = true; f.controller.refresh(); await painted();
+		// A replaced native resource must not inherit the other pane's proof.
+		image.src = "app://local/Other.png"; await until(() => !root.querySelector(".relay-image-presence"));
+		expect(f.image.view.contentEl.querySelector(".relay-image-presence-pointer")).not.toBeNull();
+		image.src = f.image.element.src; await painted();
+		if (failure === "denial") socket.roster(false);
+		else if (failure === "bytes") { f.image.file.stat.mtime++; f.vault.readBinary.mockResolvedValue(new Uint8Array([1, 2, 3]).buffer); f.controller.refresh(); }
+		else if (failure === "blur") { f.focus.mockReturnValue(false); window.dispatchEvent(new Event("blur")); }
+		else f.logout();
+		await until(() => [root, f.image.view.contentEl].every(element => !element.querySelector(".relay-image-presence")));
+		socket.imageState(); await settled(); expect(root.querySelector(".relay-image-presence")).toBeNull();
+	} finally { f.close(); root.remove(); network.close(); }
 });
 
 
