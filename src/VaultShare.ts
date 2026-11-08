@@ -19,6 +19,9 @@ import { dirname, join, sep } from "path-browserify";
 import * as Y from "yjs";
 import { CONFLICTS, select, touches, type Records, type StructuralConflict } from "./client/managedRecovery";
 import type { ManagedRestoreReview, ManagedRestoreInspection } from "./client/ManagedIndexTransport";
+import { requireRestoreRelativePath, type ManagedRestoreText, type RestoreLocalText } from "./client/ManagedRestoreText";
+import { readManagedSource } from "./client/readManagedSource";
+import { restoreMetadata } from "./collaboration/RestoreGeneration";
 import { prepareRecoveryBackup, sameCapture, type RecoveryCapture, type RecoveryIO } from "./ManagedRecoveryBackup";
 import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
@@ -32,7 +35,7 @@ import { SOURCE_CACHE_IDENTITY } from "./storage/document-cache-binding";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
 import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { SingleFlight, LazyValue, warnIfSlow } from "./asyncCache";
-import { FolderAddress, ResourceAddress, RemoteFolderAddress } from "./ResourceAddress";
+import { FolderAddress, ResourceAddress, RemoteFolderAddress, RemoteDocumentAddress, RemoteCanvasAddress } from "./ResourceAddress";
 
 // Synced entry types this folder can mint/host
 import { Document, isDocument } from "./Document";
@@ -488,6 +491,70 @@ export class VaultShare extends ProviderBacked {
 			checkAuth(); source.check();
 		};
 		check(); return index.inspectRestore(check);
+	}
+
+	/** Compare point-in-time text snapshots only. No source state is imported,
+	 * no document wrapper is opened and no native file is modified. */
+	async inspectManagedRestoreText(inspection: ManagedRestoreInspection, entryId: string, signal?: AbortSignal): Promise<ManagedRestoreText> {
+		const parent = this.resourceAddress, serverId = this.config.onpremServerId, host = this.hostAppId, sharePath = this.path;
+		if (!inspection.check || !("relayGuid" in parent) || !("folderGuid" in parent)) throw new Error("Refresh the server inventory before comparing source text");
+		const serverEntries = Object.entries(inspection.server.records).filter(([, record]) => record.id === entryId);
+		const localEntries = Object.entries(inspection.local).filter(([, record]) => record.id === entryId);
+		if (serverEntries.length !== 1 || localEntries.length > 1) throw new Error("This entry has an ambiguous location. Review its inventory first.");
+		const [serverPath, record] = serverEntries[0], kind = record.type;
+		if (record.type !== ItemKind.Document && record.type !== ItemKind.Canvas) throw new Error("Inline source comparison is available for notes and canvas source text");
+		if (localEntries.some(([, local]) => local.type !== record.type)) throw new Error("This entry changed type. Review its inventory first.");
+		requireRestoreRelativePath(serverPath); if (localEntries.length) requireRestoreRelativePath(localEntries[0][0]);
+		const address = ResourceAddress.serialize(kind === ItemKind.Canvas ? new RemoteCanvasAddress(parent.relayGuid, parent.folderGuid, entryId)
+			: new RemoteDocumentAddress(parent.relayGuid, parent.folderGuid, entryId));
+		const parentAddress = ResourceAddress.serialize(parent), binding = restoreMetadata({ restoreGeneration: inspection.server.restore_generation ?? null });
+		const scope = () => JSON.stringify([inspection.reviewId, inspection.server.restore_guard, inspection.server.restore_generation,
+			Object.entries(inspection.server.records).filter(([, item]) => item.id === entryId), Object.entries(inspection.local).filter(([, item]) => item.id === entryId)]);
+		const selectedScope = scope();
+		const check = () => {
+			if (signal?.aborted) throw Object.assign(new Error("Source comparison was cancelled"), { name: "AbortError" });
+			inspection.check!();
+			if (this.hostAppId !== host || this.path !== sharePath || this.config.onpremServerId !== serverId
+				|| ResourceAddress.serialize(this.resourceAddress) !== parentAddress || scope() !== selectedScope) throw new Error("The shared folder changed. Refresh the source comparison.");
+		};
+		check(); const local: RestoreLocalText[] = [];
+		if (localEntries.length) {
+			const cacheName = `${host}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${entryId}`;
+			const stored = await readDocumentRecoverySnapshot(cacheName); check();
+			const appId = stored.custom.find(item => item.key === "appId")?.value, s3rn = stored.custom.find(item => item.key === "s3rn")?.value;
+			if (stored.exists && (appId !== undefined && appId !== host || s3rn !== undefined && s3rn !== address)) {
+				throw new Error("The retained history has a different association. Save a recovery copy before continuing.");
+			}
+			const retained = new Y.Doc({ gc: false }), live = this.trackedEntries.get(entryId);
+			try {
+				Y.applyUpdate(retained, stored.update);
+				if (isDocument(live) || isCanvasDocument(live)) {
+					if (live.vaultShare !== this || live.entityGuid !== entryId || (isCanvasDocument(live) ? ItemKind.Canvas : ItemKind.Document) !== kind) throw new Error("The local document association changed");
+					Y.applyUpdate(retained, Y.encodeStateAsUpdate(live.crdtDoc));
+				} else if (live) throw new Error("The local entry changed type");
+				if (stored.exists || live) local.push({ label: "Local editing history", text: kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(retained), null, 2) : retained.getText("contents").toString() });
+				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(entryId); check();
+				if (unsaved !== null && unsaved !== undefined) local.push({ label: "Local unsaved buffer", text: unsaved });
+			} finally { retained.destroy(); }
+			const path = sharePath ? `${sharePath}/${localEntries[0][0]}` : localEntries[0][0];
+			const file = this.vaultApi.getAllLoadedFiles().find(file => file instanceof TFile && file.path === path);
+			if (file instanceof TFile) {
+				if (file.stat?.size > 2 * 1024 * 1024) throw new Error("The local file is too large for an inline comparison. Save a recovery copy instead.");
+				const bytes = await this.vaultApi.readBinary(file); check();
+				if (file.path !== path) throw new Error("The local file moved. Refresh the source comparison.");
+				if (bytes.byteLength > 2 * 1024 * 1024) throw new Error("The local file is too large for an inline comparison. Save a recovery copy instead.");
+				local.push({ label: "Local file on disk", text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) });
+			}
+		}
+		if (local.some(source => source.text.length > 2 * 1024 * 1024)) throw new Error("The retained text is too large for an inline comparison. Save a recovery copy instead.");
+		const snapshot = await readManagedSource(this.credentialCache, address, sharePath ? `${sharePath}/${serverPath}` : serverPath, serverId, binding, { signal, check });
+		check(); const doc = new Y.Doc({ gc: false });
+		try {
+			Y.applyUpdate(doc, snapshot.update);
+			const serverText = kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString();
+			if (serverText.length > 2 * 1024 * 1024) throw new Error("The server text is too large for an inline comparison.");
+			return { entryId, serverPath, serverText, local, capturedAt: snapshot.downloadedAt, check: snapshot.check };
+		} finally { doc.destroy(); }
 	}
 
 	private async captureRecoveryDocuments(records: Pick<ItemRecord, "id" | "type">[], check = () => {}, discovered: DiscoveredRecoveryDocument[] = []): Promise<RecoveryCapture["documents"]> {

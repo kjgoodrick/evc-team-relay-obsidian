@@ -5,6 +5,9 @@ import { CONFLICTS, makeConflict, diff } from "../../src/client/managedRecovery"
 import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
 import type { VaultShare } from "../../src/VaultShare";
 import type { App } from "obsidian";
+import { ManagedRestoreTextModal } from "../../src/ui/ManagedRestoreTextModal";
+
+jest.mock("../../src/ui/ManagedRestoreTextModal", () => ({ ManagedRestoreTextModal: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
 
 jest.mock("obsidian", () => {
 	const enhance = (el: HTMLElement) => Object.assign(el, {
@@ -126,6 +129,19 @@ test.each(["account", "inventory"])("a pending comparison cannot survive a later
 		if (change === "account") s.authChanged(); else s.doc.getMap("filemeta_v0").set("Later.md", { id: "later", type: ItemKind.Document, version: 0 });
 		finish(result); await flush(); expect(s.modal.contentEl.textContent).not.toContain("Local.md → Server.md");
 		s.modal.onClose(); expect(s.authListeners.size).toBe(0);
+	} finally { s.close(); }
+});
+
+test("inventory review opens the selected source only while its captured context is valid", async () => {
+	const s = fixture(), constructor = jest.mocked(ManagedRestoreTextModal); constructor.mockClear();
+	try {
+		s.doc.getMap("managed_base_v1").set("restoreReview", { id: "restore", local: s.conflict.local });
+		const result = Object.assign(await s.inspect(), { check: jest.fn() }); s.inspect.mockResolvedValueOnce(result);
+		const click = (label: string) => [...s.modal.contentEl.querySelectorAll("button")].find(button => button.textContent === label)!.click();
+		click("Compare server inventory"); await flush(); click("Compare source text");
+		expect(constructor).toHaveBeenCalledTimes(1); expect(constructor.mock.calls[0].slice(2)).toEqual([result, "one"]);
+		result.check.mockImplementation(() => { throw new Error("Source account changed"); }); click("Compare source text");
+		expect(constructor).toHaveBeenCalledTimes(1); expect(s.modal.contentEl.textContent).toContain("Source account changed");
 	} finally { s.close(); }
 });
 

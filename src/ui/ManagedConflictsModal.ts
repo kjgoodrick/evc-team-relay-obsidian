@@ -4,6 +4,8 @@ import { CONFLICTS, select, type StructuralConflict } from "../client/managedRec
 import { RECOVERY_FOLDER } from "../conflictCopyPath";
 import type { ManagedRestoreReview, ManagedRestoreInspection } from "../client/ManagedIndexTransport";
 import { compareRestoreInventory, type RestoreInventoryStatus } from "../client/managedRestoreInspection";
+import { ManagedRestoreTextModal } from "./ManagedRestoreTextModal";
+import { ItemKind } from "../ItemKinds";
 
 export class ManagedConflictsModal extends Modal {
 	private busy = false;
@@ -71,6 +73,13 @@ export class ManagedConflictsModal extends Modal {
 			moved: "Same entry at different locations", "local-only": "Retained locally; not currently visible on server", "server-only": "Visible on server; absent from local inventory", ambiguous: "Ambiguous identity or type; manual review needed" };
 		for (const row of rows.slice(this.page * size, (this.page + 1) * size)) {
 			this.contentEl.createEl("p", { text: `${row.localPaths.join(", ") || "No local inventory entry"} → ${row.serverPaths.join(", ") || "Not visible on server"}: ${labels[row.status]}${row.occupiedPath ? ". A different entry also uses this path." : ""}` });
+			const record = row.serverPaths.length === 1 ? inspection.server.records[row.serverPaths[0]] : undefined;
+			if (row.status !== "ambiguous" && record && (record.type === ItemKind.Document || record.type === ItemKind.Canvas)) {
+				new Setting(this.contentEl).setName(row.serverPaths[0]).addButton(button => button.setButtonText("Compare source text").setDisabled(this.busy).onClick(() => {
+					try { inspection.check?.(); new ManagedRestoreTextModal(this.app, this.share, inspection, row.id).open(); }
+					catch (error) { this.error = error instanceof Error ? error.message : String(error); this.inspection = undefined; this.render(); }
+				}));
+			}
 		}
 		if (rows.length > size) new Setting(this.contentEl).setName(`Page ${this.page + 1} of ${Math.ceil(rows.length / size)}`)
 			.addButton(button => button.setButtonText("Previous page").setDisabled(this.page === 0 || this.busy).onClick(() => { this.page--; this.render(); }))

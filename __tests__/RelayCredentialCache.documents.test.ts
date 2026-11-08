@@ -56,6 +56,30 @@ test.each(["session", "endpoint", "clear", "default", "removal"])("source recove
 	if (change === "removal") expect(s.cache.captureDocumentSourceContext("a")).toBeUndefined();
 });
 
+test("source inspection obtains an explicit read grant without borrowing or replacing a cached writer grant", async () => {
+	const s = setup(), binding = { restoreGeneration: generation };
+	const writer = await s.cache.getToken(address, "Note.md", jest.fn(), "a", binding);
+	expect(writer.authorization).toBe("full");
+	const inspected = await s.cache.requestSourceInspectionToken(address, "Note.md", "a", binding);
+	expect(inspected.grant.authorization).toBe("read-only"); expect(inspected.grant).not.toBe(writer);
+	expect(JSON.parse(fetch.mock.calls[1][1]!.body as string).mode).toBe("read");
+	expect(s.cache.peekToken(address, "a", binding)).toBe(writer); inspected.check();
+	s.state.token = jwt("replacement"); expect(inspected.check).toThrow("changed");
+});
+
+test("cancelling source inspection during authentication prevents transmission", async () => {
+	const s = setup(), wait = deferred<string>(); s.state.wait = wait.promise; let cancelled = false;
+	const pending = s.cache.requestSourceInspectionToken(address, "Note.md", "a", { restoreGeneration: generation }, () => { if (cancelled) throw new Error("cancelled"); });
+	cancelled = true; wait.resolve(s.state.token);
+	await expect(pending).rejects.toThrow("cancelled"); expect(fetch).not.toHaveBeenCalled();
+});
+
+test("source inspection refuses an unavailable selected server before any request", async () => {
+	const s = setup();
+	await expect(s.cache.requestSourceInspectionToken(address, "Note.md", "missing", {})).rejects.toThrow("available server");
+	expect(fetch).not.toHaveBeenCalled();
+});
+
 test("identical document IDs on two servers have independent requests, grants and callbacks", async () => {
 	const { cache } = setup(), callbackA = jest.fn(), callbackB = jest.fn();
 	const [a, b] = await Promise.all([cache.getToken(address, "Team/Note.md", callbackA, "a"), cache.getToken(address, "Team/Note.md", callbackB, "b")]);

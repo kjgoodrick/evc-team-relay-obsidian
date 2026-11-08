@@ -882,3 +882,9 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-marker-comparison-columns section { min-width: 0; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); overflow-wrap: anywhere; }
 .relay-marker-comparison-columns h3 { margin-top: 0; }
 .is-mobile .relay-marker-comparison button { min-height: 44px; }
+.evc-restore-text-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: 12px; }
+.evc-restore-text-grid > div { min-width: 0; }
+.evc-restore-text pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow: auto; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.evc-restore-text-added { text-decoration: underline; background: var(--text-selection); }
+.evc-restore-text-removed { text-decoration: line-through; background: var(--background-modifier-error); }
+.is-mobile .evc-restore-text button { min-height: 44px; }

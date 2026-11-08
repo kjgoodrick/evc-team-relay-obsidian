@@ -103,6 +103,27 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 			}
 		} };
 	}
+	/** Recovery inspection never borrows a cached writer grant or subscribes
+	 * for renewal. The explicit read grant and its context live only as long as
+	 * the caller's short-lived source preview. */
+	async requestSourceInspectionToken(documentId: string, filePath: string, serverId: string | undefined, binding: RestoreBinding, checkContext = () => {}): Promise<{ grant: DocumentGrant; check: () => void }> {
+		binding = Object.freeze(restoreMetadata(binding));
+		const address = ResourceAddress.parse(documentId), source = this.captureDocumentSourceContext(serverId);
+		if (!source || !("relayGuid" in address) || !("folderGuid" in address)
+			|| !("documentGuid" in address || "canvasGuid" in address) || ResourceAddress.serialize(address) !== documentId) {
+			throw new Error("A managed source document and available server are required for inspection");
+		}
+		const provider = this.relayOnPremProviders.get(source.serverId)!;
+		const check = () => { source.check(); checkContext(); };
+		check();
+		const id = "documentGuid" in address ? address.documentGuid : address.canvasGuid;
+		const grant = await provider.requestToken(address.relayGuid, address.folderGuid, id, "read", filePath, binding, check);
+		check();
+		if (grant.authorization !== "read-only" || grant.docId !== id || (grant.restoreGeneration ?? null) !== (binding.restoreGeneration ?? null)) {
+			throw new Error("The server did not return the requested read-only source context");
+		}
+		return { grant, check };
+	}
 	private restoreKey(documentId: string, serverId?: string, binding: RestoreBinding = {}): string {
 		return JSON.stringify([this.documentServer(serverId) ?? "legacy", documentId, restoreMetadata(binding).restoreGeneration ?? null]);
 	}

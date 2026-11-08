@@ -19,12 +19,17 @@ import { RemoteFolderAddress, RemoteDocumentAddress, ResourceAddress } from "../
 import type { ManagedRestoreReview } from "../../src/client/ManagedIndexTransport";
 import { openSourceDocumentCache, sourceDocumentCache } from "../../src/storage/source-document-cache";
 import { SOURCE_CACHE_IDENTITY } from "../../src/storage/document-cache-binding";
+import { readManagedSource } from "../../src/client/readManagedSource";
+import type { ManagedRestoreInspection } from "../../src/client/ManagedIndexTransport";
+import { readDocumentRecoverySnapshot } from "../../src/storage/document-recovery-snapshot";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
+jest.mock("../../src/client/readManagedSource", () => ({ readManagedSource: jest.fn() }));
 const fetchMock = platformFetch as jest.Mock;
+const sourceMock = jest.mocked(readManagedSource);
 let root: string;
 const cleanup: (() => void | Promise<void>)[] = [];
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "relay-recovery-test-")); fetchMock.mockReset(); });
+beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "relay-recovery-test-")); fetchMock.mockReset(); sourceMock.mockReset(); });
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); await fs.rm(root, { recursive: true, force: true }); });
 const io = () => ({
 	mkdir: async (p: string) => { await fs.mkdir(path.join(root, p), { recursive: true }); },
@@ -197,6 +202,125 @@ async function restoreFixture() {
 	fetchMock.mockImplementation(() => { throw new Error("Recovery must work offline"); });
 	return { ...state, review };
 }
+
+async function sourceTextFixture() {
+	const state = await restoreFixture(), serverDoc = new Y.Doc();
+	serverDoc.getText("contents").insert(0, "RESTORED SERVER TEXT");
+	const update = Y.encodeStateAsUpdate(serverDoc), stateVector = Y.encodeStateVector(serverDoc); serverDoc.destroy();
+	const inspection: ManagedRestoreInspection = { reviewId: state.review.id, checkedAt: state.review.createdAt,
+		local: state.review.local, server: { ...state.server, restore_guard: true, restore_generation: crypto.randomUUID() }, check: state.checkAuth };
+	sourceMock.mockImplementation(async (_credentials, _address, _path, _server, _binding, options) => {
+		options?.check?.(); return { update, stateVector, downloadedAt: "2026-11-08T00:00:00Z", check: () => options?.check?.() };
+	});
+	return { ...state, inspection, update, name: `${state.host}-relay-doc-${state.note.id}` };
+}
+
+test("source comparison keeps local history, buffer, disk and restored text distinct without writing", async () => {
+	const s = await sourceTextFixture(), before = await readDocumentRecoverySnapshot(s.name), index = Y.encodeStateAsUpdate(s.share.crdtDoc);
+	const result = await s.share.inspectManagedRestoreText(s.inspection, s.note.id);
+	expect(result.serverText).toBe("RESTORED SERVER TEXT");
+	expect(result.local).toEqual([
+		{ label: "Local editing history", text: "OFFLINE EDIT IN INDEXEDDB" },
+		{ label: "Local unsaved buffer", text: "UNSAVED EDITOR BUFFER" },
+		{ label: "Local file on disk", text: "OFFLINE DISK EDIT" },
+	]);
+	const parent = s.share.resourceAddress as RemoteFolderAddress;
+	expect(sourceMock).toHaveBeenCalledWith(s.share.credentialCache,
+		ResourceAddress.serialize(new RemoteDocumentAddress(parent.relayGuid, parent.folderGuid, s.note.id)), "Team/Remote.md", "test-server",
+		{ restoreGeneration: s.inspection.server.restore_generation }, expect.objectContaining({ check: expect.any(Function) }));
+	expect(await readDocumentRecoverySnapshot(s.name)).toEqual(before);
+	expect(await fs.readFile(path.join(root, "Team/Local.md"), "utf8")).toBe("OFFLINE DISK EDIT");
+	expect(await s.share.unsavedStore.readUnsaved(s.note.id)).toBe("UNSAVED EDITOR BUFFER");
+	expect(Y.encodeStateAsUpdate(s.share.crdtDoc)).toEqual(index); expect(fetchMock).not.toHaveBeenCalled();
+	result.check(); s.config.onpremServerId = "different"; expect(result.check).toThrow("changed");
+});
+
+test("server-only text inspection creates no retained cache or local buffer", async () => {
+	const s = await sourceTextFixture(), id = crypto.randomUUID(), cacheName = `${s.host}-relay-doc-${id}`;
+	s.inspection.server.records = { "New.md": { ...s.note, id } };
+	expect((await s.share.inspectManagedRestoreText(s.inspection, id)).local).toEqual([]);
+	expect((await readDocumentRecoverySnapshot(cacheName)).exists).toBe(false);
+	expect(await s.share.unsavedStore.readUnsaved(id)).toBeNull();
+});
+
+test("existing canvas source can be inspected as JSON without opening a canvas editor", async () => {
+	const s = await sourceTextFixture(), id = crypto.randomUUID(), doc = new Y.Doc();
+	s.inspection.server.records = { "Restored.canvas": { id, type: ItemKind.Canvas, version: 0 } };
+	doc.getMap("nodes").set("node", { id: "node", type: "text", text: "before", x: 0, y: 0, width: 200, height: 100 });
+	doc.getText("node").insert(0, "current node text");
+	const update = Y.encodeStateAsUpdate(doc), stateVector = Y.encodeStateVector(doc); doc.destroy();
+	sourceMock.mockResolvedValueOnce({ update, stateVector, downloadedAt: "2026-11-08T00:00:00Z", check: s.checkAuth });
+	const result = await s.share.inspectManagedRestoreText(s.inspection, id);
+	expect(JSON.parse(result.serverText)).toMatchObject({ edges: [], nodes: [{ id: "node", text: "current node text" }] });
+	expect(result.local).toEqual([]); expect(s.share.trackedEntries.size).toBe(0);
+});
+
+test("source comparison includes live unsaved work without appending it to the retained cache", async () => {
+	const s = await sourceTextFixture(), before = await readDocumentRecoverySnapshot(s.name), liveDoc = new Y.Doc();
+	Y.applyUpdate(liveDoc, before.update); liveDoc.getText("contents").insert(liveDoc.getText("contents").length, " + LIVE");
+	const live = Object.create(Document.prototype) as Document;
+	Object.assign(live, { entityGuid: s.note.id, _parent: s.share, crdtDoc: liveDoc, _unsavedFile: { unsavedText: "LIVE BUFFER" } });
+	s.share.trackedEntries.set(s.note.id, live);
+	try {
+		const result = await s.share.inspectManagedRestoreText(s.inspection, s.note.id);
+		expect(result.local.slice(0, 2)).toEqual([{ label: "Local editing history", text: "OFFLINE EDIT IN INDEXEDDB + LIVE" }, { label: "Local unsaved buffer", text: "LIVE BUFFER" }]);
+		expect(await readDocumentRecoverySnapshot(s.name)).toEqual(before);
+	} finally { liveDoc.destroy(); }
+});
+
+test.each(["duplicate server", "duplicate local", "different type", "unsafe server path", "unsafe local path", "missing check"])("source comparison rejects %s before downloading", async kind => {
+	const s = await sourceTextFixture();
+	if (kind === "duplicate server") s.inspection.server.records["Other.md"] = s.note;
+	if (kind === "duplicate local") s.inspection.local["Other.md"] = s.note;
+	if (kind === "different type") s.inspection.local["Local.md"] = { ...s.note, type: ItemKind.Canvas };
+	if (kind === "unsafe server path") s.inspection.server.records = { "../Other.md": s.note };
+	if (kind === "unsafe local path") s.inspection.local = { "../Other.md": s.note };
+	if (kind === "missing check") delete s.inspection.check;
+	await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id)).rejects.toThrow(); expect(sourceMock).not.toHaveBeenCalled();
+});
+
+test.each(["stored host", "stored address", "live owner", "live kind"])("source comparison refuses a mismatched %s", async kind => {
+	const s = await sourceTextFixture(), doc = new Y.Doc();
+	try {
+		if (kind.startsWith("stored")) {
+			const store = new LocalDocumentStore(s.name, doc); await store.whenSynced;
+			await store.set(kind === "stored host" ? "appId" : "s3rn", "different"); await store.close();
+		} else if (kind === "live owner") {
+			const live = Object.create(Document.prototype) as Document;
+			Object.assign(live, { _parent: {}, crdtDoc: doc }); s.share.trackedEntries.set(s.note.id, live);
+		} else s.share.trackedEntries.set(s.note.id, {} as Document);
+		await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id)).rejects.toThrow(); expect(sourceMock).not.toHaveBeenCalled();
+	} finally { doc.destroy(); }
+});
+
+test.each(["invalid utf8", "large disk", "large buffer", "moved file"])("source comparison rejects %s without fetching server text", async kind => {
+	const s = await sourceTextFixture();
+	if (kind === "invalid utf8") await fs.writeFile(path.join(root, "Team/Local.md"), new Uint8Array([255]));
+	if (kind === "large disk") s.vault.readBinary = async () => new Uint8Array(2 * 1024 * 1024 + 1).buffer;
+	if (kind === "large buffer") await s.share.unsavedStore.persistUnsaved(s.note.id, "a".repeat(2 * 1024 * 1024 + 1));
+	if (kind === "moved file") s.vault.readBinary = async file => { file.path = "Team/Moved.md"; return new ArrayBuffer(0); };
+	await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id)).rejects.toThrow(); expect(sourceMock).not.toHaveBeenCalled();
+});
+
+test.each(["account", "generation", "parent", "cancelled"])("a %s change during a local read prevents the source request", async kind => {
+	const s = await sourceTextFixture(), abort = new AbortController();
+	s.vault.readBinary = async () => {
+		if (kind === "account") s.checkAuth.mockImplementation(() => { throw new Error("Account changed"); });
+		if (kind === "generation") s.inspection.server.restore_generation = crypto.randomUUID();
+		if (kind === "parent") Object.assign(s.share, { _resourceAddress: new RemoteFolderAddress(crypto.randomUUID(), crypto.randomUUID()) });
+		if (kind === "cancelled") abort.abort();
+		return new ArrayBuffer(0);
+	};
+	await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id, abort.signal)).rejects.toThrow(); expect(sourceMock).not.toHaveBeenCalled();
+});
+
+test("source comparison refuses a changed inventory after the server download", async () => {
+	const s = await sourceTextFixture(), implementation = sourceMock.getMockImplementation()!;
+	sourceMock.mockImplementationOnce(async (...args) => {
+		const result = await implementation(...args); s.inspection.server.records = {}; return result;
+	});
+	await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id)).rejects.toThrow("changed");
+});
 
 test("shared-folder restore inspection retains source state and fences a changing account or folder", async () => {
 	const s = await restoreFixture(), before = Y.encodeStateAsUpdate(s.share.crdtDoc);

@@ -12,6 +12,7 @@ import type { AuthSession } from "../../src/AuthSession";
 import type { IAuthProvider } from "../../src/auth/IAuthProvider";
 import { LocalDocumentStore } from "../../src/storage/local-document-store";
 import { openSourceDocumentCache, type SourceDocumentIdentity } from "../../src/storage/source-document-cache";
+import { readManagedSource } from "../../src/client/readManagedSource";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 
@@ -112,6 +113,11 @@ integration("managed document sockets reject original grants after generation ro
 		fresh.text.insert(fresh.text.length, "bound edit\n");
 		const currentReader = await peer(await grant("read", generation));
 		await until(() => currentReader.text.toString() === fresh.text.toString(), "fresh bound write/read");
+		const sourceBefore = Y.encodeStateAsUpdate(fresh.backing.crdtDoc);
+		const preview = await readManagedSource(writer.cache, ResourceAddress.serialize(address), "Note.md", "fixture", { restoreGeneration: generation });
+		const inspected = new Y.Doc({ gc: false }); docs.push(inspected); Y.applyUpdate(inspected, preview.update);
+		expect(inspected.getText("contents").toString()).toBe("content before rotation\nbound edit\n");
+		expect(Y.encodeStateAsUpdate(fresh.backing.crdtDoc)).toEqual(sourceBefore); expect(() => preview.check()).not.toThrow();
 		expect(currentReader.text.toString()).not.toContain("OLD OFFLINE");
 		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
 		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
