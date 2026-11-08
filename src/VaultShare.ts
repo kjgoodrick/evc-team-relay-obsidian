@@ -18,7 +18,7 @@ import { dirname, join, sep } from "path-browserify";
 
 import * as Y from "yjs";
 import { CONFLICTS, select, touches, type Records, type StructuralConflict } from "./client/managedRecovery";
-import type { ManagedRestoreReview } from "./client/ManagedIndexTransport";
+import type { ManagedRestoreReview, ManagedRestoreInspection } from "./client/ManagedIndexTransport";
 import { prepareRecoveryBackup, sameCapture, type RecoveryCapture, type RecoveryIO } from "./ManagedRecoveryBackup";
 import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
@@ -473,6 +473,22 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	openManagedConflicts(): void { new ManagedConflictsModal(this.obsidianApp, this).open(); }
+
+	async inspectManagedRestore(): Promise<ManagedRestoreInspection> {
+		const provider = this._liveProvider, index = provider?.managedIndex;
+		if (!index) throw new Error("Connect this shared folder to load its server inventory");
+		const credentials = this.credentialCache, server = this.config.onpremServerId, sharePath = this.path;
+		const address = ResourceAddress.serialize(this.resourceAddress), checkAuth = credentials.captureFileContext(address, server);
+		const source = credentials.captureDocumentSourceContext?.(server);
+		if (!source) throw new Error("The selected server is unavailable. Reconnect it before reading the current inventory.");
+		const check = () => {
+			if (this.isTornDown || this.isRecoveringStructure || this._liveProvider !== provider || provider.managedIndex !== index
+				|| this.credentialCache !== credentials || this.config.onpremServerId !== server || this.path !== sharePath
+				|| ResourceAddress.serialize(this.resourceAddress) !== address) throw new Error("The shared folder changed. Refresh the restore comparison.");
+			checkAuth(); source.check();
+		};
+		check(); return index.inspectRestore(check);
+	}
 
 	private async captureRecoveryDocuments(records: Pick<ItemRecord, "id" | "type">[], check = () => {}, discovered: DiscoveredRecoveryDocument[] = []): Promise<RecoveryCapture["documents"]> {
 		const documents: RecoveryCapture["documents"] = [], kinds = new Map<string, ItemKind>();

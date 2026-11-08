@@ -49,6 +49,10 @@ integration("actual restored inventory fences old local work while fresh bound c
 		const final = await (await fetch(endpoint, { headers })).json() as ManagedManifest;
 		expect(final.records["Moved bound note.md"]).toEqual(added); expect(final.records["New bound note.md"]).toBeUndefined();
 		expect(final.activity[added.id]).toBe("bound activity"); expect(final.records[path]).toEqual(entry);
+		const retained = Y.encodeStateAsUpdate(reopened.doc), inspected = await reopened.transport.inspectRestore();
+		expect(inspected.local).toEqual(local); expect(inspected.server).toEqual(final);
+		expect(Y.encodeStateAsUpdate(reopened.doc)).toEqual(retained); expect(reopened.transport.isBlocked(path)).toBe(true);
+		await expect(reopened.transport.flush()).rejects.toThrow("restored");
 		expect(reopened.records.toJSON()).toEqual(local); expect(reopened.transport.restoreReview).toEqual(old.transport.restoreReview);
 	} finally { transports.forEach(transport => transport.destroy()); documents.forEach(doc => doc.destroy()); }
 }, 30_000);

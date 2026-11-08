@@ -10,11 +10,11 @@ const note = (id: string): ItemRecord => ({ id, type: ItemKind.Document, version
 const empty = (): ManagedManifest => ({ records: {}, permissions: {}, activity: {}, owner: true });
 const transports: ManagedIndexTransport[] = [];
 const documents: Y.Doc[] = [];
-function setup(bytes?: Uint8Array) {
+function setup(bytes?: Uint8Array, credentials = () => ({ endpoint: "https://cp.test/v1/managed/index/share", token: "grant" })) {
 	const doc = new Y.Doc(); documents.push(doc);
 	if (bytes) Y.applyUpdate(doc, bytes);
 	const failed = jest.fn();
-	const transport = new ManagedIndexTransport(doc, () => ({ endpoint: "https://cp.test/v1/managed/index/share", token: "grant" }), jest.fn(), failed);
+	const transport = new ManagedIndexTransport(doc, credentials, jest.fn(), failed);
 	transports.push(transport);
 	return { doc, transport, failed, records: doc.getMap<ItemRecord>("filemeta_v0") };
 }
@@ -23,6 +23,55 @@ afterEach(() => { transports.splice(0).forEach(t => t.destroy()); documents.spli
 
 const baseId = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const restored = (snapshot = empty(), generation = baseId(80)): ManagedManifest => ({ ...snapshot, restore_guard: true, restore_generation: generation });
+
+function pausedInspection(credentials?: () => { endpoint: string; token: string }) {
+	const s = setup(undefined, credentials), before = { ...empty(), records: { "Old.md": note("one") } };
+	s.doc.getMap("managed_base_v1").set("snapshot", before);
+	s.records.set("Local.md", note("one"));
+	s.doc.getMap("managed_base_v1").set("restoreReview", { id: "review", createdAt: "2026-11-08T00:00:00Z", before, observed: restored(before), local: s.records.toJSON(), activity: {} });
+	return s;
+}
+
+test("restore inspection reads current visible inventory without applying it or reopening queued work", async () => {
+	const s = pausedInspection(), before = Y.encodeStateAsUpdate(s.doc);
+	const latest = restored({ ...empty(), records: { "Current.md": note("one"), "Added.md": note("two") } }, baseId(81));
+	fetchMock.mockResolvedValueOnce(response(200, latest));
+	expect(await s.transport.inspectRestore()).toMatchObject({ reviewId: "review", local: { "Local.md": note("one") }, server: latest });
+	expect(fetchMock.mock.calls.map(call => call[1]?.method)).toEqual(["GET"]);
+	expect(Y.encodeStateAsUpdate(s.doc)).toEqual(before); expect(s.transport.owner).toBe(false);
+	expect(s.transport.permissions).toEqual({}); expect(s.transport.isBlocked("Current.md")).toBe(true);
+	await expect(s.transport.flush()).rejects.toThrow("restored"); expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test.each(["local edit", "review", "stop", "destroy", "endpoint", "token", "external context"])("restore inspection discards a late response after %s changes", async change => {
+	const credentials = { endpoint: "https://cp.test/v1/managed/index/share", token: "grant" }, s = pausedInspection(() => ({ ...credentials }));
+	let finish!: (response: Response) => void, invalidated = false;
+	fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+	const pending = s.transport.inspectRestore(() => { if (invalidated) throw new Error("changed"); });
+	if (change === "local edit") s.records.set("Later.md", note("later"));
+	if (change === "review") s.doc.getMap("managed_base_v1").set("restoreReview", { ...s.transport.restoreReview, id: "later" });
+	if (change === "stop") s.transport.stop();
+	if (change === "destroy") s.transport.destroy();
+	if (change === "endpoint") credentials.endpoint = "https://replacement.test";
+	if (change === "token") credentials.token = "different-account";
+	if (change === "external context") invalidated = true;
+	finish(response(200, restored())); await expect(pending).rejects.toThrow("changed");
+	expect(s.records.get("Local.md")).toEqual(note("one"));
+});
+
+test("restore inspection rechecks context after response body parsing", async () => {
+	const s = pausedInspection();
+	fetchMock.mockResolvedValueOnce({ ok: true, status: 200, text: async () => { s.records.set("Later.md", note("later")); return JSON.stringify(restored()); } } as Response);
+	await expect(s.transport.inspectRestore()).rejects.toThrow("changed");
+});
+
+test("failed restore inspection remains retryable without writing or clearing review", async () => {
+	const s = pausedInspection(), before = Y.encodeStateAsUpdate(s.doc);
+	fetchMock.mockResolvedValueOnce(response(403, {})); await expect(s.transport.inspectRestore()).rejects.toThrow("403");
+	expect(Y.encodeStateAsUpdate(s.doc)).toEqual(before);
+	fetchMock.mockResolvedValueOnce(response(200, restored())); await expect(s.transport.inspectRestore()).resolves.toMatchObject({ reviewId: "review" });
+	expect(fetchMock.mock.calls.every(call => call[1]?.method === "GET")).toBe(true);
+});
 
 test("source transfer contexts require a loaded inventory and expire on restore or stop", async () => {
 	const s = setup();

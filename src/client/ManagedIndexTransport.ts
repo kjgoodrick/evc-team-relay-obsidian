@@ -20,6 +20,12 @@ export interface ManagedRestoreReview {
 	local: Records; activity: Record<string, string>;
 }
 
+export interface ManagedRestoreInspection {
+	reviewId: string; checkedAt: string; local: Records; server: ManagedManifest;
+	/** Transient view validity; never serialized into an archive or decision. */
+	check?: () => void;
+}
+
 const restoreBinding = (value: Pick<ManagedManifest, "restore_guard" | "restore_generation">): RestoreBinding => {
 	const context = restoreContext(value.restore_guard, value.restore_generation);
 	if (context?.generation && !context.supported) throw new Error("The server cannot safely synchronize this restored share. Local work is retained.");
@@ -34,6 +40,7 @@ export class ManagedIndexTransport {
 	private timer?: ReturnType<typeof setTimeout>;
 	private running?: Promise<unknown>;
 	private stopped = false;
+	private destroyed = false;
 	private connected = false;
 	private generation = 0;
 	private readonly changed = (_update: Uint8Array, origin: unknown) => {
@@ -61,7 +68,7 @@ export class ManagedIndexTransport {
 		this.connected = false;
 		this.status(false);
 	}
-	destroy(): void { this.stop(); this.doc.off("update", this.changed); }
+	destroy(): void { this.destroyed = true; this.stop(); this.doc.off("update", this.changed); }
 
 	registered(path: string, id: string): boolean {
 		return !this.restoreReview && this.doc.getMap<ManagedManifest>(BASE).get("snapshot")?.records[path]?.id === id;
@@ -131,6 +138,28 @@ export class ManagedIndexTransport {
 
 	get conflicts(): StructuralConflict[] { return [...this.doc.getMap<StructuralConflict>(CONFLICTS).values()]; }
 	get restoreReview(): ManagedRestoreReview | undefined { return this.doc.getMap<ManagedRestoreReview>(BASE).get("restoreReview"); }
+	/** Read current visible inventory without applying it, adopting its lineage,
+	 * restarting the exchange loop or publishing any retained local work. */
+	async inspectRestore(checkContext = () => {}): Promise<ManagedRestoreInspection> {
+		const review = this.restoreReview;
+		if (!review) throw new Error("This shared folder has no restore review to inspect");
+		const reviewText = JSON.stringify(review), localText = JSON.stringify(this.doc.getMap<ItemRecord>("filemeta_v0").toJSON());
+		const credentials = this.credentials(), generation = this.generation;
+		const check = () => {
+			checkContext();
+			const current = this.credentials();
+			if (this.destroyed || this.doc.isDestroyed || generation !== this.generation
+				|| current.endpoint !== credentials.endpoint || current.token !== credentials.token
+				|| JSON.stringify(this.restoreReview) !== reviewText || JSON.stringify(this.doc.getMap("filemeta_v0").toJSON()) !== localText) {
+				throw new Error("The restore review or connection changed. Refresh the comparison; local work is retained.");
+			}
+		};
+		check();
+		const response = await platformFetch(credentials.endpoint, { method: "GET", sensitive: true, headers: { Authorization: `Bearer ${credentials.token}` } });
+		check();
+		const server = await this.manifest(response); check();
+		return { reviewId: review.id, checkedAt: new Date().toISOString(), local: JSON.parse(localText) as Records, server, check };
+	}
 	/** Bind a source transfer before its first asynchronous read. */
 	captureContentContext(path: string, id: string): { binding: RestoreBinding; check: () => void } {
 		if (!this.doc.getMap(BASE).has("snapshot")) throw new Error("Wait for the shared file inventory before transferring a file");

@@ -198,6 +198,21 @@ async function restoreFixture() {
 	return { ...state, review };
 }
 
+test("shared-folder restore inspection retains source state and fences a changing account or folder", async () => {
+	const s = await restoreFixture(), before = Y.encodeStateAsUpdate(s.share.crdtDoc);
+	await expect(s.share.inspectManagedRestore()).rejects.toThrow("selected server is unavailable"); expect(fetchMock).not.toHaveBeenCalled();
+	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: "test-server", controlPlaneUrl: "https://fixture.test", check: s.checkAuth });
+	fetchMock.mockImplementationOnce(async () => ({ ok: true, status: 200, text: async () => JSON.stringify(s.server) }));
+	const inspected = await s.share.inspectManagedRestore(); expect(inspected.server).toEqual(s.server);
+	expect(Y.encodeStateAsUpdate(s.share.crdtDoc)).toEqual(before); expect(s.checkAuth).toHaveBeenCalled();
+	let finish!: (value: unknown) => void;
+	fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+	const pending = s.share.inspectManagedRestore(); s.config.onpremServerId = "different-server";
+	finish({ ok: true, status: 200, text: async () => JSON.stringify(s.server) });
+	await expect(pending).rejects.toThrow("changed");
+	expect(Y.encodeStateAsUpdate(s.share.crdtDoc)).toEqual(before); expect(fetchMock.mock.calls.every(call => call[1]?.method === "GET")).toBe(true);
+});
+
 test("paused-share archive preserves original and multiple restored histories without merging their bytes or buffers", async () => {
 	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress;
 	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: "test-server", controlPlaneUrl: "https://fixture.test", check: s.checkAuth });
