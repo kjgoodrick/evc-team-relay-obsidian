@@ -1,6 +1,6 @@
 import type { Draft, OutboxOperation } from "./DiscussionStore";
 
-export interface LocalDraftItem { draft: Draft; pendingSend: boolean; recovery: boolean }
+export interface LocalDraftItem { draft: Draft; pendingSend: boolean; recovery: boolean; imported?: boolean }
 export interface LocalWorkPage<T, C> { items: T[]; next?: C }
 export type WaitingState = "review" | "rejected" | "sending" | "queued";
 export interface WaitingCursor { state: WaitingState; id: string }
@@ -21,7 +21,8 @@ export async function localDraftPage(tx: IDBTransaction, after?: string, limit =
 	const drafts = await read(tx.objectStore("drafts").getAll(after === undefined ? undefined : IDBKeyRange.lowerBound(after, true), limit + 1)) as Draft[];
 	const more = drafts.length > limit; drafts.length = Math.min(drafts.length, limit);
 	const preferences = tx.objectStore("preferences"), items: LocalDraftItem[] = [];
-	for (const draft of drafts) items.push({ draft, pendingSend: !!await read(preferences.get("online:" + draft.id)), recovery: !!await read(preferences.get("recovery:" + draft.id)) });
+	for (const draft of drafts) items.push({ draft, pendingSend: !!await read(preferences.get("online:" + draft.id)), recovery: !!await read(preferences.get("recovery:" + draft.id)),
+		...(await read(preferences.get("importedDraft:" + draft.id)) ? { imported: true } : {}) });
 	return { items, ...(more ? { next: drafts[drafts.length - 1].id } : {}) };
 }
 export async function waitingWorkPage(tx: IDBTransaction, after?: WaitingCursor, limit = 10): Promise<LocalWorkPage<OutboxOperation, WaitingCursor>> {

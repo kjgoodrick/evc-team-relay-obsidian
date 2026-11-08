@@ -19,9 +19,10 @@ Pictures already stored only on the server are references, not included files.
 
 Some waiting changes may already have reached the server. Do not replay these
 requests or replace a live database with this copy. Delivery must be reconciled
-and content reviewed before any future import or send. This preview has no import
-command. The JSON preserves rich content, targets and original request identities
-for manual recovery and future reviewed import.
+and content reviewed before any future send. Comment storage can inspect this
+folder and restore ordinary drafts as separate local copies for editing. It does
+not resume waiting requests or unconfirmed actions. The JSON preserves rich
+content, targets and original request identities for reviewed recovery.
 
 COMPLETE.json records the verified manifest hash. A folder without it is incomplete.
 The manifest records original picture hashes and lengths. Keep the folder together.

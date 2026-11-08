@@ -6,6 +6,7 @@ import type { LocalWorkSummary } from "../storage/LocalWorkRecords";
 import { CommentLocalWorkModal } from "./CommentLocalWork";
 import type { LocalWorkIO } from "../LocalWorkRecovery";
 import { commentArchiveIO } from "./CommentArchiveIO";
+import { CommentRecoveryImportModal } from "./CommentRecoveryImport";
 
 const mib = 1024 * 1024;
 const size = (bytes: number) => `${(bytes / mib).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`;
@@ -15,6 +16,7 @@ const size = (bytes: number) => `${(bytes / mib).toLocaleString(undefined, { max
 export class CommentStorageModal extends Modal {
 	private work?: CommentLocalWorkModal;
 	private archive?: DiscussionExportModal;
+	private importer?: CommentRecoveryImportModal;
 	private archiveButton?: HTMLButtonElement;
 	private live = true;
 	private busy = false;
@@ -37,7 +39,7 @@ export class CommentStorageModal extends Modal {
 	private retained?: LocalWorkSummary;
 	constructor(app: App, private session: DiscussionSession, private context: () => boolean, private recoveryIO?: LocalWorkIO) { super(app); }
 	private current = () => this.live && this.context() && this.session.status !== "closed";
-	validate(): void { if (this.live && !this.current()) this.close(); else { this.work?.validate(); this.archive?.validate(); } }
+	validate(): void { if (this.live && !this.current()) this.close(); else { this.work?.validate(); this.archive?.validate(); this.importer?.validate(); } }
 	async onOpen(): Promise<void> {
 		this.setTitle("Comment storage on this device");
 		this.contentEl.createEl("p", { text: "Applies to this shared folder in this vault for the signed-in account. Saved drafts, queued changes and their original pictures are retained separately from downloaded pictures." });
@@ -65,7 +67,9 @@ export class CommentStorageModal extends Modal {
 		this.clear.onclick = () => { void this.change(() => this.session.clearDownloadedPictures(), "Downloaded pictures cleared. Saved work and original pictures are retained.", false); };
 		this.contentEl.createEl("p", { text: "Lowering the limit removes the least recently used downloads first. Pictures load again when opened online. Visible pictures may remain in memory until their view closes." });
 		this.contentEl.createEl("h3", { text: "Save a recovery copy" });
-		this.contentEl.createEl("p", { text: "Save this account's drafts, waiting changes, unconfirmed actions and retained original pictures in the local recovery folder. This is an unencrypted local copy; other sync or backup tools may copy it. Shared discussion history and server-only pictures are not included. Nothing is sent or discarded. Import is not available in this preview." });
+		this.contentEl.createEl("p", { text: "Save this account's drafts, waiting changes, unconfirmed actions and retained original pictures in the local recovery folder. This is an unencrypted local copy; other sync or backup tools may copy it. Shared discussion history and server-only pictures are not included. Nothing is sent or discarded. Ordinary drafts can be reviewed and restored locally; waiting requests require separate delivery checks." });
+		const reviewCopy = this.contentEl.createEl("button", { text: "Review a recovery copy", attr: { type: "button" } });
+		reviewCopy.onclick = () => { if (!this.current() || this.busy) return; this.importer?.close(); this.importer = new CommentRecoveryImportModal(this.app, this.session, this.current); this.importer.open(); };
 		this.recoverySummary = this.contentEl.createDiv();
 		this.exportButton = this.contentEl.createEl("button", { text: "Save recovery copy", attr: { type: "button" } });
 		this.exportButton.onclick = () => { void this.exportWork(); };
@@ -152,7 +156,7 @@ export class CommentStorageModal extends Modal {
 		finally { this.busy = false; if (this.current()) { await this.refresh(); this.controls(); } }
 	}
 	onClose(): void {
-		this.live = false; this.archive?.close(); this.archive = undefined; this.work?.close(); this.work = undefined; this.stop?.(); this.stop = undefined;
+		this.live = false; this.importer?.close(); this.importer = undefined; this.archive?.close(); this.archive = undefined; this.work?.close(); this.work = undefined; this.stop?.(); this.stop = undefined;
 		if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearTimeout(this.timer);
 		this.timer = undefined; this.contentEl.empty();
 	}

@@ -10,6 +10,8 @@ import { v4 as uuid } from "uuid";
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, resolvePendingBaseGroupAnchor, type PendingBaseGroupAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { DiscussionReattachment } from "./DiscussionReattachment";
 import { saveLocalWorkRecovery, type LocalWorkIO } from "./LocalWorkRecovery";
+import { restoreLocalDraft } from "./LocalDraftImport";
+import type { InspectedLocalWork, LocalWorkImportIO } from "./LocalWorkImport";
 import type { ReviewedAbandonment } from "./storage/DiscussionStore";
 import { editableCommentDraft } from "./ui/CommentDraft";
 import { parseBody } from "./DiscussionProtocol";
@@ -143,6 +145,11 @@ export class DiscussionSession {
 	async saveLocalWorkRecovery(io: LocalWorkIO, visible: () => boolean, retainedId?: string, progress?: (text: string) => void): Promise<string> {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		return this.trackLocal(saveLocalWorkRecovery(this.store, io, () => !this.closed && visible(), retainedId, progress)
+			.finally(() => { if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); } }));
+	}
+	async restoreLocalDraft(io: LocalWorkImportIO, copy: InspectedLocalWork, draftId: string, visible: () => boolean, progress?: (text: string) => void) {
+		if (this.closed) throw new Error("This discussion account is closed.");
+		return this.trackLocal(restoreLocalDraft(this.store, io, copy, draftId, () => !this.closed && visible(), progress)
 			.finally(() => { if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); } }));
 	}
 	async saveDiscussionExport(scopeId: string, io: LocalWorkIO, visible: () => boolean, includePictures = true, progress?: (text: string) => void): Promise<string> {

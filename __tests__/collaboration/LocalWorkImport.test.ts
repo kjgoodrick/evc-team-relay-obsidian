@@ -5,6 +5,8 @@ import { saveLocalWorkRecovery, type LocalWorkIO } from "../../src/collaboration
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { pictureHash, prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
+import { recoveryDraftReview, restoreLocalDraft } from "../../src/collaboration/LocalDraftImport";
+import { pictureIds } from "../../src/collaboration/PictureProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -126,5 +128,72 @@ test("local I/O failures never expose paths or arbitrary provider error text", a
 		await expect(inspectLocalWorkRecovery(f.io, f.path, () => true)).rejects.toThrow("invalid");
 		const error = await inspectLocalWorkRecovery(f.io, f.path, () => true).catch(value => value);
 		expect(String(error)).not.toMatch(/private|secret|adapter/);
+	} finally { f.close(); }
+});
+
+test("reviewed restore keeps rich content and target, remaps original and undo pictures and never queues imported requests", async () => {
+	const f = await fixture(), destination = await DiscussionStore.open({ ...identity, vaultId: "another-device" }, new IDBFactory());
+	try {
+		await f.rewrite(data => {
+			data.drafts[0].target = { version: 1, type: "note" };
+			data.drafts[0].body.text = "Misleading projection";
+			data.drafts[0].body.editBaseRevision = 7;
+			data.drafts[0].body.undoPictures = [{ type: "picture", picture_id: id(20), alt: "Undo" }];
+		});
+		const copy = await inspectLocalWorkRecovery(f.io, f.path, () => true), originals = new Map(f.binaries), texts = new Map(f.texts);
+		const review = recoveryDraftReview(copy, "draft", destination.identity);
+		expect(review).toMatchObject({ originalPictures: 1, missingPictures: 0 }); expect(review.body.text).toContain("Private saved draft");
+		const restored = await restoreLocalDraft(destination, f.io, copy, "draft", () => true);
+		const draft = (await destination.getDraft(restored.receipt.draftId))!, ids = pictureIds(draft.body, true);
+		expect(ids).toHaveLength(1); expect(ids[0]).not.toBe(id(20));
+		expect(draft.target).toEqual({ version: 1, type: "note" }); expect(draft.body).toMatchObject({ editBaseRevision: 7, undoPictures: [{ type: "picture", picture_id: ids[0], alt: "Undo" }] });
+		expect(await destination.pictureSource(ids[0], scope)).toMatchObject({ bytes: new Uint8Array([1, 2, 3]).buffer });
+		expect(await destination.storageUsage()).toMatchObject({ drafts: 1, queued: 0, sending: 0, rejected: 0, review: 0, savedPictures: 1 });
+		expect(await destination.getOperation(id(4))).toBeUndefined();
+		expect((await restoreLocalDraft(destination, f.io, copy, "draft", () => true)).receipt).toEqual(restored.receipt);
+		expect(await destination.storageUsage()).toMatchObject({ drafts: 1, savedPictures: 1, savedPictureBytes: 3 });
+		expect(f.binaries).toEqual(originals); expect(f.texts).toEqual(texts);
+	} finally { destination.close(); f.close(); }
+});
+
+test.each(["online", "recovery", "operation", "unknown", "mentions", "picture_scope", "account"])("refuses unsafe draft recovery: %s", async kind => {
+	const f = await fixture();
+	try {
+		await f.rewrite(data => {
+			if (kind === "online" || kind === "recovery") data.actions.push({ key: kind + ":draft", value: {} });
+			if (kind === "operation") data.operations[0].reviewDraftId = "draft";
+			if (kind === "unknown") data.drafts[0].body = { unknown: "Keep this content" };
+			if (kind === "mentions") data.drafts[0].body = { text: "text", mentions: [{ start: -1, end: 1, userId: id(1) }] };
+			if (kind === "picture_scope") data.pictures[0].scopeId = id(99);
+			if (kind === "account") data.identity.accountId = id(99);
+		});
+		const copy = await inspectLocalWorkRecovery(f.io, f.path, () => true), before = await f.store.storageUsage();
+		await expect(restoreLocalDraft(f.store, f.io, copy, "draft", () => true)).rejects.toThrow();
+		expect(await f.store.storageUsage()).toEqual(before);
+	} finally { f.close(); }
+});
+
+test.each(["manifest", "picture", "context"])("changes to %s after review prevent any restored draft", async kind => {
+	const f = await fixture();
+	try {
+		const copy = await inspectLocalWorkRecovery(f.io, f.path, () => true), before = await f.store.storageUsage();
+		if (kind === "manifest") await f.rewrite(data => { data.drafts[0].body.text = "Changed"; });
+		if (kind === "picture") f.binaries.set(f.path + "/pictures/00001.bin", new Uint8Array([9, 8, 7]).buffer);
+		let current = true;
+		await expect(restoreLocalDraft(f.store, f.io, copy, "draft", () => current, text => { if (kind === "context" && text.startsWith("Saving")) current = false; })).rejects.toThrow();
+		expect(await f.store.storageUsage()).toEqual(before);
+	} finally { f.close(); }
+});
+
+test("server-only picture references are counted explicitly and copied without a remote fetch", async () => {
+	const f = await fixture();
+	try {
+		await f.rewrite(data => { data.pictures = []; });
+		const copy = await inspectLocalWorkRecovery(f.io, f.path, () => true);
+		expect(recoveryDraftReview(copy, "draft", f.store.identity)).toMatchObject({ originalPictures: 0, missingPictures: 1 });
+		jest.mocked(f.io.readBinary).mockClear();
+		const result = await restoreLocalDraft(f.store, f.io, copy, "draft", () => true);
+		expect(pictureIds((await f.store.getDraft(result.receipt.draftId))!.body, true)).toEqual([id(20)]);
+		expect(f.io.readBinary).not.toHaveBeenCalled();
 	} finally { f.close(); }
 });

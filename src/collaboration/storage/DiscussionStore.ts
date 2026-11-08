@@ -8,6 +8,7 @@ import { INBOX_KEY, parseInboxLocalState, forgetInboxScope, type InboxLocalState
 import { pictureCacheLimit, validPictureCacheLimit, type DiscussionStorageUsage } from "./CachePolicy";
 import { LOCAL_WORK_STORE, captureLocalWork, releaseLocalWork, type LocalWorkSnapshot, type LocalWorkSummary } from "./LocalWorkRecords";
 import { localDraftPage, waitingWorkPage, type WaitingCursor } from "./LocalWorkPage";
+import { commitDraftImport, importOrigin, type ImportedDraftOrigin } from "./ImportedDrafts";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -208,6 +209,23 @@ export class DiscussionStore {
 			const source: LocalPicture | undefined = await request(tx.objectStore("pictureSources").get(id));
 			return source?.scopeId === scopeId ? source : undefined;
 		});
+	}
+	async importLocalDraft(originValue: ImportedDraftOrigin, draft: Draft, pictures: LocalPicture[], current: () => boolean): Promise<{ receipt: import("./ImportedDrafts").DraftImportReceipt; created: boolean }> {
+		const origin = importOrigin(originValue, this.identity);
+		if (!draft.id.startsWith("imported:") || !isId(draft.id.slice("imported:".length)) || draft.scopeId !== origin.scopeId || draft.revision !== 0) throw new Error("Choose a new local draft identity for recovery.");
+		draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
+		if (pictures.length > 100) throw new Error("This draft has too many retained original pictures.");
+		const ids = pictureIds(draft.body, true), sources: LocalPicture[] = [];
+		let total = 0;
+		for (const source of pictures) {
+			if (!current()) throw new Error("The recovery review changed. Nothing was restored.");
+			if (!ids.includes(source.id) || source.scopeId !== draft.scopeId || (total += source.size) > 100 * 1024 * 1024) throw new Error("Recovery pictures exceed the local draft limits.");
+			const prepared = await prepareLocalPicture(source.id, source.scopeId, source.bytes);
+			if (prepared.sha256 !== source.sha256 || prepared.size !== source.size) throw new Error("An original picture changed before recovery.");
+			sources.push(prepared);
+		}
+		const key = await pictureHash(new TextEncoder().encode(JSON.stringify([origin.manifestSha256, origin.snapshotId, origin.draftId, origin.scopeId])).buffer);
+		return this.transaction(["drafts", "outbox", ...PICTURE_STORES], "readwrite", tx => commitDraftImport(tx, key, origin, draft, sources, current, Date.now()));
 	}
 
 	async cachedPicture(scopeId: string, id: string, variant: PictureVariant): Promise<CachedPicture | undefined> {

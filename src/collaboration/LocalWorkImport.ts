@@ -102,7 +102,7 @@ function snapshot(value: unknown): InspectedLocalWork["snapshot"] {
 	for (const row of actions) {
 		requireValue(isRecord(row)); keys(row, ["key", "value"]);
 		const key = row.key;
-		requireValue(text(key, 2048) && ["online:", "recovery:", "reattach:", "timelineMarkerCommand:"].some(prefix => key.startsWith(prefix))); actionKeys.push(key);
+		requireValue(text(key, 2048) && ["online:", "recovery:", "importedDraft:", "reattach:", "timelineMarkerCommand:"].some(prefix => key.startsWith(prefix))); actionKeys.push(key);
 	}
 	let pictureBytes = 0;
 	for (const [index, row] of pictures.entries()) {

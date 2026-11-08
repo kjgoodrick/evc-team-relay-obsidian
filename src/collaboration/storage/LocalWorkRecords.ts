@@ -72,9 +72,9 @@ export async function captureLocalWork(tx: IDBTransaction, identity: StoreIdenti
 		account(dependency); snapshot.dependencies.push(dependency);
 	}
 	const drafts = new Set(snapshot.drafts.map(draft => draft.id));
-	for (const prefix of ["online:", "recovery:", "reattach:", "timelineMarkerCommand:"]) await scan(tx.objectStore("preferences"), (value, key) => {
+	for (const prefix of ["online:", "recovery:", "importedDraft:", "reattach:", "timelineMarkerCommand:"]) await scan(tx.objectStore("preferences"), (value, key) => {
 		if (value == null || typeof key !== "string") return;
-		if ((prefix === "online:" || prefix === "recovery:") && !drafts.has(key.slice(prefix.length))) return;
+		if ((prefix === "online:" || prefix === "recovery:" || prefix === "importedDraft:") && !drafts.has(key.slice(prefix.length))) return;
 		if (prefix === "reattach:" && isRecord(value) && value.completed !== undefined) return;
 		if (prefix === "timelineMarkerCommand:" && isRecord(value) && value.status === "accepted") return;
 		const action = { key, value: value as Json }; account(action); snapshot.actions.push(action);

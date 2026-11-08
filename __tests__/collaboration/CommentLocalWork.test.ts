@@ -53,6 +53,21 @@ test("drafts remain editable with an inaccessible target, preserving the target 
 	} finally { f.close(); }
 });
 
+test("imported copies are labeled and remain locally editable without a send or automatic target conversion", async () => {
+	const f = await fixture();
+	try {
+		const copied = { ...draft(), id: "imported:" + id(99) };
+		await f.store.importLocalDraft({ version: 1, manifestSha256: "a".repeat(64), snapshotId: id(98), draftId: draft().id, scopeId: scope, identity }, copied, [], () => true);
+		await f.modal.onOpen(); expect(f.modal.contentEl.textContent).toContain("Imported local draft");
+		f.button("Open saved draft").click(); await until(() => !!f.modal.contentEl.querySelector("textarea") && !f.modal.contentEl.querySelector("textarea")!.disabled);
+		expect(f.modal.contentEl.textContent).toContain("Sending imported drafts is not available"); expect(f.button("Send").hidden).toBe(true);
+		const input = f.modal.contentEl.querySelector("textarea")!; input.value = "Edited recovered content"; input.dispatchEvent(new Event("input"));
+		f.button("Back to saved work").click(); await until(() => !!f.button("Open saved draft"));
+		expect(await f.store.getDraft(copied.id)).toMatchObject({ revision: 1, target: draft().target, body: { text: "Edited recovered content" } });
+		expect(await f.store.selectionDrafts(scope)).toEqual({ drafts: [], hasMore: false }); expect(f.session.queue).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
 test("local drafts can be discarded with review while uncertain sends remain locked", async () => {
 	const f = await fixture();
 	try {
