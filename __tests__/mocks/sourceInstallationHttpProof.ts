@@ -15,7 +15,8 @@ import { prepareSourceInstallation } from "../../src/SourceInstallationPreparati
 import { activateSourceInstallation, sourceActivationRequest } from "../../src/SourceInstallationActivation";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
 import { admitSourceStartup } from "../../src/storage/source-startup-admission";
-import { openSourceInventoryCache } from "../../src/storage/source-document-cache";
+import { openSourceInventoryCache, type SourceInventoryIdentity } from "../../src/storage/source-document-cache";
+import type { SourceSelectionContext } from "../../src/storage/source-selection-context";
 import { readManagedInventory } from "../../src/client/readManagedInventory";
 import { ManagedIndexTransport } from "../../src/client/ManagedIndexTransport";
 import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
@@ -24,6 +25,13 @@ import { UnsavedFileStore } from "../../src/UnsavedFile";
 /** Called only by the disposable HTTP/MinIO integration. The fixture owns the
  * server's only writer and this temporary directory; no native app is opened. */
 export async function proveAttachmentSourceInstallation(cache: RelayCredentialCache, fixture: Record<string, string>, token: string) {
+	return proveSourceInstallation(cache, fixture, token, { expectedFiles: { "Upload.png": "second exact image revision", "Legacy.png": "verified legacy attachment fixture" } });
+}
+
+export async function proveSourceInstallation(cache: RelayCredentialCache, fixture: Record<string, string>, token: string, proof: {
+	expectedFiles: Record<string, string>;
+	verifySelected?: (identity: SourceInventoryIdentity, selected: SourceSelectionContext, directory: string) => Promise<void>;
+}) {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "relay-http-installation-"));
 	const identity = { hostAppId: crypto.randomUUID(), serverId: "fixture", controlPlaneUrl: fixture.base,
 		s3rn: ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", fixture.share)), restoreGeneration: fixture.generation };
@@ -50,6 +58,7 @@ export async function proveAttachmentSourceInstallation(cache: RelayCredentialCa
 		const review = await journal.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: null, reviewId, restoreGeneration: fixture.generation });
 		await expect(admitSourceStartup(vault, "Original", identity, { check: () => {} })).rejects.toThrow("awaiting recovery");
 		const snapshot = await readManagedInventory(cache, identity.s3rn, "fixture", identity);
+		expect(Object.keys(snapshot.records).sort()).toEqual(Object.keys(proof.expectedFiles).sort());
 		const downloads = createSourceInstallationDownloads(cache, identity, snapshot);
 		const prepared = await prepareSourceInstallation(journal, staging, { source: identity, reviewId, reviewRevision: review.revision!, operationId: crypto.randomUUID(),
 			archive: backup.reference, originalRoot: "Original", destinationRoot: "Restored", snapshot }, downloads);
@@ -58,8 +67,7 @@ export async function proveAttachmentSourceInstallation(cache: RelayCredentialCa
 		const host = { settings: scope, app: { loadLocalStorage: () => null }, buffers: new UnsavedFileStore(), checkIsolation: () => {} };
 		const result = await activateSourceInstallation(journal, staging, native, request, host, downloads);
 		expect(result).toMatchObject({ destinationRoot: "Restored", selection: { pending: null, nativeRoot: "Restored", active: { kind: "source", restoreGeneration: fixture.generation } } });
-		expect(await fs.readFile(path.join(directory, "Restored", "Upload.png"), "utf8")).toBe("second exact image revision");
-		expect(await fs.readFile(path.join(directory, "Restored", "Legacy.png"), "utf8")).toBe("verified legacy attachment fixture");
+		for (const [name, expected] of Object.entries(proof.expectedFiles)) expect(await fs.readFile(path.join(directory, "Restored", name), "utf8")).toBe(expected);
 		expect(await fs.readFile(path.join(directory, "Original", "Offline.md"), "utf8")).toBe("Retained original offline work");
 		expect((await scope.readPersistedValue())![0].path).toBe("Restored");
 		const admitted = await admitSourceStartup(vault, "Restored", identity, { check: () => {} });
@@ -70,9 +78,11 @@ export async function proveAttachmentSourceInstallation(cache: RelayCredentialCa
 				expect(transport.snapshot.records).toEqual(snapshot.records); await transport.flush();
 				expect(transport.restoreReview).toBeUndefined(); expect(transport.conflicts).toEqual([]); expect(transport.snapshot.records).toEqual(snapshot.records);
 			} finally { transport.destroy(); await store.close(); doc.destroy(); }
+			await proof.verifySelected?.(identity, admitted, path.join(directory, "Restored"));
 		} finally { admitted.close(); }
-		await fs.writeFile(path.join(directory, "Restored", "Upload.png"), "Later local edit");
+		const laterFile = path.join(directory, "Restored", Object.keys(proof.expectedFiles)[0]);
+		await fs.writeFile(laterFile, "Later local edit");
 		expect(await activateSourceInstallation(journal, staging, native, request, host, downloads)).toMatchObject({ reconciled: true });
-		expect(await fs.readFile(path.join(directory, "Restored", "Upload.png"), "utf8")).toBe("Later local edit");
+		expect(await fs.readFile(laterFile, "utf8")).toBe("Later local edit");
 	} finally { scope?.destroy(); journal?.close(); await fs.rm(directory, { recursive: true, force: true }); }
 }

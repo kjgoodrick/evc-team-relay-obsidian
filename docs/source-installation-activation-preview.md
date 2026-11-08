@@ -137,9 +137,30 @@ metadata validation and unknown-field rejection. The focused plan/content/stagin
 set passes **107 tests**; the actual HTTP/MinIO proof passes separately.
 
 This fixture owns its sole server writer and temporary native directory. It does
-not demonstrate production writer isolation, live Markdown/Canvas source
-installation, a native Obsidian UI, or mobile filesystem behavior. Its HTTP
+not demonstrate production writer isolation, Canvas source installation,
+a native Obsidian UI, or mobile filesystem behavior. Its HTTP
 process, database, bucket and rootless container are removed after completion.
 The final full regression passes **4,574 tests across 308 suites** (41 tests in
 27 opt-in suites skipped); main types, changed-source lint, unchanged test-type
 ratchet and preview build pass with the existing 15 warnings.
+
+## Editing-history service integration
+
+The actual FastAPI/Rust WebSocket generation-rotation fixture now also performs
+full Markdown installation through read-only source downloads, preparation,
+native files, selected document/inventory caches, persisted mapping, activation
+and startup admission. It uses a member whose `Budget.md` is inaccessible: only
+the visible `Note.md` is downloaded and materialized. The installed native text
+and full cached editing history agree before the ordinary provider connects.
+
+After admission, that provider sends a new member edit which an independent
+read-only peer observes. Original-generation clients remain paused and retain
+their distinct offline edits; those edits never enter the new source. A later
+native edit still survives exact activation-receipt retry. The fixture owns the
+writer sessions and temporary native directory and cleans up its HTTP/Rust
+processes. This is service/cache evidence, not native editor or OS isolation
+acceptance. Canvas and multi-process installation remain unverified.
+
+Both actual service fixtures pass after sharing the installation harness. The
+test-type ratchet stays at 205 errors/44 signatures versus 207/46. Production
+implementation is unchanged from the 4,574-test regression checkpoint above.

@@ -13,8 +13,11 @@ import type { IAuthProvider } from "../../src/auth/IAuthProvider";
 import { LocalDocumentStore } from "../../src/storage/local-document-store";
 import { openSourceDocumentCache, type SourceDocumentIdentity } from "../../src/storage/source-document-cache";
 import { readManagedSource } from "../../src/client/readManagedSource";
+import { proveSourceInstallation } from "../mocks/sourceInstallationHttpProof";
+import { RemoteFolderAddress } from "../../src/ResourceAddress";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
+jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/obsidian"), FileSystemAdapter: class {} }));
 
 const fixturePath = process.env.EVC_DOCUMENT_RESTORE_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -134,6 +137,33 @@ integration("managed document sockets reject original grants after generation ro
 		expect(await restarted.backing.bringOnline()).toBe(false);
 		expect(restarted.requests).not.toHaveBeenCalled();
 		expect(restarted.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
+		// Exercise the production read-only source download through a full
+		// native/cache installation, using the member whose Budget.md is hidden.
+		restoredRestart.backing.goOffline(); currentReader.provider.disconnect();
+		const memberAuth = { getToken: () => f.bobToken, getValidToken: async () => f.bobToken } as IAuthProvider;
+		const memberCache = new RelayCredentialCache(session, new SystemClock(), "disposable", 5,
+			new Map([["fixture", new RelayOnPremTokenProvider({ controlPlaneUrl: f.base, authProvider: memberAuth })]])); caches.push(memberCache);
+		const folderAddress = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", f.share));
+		const inventoryGrant = await memberCache.requestInventoryInspectionToken(folderAddress, "fixture", { restoreGeneration: generation });
+		await proveSourceInstallation(memberCache, { ...f, generation }, inventoryGrant.grant.token, {
+			expectedFiles: { "Note.md": "content before rotation\nbound edit\n" },
+			verifySelected: async (identity, selected, directory) => {
+				const backing = new StoredDocument(f.note, address, memberCache, session, "fixture", selected.binding, selected); clients.push(backing);
+				const store = await openSourceDocumentCache({ ...identity, s3rn: ResourceAddress.serialize(address) }, backing.crdtDoc); stores.push(store); backing.attachStore(store);
+				const text = backing.crdtDoc.getText("contents");
+				expect(text.toString()).toBe(fs.readFileSync(path.join(directory, "Note.md"), "utf8"));
+				expect(fs.existsSync(path.join(directory, "Budget.md"))).toBe(false);
+				expect(await backing.bringOnline()).toBe(true); await until(() => backing._liveProvider.synced, "installed source provider admission");
+				expect(text.toString()).toBe("content before rotation\nbound edit\n");
+				text.insert(text.length, "activated member edit\n");
+				const observer = await peer(await grant("read", generation));
+				await until(() => observer.text.toString() === text.toString(), "installed source writes through ordinary provider");
+				expect(observer.text.toString()).not.toContain("OLD OFFLINE"); expect(observer.text.toString()).not.toContain("CACHED CLIENT");
+				backing.goOffline(); await store.close();
+			},
+		});
+		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
+		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
 	} finally {
 		clients.forEach(client => client.dismantle());
 		await Promise.all(stores.map(store => store.close()));
