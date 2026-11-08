@@ -229,6 +229,18 @@ document credentials and background renewal. Server/provider session, file,
 digest, content type, byte length and restore binding distinguish requests.
 Identical requests coalesce; session changes and cache clear reject late results.
 Routine JWT refresh within the same session does not invalidate the namespace.
+Document and attachment token requests now retain their account/session and
+endpoint before asynchronous authentication. Document requests recheck after
+their throttle wait, before transmission, after the response and after body
+parsing. URL changes (including changing away and back), account changes or
+provider teardown reject the old work. An old write refusal cannot trigger a
+read-only retry under a replacement identity, and an old restore error cannot be
+classified as a new account's restore refusal. A normalized equivalent URL and
+ordinary JWT refresh in the same session remain compatible. Endpoint changes
+also invalidate cached file grants and clear refusal/network tracking belonging
+to the previous context. Tests cover those boundaries with delayed auth,
+throttle, response and parsing; document credential/cache namespacing is still
+required before safe restored-source resumption.
 
 The paired server stores verified revisions at
 `managed-assets/v1/{share}/{entry}/{sha256}`, with verified legacy reads. This keeps

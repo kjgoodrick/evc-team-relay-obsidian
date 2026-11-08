@@ -221,7 +221,7 @@ describe("TokenRequestThrottle", () => {
 			}
 			return { ok: true, status: 200, json: async () => ok, text: async () => "", headers: new Headers() } as Response;
 		});
-		const authProvider = { getValidToken: async () => "user-token" } as unknown as IAuthProvider;
+		const authProvider = { getToken: () => "user-token", getValidToken: async () => "user-token" } as unknown as IAuthProvider;
 		const provider = new RelayOnPremTokenProvider({ controlPlaneUrl: "https://cp.example.com", authProvider });
 		await expect(provider.requestToken("r", "share", "doc-0")).rejects.toBeInstanceOf(RateLimitError);
 

@@ -285,6 +285,7 @@ export function localExpiryTime(
 export class RelayOnPremTokenProvider {
 	private log = namedLogger("[RelayOnPremTokenProvider]");
 	private normalizedUrl: string;
+	private destroyed = false;
 	/** Shared throttle — all token requests for this provider share one queue */
 	private throttle: TokenRequestThrottle;
 	/**
@@ -323,8 +324,12 @@ export class RelayOnPremTokenProvider {
 	 * so without this the old URL stays baked into `normalizedUrl` until reload.
 	 */
 	updateControlPlaneUrl(controlPlaneUrl: string): void {
+		const normalized = controlPlaneUrl.replace(/\/+$/, "");
+		if (normalized !== this.normalizedUrl) {
+			this.fileContext = {}; this.refusedShares.clear(); this.sharesOnNetwork.clear();
+		}
 		this.config.controlPlaneUrl = controlPlaneUrl;
-		this.normalizedUrl = controlPlaneUrl.replace(/\/+$/, "");
+		this.normalizedUrl = normalized;
 	}
 
 	/**
@@ -340,8 +345,14 @@ export class RelayOnPremTokenProvider {
 		filePath?: string,
 		binding: RestoreBinding = {},
 	): Promise<DocumentGrant> {
+		if (this.destroyed) throw new Error("Token provider was destroyed");
 		binding = restoreMetadata(binding);
+		const identity = this.getFileCredentialContext(), endpoint = this.normalizedUrl;
+		const checkIdentity = () => {
+			if (this.destroyed || identity !== this.getFileCredentialContext()) throw new Error("Document login or server changed. Retry using the current connection.");
+		};
 		const token = await this.config.authProvider.getValidToken();
+		checkIdentity();
 
 		if (!token) {
 			throw new Error("Not authenticated");
@@ -372,13 +383,14 @@ export class RelayOnPremTokenProvider {
 		await this.throttle.acquire(docId);
 
 		try {
+			checkIdentity();
 			if (this.sharesOnNetwork.has(folderId)) {
 				throw new RelayTokenTimeoutError(
 					`Token request for doc ${docId} not sent: an earlier request for share ${folderId} is still in flight`,
 				);
 			}
 			const fetched = platformFetch(
-				`${this.normalizedUrl}/v1/tokens/relay`,
+				`${endpoint}/v1/tokens/relay`,
 				{
 					method: "POST",
 					headers: {
@@ -409,12 +421,14 @@ export class RelayOnPremTokenProvider {
 			]).finally(() => window.clearTimeout(timer));
 			// Settled: clear now, before the read retry below asks again.
 			offNetwork();
+			checkIdentity();
 
 			if (response.status === 429) {
 				// Parse Retry-After header (seconds) if present, default 60 s
 				const retryAfterSec = parseInt(response.headers.get("Retry-After") ?? "60", 10);
 				const retryAfterMs = (isNaN(retryAfterSec) ? 60 : retryAfterSec) * 1000;
 				const errorText = await response.text().catch(() => "");
+				checkIdentity();
 				console.warn(
 					`[DIAG][RelayOnPremTokenProvider] 429 rate limited for doc ${docId}. retryAfter=${retryAfterMs}ms body=${errorText}`
 				);
@@ -438,8 +452,9 @@ export class RelayOnPremTokenProvider {
 				if (response.headers.get("X-Relay-Managed") === "true" && docId !== folderId) {
 					throw new Error(`Access to this file was revoked (${response.status})`);
 				}
-				this.refusedShares.add(folderId);
 				const errorText = await response.text().catch(() => "");
+				checkIdentity();
+				this.refusedShares.add(folderId);
 				throw new RelayAccessDeniedError(
 					response.status,
 					`Token request failed: ${response.status} - ${errorText}`,
@@ -448,6 +463,7 @@ export class RelayOnPremTokenProvider {
 
 			if (!response.ok) {
 				const errorText = await response.text();
+				checkIdentity();
 				if (response.status === 409) {
 					let detail: { detail?: { code?: string }; error?: { message?: { code?: string } } } | undefined;
 					try { detail = JSON.parse(errorText) as typeof detail; } catch { /* Other conflicts retain their ordinary error. */ }
@@ -457,6 +473,7 @@ export class RelayOnPremTokenProvider {
 			}
 
 			const data = await response.json() as RelayTokenResponse;
+			checkIdentity();
 			const context = restoreContext(data.restore_guard, data.restore_generation);
 			if (docId !== folderId && (restoreGeneration(context?.generation) !== restoreGeneration(binding.restoreGeneration)
 				|| (binding.restoreGeneration && !context?.supported))) throw new RelayRestoreRequiredError();
@@ -478,6 +495,7 @@ export class RelayOnPremTokenProvider {
 
 			return clientToken;
 		} catch (error: unknown) {
+			checkIdentity();
 			this.log("Token request error:", error);
 			throw error;
 		}
@@ -507,7 +525,7 @@ export class RelayOnPremTokenProvider {
 	 */
 	private fileIdentity?: string;
 	private fileContext: object = {};
-	/** Opaque in-memory cache namespace; changes on logout/session/account changes.
+	/** Opaque in-memory cache namespace; changes on login, endpoint and teardown changes.
 	 * Routine JWT refresh within one session retains the namespace. */
 	getFileCredentialContext(): object {
 		const token = this.config.authProvider.getToken();
@@ -518,7 +536,10 @@ export class RelayOnPremTokenProvider {
 				if (typeof claims.sub === "string" && typeof claims.session_id === "string") identity = JSON.stringify([claims.sub, claims.session_id]);
 			} catch { /* Legacy credentials are scoped to their exact token. */ }
 		}
-		if (identity !== this.fileIdentity) { this.fileIdentity = identity; this.fileContext = {}; }
+		if (identity !== this.fileIdentity) {
+			this.fileIdentity = identity; this.fileContext = {};
+			this.refusedShares.clear(); this.sharesOnNetwork.clear();
+		}
 		return this.fileContext;
 	}
 
@@ -531,10 +552,11 @@ export class RelayOnPremTokenProvider {
 		contentLength: number,
 		binding: RestoreBinding = {},
 	): Promise<FileGrant> {
+		if (this.destroyed) throw new Error("Token provider was destroyed");
 		binding = restoreMetadata(binding);
-		const identity = this.getFileCredentialContext();
+		const identity = this.getFileCredentialContext(), endpoint = this.normalizedUrl;
 		const checkIdentity = () => {
-			if (identity !== this.getFileCredentialContext()) throw new Error("Attachment login changed. Retry using the current account.");
+			if (this.destroyed || identity !== this.getFileCredentialContext()) throw new Error("Attachment login changed or server changed. Retry using the current connection.");
 		};
 		const token = await this.config.authProvider.getValidToken();
 		checkIdentity();
@@ -558,7 +580,7 @@ export class RelayOnPremTokenProvider {
 		// lane time. A 429 still surfaces as RateLimitError and is retried by the caller.
 		try {
 			const response = await platformFetch(
-				`${this.normalizedUrl}/v1/shares/${folderId}/file-token`,
+				`${endpoint}/v1/shares/${folderId}/file-token`,
 				{
 					method: "POST",
 					headers: {
@@ -569,11 +591,13 @@ export class RelayOnPremTokenProvider {
 					body: JSON.stringify(request),
 				}
 			);
+			checkIdentity();
 
 			if (response.status === 429) {
 				const retryAfterSec = parseInt(response.headers.get("Retry-After") ?? "60", 10);
 				const retryAfterMs = (isNaN(retryAfterSec) ? 60 : retryAfterSec) * 1000;
 				const errorText = await response.text().catch(() => "");
+				checkIdentity();
 				console.warn(
 					`[DIAG][RelayOnPremTokenProvider] 429 rate limited for file-token ${fileId}. retryAfter=${retryAfterMs}ms body=${errorText}`
 				);
@@ -585,6 +609,7 @@ export class RelayOnPremTokenProvider {
 
 			if (!response.ok) {
 				const errorText = await response.text();
+				checkIdentity();
 				throw new Error(`File token request failed: ${response.status} - ${errorText}`);
 			}
 
@@ -616,12 +641,15 @@ export class RelayOnPremTokenProvider {
 
 			return fileToken;
 		} catch (error: unknown) {
+			checkIdentity();
 			this.log("File token request error:", error);
 			throw error;
 		}
 	}
 
 	destroy() {
+		if (this.destroyed) return;
+		this.destroyed = true; this.fileContext = {}; this.refusedShares.clear(); this.sharesOnNetwork.clear();
 		this.throttle.destroy();
 	}
 }

@@ -78,6 +78,21 @@ test("request binding is frozen before asynchronous authentication", async () =>
 	s.cache.destroy();
 });
 
+test("editing the same provider's endpoint invalidates cached and waiting file credentials", async () => {
+	const s = setup(), read = () => s.cache.resolveFileToken(address, "hash", "image/png", 0, "a");
+	const first = await read();
+	s.a.updateControlPlaneUrl("https://replacement.test/");
+	const replacement = await read(); expect(replacement).not.toBe(first);
+	expect(fetch.mock.calls[1][0]).toContain("https://replacement.test/");
+	s.cache.clear();
+	const wait = deferred<Response>(); fetch.mockReturnValueOnce(wait.promise);
+	const pending = read(); await Promise.resolve();
+	s.a.updateControlPlaneUrl("https://final.test");
+	wait.resolve(new Response(JSON.stringify({ token: "obsolete", base_url: "https://replacement.test/file", expires_at: new Date(Date.now() + 600_000).toISOString() })));
+	await expect(pending).rejects.toThrow("server changed");
+	s.cache.destroy();
+});
+
 test("clearing credentials while a request waits cannot repopulate the cache", async () => {
 	const s = setup(), wait = deferred<Response>(); fetch.mockReturnValueOnce(wait.promise);
 	const pending = s.cache.resolveFileToken(address, "hash", "image/png", 0, "a"); await Promise.resolve();
