@@ -108,6 +108,7 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 
 		this.setLoggers(`[CanvasDocument](${this.entryPath})`);
 		this._indexeddbPersistence = this.openPersistence();
+		this.retainRestoreReviewIn(this._indexeddbPersistence);
 
 		void this.awaitFirstSync().then(() => this.bootstrapAfterSync());
 	}

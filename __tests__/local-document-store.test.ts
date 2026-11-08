@@ -160,3 +160,49 @@ test("closing immediately after an edit drains the accepted write before restart
 	expect(restored.getText("contents").toString()).toBe("last offline edit");
 	await reopened.close(); restored.destroy();
 });
+
+test("restore quarantine recorded during open survives immediate close with earlier and later edits", async () => {
+	const name = `restore-review-${crypto.randomUUID()}`, doc = new Y.Doc();
+	const store = new LocalDocumentStore(name, doc);
+	doc.getText("contents").insert(0, "before restore");
+	const saved = store.markRestoreReview();
+	doc.getText("contents").insert(doc.getText("contents").length, " and after restore");
+	await store.close(); await saved; doc.destroy();
+	const reopenedDoc = new Y.Doc(), reopened = new LocalDocumentStore(name, reopenedDoc);
+	await reopened._dbref;
+	expect(reopened.restoreReviewRequired).toBe(true);
+	expect(reopenedDoc.getText("contents").toString()).toBe("before restore and after restore");
+	await reopened.close(); reopenedDoc.destroy();
+});
+
+test("another window's quarantine is checked without replacing document content or sync metadata", async () => {
+	const name = `restore-other-window-${crypto.randomUUID()}`;
+	const first = new LocalDocumentStore(name, new Y.Doc()), second = new LocalDocumentStore(name, new Y.Doc());
+	await Promise.all([first._dbref, second._dbref]);
+	await first.rememberServerSync(); await first.rememberSyncBase("retained comparison base");
+	expect(await first.loadRestoreReview()).toBe(false);
+	await second.markRestoreReview();
+	expect(first.restoreReviewRequired).toBe(false);
+	expect(await first.loadRestoreReview()).toBe(true);
+	expect(await first.loadSyncBase()).toBe("retained comparison base");
+	expect(first.serverSyncKnown).toBe(true);
+	await Promise.all([first.close(), second.close()]); first.doc.destroy(); second.doc.destroy();
+});
+
+test("an aborted quarantine write reports failure and does not pretend to be durable", async () => {
+	const name = `restore-abort-${crypto.randomUUID()}`, store = new LocalDocumentStore(name, new Y.Doc());
+	const db = await store._dbref, put = IDBObjectStore.prototype.put;
+	const failure = jest.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+		const request = put.call(this, value, key);
+		if (key === "restoreReviewRequired") this.transaction.abort();
+		return request;
+	});
+	try {
+		await expect(store.markRestoreReview()).rejects.toThrow();
+		expect(store.restoreReviewRequired).toBe(true); // this runtime remains paused
+		await expect(store.close()).rejects.toThrow();
+	} finally { failure.mockRestore(); db.close(); }
+	const reopened = new LocalDocumentStore(name, new Y.Doc());
+	expect(await reopened.loadRestoreReview()).toBe(false);
+	await reopened.close(); reopened.doc.destroy();
+});

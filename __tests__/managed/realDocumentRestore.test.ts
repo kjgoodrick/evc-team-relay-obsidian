@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as Y from "yjs";
@@ -9,12 +10,16 @@ import { RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddres
 import { SystemClock } from "../../src/Clock";
 import type { AuthSession } from "../../src/AuthSession";
 import type { IAuthProvider } from "../../src/auth/IAuthProvider";
+import { LocalDocumentStore } from "../../src/storage/local-document-store";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 
 const fixturePath = process.env.EVC_DOCUMENT_RESTORE_FIXTURE;
 const integration = fixturePath ? test : test.skip;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+class StoredDocument extends ProviderBacked {
+	attachStore(store: LocalDocumentStore) { this.retainRestoreReviewIn(store); }
+}
 async function until(check: () => boolean, message: string) {
 	const deadline = Date.now() + 8000;
 	while (Date.now() < deadline) { if (check()) return; await delay(20); }
@@ -26,16 +31,18 @@ integration("managed document sockets reject original grants after generation ro
 	if (new URL(f.base).hostname !== "127.0.0.1" || !f.restartDir.includes("evc-managed-integration-")) throw new Error("Only a disposable fixture is allowed");
 	const providers: YSweetProvider[] = [], docs: Y.Doc[] = [];
 	const clients: ProviderBacked[] = [], caches: RelayCredentialCache[] = [];
+	const stores: LocalDocumentStore[] = [];
 	const address = new RemoteDocumentAddress("relay-onprem", f.share, f.note);
 	const auth = { getToken: () => f.ownerToken, getValidToken: async () => f.ownerToken } as IAuthProvider;
 	const session = { getCurrentUserForServer: () => undefined, on: () => () => {} } as unknown as AuthSession;
-	function client() {
+	function client(storeName = `actual-restore-${crypto.randomUUID()}`) {
 		const tokenProvider = new RelayOnPremTokenProvider({ controlPlaneUrl: f.base, authProvider: auth });
 		const requests = jest.spyOn(tokenProvider, "requestToken");
 		const cache = new RelayCredentialCache(session, new SystemClock(), "disposable", 5, new Map([["fixture", tokenProvider]]));
-		const backing = new ProviderBacked(f.note, address, cache, session, "fixture");
+		const backing = new StoredDocument(f.note, address, cache, session, "fixture");
+		const store = new LocalDocumentStore(storeName, backing.crdtDoc); stores.push(store); backing.attachStore(store);
 		clients.push(backing); caches.push(cache);
-		return { backing, cache, requests, provider: backing._liveProvider, text: backing.crdtDoc.getText("contents") };
+		return { backing, cache, requests, store, provider: backing._liveProvider, text: backing.crdtDoc.getText("contents") };
 	}
 	async function grant(mode: "read" | "write", generation?: string, expected = 200) {
 		const response = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: { Authorization: `Bearer ${f.ownerToken}`,
@@ -93,8 +100,16 @@ integration("managed document sockets reject original grants after generation ro
 		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
 		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
 		expect(uncached.text.toString()).toBe("UNCACHED CLIENT EDIT MUST STAY LOCAL\n");
+		await writer.store.close();
+		const restarted = client(writer.store.name);
+		await expect(restarted.backing.ensureActiveProvider()).rejects.toThrow("restore review");
+		expect(await restarted.backing.bringOnline()).toBe(false);
+		expect(restarted.requests).not.toHaveBeenCalled();
+		expect(restarted.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
 	} finally {
-		clients.forEach(client => { client.dismantle(); client.crdtDoc.destroy(); }); caches.forEach(cache => cache.destroy());
+		clients.forEach(client => client.dismantle());
+		await Promise.all(stores.map(store => store.close()));
+		clients.forEach(client => client.crdtDoc.destroy()); caches.forEach(cache => cache.destroy());
 		providers.forEach(provider => provider.destroy()); docs.forEach(doc => doc.destroy());
 	}
 }, 30_000);

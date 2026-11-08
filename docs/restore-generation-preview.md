@@ -253,8 +253,20 @@ and unloading settles late credential requests without recreating cache entries.
 Markdown and existing Canvas sync also respect the parent inventory's durable
 restore review. Ordinary original-lineage synchronization remains compatible.
 
-The per-document pause is not yet durable independently of inventory review.
-Safe resumed cache namespaces, retained review and verified source replacement
-are still required; the legacy cache's versionless IndexedDB open means a version
-bump alone cannot exclude older workers. No native restore workflow, restored-data
-drill or coordinator is claimed by this admission/pause test.
+Each Markdown/Canvas document now also records a monotonic review marker in its
+existing private cache, independently of folder inventory. Saving it does not
+replace updates, sync bases, origin or server-sync metadata. Cache close drains
+the marker transaction and accepted edits. Opening and token acquisition read it
+before network work, including the otherwise fresh cached-token path; that read
+also detects another window's marker. Failed writes reject instead of reporting
+durability, while the current runtime stays paused. There is no marker-clear or
+resume action. Existing plugin workers are not excluded from the legacy cache.
+
+The actual-service fixture closes the paused store and reopens a fresh client:
+its old edits return and it makes no token request. Unit checks include marking
+during startup, immediate close, second-window discovery, failed persistence and
+unload during the read. These use fake IndexedDB, not native/mobile persistence
+acceptance. Safe resumed cache namespaces, verified source replacement and full
+review remain required; the legacy cache's versionless IndexedDB open means a
+version bump alone cannot exclude older workers. No native restore workflow,
+restored-data drill or coordinator is claimed by this admission/pause test.

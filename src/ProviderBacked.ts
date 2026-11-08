@@ -20,6 +20,7 @@ import { createPermanentUserData } from "./permanentUserData";
 import { safeAvatarUrl } from "./presenceAvatar";
 import { decodeJwt } from "jose";
 import type { NotePresenceSurface } from "./collaboration/presence/PresenceSettings";
+import type { LocalDocumentStore } from "./storage/local-document-store";
 
 const EMPTY_TOKEN: DocumentGrant = {
 	token: "",
@@ -128,6 +129,7 @@ export class ProviderBacked extends Loggable {
 	private detachAccess: () => void;
 	private detachRestore?: () => void;
 	private restorePaused = false;
+	private restorePersistence?: LocalDocumentStore;
 	private detachAuthSession?: () => void;
 	private detachProfileRefresh?: () => void;
 	// accountId last used to seed awareness/doc-identity, so a later auth
@@ -214,9 +216,29 @@ export class ProviderBacked extends Loggable {
 	}
 
 	get restoreReviewRequired(): boolean {
-		return this.restorePaused || !!this.credentialCache?.isRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+		return this.restorePaused || !!this.restorePersistence?.restoreReviewRequired
+			|| !!this.credentialCache?.isRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+	}
+	/** Document caches retain their pause independently of folder inventory. */
+	protected retainRestoreReviewIn(store: LocalDocumentStore): void {
+		this.restorePersistence = store;
+		if (this.restoreReviewRequired) this.pauseForRestore();
+		void store._dbref.then(() => {
+			if (this.restorePersistence === store && !store._destroyed && this.restoreReviewRequired) this.pauseForRestore();
+		}).catch(error => this.warn("Unable to read document restore review", error));
+	}
+	private async checkStoredRestoreReview(): Promise<void> {
+		const store = this.restorePersistence;
+		if (store) {
+			await store.loadRestoreReview();
+			if (this.restorePersistence !== store || store._destroyed) throw new Error("Document cache was closed");
+		}
+		if (this.restoreReviewRequired) { this.pauseForRestore(); throw new RelayRestoreRequiredError(); }
 	}
 	protected pauseForRestore(): void {
+		if (this.restorePersistence && !this.restorePersistence.restoreReviewRequired) {
+			void this.restorePersistence.markRestoreReview().catch(error => this.warn("Unable to save document restore review", error));
+		}
 		if (this.restorePaused) return;
 		this.restorePaused = true; this.goOffline();
 	}
@@ -392,6 +414,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	async requestProviderToken(): Promise<DocumentGrant> {
+		if (this.restorePersistence) await this.checkStoredRestoreReview();
 		if (this.restoreReviewRequired) throw new RelayRestoreRequiredError();
 		this.log("requesting a provider token");
 		return this.credentialCache.getToken(
@@ -562,7 +585,8 @@ export class ProviderBacked extends Loggable {
 		this.broadcastState();
 	}
 
-	public ensureActiveProvider<T extends ProviderBacked>(this: T): Promise<T> {
+	public async ensureActiveProvider<T extends ProviderBacked>(this: T): Promise<T> {
+		if (this.restorePersistence) await this.checkStoredRestoreReview();
 		if (this.hasFreshProviderToken()) {
 			return Promise.resolve(this);
 		}
@@ -657,6 +681,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	dismantle(): void {
+		this.restorePersistence = undefined;
 		this.detachRestore?.();
 		this.reconnectGate.cancel();
 		this.detachAccess();

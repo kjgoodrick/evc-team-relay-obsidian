@@ -85,6 +85,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 
 		this.setLoggers(`[SharedDoc](${this.entryPath})`);
 		this._indexeddbPersistence = this.openPersistence();
+		this.retainRestoreReviewIn(this._indexeddbPersistence);
 
 		void this.awaitFirstSync().then(() => this.bootstrapAfterSync());
 		withToggle(featureKey.enableDeltaLogging, () => this.attachDeltaLogger());

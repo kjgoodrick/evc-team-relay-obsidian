@@ -26,6 +26,8 @@ const KEY_SERVER_SYNC = "serverSync";
 const KEY_ORIGIN = "origin";
 /** Text this client and the relay last agreed on; see `Document.getSyncBase()`. */
 const KEY_SYNC_BASE = "syncBase";
+/** Monotonic quarantine flag; review/resume must use a separate cache namespace. */
+const KEY_RESTORE_REVIEW = "restoreReviewRequired";
 
 /**
  * Collapse thresholds. The first pass after opening the database tolerates a
@@ -182,6 +184,8 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 	 * disk again once the store is open.
 	 */
 	private _syncBase: string | undefined = undefined;
+	private _restoreReviewRequired = false;
+	private restoreReviewWrite?: Promise<void>;
 
 	private _trimSize = COLD_START_COLLAPSE_AT;
 	/**
@@ -240,6 +244,9 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 					| undefined;
 				const syncBase = await getFromDb(db, KEY_SYNC_BASE);
 				this._syncBase = typeof syncBase === "string" ? syncBase : undefined;
+				// Any stored value is a quarantine marker, including an unknown
+				// future representation. Never clear a pause recorded during open.
+				this._restoreReviewRequired ||= (await getFromDb(db, KEY_RESTORE_REVIEW)) !== undefined;
 				if (this._destroyed) return db;
 				this._trimSize = LIVE_COLLAPSE_AT;
 				this.synced = true;
@@ -349,6 +356,39 @@ export class LocalDocumentStore extends ObservableV2<LocalDocumentStoreEvents> {
 		const db = await this._dbref;
 		const [custom] = idb.transact(db, [CUSTOM_STORE]);
 		await idb.del(custom, key);
+	}
+
+	get restoreReviewRequired(): boolean { return this._restoreReviewRequired; }
+
+	/** Recheck another window's marker before using even a cached credential. */
+	async loadRestoreReview(): Promise<boolean> {
+		if (this._destroyed) throw new Error("Document cache was closed");
+		const db = await this._dbref;
+		if (this._destroyed) throw new Error("Document cache was closed");
+		if (!this._restoreReviewRequired) {
+			const marker = await getFromDb(db, KEY_RESTORE_REVIEW);
+			this._restoreReviewRequired ||= marker !== undefined;
+		}
+		if (this._destroyed) throw new Error("Document cache was closed");
+		return this._restoreReviewRequired;
+	}
+
+	/** Preserve all updates/metadata and drain the committed marker on close(). */
+	markRestoreReview(): Promise<void> {
+		if (this._destroyed) return Promise.reject(new Error("Document cache was closed"));
+		this._restoreReviewRequired = true;
+		if (this.restoreReviewWrite) return this.restoreReviewWrite;
+		const pending = this._dbref.then(db => new Promise<void>((resolve, reject) => {
+			const tx = db.transaction(CUSTOM_STORE, "readwrite");
+			tx.oncomplete = () => resolve();
+			tx.onabort = () => reject(tx.error ?? new Error("Restore review could not be saved"));
+			tx.onerror = () => { /* onabort reports the transaction failure */ };
+			tx.objectStore(CUSTOM_STORE).put(1, KEY_RESTORE_REVIEW);
+		}));
+		this.restoreReviewWrite = pending;
+		this.pendingWrites.add(pending);
+		void pending.then(() => this.pendingWrites.delete(pending), () => { /* close() reports failed persistence */ });
+		return pending;
 	}
 
 	/**
