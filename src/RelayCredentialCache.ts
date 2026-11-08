@@ -11,6 +11,7 @@ import { platformFetch } from "./platformFetch";
 import { refresh as universalRefresh } from "./RelayCredentialRefresh";
 import {
 	RelayAccessDeniedError,
+	RelayRestoreRequiredError,
 	RelayTokenTimeoutError,
 	type RelayOnPremTokenProvider,
 } from "./auth/RelayOnPremTokenProvider";
@@ -76,6 +77,19 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	private nextFileContext = 0;
 	private fileCacheGeneration = 0;
 	private fileCacheDestroyed = false;
+	private restorePauses = new Set<string>();
+	private restoreListeners = new Set<(documentId: string) => void>();
+	private restoreKey(documentId: string, serverId?: string): string {
+		return JSON.stringify([serverId ?? this.documentServerMap.get(documentId) ?? this.defaultRelayOnPremServerId ?? "legacy", documentId]);
+	}
+	isRestoreRequired(documentId: string, serverId?: string): boolean { return this.restorePauses.has(this.restoreKey(documentId, serverId)); }
+	onRestoreRequired(listener: (documentId: string) => void): () => void { this.restoreListeners.add(listener); return () => this.restoreListeners.delete(listener); }
+	markRestoreRequired(documentId: string, serverId?: string): void {
+		if (this.fileCacheDestroyed) return;
+		this.restorePauses.add(this.restoreKey(documentId, serverId));
+		this.dropFromQueue(documentId);
+		for (const listener of this.restoreListeners) listener(documentId);
+	}
 
 	constructor(
 		private authSession: AuthSession,
@@ -171,6 +185,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		callback: (token: DocumentGrant) => void,
 		onpremServerId?: string,
 	): Promise<DocumentGrant> {
+		if (this.fileCacheDestroyed) throw new Error("Credential cache was destroyed");
 		const havePath = this.isRelayOnPremMode && friendlyName && friendlyName !== "unknown";
 		if (havePath) {
 			this.filePathMap.set(documentId, friendlyName);
@@ -178,6 +193,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		if (this.isRelayOnPremMode && onpremServerId) {
 			this.documentServerMap.set(documentId, onpremServerId);
 		}
+		if (this.isRestoreRequired(documentId, onpremServerId)) throw new RelayRestoreRequiredError();
 		return super.acquireToken(documentId, friendlyName, callback);
 	}
 
@@ -191,6 +207,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		onSuccess: (grant: DocumentGrant) => void,
 		onError: (err: Error) => void,
 	): Promise<void> {
+		if (this.fileCacheDestroyed) { onError(new Error("Credential cache was destroyed")); return; }
 		const shareId = shareIdOf(documentId);
 		// A share's documents ask one at a time, so a share refused at any
 		// point (first connect, after a sleep, mid-session) costs one request
@@ -206,6 +223,12 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 			const probe = this.shareProbes.get(shareId);
 			if (!probe) break;
 			await probe;
+		}
+		if (this.fileCacheDestroyed) { onError(new Error("Credential cache was destroyed")); return; }
+		const restoreKey = this.restoreKey(documentId);
+		if (this.restorePauses.has(restoreKey)) {
+			void Promise.resolve().then(() => onError(new RelayRestoreRequiredError()));
+			return;
 		}
 		const now = Date.now();
 		const retryAt = this.accessDenied.retryAt(shareId, now);
@@ -236,6 +259,8 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 				this.isRelayOnPremMode,
 				documentId,
 				(grant) => {
+					if (this.fileCacheDestroyed) { done(); onError(new Error("Credential cache was destroyed")); return; }
+					if (this.restorePauses.has(restoreKey)) { done(); onError(new RelayRestoreRequiredError()); return; }
 					const wasDenied = this.accessDenied.isDenied(shareId);
 					this.accessDenied.clear(shareId);
 					this.stalled.clear(shareId);
@@ -244,6 +269,12 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 					onSuccess(grant);
 				},
 				(err) => {
+					if (this.fileCacheDestroyed) { done(); onError(err); return; }
+					if (err instanceof RelayRestoreRequiredError) {
+						this.restorePauses.add(restoreKey);
+						this.dropFromQueue(documentId);
+						for (const listener of this.restoreListeners) listener(documentId);
+					}
 					if (err instanceof RelayAccessDeniedError) {
 						const wasDenied = this.accessDenied.isDenied(shareId);
 						err.retryAt = this.accessDenied.recordDenied(shareId, Date.now());
@@ -307,6 +338,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	}
 
 	destroy() {
+		this.restoreListeners.clear(); this.restorePauses.clear();
 		this.fileCacheDestroyed = true;
 		this.fileCacheGeneration++; this.fileTokens.clear(); this.fileRequests.clear();
 		this.filePathMap.clear();

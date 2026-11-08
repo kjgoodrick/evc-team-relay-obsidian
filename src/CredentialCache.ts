@@ -118,10 +118,11 @@ export class CredentialCache<TokenType extends TokenBearing> {
 	}
 
 	requestRefresh(documentId: string): Promise<TokenType> {
+		if (this.destroyed) return Promise.reject(new Error("Credential cache was destroyed"));
 		return new Promise<TokenType>((resolve, reject) => {
 			this.refreshFn(
 				documentId,
-				(token) => resolve(token),
+				(token) => this.destroyed ? reject(new Error("Credential cache was destroyed")) : resolve(token),
 				(error) => {
 					// A failed refresh must not unsubscribe: a retry may still succeed
 					// and the doc is still in use. Only goOffline() unsubscribes.
@@ -182,6 +183,7 @@ export class CredentialCache<TokenType extends TokenBearing> {
 
 	/** Kick off an immediate refresh if under `maxConnections`, else queue it for later. */
 	private dispatchOrEnqueue(documentId: string) {
+		if (this.destroyed) return;
 		if (this.liveConnections >= this.connectionCap) {
 			this.logLine(`at max connections — queuing ${documentId} for later`);
 			this.pendingQueue.add(documentId);
@@ -192,6 +194,7 @@ export class CredentialCache<TokenType extends TokenBearing> {
 		this.liveConnections++;
 		const advance = () => {
 			this.liveConnections--;
+			if (this.destroyed) return;
 			const next = this.popQueued();
 			if (next) {
 				this.dispatchOrEnqueue(next);
@@ -226,7 +229,7 @@ export class CredentialCache<TokenType extends TokenBearing> {
 	}
 
 	private handleTokenRefreshed(documentId: string, token: TokenType) {
-		if (!this.tokenEntries.has(documentId)) {
+		if (this.destroyed || !this.tokenEntries.has(documentId)) {
 			return;
 		}
 		const existing = this.tokenEntries.get(documentId) as CredentialEntry<TokenType>;
@@ -239,6 +242,7 @@ export class CredentialCache<TokenType extends TokenBearing> {
 	}
 
 	private handleRefreshFailure(documentId: string) {
+		if (this.destroyed) return;
 		const existing = this.tokenEntries.get(documentId);
 		const attempts = (existing?.attempts ?? 0) + 1;
 		const MAX_ATTEMPTS = 3;
@@ -335,11 +339,7 @@ export class CredentialCache<TokenType extends TokenBearing> {
 		callback: (token: TokenType) => void,
 	): Promise<TokenType> {
 		this.logLine(`resolving a token for ${friendlyName}`);
-		if (!this.tokenEntries) {
-			void Promise.reject(
-				new Error("attempted to get token after CredentialCache was destroyed."),
-			);
-		}
+		if (this.destroyed) throw new Error("Credential cache was destroyed");
 
 		const tokenInfo = this.tokenEntries.get(documentId);
 		//: `tokenIsValid` alone is a literal-expiry check -- a token
@@ -429,7 +429,10 @@ export class CredentialCache<TokenType extends TokenBearing> {
 		});
 	}
 
+	private destroyed = false;
 	teardown() {
+		if (this.destroyed) return;
+		this.destroyed = true;
 		this.purge();
 		this.clock.teardown();
 		this.clock = null as unknown as Clock;
@@ -439,9 +442,8 @@ export class CredentialCache<TokenType extends TokenBearing> {
 			onError: (err: Error) => void,
 		) => void;
 		this.subscriberCallbacks.clear();
-		this.subscriberCallbacks = null as unknown as Map<string, (token: TokenType) => void>;
 		this._inFlightPromises.clear();
-		this._inFlightPromises = null as unknown as Map<string, Promise<TokenType>>;
-		this.tokenEntries = null as unknown as Map<string, CredentialEntry<TokenType>>;
+		// In-flight callbacks still need these empty containers to settle their
+		// callers after unload. The destroyed guard prevents late adoption.
 	}
 }

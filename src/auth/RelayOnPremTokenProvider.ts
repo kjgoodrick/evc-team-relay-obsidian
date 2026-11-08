@@ -7,7 +7,7 @@
 
 import { platformFetch } from "../platformFetch";
 import { decodeJwt } from "jose";
-import { restoreMetadata, restoreContext, type RestoreBinding } from "../collaboration/RestoreGeneration";
+import { restoreMetadata, restoreContext, restoreGeneration, type RestoreBinding } from "../collaboration/RestoreGeneration";
 import { namedLogger } from "../logging";
 import type { DocumentGrant, FileGrant } from "../relay/TokenShapes";
 import type { IAuthProvider } from "./IAuthProvider";
@@ -28,6 +28,8 @@ export interface RelayTokenResponse {
 	expires_at: string;
 	/** Lifetime in seconds; not sent by the current control-plane. */
 	expires_in?: number;
+	restore_guard?: boolean;
+	restore_generation?: string | null;
 }
 
 export interface FileTokenRequest {
@@ -101,6 +103,14 @@ export class RelayAccessDeniedError extends Error {
 	) {
 		super(message ?? `Relay token refused: ${status}`);
 		this.name = "RelayAccessDeniedError";
+	}
+}
+
+/** Old document work requires review; logging in or retrying cannot rebind it. */
+export class RelayRestoreRequiredError extends Error {
+	constructor() {
+		super("This share was restored. Document synchronization is paused; local edits and cached content are retained for restore review.");
+		this.name = "RelayRestoreRequiredError";
 	}
 }
 
@@ -327,8 +337,10 @@ export class RelayOnPremTokenProvider {
 		folderId: string,
 		docId: string,
 		mode: "read" | "write" = "read",
-		filePath?: string
+		filePath?: string,
+		binding: RestoreBinding = {},
 	): Promise<DocumentGrant> {
+		binding = restoreMetadata(binding);
 		const token = await this.config.authProvider.getValidToken();
 
 		if (!token) {
@@ -372,6 +384,7 @@ export class RelayOnPremTokenProvider {
 					headers: {
 						"Content-Type": "application/json",
 						Authorization: `Bearer ${token}`,
+						...(binding.restoreGeneration ? { "X-Relay-Restore-Generation": binding.restoreGeneration } : {}),
 					},
 					body: JSON.stringify(request),
 				}
@@ -418,7 +431,7 @@ export class RelayOnPremTokenProvider {
 				this.log(
 					`Write access denied for doc ${docId} — retrying as read-only (viewer role)`
 				);
-				return this.requestToken(relayId, folderId, docId, "read", filePath);
+				return this.requestToken(relayId, folderId, docId, "read", filePath, binding);
 			}
 
 			if (response.status === 401 || response.status === 403) {
@@ -435,10 +448,18 @@ export class RelayOnPremTokenProvider {
 
 			if (!response.ok) {
 				const errorText = await response.text();
+				if (response.status === 409) {
+					let detail: { detail?: { code?: string }; error?: { message?: { code?: string } } } | undefined;
+					try { detail = JSON.parse(errorText) as typeof detail; } catch { /* Other conflicts retain their ordinary error. */ }
+					if ((detail?.detail ?? detail?.error?.message)?.code === "restore_generation_changed") throw new RelayRestoreRequiredError();
+				}
 				throw new Error(`Token request failed: ${response.status} - ${errorText}`);
 			}
 
 			const data = await response.json() as RelayTokenResponse;
+			const context = restoreContext(data.restore_guard, data.restore_generation);
+			if (docId !== folderId && (restoreGeneration(context?.generation) !== restoreGeneration(binding.restoreGeneration)
+				|| (binding.restoreGeneration && !context?.supported))) throw new RelayRestoreRequiredError();
 			this.refusedShares.delete(folderId);
 
 			// Convert to DocumentGrant format expected by the plugin
@@ -450,6 +471,7 @@ export class RelayOnPremTokenProvider {
 				folder: folderId,
 				expiryTime,
 				authorization: mode === "write" ? "full" : "read-only",
+				...(context ? { restoreGuard: context.supported, restoreGeneration: context.generation } : {}),
 			};
 
 			this.log(`Successfully obtained relay token, expires at ${data.expires_at}`);

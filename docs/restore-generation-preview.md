@@ -233,17 +233,28 @@ Actual TypeScript/HTTP/MinIO and PostgreSQL race tests cover these boundaries.
 It does not provide atomic filesystem replacement, a pre-write source-byte
 backup, native/mobile acceptance, full restore reconciliation or safe resume.
 
-## Document socket admission test
+## Document socket admission and automatic pause
 
 The paired server now binds managed document grants to the request's original
 restore generation and checks it on admission and active socket traffic. The
-`realDocumentRestore` fixture verifies the actual low-level provider against
-FastAPI/Rust: old reader/writer connections close, old queued edits remain local,
-and explicitly bound fresh clients can read/write the current generation.
+`realDocumentRestore` fixture verifies the actual credential cache and
+ProviderBacked against FastAPI/Rust. Open readers/writers close; a cached original
+credential receives a dedicated `4412` close without opening an upstream relay;
+an uncached original token request receives `409 restore_generation_changed`.
+All three client paths pause without reconnect/token-refresh loops and preserve
+their local Y.Doc edits. Explicitly bound fresh low-level clients can read/write
+the current generation. Current file/session authorization precedes the restore
+close, so revoked access does not reveal the restore state.
 
-The automatic ProviderBacked/document-cache path is not yet bound to durable
-restore metadata. It must retain old work for review and stop retrying, rather
-than adopt the generation returned by token minting. Safe resumed cache namespaces
-and verified source replacement are still required; the legacy cache's versionless
-IndexedDB open means a version bump alone cannot exclude older workers. No native
-restore workflow or coordinator is claimed by this server admission test.
+The automatic document path retains its original null binding; token responses
+cannot assign it a new generation. A detected pause survives manual retries and
+credential-cache clearing during that runtime. In-flight success cannot undo it,
+and unloading settles late credential requests without recreating cache entries.
+Markdown and existing Canvas sync also respect the parent inventory's durable
+restore review. Ordinary original-lineage synchronization remains compatible.
+
+The per-document pause is not yet durable independently of inventory review.
+Safe resumed cache namespaces, retained review and verified source replacement
+are still required; the legacy cache's versionless IndexedDB open means a version
+bump alone cannot exclude older workers. No native restore workflow, restored-data
+drill or coordinator is claimed by this admission/pause test.

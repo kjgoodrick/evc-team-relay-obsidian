@@ -44,6 +44,9 @@ export interface DocumentGrant {
 
 	/** sha256 of the content, hex-encoded — a string, not a number. */
 	fileHash?: string;
+	/** Current managed server context; a document request must retain its own binding. */
+	restoreGuard?: boolean;
+	restoreGeneration?: string | null;
 }
 
 /**
@@ -62,7 +65,4 @@ export interface FileGrant extends DocumentGrant {
 	contentType: string;
 	contentLength: number;
 	fileHash: string;
-	/** Current server context, separate from the request's immutable write binding. */
-	restoreGuard?: boolean;
-	restoreGeneration?: string | null;
 }

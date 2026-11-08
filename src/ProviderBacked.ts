@@ -15,7 +15,7 @@ import type { DocumentGrant } from "./relay/TokenShapes";
 import { ResourceAddress, type ResourceAddressType } from "./ResourceAddress";
 import { currentToggles } from "./featureToggleState";
 import { computeReconnectDelay } from "./reconnectThrottle";
-import { RelayAccessDeniedError } from "./auth/RelayOnPremTokenProvider";
+import { RelayAccessDeniedError, RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { createPermanentUserData } from "./permanentUserData";
 import { safeAvatarUrl } from "./presenceAvatar";
 import { decodeJwt } from "jose";
@@ -126,6 +126,8 @@ export class ProviderBacked extends Loggable {
 	private detachConnectionClose: () => void;
 	private detachState: () => void;
 	private detachAccess: () => void;
+	private detachRestore?: () => void;
+	private restorePaused = false;
 	private detachAuthSession?: () => void;
 	private detachProfileRefresh?: () => void;
 	// accountId last used to seed awareness/doc-identity, so a later auth
@@ -206,6 +208,17 @@ export class ProviderBacked extends Loggable {
 		this.detachProfileRefresh = this.authSession?.onTokenRefreshed?.((serverId) => {
 			if (!this.onpremServerId || serverId === this.onpremServerId) this.reseedIdentityIfChanged();
 		});
+		this.detachRestore = credentialCache.onRestoreRequired?.(documentId => {
+			if (documentId === ResourceAddress.serialize(this.resourceAddress) && this.restoreReviewRequired) this.pauseForRestore();
+		});
+	}
+
+	get restoreReviewRequired(): boolean {
+		return this.restorePaused || !!this.credentialCache?.isRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+	}
+	protected pauseForRestore(): void {
+		if (this.restorePaused) return;
+		this.restorePaused = true; this.goOffline();
 	}
 
 	/**
@@ -277,7 +290,7 @@ export class ProviderBacked extends Loggable {
 			this.log(`${this.getVaultPath()}: connection dropped`, event);
 			const canRetry = this._liveProvider.canReconnect();
 			this.goOffline();
-			if (canRetry) {
+			if (canRetry && !this.restoreReviewRequired) {
 				this.reconnectGate.schedule(this._liveProvider.maxBackoffTime, () => {
 					void this.bringOnline();
 				});
@@ -299,7 +312,12 @@ export class ProviderBacked extends Loggable {
 	 * bringOnline(), which mints a fresh one first.
 	 */
 	private attachConnectionCloseHandler(): () => void {
-		const handler = () => {
+		const handler = (event: CloseEvent) => {
+			if (event?.code === 4412 && this.issuedToken.url.includes("/v1/managed/socket")) {
+				this.credentialCache.markRestoreRequired?.(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
+				this.pauseForRestore();
+				return;
+			}
 			this.refreshStaleProviderToken();
 		};
 		this._liveProvider.on("connection-close", handler);
@@ -308,6 +326,7 @@ export class ProviderBacked extends Loggable {
 
 	/** A queued reconnect may run after sleep, long after the close-time check. */
 	private refreshStaleProviderToken(): boolean {
+		if (this.restoreReviewRequired) { this.pauseForRestore(); return false; }
 		if (!this._liveProvider.shouldConnect) return false;
 		if (this.hasUsableProviderToken()) return true;
 		this.log(`${this.getVaultPath()}: stale token, refreshing before reconnect`);
@@ -373,6 +392,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	async requestProviderToken(): Promise<DocumentGrant> {
+		if (this.restoreReviewRequired) throw new RelayRestoreRequiredError();
 		this.log("requesting a provider token");
 		return this.credentialCache.getToken(
 			ResourceAddress.serialize(this.resourceAddress),
@@ -383,6 +403,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	hasFreshProviderToken(): boolean {
+		if (this.restoreReviewRequired) return false;
 		if (!this.issuedToken) {
 			return false;
 		}
@@ -399,11 +420,13 @@ export class ProviderBacked extends Loggable {
 	 * this grant by applyRefreshedToken() already.)
 	 */
 	private hasUsableProviderToken(): boolean {
+		if (this.restoreReviewRequired) return false;
 		const expiry = this.issuedToken?.expiryTime ?? 0;
 		return !!this.issuedToken?.token && Date.now() + RECONNECT_TOKEN_MARGIN_MS <= expiry;
 	}
 
 	applyRefreshedToken(clientToken: DocumentGrant): void {
+		if (this.restoreReviewRequired) return;
 		// point the live provider connection at the freshly-issued token
 		this.issuedToken = clientToken;
 
@@ -447,6 +470,7 @@ export class ProviderBacked extends Loggable {
 	 * into.
 	 */
 	async bringOnline(): Promise<boolean> {
+		if (this.restoreReviewRequired) { this.pauseForRestore(); return false; }
 		if (this.isOnline) {
 			return true;
 		}
@@ -459,7 +483,7 @@ export class ProviderBacked extends Loggable {
 			// goOffline() ran while the token was on its way (a caller that
 			// stopped waiting for this connect released it): connecting now
 			// would leave a socket nobody owns.
-			if (this.offlineCalls !== offlineCalls) return false;
+			if (this.offlineCalls !== offlineCalls || this.restoreReviewRequired) return false;
 			this.applyRefreshedToken(clientToken); // re-check: token may already be current at this point
 			this._liveProvider.connect();
 			// A retry left by an earlier failure is not needed any more.
@@ -467,6 +491,7 @@ export class ProviderBacked extends Loggable {
 			this.broadcastState();
 			return true;
 		} catch (e) {
+			if (e instanceof RelayRestoreRequiredError) { this.pauseForRestore(); return false; }
 			this.warn("bringOnline() failed:", e instanceof Error ? e.message : e);
 			// Cancelled by goOffline() while the token was on its way: the
 			// explicit "disconnected" intent stands, no retry behind it.
@@ -533,7 +558,7 @@ export class ProviderBacked extends Loggable {
 		// above) schedule it AFTER calling this.
 		this.reconnectGate.cancel();
 		this._liveProvider.disconnect();
-		this.credentialCache.dropFromQueue(this.entityGuid);
+		this.credentialCache.dropFromQueue(ResourceAddress.serialize(this.resourceAddress));
 		this.broadcastState();
 	}
 
@@ -632,6 +657,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	dismantle(): void {
+		this.detachRestore?.();
 		this.reconnectGate.cancel();
 		this.detachAccess();
 		this.detachConnectionError?.();

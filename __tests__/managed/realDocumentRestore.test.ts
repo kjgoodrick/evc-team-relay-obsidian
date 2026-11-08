@@ -2,6 +2,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as Y from "yjs";
 import { YSweetProvider } from "../../src/client/provider";
+import { ProviderBacked } from "../../src/ProviderBacked";
+import { RelayCredentialCache } from "../../src/RelayCredentialCache";
+import { RelayOnPremTokenProvider } from "../../src/auth/RelayOnPremTokenProvider";
+import { RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddress";
+import { SystemClock } from "../../src/Clock";
+import type { AuthSession } from "../../src/AuthSession";
+import type { IAuthProvider } from "../../src/auth/IAuthProvider";
+
+jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 
 const fixturePath = process.env.EVC_DOCUMENT_RESTORE_FIXTURE;
 const integration = fixturePath ? test : test.skip;
@@ -16,6 +25,18 @@ integration("managed document sockets reject original grants after generation ro
 	const f = JSON.parse(fs.readFileSync(fixturePath!, "utf8")) as Record<string, string>;
 	if (new URL(f.base).hostname !== "127.0.0.1" || !f.restartDir.includes("evc-managed-integration-")) throw new Error("Only a disposable fixture is allowed");
 	const providers: YSweetProvider[] = [], docs: Y.Doc[] = [];
+	const clients: ProviderBacked[] = [], caches: RelayCredentialCache[] = [];
+	const address = new RemoteDocumentAddress("relay-onprem", f.share, f.note);
+	const auth = { getToken: () => f.ownerToken, getValidToken: async () => f.ownerToken } as IAuthProvider;
+	const session = { getCurrentUserForServer: () => undefined, on: () => () => {} } as unknown as AuthSession;
+	function client() {
+		const tokenProvider = new RelayOnPremTokenProvider({ controlPlaneUrl: f.base, authProvider: auth });
+		const requests = jest.spyOn(tokenProvider, "requestToken");
+		const cache = new RelayCredentialCache(session, new SystemClock(), "disposable", 5, new Map([["fixture", tokenProvider]]));
+		const backing = new ProviderBacked(f.note, address, cache, session, "fixture");
+		clients.push(backing); caches.push(cache);
+		return { backing, cache, requests, provider: backing._liveProvider, text: backing.crdtDoc.getText("contents") };
+	}
 	async function grant(mode: "read" | "write", generation?: string, expected = 200) {
 		const response = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: { Authorization: `Bearer ${f.ownerToken}`,
 			"Content-Type": "application/json", ...(generation ? { "X-Relay-Restore-Generation": generation } : {}) },
@@ -32,16 +53,34 @@ integration("managed document sockets reject original grants after generation ro
 	}
 	try {
 		const original = await grant("write"); expect(original.restore_generation).toBeNull();
-		const writer = await peer(original), reader = await peer(await grant("read"));
+		const writer = client(), cached = client(), uncached = client();
+		expect(await writer.backing.bringOnline()).toBe(true);
+		await until(() => writer.provider.synced, "actual document client synchronized");
+		// An offline client may hold a valid, unexpired grant when the restore happens.
+		await cached.cache.getToken(ResourceAddress.serialize(address), "Note.md", () => {}, "fixture");
+		const reader = await peer(await grant("read"));
 		writer.text.insert(0, "content before rotation\n");
 		await until(() => reader.text.toString() === writer.text.toString(), "original content");
 		const generation = crypto.randomUUID();
 		fs.writeFileSync(path.join(f.restartDir, "rotate-request"), generation);
 		await until(() => fs.existsSync(path.join(f.restartDir, "rotate-done")), "fixture generation rotation");
 		await until(() => !writer.provider.wsconnected && !reader.provider.wsconnected, "active old sockets closed");
-		writer.provider.disconnect(); reader.provider.disconnect();
+		await until(() => writer.backing.restoreReviewRequired, "active client pauses for review");
+		reader.provider.disconnect();
 		writer.text.insert(writer.text.length, "OLD OFFLINE EDIT MUST STAY LOCAL\n");
-		writer.provider.connect(); await delay(300); expect(writer.provider.wsconnected).toBe(false); writer.provider.disconnect();
+		expect(await writer.backing.bringOnline()).toBe(false);
+		cached.text.insert(0, "CACHED CLIENT EDIT MUST STAY LOCAL\n");
+		expect(await cached.backing.bringOnline()).toBe(true);
+		await until(() => cached.backing.restoreReviewRequired, "cached grant receives restore close on admission");
+		uncached.text.insert(0, "UNCACHED CLIENT EDIT MUST STAY LOCAL\n");
+		expect(await uncached.backing.bringOnline()).toBe(false);
+		expect(uncached.backing.restoreReviewRequired).toBe(true);
+		await delay(1500);
+		for (const peer of [writer, cached, uncached]) {
+			expect(peer.provider.shouldConnect).toBe(false); expect(peer.provider.wsconnected).toBe(false);
+			expect(peer.requests).toHaveBeenCalledTimes(1);
+			expect(await peer.backing.bringOnline()).toBe(false);
+		}
 		await grant("write", undefined, 409); await grant("read", undefined, 409);
 		await grant("write", crypto.randomUUID(), 409);
 		const bound = await grant("write", generation); expect(bound.restore_generation).toBe(generation);
@@ -52,5 +91,10 @@ integration("managed document sockets reject original grants after generation ro
 		await until(() => currentReader.text.toString() === fresh.text.toString(), "fresh bound write/read");
 		expect(currentReader.text.toString()).not.toContain("OLD OFFLINE");
 		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
-	} finally { providers.forEach(provider => provider.destroy()); docs.forEach(doc => doc.destroy()); }
+		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
+		expect(uncached.text.toString()).toBe("UNCACHED CLIENT EDIT MUST STAY LOCAL\n");
+	} finally {
+		clients.forEach(client => { client.dismantle(); client.crdtDoc.destroy(); }); caches.forEach(cache => cache.destroy());
+		providers.forEach(provider => provider.destroy()); docs.forEach(doc => doc.destroy());
+	}
 }, 30_000);

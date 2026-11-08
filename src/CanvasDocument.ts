@@ -99,6 +99,7 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 
 		this.unsubscribes.push(
 			this._parent.subscribe(this.entryPath, (state) => {
+				if (this.restoreReviewRequired) { this.pauseForRestore(); return; }
 				if (state.intent === "disconnected") {
 					this.goOffline();
 				}
@@ -114,7 +115,10 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	/** Read live rather than the value captured at construction — see the
 	 * base-class doc comment for why. */
 	protected override getOnpremServerId(): string | undefined {
-		return this._parent.config.onpremServerId;
+		return this._parent?.config.onpremServerId ?? this.onpremServerId;
+	}
+	get restoreReviewRequired(): boolean {
+		return !!this._parent?._liveProvider?.managedIndex?.restoreReview || super.restoreReviewRequired;
 	}
 
 	private openPersistence(): LocalDocumentStore {

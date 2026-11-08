@@ -50,9 +50,9 @@ class FakeWS {
 		this.onopen?.();
 	}
 	/** Server-side drop of an established connection: close, no error event. */
-	drop(): void {
+	drop(code = 1006): void {
 		this.readyState = FakeWS.CLOSED;
-		this.onclose?.({ code: 1006 });
+		this.onclose?.({ code });
 	}
 }
 
@@ -102,6 +102,22 @@ describe("onclose reconnect never reuses an expired token", () => {
 	afterEach(() => {
 		jest.useRealTimers();
 		(testGlobal as { WebSocket?: unknown }).WebSocket = RealWS;
+	});
+
+	test("managed restore close pauses immediately without replay, token refresh or loss of local edits", async () => {
+		const token = { ...grant("old", Date.now() + 600_000), url: "ws://relay.example.com/v1/managed/socket" };
+		const getToken = jest.fn<() => Promise<DocumentGrant>>().mockResolvedValue(token);
+		const pb = build(getToken); pb.crdtDoc.getText("contents").insert(0, "keep these edits");
+		expect(await pb.bringOnline()).toBe(true); FakeWS.instances[0].open();
+		FakeWS.instances[0].drop(4412);
+		expect(pb.restoreReviewRequired).toBe(true); expect(pb.isOnline).toBe(false);
+		await jest.advanceTimersByTimeAsync(60_000);
+		expect(getToken).toHaveBeenCalledTimes(1); expect(FakeWS.instances).toHaveLength(1);
+		expect(await pb.bringOnline()).toBe(false);
+		pb.applyRefreshedToken({ ...token, token: "late" }); expect(pb.issuedToken.token).toBe("old");
+		await expect(pb.ensureActiveProvider()).rejects.toThrow("restore review");
+		expect(pb.crdtDoc.getText("contents").toString()).toBe("keep these edits");
+		pb.dismantle(); pb.crdtDoc.destroy();
 	});
 
 	test("expired token: the reconnect after a silent drop opens with a NEWLY minted token, never the old one", async () => {
