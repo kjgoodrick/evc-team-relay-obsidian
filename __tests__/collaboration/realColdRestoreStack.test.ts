@@ -7,7 +7,7 @@ import { YSweetProvider } from "../../src/client/provider";
 import { ProviderBacked } from "../../src/ProviderBacked";
 import { RelayCredentialCache } from "../../src/RelayCredentialCache";
 import { RelayOnPremTokenProvider } from "../../src/auth/RelayOnPremTokenProvider";
-import { RemoteDocumentAddress } from "../../src/ResourceAddress";
+import { RemoteDocumentAddress, RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { SystemClock } from "../../src/Clock";
 import type { AuthSession } from "../../src/AuthSession";
 import type { IAuthProvider } from "../../src/auth/IAuthProvider";
@@ -18,6 +18,8 @@ import { DiscussionOutbox } from "../../src/collaboration/DiscussionOutbox";
 import { bodyFromText, localTextAnchor, protocolJson, wireTextAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { captureTextAnchor, resolveTextAnchor } from "../../src/collaboration/anchors/text";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import { openSourceInventoryCache } from "../../src/storage/source-document-cache";
+import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 const integration = process.env.EVC_COLD_RESTORE_FIXTURE ? test : test.skip;
@@ -45,6 +47,29 @@ integration("cold backup and rollback retain actual CRDT, discussions and pictur
 	const writer = new StoredDocument(f.note, new RemoteDocumentAddress("relay-onprem", f.share, f.note), credentials, session, "fixture");
 	const documentStore = new LocalDocumentStore("cold-original-" + randomUUID(), writer.crdtDoc); writer.attachStore(documentStore);
 	const providers: YSweetProvider[] = [], docs: Y.Doc[] = [];
+	const inventories: { client: StoredDocument; store: LocalDocumentStore }[] = [];
+	const inventoryHost = randomUUID();
+	async function inventory(generation: string | null = null, online = true) {
+		const address = new RemoteFolderAddress("relay-onprem", f.share), binding = { restoreGeneration: generation };
+		const client = new StoredDocument(f.share, address, credentials, session, "fixture", binding);
+		const store = await openSourceInventoryCache({ ...binding, hostAppId: inventoryHost, serverId: "fixture", controlPlaneUrl: f.base, s3rn: ResourceAddress.serialize(address) }, client.crdtDoc);
+		client.attachStore(store); inventories.push({ client, store });
+		if (online) {
+			expect(await client.bringOnline()).toBe(true);
+			await until(() => !!client._liveProvider.managedIndex?.owner && client.isOnline, "selected inventory sync");
+			client.goOffline();
+		}
+		return { client, store, records: client.crdtDoc.getMap<ItemRecord>("filemeta_v0") };
+	}
+	async function expectHeldInventory(value: Awaited<ReturnType<typeof inventory>>, path: string, record: ItemRecord) {
+		// A still-valid inventory grant may read the replacement manifest. It
+		// must not let the selected transport rebase and publish retained moves.
+		value.client._liveProvider.connect();
+		await until(() => !!value.client._liveProvider.managedIndex?.restoreReview, "previous inventory generation held");
+		value.client.goOffline();
+		expect(value.records.get(path)).toEqual(record);
+		expect(value.client._liveProvider.managedIndex!.owner).toBe(false);
+	}
 	async function grant(token: string, mode: "read" | "write", generation?: string, entry = f.note, expected = 200) {
 		const response = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: {
 			Authorization: "Bearer " + token, "Content-Type": "application/json",
@@ -104,13 +129,25 @@ integration("cold backup and rollback retain actual CRDT, discussions and pictur
 		const thumbnail = await transport.pictureContent(f.note, pictureId, "thumbnail", picture.renditions.thumbnail!);
 		const unsent = command(protocolJson({ type: "reply.create", thread_id: thread, message_id: randomUUID(), body: bodyFromText("Offline original reply") }), "reply.create");
 		await store.enqueue(unsent);
+		const originalInventory = await inventory();
+		const [originalPath, originalRecord] = [...originalInventory.records].find(([, record]) => record.id === f.note)!;
+		originalInventory.client.crdtDoc.transact(() => {
+			originalInventory.records.delete(originalPath); originalInventory.records.set("Original offline inventory.md", originalRecord);
+		});
 		writer.goOffline(); text.insert(text.length, " OLD OFFLINE EDIT");
 		const generation1 = await restore(1);
+		await expectHeldInventory(originalInventory, "Original offline inventory.md", originalRecord);
 		const generations = [generation1];
 		let postRestore: QueuedCommand | undefined;
 		let current = await peer(generation1);
+		let currentInventory = await inventory(generation1);
+		const postRestoreEntry: ItemRecord = { id: randomUUID(), type: ItemKind.Document, version: 0 };
 		for (let round = 0; round < 2; round++) {
 			const generation = generations[round];
+			expect(currentInventory.records.get(originalPath)).toEqual(originalRecord);
+			expect(currentInventory.records.has("Original offline inventory.md")).toBe(false);
+			expect(currentInventory.records.has("After first restore.md")).toBe(false);
+			expect(currentInventory.records.has("First restored offline move.md")).toBe(false);
 			expect(current.text.toString()).toBe("beta gamma");
 			expect(await transport.anchorContext(f.note)).toEqual(context);
 			expect(await transport.thread(f.note, thread)).toEqual(baseline);
@@ -143,7 +180,20 @@ integration("cold backup and rollback retain actual CRDT, discussions and pictur
 				await until(() => observer.text.toString() === current.text.toString(), "new-generation CRDT write");
 				current.provider.disconnect();
 				current.text.insert(current.text.length, " LATER OFFLINE EDIT");
+				const index = currentInventory.client._liveProvider.managedIndex!; index.start();
+				expect(await index.claim("After first restore.md", postRestoreEntry)).toBe(true);
+				currentInventory.client.goOffline();
+				currentInventory.client.crdtDoc.transact(() => {
+					currentInventory.records.delete("After first restore.md"); currentInventory.records.set("First restored offline move.md", postRestoreEntry);
+				});
 				const generation2 = await restore(2); expect(generation2).not.toBe(generation1); generations.push(generation2);
+				await expectHeldInventory(currentInventory, "First restored offline move.md", postRestoreEntry);
+				await currentInventory.store.close();
+				const retained = await inventory(generation1, false);
+				expect(retained.records.get("First restored offline move.md")).toEqual(postRestoreEntry);
+				expect(retained.client.crdtDoc.getMap("managed_base_v1").get("restoreReview")).toBeDefined();
+				currentInventory = await inventory(generation2);
+				await grant(f.ownerToken, "write", generation1, f.share, 409);
 				await grant(f.ownerToken, "write", generation1, f.note, 409);
 				// The old restored client's valid, cached socket grant is fenced too.
 				let closed = 0; current.provider.on("connection-close", (event: CloseEvent | null) => { closed = event?.code ?? 0; });
@@ -158,10 +208,17 @@ integration("cold backup and rollback retain actual CRDT, discussions and pictur
 				const fresh = command(protocolJson({ type: "reply.create", thread_id: thread, message_id: randomUUID(), body: bodyFromText("New work after rollback") }), "reply.create", generation);
 				await transport.send(fresh);
 				expect((await transport.thread(f.note, thread)).messages).toHaveLength(3);
+				const index = currentInventory.client._liveProvider.managedIndex!; index.start();
+				expect(await index.claim("After rollback.md", { id: randomUUID(), type: ItemKind.Document, version: 0 })).toBe(true);
+				currentInventory.client.goOffline();
+				expect(originalInventory.records.get("Original offline inventory.md")).toEqual(originalRecord);
 			}
 		}
 	} finally {
 		worker.stop(); await worker.settled(); store.close();
+		for (const inventory of inventories) {
+			inventory.client.dismantle(); await inventory.store.close(); inventory.client.crdtDoc.destroy();
+		}
 		writer.dismantle(); await documentStore.close(); writer.crdtDoc.destroy(); credentials.destroy();
 		providers.forEach(provider => provider.destroy()); docs.forEach(doc => doc.destroy());
 	}

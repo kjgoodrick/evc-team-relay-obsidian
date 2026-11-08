@@ -54,6 +54,18 @@ rollback rehearsal now verifies CRDT/comment/picture/ACL preservation. The HTTP
 inventory fixture additionally verifies selected claims/moves/activity, refusal
 of an empty original-generation selection, and persisted inventory reopening.
 
+The full cold-restore rehearsal now also uses real `ProviderBacked` inventory
+clients and separate persisted inventory caches. It preserves an original offline
+move through the first restore, accepts a first-generation claim, retains a later
+offline move through rollback, reopens that held cache and accepts a new claim
+only from the second selected generation. The first generation's cached grant
+can read the replacement manifest but cannot cause the transport to rebase old
+moves. A new token request bound to the obsolete generation is refused. The
+November 8 inventory run passed in 204.9 seconds at
+`/private/tmp/evc-inventory-cold-drill-20261108-b`, with owned resources removed
+and pre-existing container state unchanged. The preceding `-a` attempt stopped
+at image preflight because of a mistyped image digest and created no containers.
+
 Paused-share recovery now discovers and exports matching source namespaces as
 [separate generation histories](managed-recovery-backup-preview.md), including
 their own buffers and private inventories. Identity and catalog changes during
