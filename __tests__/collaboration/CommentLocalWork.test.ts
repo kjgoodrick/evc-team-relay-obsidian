@@ -4,7 +4,9 @@ import { TextEncoder, TextDecoder } from "node:util";
 import { serialize, deserialize } from "node:v8";
 import { webcrypto } from "node:crypto";
 import type { App } from "obsidian";
-import { DiscussionStore, type Draft } from "../../src/collaboration/storage/DiscussionStore";
+import { DiscussionStore, type Draft, type OutboxOperation } from "../../src/collaboration/storage/DiscussionStore";
+import type { CommandStatus } from "../../src/collaboration/DiscussionTransport";
+import type { RestoreBinding } from "../../src/collaboration/RestoreGeneration";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { CommentLocalWorkModal } from "../../src/collaboration/ui/CommentLocalWork";
 import { CommentComposer } from "../../src/collaboration/ui/CommentComposer";
@@ -29,6 +31,8 @@ async function until(check: () => boolean): Promise<void> {
 async function fixture() {
 	const store = await DiscussionStore.open(identity, new IDBFactory()), listeners = new Set<() => void>(); let current = true;
 	const session = { store, identity, status: "unavailable", online: false, canQueue: false, canAttachPictures: false,
+		canCheckSavedCommand: false, restoreBinding: {} as RestoreBinding,
+		checkSavedCommand: jest.fn(async (_operation: OutboxOperation, _visible: () => boolean): Promise<CommandStatus> => ({ status: "unknown" })),
 		permission: () => undefined, participants: jest.fn(() => []), displayName: jest.fn(() => "Member"), queue: jest.fn(),
 		trackLocal: <T>(promise: Promise<T>) => promise,
 		onChange: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -36,8 +40,86 @@ async function fixture() {
 	};
 	const modal = new CommentLocalWorkModal({} as App, session as unknown as DiscussionSession, () => current); document.body.append(modal.contentEl);
 	const button = (text: string) => Array.from(modal.contentEl.querySelectorAll("button")).find(item => item.textContent === text)!;
-	return { store, session, modal, button, listeners, invalidate: () => { current = false; modal.validate(); }, close: () => { modal.onClose(); modal.contentEl.remove(); store.close(); } };
+	return { store, session, modal, button, listeners, notify: () => listeners.forEach(listener => listener()), invalidate: () => { current = false; modal.validate(); }, close: () => { modal.onClose(); modal.contentEl.remove(); store.close(); } };
 }
+
+async function receiptFixture() {
+	const f = await fixture();
+	await f.store.enqueue({ operationId: id(40), scopeId: scope, type: "reply.create", dependsOn: [], payload: { type: "reply.create", thread_id: id(41), message_id: id(42), body: protocolJson(bodyFromText("Waiting reply")) } });
+	await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0, () => true); f.session.restoreBinding = { restoreGeneration: id(90) };
+	await f.modal.onOpen(); f.button("Waiting changes").click(); await until(() => !!f.button("Check server receipt"));
+	return { ...f, saved: (await f.store.getOperation(id(40)))! };
+}
+
+test.each(["accepted", "withdrawn", "unknown"] as const)("saved-work receipt result %s preserves the original request and never queues recovery", async status => {
+	const f = await receiptFixture();
+	try {
+		expect(f.saved).toMatchObject({ error: "restore_generation_changed" }); expect(f.button("Check server receipt").disabled).toBe(true);
+		f.session.canCheckSavedCommand = true; f.notify(); expect(f.button("Check server receipt").disabled).toBe(false);
+		const result: CommandStatus = status === "accepted" ? { status, result: { operation_id: id(40), scope_id: scope, thread_id: id(41), sequence: 1, state: "open", state_revision: 1, removed: false, changed: true, message_id: id(42), message_revision: 1 } } : { status };
+		f.session.checkSavedCommand.mockResolvedValueOnce(result); f.button("Check server receipt").click();
+		await until(() => f.modal.contentEl.textContent!.includes("Checked "));
+		expect(f.session.checkSavedCommand).toHaveBeenCalledWith(f.saved, expect.any(Function));
+		expect(f.modal.contentEl.textContent).toContain(status === "accepted" ? "recorded this request as accepted" : status === "withdrawn" ? "recorded this request as cancelled" : "does not prove the change was never accepted");
+		expect(await f.store.getOperation(id(40))).toEqual(f.saved); expect(f.session.queue).not.toHaveBeenCalled();
+		expect(f.session.participants).not.toHaveBeenCalled(); expect(f.session.displayName).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
+test.each(["page", "account", "offline", "restore"])("a pending saved-work receipt is ignored after %s changes", async change => {
+	const f = await receiptFixture();
+	try {
+		f.session.canCheckSavedCommand = true; f.notify(); let finish!: (result: CommandStatus) => void;
+		f.session.checkSavedCommand.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		const button = f.button("Check server receipt"); button.click(); button.click(); expect(f.session.checkSavedCommand).toHaveBeenCalledTimes(1);
+		const current = f.session.checkSavedCommand.mock.calls[0][1]; expect(current()).toBe(true);
+		if (change === "page") f.button("Drafts").click();
+		if (change === "account") f.invalidate();
+		if (change === "offline") { f.session.canCheckSavedCommand = false; f.notify(); }
+		if (change === "restore") { f.session.restoreBinding = { restoreGeneration: id(91) }; f.notify(); }
+		expect(current()).toBe(false); finish({ status: "unknown" });
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(f.modal.contentEl.textContent).not.toContain("No matching receipt was found"); expect(await f.store.getOperation(id(40))).toEqual(f.saved);
+	} finally { f.close(); }
+});
+
+test("failed receipt inspection can retry and cannot resurrect a result after close", async () => {
+	const f = await receiptFixture();
+	try {
+		f.session.canCheckSavedCommand = true; f.notify(); f.session.checkSavedCommand.mockRejectedValueOnce(new Error("Disconnected"));
+		f.button("Check server receipt").click(); await until(() => f.modal.contentEl.textContent!.includes("receipt could not be checked"));
+		expect(f.button("Check server receipt").disabled).toBe(false);
+		let finish!: (result: CommandStatus) => void;
+		f.session.checkSavedCommand.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		f.button("Check server receipt").click(); f.modal.onClose(); finish({ status: "withdrawn" });
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(f.modal.contentEl.textContent).toBe(""); expect(f.listeners.size).toBe(0); expect(await f.store.getOperation(id(40))).toEqual(f.saved);
+	} finally { f.close(); }
+});
+
+test("picture uploads and unprepared group requests explain why a comment receipt is unavailable", async () => {
+	const f = await receiptFixture();
+	try {
+		jest.spyOn(f.store, "waitingWorkPage").mockResolvedValueOnce({ items: [{ ...f.saved, type: "picture.upload" }, { ...f.saved, operationId: id(43), type: "base.group.create" } ] });
+		f.button("Refresh saved work").click(); await until(() => f.modal.contentEl.textContent!.includes("no saved final target"));
+		expect(f.button("Check server receipt")).toBeUndefined(); expect(f.modal.contentEl.textContent).toContain("Picture uploads have separate receipts");
+		expect(f.session.checkSavedCommand).not.toHaveBeenCalled();
+	} finally { f.close(); }
+});
+
+test("reopened saved-work browsing cannot adopt a receipt from the previous lifetime", async () => {
+	const f = await receiptFixture();
+	try {
+		f.session.canCheckSavedCommand = true; f.notify(); let finish!: (result: CommandStatus) => void;
+		f.session.checkSavedCommand.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		f.button("Check server receipt").click(); f.modal.onClose(); await f.modal.onOpen();
+		expect(f.button("Check server receipt")).toBeDefined(); finish({ status: "withdrawn" });
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(f.modal.contentEl.textContent).not.toContain("recorded this request as cancelled");
+		f.button("Check server receipt").click(); await until(() => f.modal.contentEl.textContent!.includes("No matching receipt"));
+		expect(await f.store.getOperation(id(40))).toEqual(f.saved);
+	} finally { f.close(); }
+});
 
 test("drafts remain editable with an inaccessible target, preserving the target and hiding send actions", async () => {
 	const f = await fixture();

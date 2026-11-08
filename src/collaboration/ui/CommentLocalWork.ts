@@ -8,6 +8,7 @@ import { readCommentDraft } from "./CommentDraft";
 import { CancelReactionModal } from "./CancelReaction";
 import { CommentComposer } from "./CommentComposer";
 import { copyToClipboard } from "../../utils/clipboard";
+import { commandReceiptError, commandReceiptMessage } from "./CommandReceipt";
 
 const operationLabels: Record<OutboxOperation["type"], string> = {
 	"thread.create": "New discussion", "reply.create": "Reply", "message.edit": "Comment edit",
@@ -41,13 +42,15 @@ export class CommentLocalWorkModal extends Modal {
 	private list?: HTMLElement;
 	private status?: HTMLElement;
 	private navigation?: HTMLElement;
+	private receipts = new Set<() => void>();
 	constructor(app: App, private session: DiscussionSession, private context: () => boolean) { super(app); }
 	private accountCurrent = () => this.context() && this.session.status !== "closed";
 	private current = () => this.live && this.accountCurrent();
 	validate(): void { if (this.live && !this.current()) this.close(); else this.reaction?.validate(); }
 	async onOpen(): Promise<void> {
+		this.live = true; this.generation++;
 		this.setTitle("Saved comment work");
-		this.stop = this.session.onChange(() => { this.validate(); if (this.current()) this.composer?.update(); });
+		this.stop = this.session.onChange(() => { this.validate(); if (this.current()) { this.composer?.update(); this.receipts.forEach(update => update()); } });
 		await this.showList();
 	}
 	private async showList(): Promise<void> {
@@ -58,7 +61,7 @@ export class CommentLocalWorkModal extends Modal {
 			if (!this.current() || this.composer !== editor) return;
 			editor.dispose(); this.composer = undefined;
 		}
-		this.contentEl.empty();
+		this.receipts.clear(); this.contentEl.empty();
 		this.contentEl.createEl("p", { text: "Your local drafts and waiting changes for this shared folder. A note or saved view can be missing or inaccessible. Pages show current saved state; refresh after changes in another window." });
 		const tabs = this.contentEl.createDiv({ attr: { role: "group", "aria-label": "Saved work type" } });
 		for (const mode of ["drafts", "waiting"] as const) {
@@ -122,12 +125,40 @@ export class CommentLocalWorkModal extends Modal {
 		card.createEl("p", { text: operationText(operation).slice(0, 1000) });
 		card.createEl("p", { text: `Saved ${new Date(operation.createdAt).toLocaleString()} · ${operation.dependsOn.length} dependencies` });
 		if (operation.error === "restore_generation_changed") card.createEl("p", { text: "Saved before the server was restored. This request is held for review; its original content is retained. Check the current discussion and its saved receipt before copying or sending new work." });
-		card.createEl("p", { text: operation.type === "reaction.set" ? "Cancellation checks delivery before retiring this change. It never sends an opposite reaction." : "This saved command is read-only here. Check delivery and review recovery from the original discussion before changing or sending it again." });
+		card.createEl("p", { text: operation.type === "reaction.set" ? "Cancellation checks delivery before retiring this change. It never sends an opposite reaction." : "This saved command is read-only here. Receipt checks keep it unchanged. Review recovery from the original discussion before changing or sending it again." });
+		if (operation.type !== "picture.upload" && (operation.type !== "base.group.create" || operation.preparedAnchor !== undefined)) this.renderReceipt(card, operation);
+		else card.createEl("p", { text: operation.type === "picture.upload" ? "Picture uploads have separate receipts. Check the saved comment that uses this picture." : "This group request has no saved final target, so its comment receipt cannot be checked yet." });
 		if (operation.type === "reaction.set" && operation.error !== "restore_generation_changed") {
 			const cancel = card.createEl("button", { text: "Cancel saved reaction", attr: { type: "button" } });
 			cancel.onclick = () => { if (!this.current()) return; this.reaction?.close(); this.reaction = new CancelReactionModal(this.app, this.session, operation, this.current); this.reaction.open(); };
 		}
 		this.copy(card, () => operationText(operation));
+	}
+	private renderReceipt(card: HTMLElement, operation: OutboxOperation): void {
+		card.createEl("p", { text: "A receipt records delivery; it does not establish whether the current discussion still contains that change." });
+		const button = card.createEl("button", { text: "Check server receipt", attr: { type: "button" } });
+		const status = card.createDiv({ attr: { role: "status", "aria-live": "polite" } });
+		const page = this.generation;
+		let busy = false, serial = 0, available = this.session.canCheckSavedCommand, binding = JSON.stringify(this.session.restoreBinding);
+		const current = () => this.current() && this.generation === page && card.parentElement === this.list;
+		const controls = () => {
+			if (!current()) return;
+			const next = this.session.canCheckSavedCommand, nextBinding = JSON.stringify(this.session.restoreBinding);
+			if (nextBinding !== binding || available && !next) { serial++; busy = false; status.setText("The connection or server context changed. Check the receipt again when connected."); }
+			binding = nextBinding; available = next; button.disabled = busy || !available;
+		};
+		this.receipts.add(controls); controls();
+		if (!available) status.setText("Connect to a server that supports receipt inspection to check this request.");
+		button.onclick = () => {
+			controls(); if (!current() || busy || !available) return;
+			const request = ++serial, selectedBinding = binding;
+			const valid = () => current() && serial === request && this.session.canCheckSavedCommand && JSON.stringify(this.session.restoreBinding) === selectedBinding;
+			busy = true; controls(); status.setText("Checking this request's receipt…");
+			void this.session.checkSavedCommand(operation, valid).then(result => {
+				if (valid()) status.setText(`${commandReceiptMessage(result)} Checked ${new Date().toLocaleTimeString()}.`);
+			}).catch(error => { if (valid()) status.setText(commandReceiptError(error)); })
+				.finally(() => { if (current() && serial === request) { busy = false; controls(); } });
+		};
 	}
 	private openDraft(draft: Draft): void {
 		if (!this.current() || this.composer) return;
@@ -142,6 +173,6 @@ export class CommentLocalWorkModal extends Modal {
 	}
 	onClose(): void {
 		this.live = false; this.reaction?.close(); this.reaction = undefined; this.generation++; this.stop?.(); this.stop = undefined;
-		this.composer?.dispose(); this.composer = undefined; this.contentEl.empty();
+		this.composer?.dispose(); this.composer = undefined; this.receipts.clear(); this.contentEl.empty();
 	}
 }

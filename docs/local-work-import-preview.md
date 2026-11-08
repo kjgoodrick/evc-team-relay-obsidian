@@ -43,6 +43,24 @@ if the original note is not available locally or comment permission was revoked.
 Closing the review, changing accounts or losing its active context discards late
 results. Status is transient, not stored as durable acceptance evidence.
 
+The ordinary **Saved comment work → Waiting changes** browser also exposes
+**Check server receipt**, including requests held after a restore. It uses the
+same exact-request session API without requiring the original note to be open
+or present locally. Current server read permission still applies; inaccessible
+targets remain errors. Picture uploads and unprepared group requests explain
+their separate receipt requirements. The browser remains a local, paged read
+until the user explicitly checks a receipt.
+
+Receipt results include the check time and explain that acceptance is not proof
+the current discussion still contains the change. Neither accepted nor unknown
+results change the local operation, its original generation or dependencies.
+The button follows connection/capability availability; one check per card can
+run at a time. Page/account/connection/restore-context changes and close/reopen
+invalidate late results. Changing context also withdraws a displayed status.
+No picture download, participant lookup, resend, withdrawal, draft conversion
+or dependent replay is performed by these controls. Full restored-command and
+dependent reconciliation remains unfinished.
+
 Ordinary creation, reply, edit and reaction requests can be checked. A saved
 Bases group request can be checked only when its exact prepared target is already
 in the archive; inspection never acquires a fresh target. Supported lane ranges
