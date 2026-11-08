@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import { prepareRecoveryBackup, type RecoveryIO } from "../../src/ManagedRecoveryBackup";
-import { verifyRecoveryArchive, recoveryCompletionText, type RecoveryArchiveReference, type RecoveryArchiveFile } from "../../src/ManagedRecoveryArchive";
+import { verifyRecoveryArchive, inspectRecoveryArchive, recoveryCompletionText, type RecoveryArchiveReference, type RecoveryArchiveFile } from "../../src/ManagedRecoveryArchive";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
 import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { RECOVERY_FOLDER } from "../../src/conflictCopyPath";
@@ -151,6 +151,16 @@ test("returned summaries do not expose a mutable trusted artifact list", async (
 	expect(Object.isFrozen(result.reference)).toBe(true); expect(result).not.toHaveProperty("files");
 	await io.write(`${backup.path}/unlisted.txt`, "not part of recovery");
 	expect(await verifyRecoveryArchive(io, backup.reference)).toEqual(result);
+});
+
+test("explicit archive inspection exposes only immutable verified file descriptors", async () => {
+	const backup = await archive(), result = await inspectRecoveryArchive(io, backup.reference);
+	expect(Object.isFrozen(result.files)).toBe(true);
+	expect(result.files.every(file => Object.isFrozen(file))).toBe(true);
+	expect(result.files.find(file => file.path === "files/Team/Note.md")).toMatchObject({ bytes: 6, sha256: hash("native") });
+	expect(() => Object.assign(result.files[0], { bytes: 0 })).toThrow();
+	await io.write(`${backup.path}/unlisted.txt`, "Not an archived file");
+	expect((await inspectRecoveryArchive(io, backup.reference)).files).toEqual(result.files);
 });
 
 test("buffers returned from another window realm can be verified", async () => {

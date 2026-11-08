@@ -17,6 +17,8 @@ export interface SourceInstallationCapture {
 	archive: RecoveryArchiveReference;
 	originalRoot: string;
 	destinationRoot: string;
+	/** Explicit opt-in; equal paths never silently change the installation mode. */
+	mode?: "new-folder" | "existing-folder";
 	snapshot: ManagedManifest;
 }
 export interface SourceInstallationDownloads {
@@ -39,15 +41,17 @@ export async function stageSourceInstallation(io: SourceInstallationStageIO, inp
 	const metadata = JSON.stringify(input);
 	if (!metadata || new TextEncoder().encode(metadata).byteLength > 16 * 1024 * 1024) throw new Error("Installation capture metadata exceeds its size limit");
 	const capture = JSON.parse(metadata) as SourceInstallationCapture;
+	if (capture.mode !== undefined && capture.mode !== "new-folder" && capture.mode !== "existing-folder") throw new Error("Unsupported installation capture mode");
 	const readSource = downloads.source.bind(downloads), readAttachment = downloads.attachment.bind(downloads);
 	if (!capture.snapshot?.records || typeof capture.snapshot.records !== "object" || Array.isArray(capture.snapshot.records)) throw new Error("Invalid captured installation inventory");
 	const entries = Object.entries(capture.snapshot.records).map(([path, record]): InstallationEntry => ({ path, record,
 		...(record?.type === "folder" ? {} : { file: record?.type === "markdown" || record?.type === "canvas" ? placeholder() : { bytes: 0, sha256: record?.hash ?? "" } }),
 		...(record?.type === "markdown" || record?.type === "canvas" ? { source: placeholder() } : {}),
 	}));
-	const plan: SourceInstallationPlan = parseSourceInstallationPlan({ format: "team-relay-source-installation", version: 1, id: crypto.randomUUID(),
+	const mode = capture.mode ?? "new-folder";
+	const plan: SourceInstallationPlan = parseSourceInstallationPlan({ format: "team-relay-source-installation", version: mode === "existing-folder" ? 2 : 1, id: crypto.randomUUID(),
 		reviewId: capture.reviewId, source: capture.source, archive: capture.archive, originalRoot: capture.originalRoot,
-		destinationRoot: capture.destinationRoot, mode: "new-folder", inventory: placeholder(), entries });
+		destinationRoot: capture.destinationRoot, mode, inventory: placeholder(), entries });
 	const inventory = new Uint8Array(buildInstallationInventory(plan, capture.snapshot)).buffer;
 	const checkContext = options.check, signal = options.signal, timeout = options.timeoutMs ?? 30_000;
 	if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) throw new Error("Invalid installation staging timeout");

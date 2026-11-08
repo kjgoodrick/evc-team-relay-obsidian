@@ -4,15 +4,17 @@
 recovery coordinator. Its ID and SHA-256 fit the existing selection journal's
 prepared-plan reference. It records the exact review, vault/server/folder source
 identity and restore generation, original-work recovery archive, original root,
-proposed new root, inventory update, file records, native bytes and editing-history
+proposed destination root, inventory update, file records, native bytes and editing-history
 artifacts. It has no credentials or transient login identity.
 
-The first format supports a **new folder** disjoint from both the original folder
-and the local recovery directory. This is the working restore default while the
-optional destination preference is reviewed. It cannot represent replacement of
-an existing folder. A vault-root original needs a separate destination/vault flow
-and is refused by this format. The coordinator still must establish that the
-proposed destination is new and isolated; a path in a plan does not prove that.
+Version 1 supports a **new folder** disjoint from both the original folder and the
+local recovery directory. Version 2 explicitly describes an **existing-folder**
+destination with exactly matching original/destination paths. The working product
+direction is same-folder recovery. Its [preparation and read-only comparison](same-folder-source-inspection-preview.md)
+are implemented; replacement and activation are unfinished. Existing new-folder
+mutation paths reject version 2 rather than weakening their isolation checks.
+A vault-root original remains unsupported. A path in a plan does not prove writer
+isolation, capture current native state or authorize an overwrite.
 
 Native paths are validated separately from artifact locations. Staging always
 uses `Relay Recovery (local only)/Source installations/<plan UUID>` with

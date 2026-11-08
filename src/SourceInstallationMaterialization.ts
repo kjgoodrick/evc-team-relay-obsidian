@@ -78,6 +78,7 @@ export async function withMaterializedSourceInstallation<T>(journal: SourceSelec
 	const verified = await verifySourceInstallationPlan(staging, preparation.plan,
 		{ source: request.source, reviewId: request.reviewId, archive: preparation.archive }, { check, signal, timeoutMs });
 	const { plan } = verified, root = plan.destinationRoot, owner = native.nativeWriteOwner;
+	if (plan.mode !== "new-folder") throw new Error("Same-folder recovery requires its replacement coordinator; the new-folder installer cannot apply it");
 	if (native.root !== root) throw new Error("The native destination does not match the installation plan");
 	const confirm = async () => {
 		check();

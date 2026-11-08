@@ -62,6 +62,14 @@ function parseManifest(bytes: ArrayBuffer, maxFiles: number, maxFileBytes: numbe
  * checked. This proves saved bytes, not source freshness or permission to write.
  * Reads are sequential and bounded; no native file or source cache is modified. */
 export async function verifyRecoveryArchive(io: RecoveryArchiveReader, input: RecoveryArchiveReference, options: RecoveryArchiveVerification = {}) {
+	const { reference, fileCount, totalBytes } = await inspectRecoveryArchive(io, input, options);
+	return { reference, fileCount, totalBytes };
+}
+
+/** Explicit metadata inspection for recovery comparison. Returned immutable
+ * descriptors are observations bound to the verified manifest, not permission
+ * to overwrite live files. Ordinary verification retains its summary-only API. */
+export async function inspectRecoveryArchive(io: RecoveryArchiveReader, input: RecoveryArchiveReference, options: RecoveryArchiveVerification = {}) {
 	const reference = { path: input?.path, manifestSha256: input?.manifestSha256 };
 	requireRecoveryRelativePath(reference.path);
 	if (!reference.path.startsWith(RECOVERY_FOLDER + "/") || reference.path.length > 2048 || reference.path.includes(":")
@@ -114,5 +122,6 @@ export async function verifyRecoveryArchive(io: RecoveryArchiveReader, input: Re
 	// Detect a replaced manifest/marker while sequential artifact reads ran.
 	if (await digest(await read("manifest.json", bound.maxManifestBytes, manifest.byteLength)) !== reference.manifestSha256) throw new Error("Recovery manifest changed during verification");
 	await verifyCompletion(); check();
-	return { reference: Object.freeze(reference), fileCount: files.length, totalBytes };
+	return { reference: Object.freeze(reference), fileCount: files.length, totalBytes,
+		files: Object.freeze(files.map(file => Object.freeze({ ...file }))) };
 }

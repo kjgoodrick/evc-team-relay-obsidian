@@ -12,6 +12,7 @@ export function createDesktopSourceMaterializationIO(vault: Vault, input: Source
 		throw new Error("This host does not provide exclusive native source installation");
 	}
 	const plan = parseSourceInstallationPlan(input), root = plan.destinationRoot;
+	if (plan.mode !== "new-folder") throw new Error("This native adapter only supports new-folder installation");
 	// eslint-disable-next-line @typescript-eslint/no-require-imports -- desktop capability is established before loading Node
 	const fs = require("fs/promises") as typeof import("node:fs/promises");
 	// eslint-disable-next-line @typescript-eslint/no-require-imports -- desktop-only path operations

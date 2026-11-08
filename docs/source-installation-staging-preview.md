@@ -7,6 +7,12 @@ re-verifies the original-work recovery archive, and creates a unique staging
 directory using an I/O operation that must fail if the directory already exists.
 It never reuses or empties an existing directory.
 
+An explicit `mode: "existing-folder"` prepares the selected source for the exact
+original root using the version-2 plan. Omitting mode preserves the version-1
+new-folder contract. This changes neither the original tree nor the share mapping;
+the [same-folder comparison](same-folder-source-inspection-preview.md) can inspect
+prepared artifacts, but the existing native installer cannot apply them.
+
 Downloads are sequential and receive detached entry metadata plus the exact
 vault/server/folder/generation identity. Markdown and existing Canvas sources
 are projected from complete editing histories using the native save projection.
@@ -18,8 +24,8 @@ semantics are read back before a result is returned.
 The adapter contract requires read-only, generation-bound downloads and exclusive
 directory creation. A [preparation coordinator](source-installation-preparation-preview.md)
 now connects verified staging and a fresh inventory read to the journal.
-Production host/transport adapters are not connected yet; synthetic tests exercise this contract on a
-real temporary filesystem. The primitive does not select a source, advance the
+Desktop staging and authenticated download adapters now have real HTTP/CRDT and
+HTTP/MinIO evidence. User-facing integration remains unfinished. The primitive does not select a source, advance the
 selection journal, create the proposed native destination, touch originals,
 import a source cache or replay saved work. A returned artifact still needs current
 server, journal and writer-isolation checks before installation.

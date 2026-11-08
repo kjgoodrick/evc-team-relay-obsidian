@@ -2,7 +2,7 @@ import type { ItemRecord } from "./ItemKinds";
 import { RECOVERY_FOLDER } from "./conflictCopyPath";
 import { sha256Hex } from "./contentDigest";
 import { restoreGeneration } from "./collaboration/RestoreGeneration";
-import { verifyRecoveryArchive, type RecoveryArchiveReader, type RecoveryArchiveReference } from "./ManagedRecoveryArchive";
+import { inspectRecoveryArchive, type RecoveryArchiveReader, type RecoveryArchiveReference } from "./ManagedRecoveryArchive";
 import { sourceInventoryCacheSync, type SourceInventoryIdentity } from "./storage/source-document-cache";
 import { ResourceAddress, RemoteFolderAddress } from "./ResourceAddress";
 
@@ -13,19 +13,20 @@ export interface InstallationEntry {
 	file?: InstallationArtifact;
 	source?: InstallationArtifact;
 }
-export interface SourceInstallationPlan {
+interface SourceInstallationPlanContent {
 	format: "team-relay-source-installation";
-	version: 1;
 	id: string;
 	reviewId: string;
 	source: SourceInventoryIdentity;
 	archive: RecoveryArchiveReference;
 	originalRoot: string;
 	destinationRoot: string;
-	mode: "new-folder";
 	inventory: InstallationArtifact;
 	entries: InstallationEntry[];
 }
+export type SourceInstallationPlan = SourceInstallationPlanContent & (
+	{ version: 1; mode: "new-folder" } | { version: 2; mode: "existing-folder" }
+);
 export interface SourceInstallationReference { id: string; sha256: string }
 export interface SourcePlanVerificationOptions { check?: () => void; signal?: AbortSignal; timeoutMs?: number }
 const MAX_PLAN = 16 * 1024 * 1024, MAX_SOURCE = 16 * 1024 * 1024, MAX_FILE = 256 * 1024 * 1024;
@@ -90,7 +91,8 @@ function record(value: unknown): ItemRecord {
  * consistency is checked separately before installation verification returns. */
 export function parseSourceInstallationPlan(value: unknown): SourceInstallationPlan {
 	exact(value, ["format", "version", "id", "reviewId", "source", "archive", "originalRoot", "destinationRoot", "mode", "inventory", "entries"]);
-	if (value.format !== "team-relay-source-installation" || value.version !== 1 || value.mode !== "new-folder"
+	if (value.format !== "team-relay-source-installation"
+		|| !(value.version === 1 && value.mode === "new-folder" || value.version === 2 && value.mode === "existing-folder")
 		|| !Array.isArray(value.entries) || value.entries.length > MAX_ENTRIES) throw fail();
 	exact(value.source, ["hostAppId", "serverId", "controlPlaneUrl", "s3rn", "restoreGeneration"]);
 	const source = { ...value.source } as unknown as SourceInventoryIdentity;
@@ -104,7 +106,7 @@ export function parseSourceInstallationPlan(value: unknown): SourceInstallationP
 	const archive = { path: path(value.archive.path), manifestSha256: digest(value.archive.manifestSha256) };
 	if (!archive.path.startsWith(RECOVERY_FOLDER + "/")) throw fail();
 	const originalRoot = sourceInstallationNativeRoot(value.originalRoot), destinationRoot = sourceInstallationNativeRoot(value.destinationRoot);
-	if (overlaps(originalRoot, destinationRoot)) throw fail();
+	if (value.mode === "existing-folder" ? originalRoot !== destinationRoot : overlaps(originalRoot, destinationRoot)) throw fail();
 	const inventory = artifact(value.inventory, MAX_SOURCE), ids = new Set<string>();
 	const paths: PathNode = { spelling: "", children: new Map() };
 	let total = inventory.bytes, pathNodes = 0, pathComponents = 0;
@@ -137,8 +139,10 @@ export function parseSourceInstallationPlan(value: unknown): SourceInstallationP
 		if (!Number.isSafeInteger(total) || total > MAX_TOTAL) throw fail();
 		return { path: name, record: entryRecord, ...(file ? { file } : {}), ...(update ? { source: update } : {}) };
 	});
-	return { format: value.format, version: 1, id: uuid(value.id), reviewId: uuid(value.reviewId), source, archive,
-		originalRoot, destinationRoot, mode: "new-folder", inventory, entries };
+	const mode = value.mode === "existing-folder" ? { version: 2 as const, mode: "existing-folder" as const }
+		: { version: 1 as const, mode: "new-folder" as const };
+	return { format: value.format, ...mode, id: uuid(value.id), reviewId: uuid(value.reviewId), source, archive,
+		originalRoot, destinationRoot, inventory, entries };
 }
 
 /** A deterministic staging location; arbitrary manifest paths never become
@@ -195,7 +199,7 @@ export async function verifySourceInstallationPlan(io: RecoveryArchiveReader, in
 	const plan = parseSourceInstallationPlan(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
 	if (plan.id !== reference.id || plan.reviewId !== reviewId || sourceInventoryCacheSync(plan.source).identity !== scopeIdentity
 		|| plan.archive.path !== archiveReference.path || plan.archive.manifestSha256 !== archiveReference.manifestSha256) throw new Error("Installation plan belongs to another source review or recovery archive");
-	await verifyRecoveryArchive(io, archiveReference, { check, signal, timeoutMs: timeout });
+	const archive = await inspectRecoveryArchive(io, archiveReference, { check, signal, timeoutMs: timeout });
 	// Load the content projector only for explicit recovery verification. Its
 	// public builders use the same plan parser; no startup source is activated.
 	const content = await bounded(() => import("./SourceInstallationContent"));
@@ -217,5 +221,5 @@ export async function verifySourceInstallationPlan(io: RecoveryArchiveReader, in
 	}
 	if (await hash(await read("plan.json", MAX_PLAN, bytes.byteLength)) !== reference.sha256) throw new Error("Installation plan changed during verification");
 	if (!inventorySnapshot) throw new Error("The installation inventory was not verified");
-	check(); return { reference, plan, inventorySnapshot, artifactCount: artifacts.length, totalBytes };
+	check(); return { reference, plan, inventorySnapshot, artifactCount: artifacts.length, totalBytes, archiveFiles: archive.files };
 }

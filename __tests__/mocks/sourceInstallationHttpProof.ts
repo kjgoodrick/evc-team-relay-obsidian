@@ -12,6 +12,9 @@ import { createDesktopSourceInstallationIO } from "../../src/DesktopSourceInstal
 import { createDesktopSourceMaterializationIO } from "../../src/DesktopSourceMaterializationIO";
 import { createSourceInstallationDownloads } from "../../src/SourceInstallationDownloads";
 import { prepareSourceInstallation } from "../../src/SourceInstallationPreparation";
+import { stageSourceInstallation } from "../../src/SourceInstallationStaging";
+import { inspectSameFolderSource } from "../../src/SameFolderSourceInspection";
+import { createDesktopSameFolderInspectionIO } from "../../src/DesktopSameFolderInspectionIO";
 import { activateSourceInstallation, sourceActivationRequest } from "../../src/SourceInstallationActivation";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
 import { admitSourceStartup } from "../../src/storage/source-startup-admission";
@@ -63,6 +66,19 @@ export async function proveSourceInstallation(cache: RelayCredentialCache, fixtu
 		const snapshot = await readManagedInventory(cache, identity.s3rn, "fixture", identity);
 		expect(Object.keys(snapshot.records).sort()).toEqual(Object.keys(proof.expectedFiles).sort());
 		const downloads = createSourceInstallationDownloads(cache, identity, snapshot);
+		const sameFolder = await stageSourceInstallation(staging, { source: identity, reviewId, archive: backup.reference,
+			originalRoot: "Original", destinationRoot: "Original", mode: "existing-folder", snapshot }, downloads);
+		await fs.writeFile(path.join(directory, "Original", "Later.md"), "New local work after backup");
+		const comparison = await inspectSameFolderSource(staging, createDesktopSameFolderInspectionIO(vault, "Original"), sameFolder.reference,
+			{ source: identity, reviewId, archive: backup.reference });
+		expect(comparison.rows.filter(row => row.entryId).map(row => row.path).sort()).toEqual(Object.keys(proof.expectedFiles).sort());
+		expect(comparison.rows).toEqual(expect.arrayContaining([
+			expect.objectContaining({ path: "Offline.md", change: "local-only", backupStatus: "matches-backup" }),
+			expect.objectContaining({ path: "Later.md", change: "local-only", backupStatus: "not-backed-up" }),
+		]));
+		expect((await journal.read()).pending?.phase).toBe("review");
+		expect(await adapter.stat("Restored")).toBeNull();
+		expect(await fs.readFile(path.join(directory, "Original", "Later.md"), "utf8")).toBe("New local work after backup");
 		const prepared = await prepareSourceInstallation(journal, staging, { source: identity, reviewId, reviewRevision: review.revision!, operationId: crypto.randomUUID(),
 			archive: backup.reference, originalRoot: "Original", destinationRoot: "Restored", snapshot }, downloads);
 		await proof.afterPreparation?.();

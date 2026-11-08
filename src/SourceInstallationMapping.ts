@@ -88,6 +88,7 @@ export async function stageSourceInstallationMapping(journal: SourceSelectionJou
 	const confirm = async () => { check(); const current = await journal.read(); check(); if (current.revision !== state.revision) throw new Error("The source selection changed during mapping"); };
 	const verified = await verifySourceInstallationPlan(io, preparation.plan, { source: request.source, reviewId: request.reviewId, archive: preparation.archive }, { check, signal, timeoutMs });
 	const { plan } = verified, address = ResourceAddress.parse(plan.source.s3rn);
+	if (plan.mode !== "new-folder") throw new Error("Same-folder recovery requires its own activation coordinator");
 	if (!(address instanceof RemoteFolderAddress)) throw new Error("The installation has no managed folder identity");
 	const snapshot = (value: unknown) => mappingSnapshot(value, plan);
 	const normalizeLocation = (rows: VaultShareSettings[]) => rows.map(row => row.guid === address.folderGuid ? { ...row, path: plan.originalRoot } : row);
