@@ -367,6 +367,10 @@ export class BaseSyncHost extends Component {
 		const slot = await this.requireViews(folder), result = await slot.views.checkDelivery(file.entityGuid, this.viewAccess(slot, file));
 		if (!result) throw new Error("Another window is syncing this file. Try again shortly."); return result;
 	}
+	async viewRepairStatus(folder: VaultShare, file: AttachmentFile) {
+		const slot = await this.requireViews(folder);
+		return slot.views.checkStatus(file.entityGuid, this.access(slot, file, true).current);
+	}
 	async rows(folder: VaultShare): Promise<BaseSyncRow[]> {
 		const slot = await this.requireSlot(folder), records = new Map<string, BaseSyncRecord>(); let after = "";
 		for (;;) { const page = await slot.store!.list(after); for (const record of page) records.set(record.entryId, record); if (page.length < 100) break; after = page[page.length - 1].entryId; }

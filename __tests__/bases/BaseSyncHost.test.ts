@@ -14,6 +14,7 @@ import { decodeBaseBytes, encodeBaseBytes, type BaseSnapshot, type BaseRecord } 
 import { isConflictCopyPath } from "../../src/conflictCopyPath";
 import { same } from "../../src/client/managedRecovery";
 import type { BaseRegistrySnapshot } from "../../src/bases/BaseRegistryProtocol";
+import { BaseRegistryStore } from "../../src/bases/BaseRegistryStore";
 
 jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/obsidian"),
 	Component: class { register() {} registerEvent() {} registerDomEvent() {} registerInterval(timer: number) { clearInterval(timer); } },
@@ -320,4 +321,27 @@ test("native receipt inspection uses the read-only route and does not acknowledg
 		expect((await s.host.rows(s.folder))[0].record).toEqual(before);
 		expect(s.index.acknowledgeBaseContent).not.toHaveBeenCalled(); expect(s.vault.process).not.toHaveBeenCalled();
 	} finally { s.close(); }
+});
+
+test("native saved-view receipt inspection needs no clean source, inventory flush or edit permission", async () => {
+	const s = await fixture(); let store: BaseRegistryStore | undefined;
+	try {
+		await s.file.runSync();
+		store = await BaseRegistryStore.open({ serverId: "https://relay.fixture", accountId: id(1), vaultId: "fixture-vault", shareId: id(2) });
+		const snapshot: BaseRegistrySnapshot = { protocol_version: 1, definition_id: id(40), entry_id: entryId, generation: s.remote().state.generation!, revision: 1,
+			content_sha256: s.remote().state.record.hash!, views: [{ slot: 0, id: id(41), name: "Planning", type: "table", descriptor_sha256: "a".repeat(64) }], unmatched: { views: [], has_more: false, next_after: null } };
+		await store.cache(entryId, snapshot);
+		await store.stage(entryId, 1, { definitionId: snapshot.definition_id, generation: snapshot.generation,
+			request: { operation_id: id(42), content_sha256: snapshot.content_sha256, expected_revision: 1, bindings: [{ slot: 0, view_id: null }], archive: [] } });
+		const before = await store.exportRecord(entryId);
+		s.edit("views: []\n# unsynchronized local changes"); s.manifest.owner = false; s.manifest.permissions[path] = "read"; s.index.flush.mockClear();
+		fetchMock.mockImplementation(async (url, init) => {
+			expect(url).toMatch(/\/bases\/reconcile\/status$/); expect(init?.method).toBe("POST");
+			expect(JSON.parse(init!.body as string)).toEqual(before.record.pending!.request);
+			return reply(200, { status: "unknown", operation_id: id(42), entry_id: entryId });
+		});
+		expect((await s.host.viewRepairStatus(s.folder, s.file)).status).toBe("unknown");
+		expect(await store.exportRecord(entryId)).toEqual(before);
+		expect(s.index.flush).not.toHaveBeenCalled(); expect(s.index.acknowledgeBaseContent).not.toHaveBeenCalled(); expect(s.vault.process).not.toHaveBeenCalled();
+	} finally { store?.close(); s.close(); }
 });

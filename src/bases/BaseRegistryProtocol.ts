@@ -1,4 +1,5 @@
-import { baseId, baseObject } from "./BaseContentProtocol";
+import { baseId, baseObject, parseBaseRestoreContext } from "./BaseContentProtocol";
+import { restoreMetadata, type RestoreBinding } from "../collaboration/RestoreGeneration";
 
 export const BASE_REGISTRY_RESPONSE_LIMIT = 512_000;
 export interface BaseViewDescriptor { name: string; type: string; descriptor_sha256: string }
@@ -8,12 +9,19 @@ export interface BaseViewPage { views: BaseSavedView[]; has_more: boolean; next_
 export interface BaseRegistrySnapshot {
 	protocol_version: 1; definition_id: string; entry_id: string; generation: string; revision: number;
 	content_sha256: string; views: BaseViewSlot[]; unmatched: BaseViewPage;
+	restore_guard?: boolean; restore_generation?: string | null;
 }
 export interface BaseViewRepair {
 	operation_id: string; content_sha256: string; expected_revision: number;
 	bindings: { slot: number; view_id: string | null }[]; archive: string[];
 }
-export interface BaseViewRepairIntent { definitionId: string; generation: string; request: BaseViewRepair }
+export interface BaseViewRepairIntent extends RestoreBinding { definitionId: string; generation: string; request: BaseViewRepair }
+export type BaseViewRepairStatus = { status: "accepted"; result: BaseRegistrySnapshot } |
+	{ status: "unknown"; operation_id: string; entry_id: string };
+export function baseRegistryBinding(snapshot: BaseRegistrySnapshot): RestoreBinding {
+	const context = parseBaseRestoreContext(snapshot.restore_guard, snapshot.restore_generation);
+	return context ? { restoreGeneration: context.generation } : {};
+}
 
 export const baseDigest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const boundedName = (value: unknown): value is string => {
@@ -57,8 +65,10 @@ export function parseBaseRegistry(value: unknown, entryId: string, digest?: stri
 	});
 	const unmatched = parseBaseViewPage(value.unmatched, "unmatched");
 	requireValue(unmatched.views.every(view => !ids.has(view.id.toLowerCase())));
+	const context = parseBaseRestoreContext(value.restore_guard, value.restore_generation);
 	return { protocol_version: 1, definition_id: value.definition_id, entry_id: entryId, generation: value.generation,
-		revision: value.revision, content_sha256: value.content_sha256, views, unmatched };
+		revision: value.revision, content_sha256: value.content_sha256, views, unmatched,
+		...(context ? { restore_guard: context.supported, restore_generation: context.generation } : {}) };
 }
 export function copyBaseViewRepair(value: BaseViewRepair): BaseViewRepair {
 	requireValue(baseObject(value) && baseId(value.operation_id) && baseDigest(value.content_sha256) && sequence(value.expected_revision) &&
@@ -75,10 +85,11 @@ export function copyBaseViewRepair(value: BaseViewRepair): BaseViewRepair {
 }
 export function copyBaseViewIntent(value: BaseViewRepairIntent): BaseViewRepairIntent {
 	requireValue(baseObject(value) && baseId(value.definitionId) && baseId(value.generation));
-	return { definitionId: value.definitionId, generation: value.generation, request: copyBaseViewRepair(value.request) };
+	return { definitionId: value.definitionId, generation: value.generation, request: copyBaseViewRepair(value.request), ...restoreMetadata(value) };
 }
 export function parseBaseViewRepairResult(value: unknown, entryId: string, intent: BaseViewRepairIntent): BaseRegistrySnapshot {
 	const snapshot = parseBaseRegistry(value, entryId, intent.request.content_sha256, intent.generation);
+	requireValue((baseRegistryBinding(snapshot).restoreGeneration ?? null) === (intent.restoreGeneration ?? null));
 	requireValue(snapshot.definition_id === intent.definitionId && snapshot.revision === intent.request.expected_revision + 1 && snapshot.views.length === intent.request.bindings.length);
 	const archived = new Set(intent.request.archive);
 	for (const binding of intent.request.bindings) requireValue(snapshot.views[binding.slot]?.id &&

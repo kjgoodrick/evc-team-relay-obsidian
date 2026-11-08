@@ -40,6 +40,31 @@ export; complete cross-store backup/restore remains separate work. Inspection
 is explicit, with no background registry polling. Cached associations remain
 reviewable offline; new identity repair requires connectivity.
 
+### Saved-view restore binding
+
+Registry snapshots advertise the share restore context independently of the
+source generation and revision. Repairs capture `restoreGeneration` as immutable
+local metadata before asynchronous review; only the header carries it. Retrying
+refreshes current context and rejects an old binding before transmission. Staging
+and settlement also check the binding transactionally. A lost accepted response
+can still use exact retry within its original lineage.
+
+Registry IndexedDB version **2** closes version 1 workers without deleting their
+records. A fresh restore observation uses the revision captured before HTTP and
+the native per-entry lock. It can adopt an earlier server revision or a different
+definition identity, while retaining the previous snapshot in a quota-accounted
+`recoveries` store and preserving the pending request and reviewed choices.
+Stale observations and a known restored generation reverting to original or
+unsupported state are refused. Export includes those retained snapshots.
+
+**Check saved result** uses `/bases/reconcile/status`. It requires current read
+access but no clean local source, inventory flush or edit permission. This is
+observation only: accepted/unknown results neither resend nor settle the repair.
+The dialog explains the historical receipt and keeps the original choices.
+After an observed restore, **Check repair delivery** is disabled; receipt checks
+and export stay available. Full original-request reconciliation remains separate
+work, including the case where the restored backup has lost a receipt.
+
 Validation: 1,884 plugin regression tests passed (ten opt-in tests skipped).
 Both actual HTTP fixtures passed separately, covering read-only inspection,
 unambiguous/ambiguous changes, exact retry after response loss, restart, later
@@ -253,6 +278,6 @@ capture the current snapshot binding; retries keep it through lost responses.
 Bases storage version 3 preserves all existing pending/recovery bytes and closes
 older workers that would discard this metadata. The UI disables retry and
 withdrawal for older pending generations while keeping read-only receipt checks
-and recovery export available. Native acceptance, registry/inventory restore
+and recovery export available. Native acceptance, inventory restore
 fencing, explicit reconciliation of historical pending work and full coordinated
 restore/rollback remain separate unfinished work.

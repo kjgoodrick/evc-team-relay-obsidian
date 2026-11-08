@@ -1,7 +1,7 @@
-import { baseId } from "./BaseContentProtocol";
+import { baseId, baseObject } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
 import { BASE_REGISTRY_RESPONSE_LIMIT, baseDigest, copyBaseViewIntent, parseBaseRegistry, parseBaseViewPage, parseBaseViewRepairResult,
-	type BaseRegistrySnapshot, type BaseViewPage, type BaseViewRepairIntent } from "./BaseRegistryProtocol";
+	type BaseRegistrySnapshot, type BaseViewPage, type BaseViewRepairIntent, type BaseViewRepairStatus } from "./BaseRegistryProtocol";
 
 export class BaseRegistryTransport extends BaseContentTransport {
 	private registryPath(entryId: string): string {
@@ -16,9 +16,18 @@ export class BaseRegistryTransport extends BaseContentTransport {
 	}
 	async reconcile(entryId: string, requested: BaseViewRepairIntent): Promise<BaseRegistrySnapshot> {
 		const intent = copyBaseViewIntent(requested);
-		const value = await this.request(this.registryPath(entryId) + "/reconcile", "POST", JSON.stringify(intent.request), BASE_REGISTRY_RESPONSE_LIMIT);
+		const value = await this.request(this.registryPath(entryId) + "/reconcile", "POST", JSON.stringify(intent.request), BASE_REGISTRY_RESPONSE_LIMIT, intent.restoreGeneration ?? null);
 		try { return parseBaseViewRepairResult(value, entryId, intent); }
 		catch { throw new BaseContentFailure("pause", "invalid_base_registry_response"); }
+	}
+	async repairStatus(entryId: string, requested: BaseViewRepairIntent): Promise<BaseViewRepairStatus> {
+		const intent = copyBaseViewIntent(requested);
+		const value = await this.request(this.registryPath(entryId) + "/reconcile/status", "POST", JSON.stringify(intent.request), BASE_REGISTRY_RESPONSE_LIMIT);
+		try {
+			if (baseObject(value) && value.status === "accepted" && Object.keys(value).length === 2) return { status: "accepted", result: parseBaseViewRepairResult(value.result, entryId, intent) };
+			if (baseObject(value) && value.status === "unknown" && Object.keys(value).length === 3 && value.operation_id === intent.request.operation_id && value.entry_id === entryId) return { status: "unknown", operation_id: value.operation_id, entry_id: entryId };
+			throw new Error("Invalid saved-view receipt");
+		} catch { throw new BaseContentFailure("pause", "invalid_base_registry_response"); }
 	}
 	async views(entryId: string, state: "unmatched" | "archived", after?: string): Promise<BaseViewPage> {
 		if (!["unmatched", "archived"].includes(state) || after !== undefined && !baseId(after)) throw new BaseContentFailure("reject", "invalid_local_target");

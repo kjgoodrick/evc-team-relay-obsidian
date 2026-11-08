@@ -160,7 +160,7 @@ test("a conflicted repair releases its pending request only after observing the 
 		s.transport.reconcile.mockRejectedValue(new BaseContentFailure("conflict", "stale_base_revision"));
 		await expect(s.controller.checkDelivery(entryId, s.access)).rejects.toMatchObject({ code: "stale_base_revision" });
 		expect((await s.store.get(entryId)).pending).toBeDefined();
-		s.transport.inspect.mockResolvedValueOnce(snapshot(3)); await s.controller.checkDelivery(entryId, s.access);
+		s.transport.inspect.mockResolvedValue(snapshot(3)); await s.controller.checkDelivery(entryId, s.access);
 		expect((await s.store.get(entryId)).pending).toBeUndefined(); expect((await s.store.history(entryId))[0].status).toBe("superseded");
 	} finally { s.close(); }
 });
@@ -171,4 +171,114 @@ test("pagination cannot mix historical candidates into an already changed mappin
 		await expect(s.controller.page(entryId, s.access, snapshot(), "unmatched")).rejects.toMatchObject({ code: "base_review_changed" });
 		expect((await s.store.get(entryId)).snapshot?.revision).toBe(2);
 	} finally { s.close(); }
+});
+
+const restored = (value = snapshot(), generation = id(50)): BaseRegistrySnapshot => ({ ...value, restore_guard: true, restore_generation: generation });
+
+test("restored mappings preserve earlier snapshots and pending intent across a lower revision and restart", async () => {
+	const factory = new IDBFactory(); let store = await BaseRegistryStore.open(identity, factory);
+	try {
+		await store.cache(entryId, snapshot()); await store.stage(entryId, 1, intent()); await store.cache(entryId, snapshot(5));
+		const before = await store.get(entryId), next = restored();
+		await store.cache(entryId, next, before.revision); store.close(); store = await BaseRegistryStore.open(identity, factory);
+		const record = await store.get(entryId);
+		expect(record.snapshot).toEqual(next); expect(record.pending).toEqual(before.pending);
+		expect((await store.exportRecord(entryId)).recoveries).toEqual([{ entryId, revision: before.revision, snapshot: snapshot(5) }]);
+		await expect(store.requireBinding(entryId, record.pending!)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		await expect(store.settle(entryId, id(8), accepted(), "accepted")).rejects.toMatchObject({ code: "restore_generation_changed" });
+		await expect(store.settle(entryId, id(8), restored(snapshot(6)), "superseded")).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect((await store.get(entryId)).pending).toEqual(before.pending); expect(await store.history(entryId)).toEqual([]);
+	} finally { store.close(); }
+});
+
+test("saved-view restore observations require current CAS and cannot downgrade or quietly rebind staged work", async () => {
+	const store = await BaseRegistryStore.open(identity, new IDBFactory());
+	try {
+		await store.cache(entryId, snapshot());
+		await expect(store.cache(entryId, restored(), 0)).rejects.toMatchObject({ code: "base_review_changed" });
+		await expect(store.cache(entryId, restored(), 1, () => false)).rejects.toMatchObject({ code: "base_review_changed" });
+		await store.cache(entryId, restored(), 1);
+		const record = await store.get(entryId);
+		await expect(store.cache(entryId, snapshot(), record.revision)).rejects.toMatchObject({ code: "restore_guard_unavailable" });
+		await expect(store.cache(entryId, { ...restored(), restore_guard: false }, record.revision)).rejects.toThrow();
+		await expect(store.stage(entryId, record.revision, intent())).rejects.toMatchObject({ code: "restore_generation_changed" });
+		const bound = { ...intent(), restoreGeneration: id(50) };
+		await store.stage(entryId, record.revision, bound);
+		await store.settle(entryId, id(8), restored(accepted()), "accepted");
+		expect((await store.history(entryId))[0].intent.restoreGeneration).toBe(id(50));
+	} finally { store.close(); }
+});
+
+test("restore-aware registry rejects unsupported or malformed metadata and mismatched accepted receipts", () => {
+	for (const bad of [{ restore_guard: true }, { restore_generation: id(50) }, { restore_guard: false, restore_generation: id(50) }, { restore_guard: true, restore_generation: "bad" }]) {
+		expect(() => parseBaseRegistry({ ...snapshot(), ...bad }, entryId)).toThrow();
+	}
+	expect(() => parseBaseViewRepairResult(restored(accepted()), entryId, intent())).toThrow();
+	expect(() => parseBaseViewRepairResult(accepted(), entryId, { ...intent(), restoreGeneration: id(50) })).toThrow();
+});
+
+test("repair headers are frozen before credential refresh and stay outside exact request and read-only status bodies", async () => {
+	let release!: () => void; const pending = { ...intent(), restoreGeneration: id(50) }, sent: { url: string; body: unknown; generation: string | null }[] = [];
+	const transport = new BaseRegistryTransport(identity, async () => { if (!release) await new Promise<void>(resolve => { release = resolve; }); return credential(); }, async (url, init) => {
+		sent.push({ url, body: JSON.parse(init.body as string), generation: new Headers(init.headers).get("X-Relay-Restore-Generation") });
+		return response(url.endsWith("/status") ? { status: "accepted", result: restored(accepted()) } : restored(accepted()));
+	});
+	const sending = transport.reconcile(entryId, pending); pending.restoreGeneration = id(51); pending.request.archive.length = 0; release(); await sending;
+	expect(sent[0]).toMatchObject({ body: intent().request, generation: id(50) });
+	await expect(transport.repairStatus(entryId, { ...intent(), restoreGeneration: id(50) })).resolves.toEqual({ status: "accepted", result: restored(accepted()) });
+	expect(sent[1]).toMatchObject({ body: intent().request, generation: null });
+	const invalid = new BaseRegistryTransport(identity, credential, async () => response({ status: "unknown", entry_id: entryId, operation_id: id(99) }));
+	await expect(invalid.repairStatus(entryId, intent())).rejects.toMatchObject({ code: "invalid_base_registry_response" });
+});
+
+test("an old saved repair cannot replay after restore but read-only status preserves its original evidence", async () => {
+	const s = await controllerFixture(); try {
+		await s.controller.refresh(entryId, s.access); await s.store.stage(entryId, 1, intent()); await s.restart();
+		s.transport.inspect.mockResolvedValue(restored());
+		await expect(s.controller.checkDelivery(entryId, s.access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(s.transport.reconcile).not.toHaveBeenCalled();
+		const before = await s.store.exportRecord(entryId), repairStatus = jest.fn(async () => ({ status: "accepted" as const, result: accepted() }));
+		const controller = new BaseViewsController(s.store, { ...s.transport, repairStatus }, lock);
+		s.writable(false); expect(await controller.checkStatus(entryId, () => true)).toEqual({ status: "accepted", result: accepted() });
+		expect(repairStatus).toHaveBeenCalledWith(entryId, before.record.pending);
+		expect(await s.store.exportRecord(entryId)).toEqual(before);
+		await expect(controller.checkStatus(entryId, () => false)).rejects.toMatchObject({ code: "base_context_changed" });
+		expect(repairStatus).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("a restore during review refuses staging even when file and view revision are identical", async () => {
+	const s = await controllerFixture(); try {
+		await s.controller.refresh(entryId, s.access); s.transport.inspect.mockResolvedValue(restored());
+		await expect(s.controller.repair(entryId, s.access, snapshot(), intent().request.bindings, [])).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect((await s.store.get(entryId)).pending).toBeUndefined(); expect(s.transport.reconcile).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("fresh restored repair retains exact binding through lost response and restart; late old status is not applied", async () => {
+	const s = await controllerFixture(); try {
+		s.transport.inspect.mockResolvedValue(restored()); await s.controller.refresh(entryId, s.access);
+		s.transport.reconcile.mockRejectedValueOnce(new BaseContentFailure("retry", "network_unavailable"));
+		await expect(s.controller.repair(entryId, s.access, restored(), intent().request.bindings, intent().request.archive)).rejects.toMatchObject({ action: "retry" });
+		const pending = (await s.store.get(entryId)).pending!; expect(pending.restoreGeneration).toBe(id(50)); await s.restart();
+		s.transport.reconcile.mockResolvedValue(restored(accepted())); await s.controller.checkDelivery(entryId, s.access);
+		expect(s.transport.reconcile.mock.calls[1][1]).toEqual(pending); expect((await s.store.history(entryId))[0].intent).toEqual(pending);
+	} finally { s.close(); }
+});
+
+test("registry database upgrade closes old workers and retains original-lineage pending repairs", async () => {
+	const factory = new IDBFactory(), name = "team-relay-base-views:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
+	const opening = factory.open(name, 1);
+	opening.onupgradeneeded = () => { opening.result.createObjectStore("files", { keyPath: "entryId" }); opening.result.createObjectStore("history", { keyPath: ["entryId", "id"] }); opening.result.createObjectStore("meta"); };
+	const old = await new Promise<IDBDatabase>((resolve, reject) => { opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error); });
+	const record = { entryId, revision: 2, snapshot: snapshot(), pending: { ...intent(), reviewed: snapshot() } };
+	const tx = old.transaction(["files", "meta"], "readwrite"); tx.objectStore("files").put(record); tx.objectStore("meta").put(600_000, "bytes");
+	await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); });
+	let closed = false; old.onversionchange = () => { closed = true; old.close(); };
+	const store = await BaseRegistryStore.open(identity, factory); try {
+		expect(closed).toBe(true); expect(await store.get(entryId)).toEqual(record);
+		expect((await store.exportRecord(entryId)).recoveries).toEqual([]);
+		const obsolete = factory.open(name, 1);
+		await expect(new Promise((resolve, reject) => { obsolete.onsuccess = () => resolve(obsolete.result); obsolete.onerror = () => reject(obsolete.error); })).rejects.toMatchObject({ name: "VersionError" });
+	} finally { store.close(); }
 });

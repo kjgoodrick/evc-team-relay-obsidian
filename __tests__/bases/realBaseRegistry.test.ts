@@ -4,7 +4,8 @@ import { BaseContentTransport } from "../../src/bases/BaseContentTransport";
 import { BaseRegistryTransport } from "../../src/bases/BaseRegistryTransport";
 import { BaseRegistryStore } from "../../src/bases/BaseRegistryStore";
 import { BaseViewsController, type BaseViewsAccess } from "../../src/bases/BaseViewsController";
-import type { BaseRegistrySnapshot, BaseViewRepairIntent } from "../../src/bases/BaseRegistryProtocol";
+import { baseRegistryBinding, type BaseRegistrySnapshot, type BaseViewRepairIntent } from "../../src/bases/BaseRegistryProtocol";
+import { baseRestoreBinding } from "../../src/bases/BaseContentProtocol";
 import type { BaseSyncLock } from "../../src/bases/BaseSyncRunner";
 Object.assign(globalThis, { IDBKeyRange });
 const fixturePath = process.env.EVC_BASE_CONTENT_FIXTURE;
@@ -25,12 +26,12 @@ integration("real saved-view HTTP preserves identities and pending repairs throu
 	const access: BaseViewsAccess = { read: async () => source, current: value => value === source, writable: () => true };
 	const publish = async (names: string[], orders = names.map(() => ["file.name"])) => {
 		const before = await content.read(entry);
-		await content.publish(entry, { operationId: crypto.randomUUID(), expected: before.state,
+		await content.publish(entry, { operationId: crypto.randomUUID(), expected: before.state, ...baseRestoreBinding(before),
 			bytes: bytes(JSON.stringify({ views: names.map((name, slot) => ({ name, type: "table", order: orders[slot] })) })) });
 		const after = await content.read(entry);
 		source = { path: after.state.path, sha256: after.state.record.hash!, generation: after.state.generation! };
 	};
-	const intent = (snapshot: BaseRegistrySnapshot, ids: (string | null)[]): BaseViewRepairIntent => ({ definitionId: snapshot.definition_id, generation: snapshot.generation,
+	const intent = (snapshot: BaseRegistrySnapshot, ids: (string | null)[]): BaseViewRepairIntent => ({ definitionId: snapshot.definition_id, generation: snapshot.generation, ...baseRegistryBinding(snapshot),
 		request: { operation_id: crypto.randomUUID(), expected_revision: snapshot.revision, content_sha256: snapshot.content_sha256,
 			bindings: ids.map((view_id, slot) => ({ slot, view_id })), archive: [] } });
 	try {
@@ -38,6 +39,22 @@ integration("real saved-view HTTP preserves identities and pending repairs throu
 		let controller = new BaseViewsController(store, registry, lock);
 		const first = (await controller.refresh(entry, access))!.snapshot!, ids = first.views.map(view => view.id!);
 		expect(new Set(ids).size).toBe(2);
+		if (fixture.restoreGeneration) {
+			expect(first.restore_generation).toBe(fixture.restoreGeneration);
+			const legacy = { ...first }; delete legacy.restore_guard; delete legacy.restore_generation;
+			const oldStore = await BaseRegistryStore.open({ ...identity, vaultId: "pre-restore" }, factory);
+			try {
+				await oldStore.cache(entry, legacy); const oldIntent = intent(legacy, ids);
+				await oldStore.stage(entry, 1, oldIntent);
+				const old = new BaseViewsController(oldStore, registry, lock);
+				await expect(old.checkDelivery(entry, access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+				await expect(registry.reconcile(entry, oldIntent)).rejects.toMatchObject({ code: "restore_generation_changed" });
+				const before = await oldStore.exportRecord(entry);
+				expect(await old.checkStatus(entry, () => true)).toEqual({ status: "unknown", operation_id: oldIntent.request.operation_id, entry_id: entry });
+				expect(await oldStore.exportRecord(entry)).toEqual(before); expect(before.recoveries[0].snapshot).toEqual(legacy);
+				expect(await registry.inspect(entry, source.sha256, source.generation)).toEqual(first);
+			} finally { oldStore.close(); }
+		}
 		await publish(["Second", "First renamed"], [["file.size"], ["file.name"]]);
 		const renamed = (await controller.refresh(entry, access))!.snapshot!;
 		expect(renamed.views.map(view => view.id)).toEqual([ids[1], ids[0]]);
@@ -64,6 +81,9 @@ integration("real saved-view HTTP preserves identities and pending repairs throu
 		const pending = (await store.get(entry)).pending!;
 		const accepted = await registry.inspect(entry, source.sha256, source.generation);
 		expect(accepted.views.map(view => view.id)).toEqual(ids);
+		const saved = await store.exportRecord(entry);
+		expect(await controller.checkStatus(entry, () => true)).toEqual({ status: "accepted", result: accepted });
+		expect(await store.exportRecord(entry)).toEqual(saved);
 		const newer = await registry.reconcile(entry, intent(accepted, [...ids].reverse()));
 		await controller.refresh(entry, access); // Refresh must not resend the saved repair.
 		expect((await store.get(entry)).pending?.request.operation_id).toBe(pending.request.operation_id);

@@ -41,6 +41,7 @@ function fixture() {
 	let changed = (_reset: boolean) => {};
 	const host = { cachedViews: jest.fn(async () => record), refreshViews: jest.fn(async () => record),
 		repairViews: jest.fn(async () => record), checkViewRepair: jest.fn(async () => record),
+		viewRepairStatus: jest.fn(async () => ({ status: "unknown" as const, operation_id: id(8), entry_id: id(1) })),
 		savedViewPage: jest.fn(async (): Promise<BaseViewPage> => ({ views: [{ id: id(6), state: "archived", name: "Old timeline", type: "timeline", descriptor_sha256: "d".repeat(64) }], has_more: false, next_after: id(6) })),
 		export: jest.fn(async () => "local-export"), onChange: (listener: typeof changed) => { changed = listener; return () => {}; } };
 	const folder = { canWriteManagedPath: jest.fn(() => true) };
@@ -81,6 +82,21 @@ test("pending repairs show their original choices and refresh never retries them
 		expect(s.modal.contentEl.textContent).toContain(`Planning: continue identity ${id(6)}`);
 		expect(s.host.checkViewRepair).not.toHaveBeenCalled(); expect(s.button("Save associations").disabled).toBe(true);
 		s.button("Check repair delivery").click(); await flush(); expect(s.host.checkViewRepair).toHaveBeenCalledTimes(1);
+	} finally { s.close(); }
+});
+
+test("restored repairs can inspect receipts with read access while replay stays disabled", async () => {
+	const s = fixture(); try {
+		s.record.pending = { definitionId: id(2), generation: id(3), reviewed: snapshot(), request: { operation_id: id(8), expected_revision: 1, content_sha256: "a".repeat(64), bindings: [{ slot: 0, view_id: id(6) }, { slot: 1, view_id: null }], archive: [] } };
+		s.record.snapshot = { ...snapshot(), restore_guard: true, restore_generation: id(50) };
+		s.folder.canWriteManagedPath.mockReturnValue(false); s.modal.onOpen(); await flush();
+		expect(s.modal.contentEl.textContent).toContain("before restoration"); expect(s.button("Check repair delivery").disabled).toBe(true);
+		expect(s.button("Check saved result").disabled).toBe(false); s.button("Check saved result").click(); await flush();
+		expect(s.host.viewRepairStatus).toHaveBeenCalledWith(s.folder, s.file);
+		expect(s.modal.contentEl.textContent).toContain("does not prove the repair never committed");
+		expect(s.record.pending).toBeDefined(); expect(s.host.checkViewRepair).not.toHaveBeenCalled(); expect(s.host.repairViews).not.toHaveBeenCalled();
+		s.folder.canWriteManagedPath.mockReturnValue(true); s.button("Refresh views").click(); await flush();
+		expect(s.button("Check repair delivery").disabled).toBe(true);
 	} finally { s.close(); }
 });
 

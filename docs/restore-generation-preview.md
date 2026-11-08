@@ -1,7 +1,7 @@
 # Restore-generation client foundation
 
 This is a tested discussion-command, picture-upload, group-capture, inbox and
-timeline-marker, permission and Bases-content restore guard, not a complete restore workflow.
+timeline-marker, permission, Bases-content and saved-view restore guard, not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
@@ -172,5 +172,15 @@ are documented in [the Bases implementation](../src/bases/README.md#restore-gene
 The actual restored HTTP scenario exercises explicit initialization review,
 lost acceptance/reopening/exact retry, older pending work, and historical receipt
 inspection. PostgreSQL verifies publication and withdrawal waiting across a
-restore both reject before receipt/content changes. Registry/inventory mutation
-guards and full restored-work reconciliation remain.
+restore both reject before receipt/content changes. Inventory mutation guards
+and full restored-work reconciliation remain.
+
+Saved-view repair binding and registry cache version 2 are documented in
+[the saved-view contract](../src/bases/README.md#saved-view-restore-binding).
+Current snapshots retain their restore context; pending repairs keep the original
+binding through copying, persistence, reopening and transport. Restored cache
+observations retain prior mappings even when the server revision moves backwards.
+The read-only repair receipt control preserves old intent without requiring
+synchronized source bytes or sending a mutation. The actual HTTP suite covers
+old-request rejection and fresh bound lost-response retry; PostgreSQL verifies
+waiting repair/replay restore rejection and read-only receipt authorization.

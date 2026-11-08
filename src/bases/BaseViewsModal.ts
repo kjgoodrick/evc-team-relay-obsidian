@@ -4,6 +4,7 @@ import type { VaultShare } from "../VaultShare";
 import { baseSyncMessage, type BaseSyncHost } from "./BaseSyncHost";
 import type { BaseRegistryRecord } from "./BaseRegistryStore";
 import type { BaseSavedView, BaseViewPage } from "./BaseRegistryProtocol";
+import { baseRegistryBinding } from "./BaseRegistryProtocol";
 
 export class BaseViewsModal extends Modal {
 	private closed = false;
@@ -17,13 +18,14 @@ export class BaseViewsModal extends Modal {
 	private archived?: BaseViewPage;
 	private retained = new Map<string, BaseSavedView>();
 	private error = "";
+	private receipt = "";
 	private unsubscribe?: () => void;
 	constructor(app: App, private host: BaseSyncHost, private folder: VaultShare, private file: AttachmentFile) { super(app); }
 	onOpen(): void {
 		this.closed = false;
 		this.unsubscribe = this.host.onChange(reset => {
 			if (!reset) return;
-			this.context++; this.verified = false; this.record = undefined; this.retained.clear(); this.render();
+			this.context++; this.verified = false; this.record = undefined; this.receipt = ""; this.retained.clear(); this.render();
 		});
 		void this.act(async context => {
 			const cached = await this.host.cachedViews(this.folder, this.file);
@@ -41,7 +43,7 @@ export class BaseViewsModal extends Modal {
 	}
 	private editable(): boolean { return this.verified && !this.record?.pending && this.folder.canWriteManagedPath(this.file.path); }
 	private async act(action: (context: number) => Promise<void>): Promise<void> {
-		if (this.closed || this.busy) return; this.busy = true; this.error = ""; const context = this.context; this.render();
+		if (this.closed || this.busy) return; this.busy = true; this.error = ""; this.receipt = ""; const context = this.context; this.render();
 		try { await action(context); }
 		catch (error) {
 			if (context !== this.context) return;
@@ -65,10 +67,16 @@ export class BaseViewsModal extends Modal {
 		this.contentEl.createEl("p", { text: this.verified ? `Verified saved-view revision ${snapshot.revision}.` : "Cached associations. Refresh while connected before changing them." });
 		const pending = this.record!.pending;
 		if (pending) {
+			const restored = (pending.restoreGeneration ?? null) !== (baseRegistryBinding(snapshot).restoreGeneration ?? null);
 			this.contentEl.createEl("h3", { text: "Association change awaiting confirmation" });
-			this.contentEl.createEl("p", { text: "Check delivery to finish the saved change before making another. Refreshing the list does not resend it." });
+			this.contentEl.createEl("p", { text: restored ? "This saved repair belongs to the share before restoration. Its original choices are retained. Check its saved result or export a recovery copy; it cannot be resent to this restored share." : "Check repair delivery resends the saved request to finish it. Check saved result only inspects its receipt. Refreshing the list does not resend it." });
+			if (this.receipt) this.contentEl.createEl("p", { text: this.receipt, attr: { role: "status" } });
 			for (const binding of pending.request.bindings) this.contentEl.createEl("p", { text: `${pending.reviewed.views[binding.slot]?.name ?? "Saved view"}: ${binding.view_id ? `continue identity ${binding.view_id}` : "new identity"}` });
-			new Setting(this.contentEl).setName("Confirm the saved change").addButton(button => button.setButtonText("Check repair delivery").setDisabled(this.busy || !this.folder.canWriteManagedPath(this.file.path)).onClick(() => this.act(async context => {
+			new Setting(this.contentEl).setName("Inspect the saved result").addButton(button => button.setButtonText("Check saved result").setDisabled(this.busy).onClick(() => this.act(async context => {
+				const result = await this.host.viewRepairStatus(this.folder, this.file);
+				if (context === this.context) this.receipt = result.status === "accepted" ? `The server retains an accepted receipt for saved-view revision ${result.result.revision}. This is historical evidence; the pending choices remain retained for review.` : "No receipt was found. This does not prove the repair never committed before restoration. Its original choices remain retained.";
+			})));
+			new Setting(this.contentEl).setName("Confirm the saved change").addButton(button => button.setButtonText("Check repair delivery").setDisabled(this.busy || restored || !this.folder.canWriteManagedPath(this.file.path)).onClick(() => this.act(async context => {
 				const record = await this.host.checkViewRepair(this.folder, this.file); if (context === this.context) this.load(record, true);
 			})));
 		}
