@@ -310,3 +310,85 @@ test.each(["account", "record"])("receipt review refuses a late response after %
 		expect((await s.store.get(entryId)).pending).toEqual(pending);
 	} finally { s.store.close(); }
 });
+
+test("local edits based on a pre-restore baseline require explicit review before new-generation publication", async () => {
+	const s = await setup(); try {
+		await s.runner.sync(entryId, s.access); s.setLocal("old local edit");
+		const context = { supported: true, generation: id(60) }; s.remote().restoreContext = context;
+		expect(await s.runner.sync(entryId, s.access)).toBe("conflict");
+		expect((await s.store.get(entryId)).conflict?.reason).toBe("restore-changed"); expect(s.transport.publish).not.toHaveBeenCalled();
+		const publish = s.transport.publish.getMockImplementation()!;
+		s.transport.publish.mockImplementation(async (entry, pending) => { const result = await publish(entry, pending); s.remote().restoreContext = context; return result; });
+		const review = (await s.runner.review(entryId, s.access))!;
+		expect(await s.runner.resolve(entryId, s.access, review, "local")).toBe("synced");
+		expect(s.transport.publish.mock.calls[0][1].restoreGeneration).toBe(context.generation);
+		expect((await s.store.get(entryId)).baseline?.restoreContext).toEqual(context);
+		expect((await s.store.recoveries(entryId)).some(copy => text(copy.record.conflict?.local) === "old local edit")).toBe(true);
+	} finally { s.store.close(); }
+});
+
+test("an old pending publication stays intact across restore and reopening and cannot be withdrawn or replayed", async () => {
+	const s = await setup(); let reopened: BaseSyncStore | undefined;
+	try {
+		await s.runner.sync(entryId, s.access);
+		const pending = await s.store.stage(entryId, (await s.store.get(entryId)).revision, s.remote().state, bytes("old queued work"));
+		s.remote().restoreContext = { supported: true, generation: id(60) };
+		await expect(s.runner.sync(entryId, s.access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect((await s.store.get(entryId)).pending).toEqual(pending);
+		await expect(s.runner.withdraw(entryId, s.access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(s.transport.publish).not.toHaveBeenCalled(); expect(s.transport.withdraw).not.toHaveBeenCalled();
+		s.store.close(); reopened = await BaseSyncStore.open(identity, s.factory);
+		expect((await reopened.get(entryId)).pending).toEqual(pending);
+		await expect(new BaseSyncRunner(reopened, s.transport, exclusiveLock()).sync(entryId, s.access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+	} finally { s.store.close(); reopened?.close(); }
+});
+
+test("new restored work retains its original generation through lost acceptance and restart", async () => {
+	const s = await setup(); let reopened: BaseSyncStore | undefined;
+	try {
+		const context = { supported: true, generation: id(60) }; s.remote().restoreContext = context;
+		await s.runner.sync(entryId, s.access); s.setLocal("new restored edit");
+		const publish = s.transport.publish.getMockImplementation()!; let lose = true;
+		s.transport.publish.mockImplementation(async (entry, pending) => {
+			const result = await publish(entry, pending); s.remote().restoreContext = context;
+			if (lose) { lose = false; throw new BaseContentFailure("retry", "network_unavailable"); } return result;
+		});
+		await expect(s.runner.sync(entryId, s.access)).rejects.toThrow("network_unavailable");
+		const pending = (await s.store.get(entryId)).pending!; expect(pending.restoreGeneration).toBe(context.generation);
+		s.store.close(); reopened = await BaseSyncStore.open(identity, s.factory);
+		expect(await new BaseSyncRunner(reopened, s.transport, exclusiveLock()).sync(entryId, s.access)).toBe("synced");
+		expect(s.transport.publish.mock.calls[1][1]).toEqual(pending); expect(s.receipts.size).toBe(1);
+		expect((await reopened.get(entryId)).baseline?.restoreContext).toEqual(context);
+	} finally { s.store.close(); reopened?.close(); }
+});
+
+test("a later local restore observation fences a late acceptance without discarding pending bytes", async () => {
+	const s = await setup(); try {
+		s.remote().restoreContext = { supported: true, generation: id(60) };
+		await s.runner.sync(entryId, s.access); s.setLocal("late edit");
+		const publish = s.transport.publish.getMockImplementation()!;
+		s.transport.publish.mockImplementation(async (entry, pending) => {
+			const result = await publish(entry, pending);
+			await s.store.observeRestoreContext(entry, (await s.store.get(entry)).revision, { supported: true, generation: id(61) }, () => true);
+			return result;
+		});
+		await expect(s.runner.sync(entryId, s.access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect((await s.store.get(entryId)).pending).toMatchObject({ restoreGeneration: id(60) });
+		expect(text((await s.store.get(entryId)).baseline?.bytes)).toBe("base");
+	} finally { s.store.close(); }
+});
+
+test.each([false, true])("restore makes a prepared download reviewable even if its old bytes already reached disk (%s)", async alreadyWritten => {
+	const s = await setup(); try {
+		await s.runner.sync(entryId, s.access); await s.setRemote("downloaded copy");
+		await s.store.prepareDownload(entryId, (await s.store.get(entryId)).revision, bytes("base"), s.remote());
+		if (alreadyWritten) s.setLocal("downloaded copy");
+		s.remote().restoreContext = { supported: true, generation: id(60) };
+		expect(await s.runner.sync(entryId, s.access)).toBe("conflict");
+		const record = await s.store.get(entryId); expect(record.download).toBeUndefined(); expect(record.conflict?.reason).toBe("restore-changed");
+		expect((await s.store.recoveries(entryId))[0].record.download).toBeDefined(); expect(s.access.replace).not.toHaveBeenCalled();
+		const review = (await s.runner.review(entryId, s.access))!;
+		expect(await s.runner.resolve(entryId, s.access, review, "server")).toBe("synced");
+		expect((await s.store.get(entryId)).baseline?.restoreContext?.generation).toBe(id(60));
+	} finally { s.store.close(); }
+});

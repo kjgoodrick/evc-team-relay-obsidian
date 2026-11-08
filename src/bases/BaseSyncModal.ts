@@ -58,14 +58,16 @@ export class BaseSyncModal extends Modal {
 					this.restoration = { row, review, key: review.copies[0]?.key ?? "", path: row.path.replace(/\.[^/.]+$/, "") + " (restored).base" };
 				})));
 			} else if (row.file) {
-				controls.addButton(button => button.setButtonText("Retry sync").setDisabled(this.busy).onClick(() => this.act(() => this.host.retry(this.folder, row.file!))));
+				const oldRestore = !!row.record.pending && (row.record.pending.restoreGeneration ?? null) !== (row.record.restoreContext?.generation ?? null);
+				if (oldRestore) this.contentEl.createEl("p", { text: "This pending save belongs to an earlier restore generation. Check its saved result or export recovery copies. Retry and withdrawal remain blocked." });
+				controls.addButton(button => button.setButtonText("Retry sync").setDisabled(this.busy || oldRestore).onClick(() => this.act(() => this.host.retry(this.folder, row.file!))));
 				if (row.record.pending) {
 					const operationId = row.record.pending.operationId;
 					controls.addButton(button => button.setButtonText("Check saved result").setDisabled(this.busy).onClick(() => this.act(async () => {
 						const context = this.context, receipt = await this.host.checkStatus(this.folder, row.file!);
 						if (context === this.context && !this.closed) this.checked = { entryId: row.entryId, operationId, status: receipt.status };
 					})));
-					controls.addButton(button => button.setButtonText("Check delivery / withdraw").setDisabled(this.busy || !this.folder.canWriteManagedPath(row.path)).onClick(() => this.act(() => this.host.withdraw(this.folder, row.file!))));
+					controls.addButton(button => button.setButtonText("Check delivery / withdraw").setDisabled(this.busy || oldRestore || !this.folder.canWriteManagedPath(row.path)).onClick(() => this.act(() => this.host.withdraw(this.folder, row.file!))));
 				}
 				if (row.record.conflict || row.record.reviewRequired) controls.addButton(button => button.setButtonText("Review copies").setDisabled(this.busy).onClick(() => this.act(async () => {
 					const context = this.context, review = await this.host.review(this.folder, row.file!);

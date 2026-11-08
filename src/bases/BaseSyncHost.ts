@@ -37,6 +37,8 @@ export function baseSyncMessage(error: unknown, retryMessage = "Bases sync will 
 		base_context_changed: "Bases sync paused because the account, file or permissions changed.",
 		base_review_changed: "A copy changed after you opened this review. Refresh the review before choosing.",
 		base_receipt_unavailable: "A saved Bases request or its read-only receipt check is unavailable. The pending request is retained.",
+		restore_generation_changed: "The share was restored. This Bases request belongs to its previous state and is retained for review. Check its saved result or export recovery copies.",
+		restore_guard_unavailable: "This server cannot safely accept saved Bases work from the known restore generation. Local copies and pending requests are retained.",
 		base_editor_required: "Editing permission is required to publish this Bases file. Local edits are retained.",
 		base_content_disabled: "Bases sync is not enabled on this server.",
 		base_content_protocol_required: "This server needs an update before it can sync Bases safely.",
@@ -140,11 +142,13 @@ export class BaseSyncHost extends Component {
 					status: (entryId, pending) => transport.status(entryId, pending),
 					publish: async (entryId, pending) => {
 						const accepted = await transport.publish(entryId, pending);
+						await store.requireBinding(entryId, pending);
 						if (slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, accepted.state);
 						return accepted;
 					},
 					withdraw: async (entryId, pending) => {
 						const receipt = await transport.withdraw(entryId, pending);
+						await store.requireBinding(entryId, pending);
 						if (receipt.status === "accepted" && slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, receipt.result.state);
 						return receipt;
 					},

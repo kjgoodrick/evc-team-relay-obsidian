@@ -1,4 +1,4 @@
-import { copyBaseBytes, decideBaseSync, type BaseSnapshot, type BaseCommandStatus } from "./BaseContentProtocol";
+import { baseRestoreBinding, copyBaseBytes, decideBaseSync, type BaseSnapshot, type BaseCommandStatus } from "./BaseContentProtocol";
 import { BaseContentFailure, type BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseDownload, type BaseSyncRecord } from "./BaseSyncStore";
 
@@ -24,7 +24,8 @@ export function sameBaseBytes(a: ArrayBuffer | null, b: ArrayBuffer | null): boo
 	return left.every((value, index) => value === right[index]);
 }
 function sameSnapshot(a: BaseSnapshot | undefined, b: BaseSnapshot): boolean {
-	return !!a && JSON.stringify(a.state) === JSON.stringify(b.state) && sameBaseBytes(a.bytes, b.bytes);
+	return !!a && JSON.stringify(a.state) === JSON.stringify(b.state) && sameBaseBytes(a.bytes, b.bytes) &&
+		JSON.stringify(a.restoreContext) === JSON.stringify(b.restoreContext);
 }
 
 /** One bounded reconciliation. Native actors and review actions must share the
@@ -36,7 +37,10 @@ export class BaseSyncRunner {
 		if (!access.current() || remote && remote.state.path !== access.path) throw new BaseContentFailure("pause", "base_context_changed");
 	}
 	private async remote(entryId: string, access: BaseSyncAccess): Promise<BaseSnapshot> {
-		this.check(access); const remote = await this.transport.read(entryId); this.check(access, remote); return remote;
+		this.check(access); const before = await this.store.get(entryId);
+		const remote = await this.transport.read(entryId); this.check(access, remote);
+		await this.store.observeRestoreContext(entryId, before.revision, remote.restoreContext, () => access.current());
+		return remote;
 	}
 	async sync(entryId: string, access: BaseSyncAccess): Promise<BaseSyncResult> {
 		return await this.lock(entryId, () => this.run(entryId, access)) ?? "busy";
@@ -47,11 +51,13 @@ export class BaseSyncRunner {
 		if (record.retirement) throw new BaseContentFailure("pause", "base_entry_retired");
 		if (record.conflict) return "conflict";
 		if (record.pending) {
+			await this.remote(entryId, access);
 			await this.send(entryId, access, record);
 			record = await this.store.get(entryId);
 			if (record.conflict) return "conflict";
 		}
 		const remote = await this.remote(entryId, access), local = await access.read(); this.check(access, remote);
+		record = await this.store.get(entryId);
 		if (record.reviewRequired) return this.conflict(entryId, record, local.bytes, remote, "withdrawn-save");
 		if (record.download) return this.download(entryId, access, record.download, local, remote);
 		const decision = await decideBaseSync(record.baseline, local.bytes, remote, access.canInitialize); this.check(access, remote);
@@ -62,7 +68,7 @@ export class BaseSyncRunner {
 				return "synced";
 			case "upload": {
 				if (!access.writable()) return this.conflict(entryId, record, local.bytes, remote, "read-only-local-edit");
-				await this.store.stage(entryId, record.revision, remote.state, local.bytes!);
+				await this.store.stage(entryId, record.revision, remote.state, local.bytes!, baseRestoreBinding(remote));
 				await this.send(entryId, access, await this.store.get(entryId));
 				return (await this.store.get(entryId)).conflict ? "conflict" : "synced";
 			}
@@ -79,6 +85,7 @@ export class BaseSyncRunner {
 	private async send(entryId: string, access: BaseSyncAccess, record: BaseSyncRecord): Promise<void> {
 		const pending = record.pending; if (!pending) return;
 		this.check(access);
+		await this.store.requireBinding(entryId, pending);
 		if (!access.writable()) throw new BaseContentFailure("reject", "base_editor_required");
 		try {
 			const result = await this.transport.publish(entryId, pending);
@@ -88,6 +95,7 @@ export class BaseSyncRunner {
 			if (!(error instanceof BaseContentFailure) || error.action !== "conflict") throw error;
 			// A concurrent attempt may have committed after this rejection. Only
 			// the server's exact withdrawal receipt can release pending bytes.
+			await this.store.requireBinding(entryId, pending);
 			const result = await this.transport.withdraw(entryId, pending); this.check(access);
 			await this.store.settle(entryId, pending.operationId, result);
 			if (result.status === "accepted") return;
@@ -97,6 +105,9 @@ export class BaseSyncRunner {
 	}
 	private async download(entryId: string, access: BaseSyncAccess, intent: BaseDownload, local: BaseLocalFile, remote: BaseSnapshot): Promise<BaseSyncResult> {
 		this.check(access, remote);
+		if ((intent.remote.restoreContext?.generation ?? null) !== (remote.restoreContext?.generation ?? null)) {
+			await this.store.rejectDownload(entryId, intent.id, local.bytes, "restore-changed"); return "conflict";
+		}
 		// A crash after the native write but before the IndexedDB acknowledgement.
 		if (sameBaseBytes(local.bytes, intent.remote.bytes)) {
 			await this.store.completeDownload(entryId, intent.id); return "synced";
@@ -105,6 +116,7 @@ export class BaseSyncRunner {
 			await this.store.rejectDownload(entryId, intent.id, local.bytes); return "conflict";
 		}
 		this.check(access, intent.remote);
+		await this.store.requireBinding(entryId, baseRestoreBinding(intent.remote));
 		if (!await access.replace(local, copyBaseBytes(intent.remote.bytes!))) {
 			const changed = await access.read(); this.check(access);
 			await this.store.rejectDownload(entryId, intent.id, changed.bytes); return "conflict";
@@ -115,8 +127,8 @@ export class BaseSyncRunner {
 	/** Review fresh copies rather than the possibly old, retained conflict. */
 	async review(entryId: string, access: BaseSyncAccess): Promise<BaseConflictReview | undefined> {
 		return this.lock(entryId, async () => {
-			const record = await this.store.get(entryId);
 			const remote = await this.remote(entryId, access), local = await access.read(); this.check(access, remote);
+			const record = await this.store.get(entryId);
 			return { record, local, remote };
 		});
 	}
@@ -137,6 +149,7 @@ export class BaseSyncRunner {
 		return await this.lock(entryId, async () => {
 			this.check(access); const record = await this.store.get(entryId);
 			if (!record.pending) return record.conflict ? "conflict" : "waiting";
+			await this.store.requireBinding(entryId, record.pending);
 			const result = await this.transport.withdraw(entryId, record.pending); this.check(access);
 			await this.store.settle(entryId, record.pending.operationId, result); return "waiting";
 		}) ?? "busy";

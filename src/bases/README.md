@@ -231,3 +231,28 @@ concurrent-editor conflict, late-send withdrawal, both review choices and
 comment-only read access. Its worker disk port is explicitly in-memory.
 Its disk port remains in-memory; the separate native checks above establish the
 listed desktop behavior. Neither establishes complete mobile UX or Bases comments.
+
+
+## Restore generation
+
+Content snapshots retain the advertised restore context separately from their
+canonical content state. Pending requests retain `restoreGeneration` separately
+from the immutable wire body. Each entry observes the context under its native
+lock with a revision captured before the HTTP read; stale observations and a
+known restored generation reverting to an unsupported/original server are
+rejected. Older pending saves retain their original binding across reopening.
+
+The runner reads the current context before retrying pending work. Old requests
+cannot publish or withdraw, and late acknowledgments cannot settle local state
+or update managed inventory after a newer observation. Local edits from an older
+baseline require review; an unfinished old download becomes a retained conflict,
+including if its bytes already reached disk. Fresh initialization with no proven
+baseline on a restored share requires an explicit local choice. Reviewed choices
+capture the current snapshot binding; retries keep it through lost responses.
+
+Bases storage version 3 preserves all existing pending/recovery bytes and closes
+older workers that would discard this metadata. The UI disables retry and
+withdrawal for older pending generations while keeping read-only receipt checks
+and recovery export available. Native acceptance, registry/inventory restore
+fencing, explicit reconciliation of historical pending work and full coordinated
+restore/rollback remain separate unfinished work.

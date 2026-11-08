@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { BaseSyncRunner, type BaseSyncAccess, type BaseSyncLock } from "../../src/bases/BaseSyncRunner";
+import { BaseSyncStore } from "../../src/bases/BaseSyncStore";
 import { BaseContentTransport } from "../../src/bases/BaseContentTransport";
 import { BaseRegistryTransport } from "../../src/bases/BaseRegistryTransport";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
@@ -21,7 +23,7 @@ run("a restored marker session retains the original request across lost HTTP res
 	const credentials = async () => ({ accountId: f.owner, accessToken: f.ownerToken });
 	const content = new BaseContentTransport(identity, credentials, fetch), registry = new BaseRegistryTransport(identity, credentials, fetch);
 	const before = await content.read(f.markersEntry);
-	await content.publish(f.markersEntry, { operationId: randomUUID(), expected: before.state, bytes: new TextEncoder().encode(JSON.stringify({ views: [
+	await content.publish(f.markersEntry, { operationId: randomUUID(), expected: before.state, restoreGeneration: before.restoreContext?.generation, bytes: new TextEncoder().encode(JSON.stringify({ views: [
 		{ name: "Timeline", type: "sabidurian-timeline", startDateProp: "note.start", timeZone: "America/Denver" },
 	] })).buffer as ArrayBuffer });
 	const saved = await content.read(f.markersEntry), snapshot = await registry.inspect(f.markersEntry, saved.state.record.hash!, saved.state.generation!);
@@ -72,4 +74,48 @@ run("a restored marker session retains the original request across lost HTTP res
 		expect(await session.markerManagement.check(scope)).toEqual({ status: "unknown" });
 		expect(await store.preference(key)).toEqual(pending); expect(requests).toHaveLength(sent);
 	} finally { await session.close(); }
+}, 15000);
+
+
+run("restored Bases synchronization requires review, preserves lost-save bindings and refuses older pending work", async () => {
+	const f = JSON.parse(readFileSync(fixturePath!, "utf8")) as Record<string, string>;
+	if (new URL(f.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const identity = { serverId: f.base, accountId: f.owner, shareId: f.share, vaultId: randomUUID() };
+	const requests: { method: string; body: string; generation: string | null }[] = []; let lose = true;
+	const transport = new BaseContentTransport(identity, async () => ({ accountId: f.owner, accessToken: f.ownerToken }), async (url, init) => {
+		const response = await fetch(url, init);
+		if (init.method === "PUT") {
+			requests.push({ method: init.method, body: String(init.body), generation: new Headers(init.headers).get("X-Relay-Restore-Generation") });
+			if (lose && response.ok) { lose = false; await response.text(); throw new Error("Synthetic lost Bases acknowledgment"); }
+		}
+		return response;
+	});
+	const factory = new IDBFactory(); let store = await BaseSyncStore.open(identity, factory);
+	let oldStore: BaseSyncStore | undefined;
+	const disk = new TextEncoder().encode("views: []\n# reviewed restored copy").buffer as ArrayBuffer;
+	const lock: BaseSyncLock = async (_entry, work) => work();
+	const access: BaseSyncAccess = { path: "Planning.base", current: () => true, writable: () => true, canInitialize: true,
+		read: async () => ({ bytes: disk, identity: "fixture-file" }), replace: async () => { throw new Error("No native write expected"); } };
+	try {
+		let runner = new BaseSyncRunner(store, transport, lock);
+		expect(await runner.sync(f.entry, access)).toBe("conflict"); expect(requests).toHaveLength(0);
+		const review = (await runner.review(f.entry, access))!;
+		await expect(runner.resolve(f.entry, access, review, "local")).rejects.toMatchObject({ action: "retry" });
+		const pending = (await store.get(f.entry)).pending!; expect(pending.restoreGeneration).toBe(f.restoreGeneration);
+		store.close(); store = await BaseSyncStore.open(identity, factory); runner = new BaseSyncRunner(store, transport, lock);
+		expect(await runner.sync(f.entry, access)).toBe("synced");
+		expect(requests).toHaveLength(2); expect(requests[1]).toEqual(requests[0]); expect(requests[0].generation).toBe(f.restoreGeneration);
+		expect((await store.get(f.entry)).baseline?.restoreContext?.generation).toBe(f.restoreGeneration);
+		const current = await transport.read(f.entry);
+		oldStore = await BaseSyncStore.open({ ...identity, vaultId: randomUUID() }, factory);
+		const old = await oldStore.stage(f.entry, 0, current.state, disk);
+		const oldRunner = new BaseSyncRunner(oldStore, transport, lock);
+		await expect(oldRunner.sync(f.entry, access)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(requests).toHaveLength(2); expect((await oldStore.get(f.entry)).pending).toEqual(old);
+		expect((await oldRunner.checkStatus(f.entry, access)).status).toBe("unknown");
+		await expect(transport.publish(f.entry, old)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		await expect(transport.withdraw(f.entry, old)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(await transport.read(f.entry)).toEqual(current);
+		expect((await transport.status(f.entry, { ...pending, restoreGeneration: null })).status).toBe("accepted");
+	} finally { store.close(); oldStore?.close(); }
 }, 15000);

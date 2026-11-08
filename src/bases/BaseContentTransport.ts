@@ -10,6 +10,7 @@ export class BaseContentFailure extends Error {
 		readonly status = 0, readonly retryAfterMs?: number) { super(code); this.name = "BaseContentFailure"; }
 }
 const codes = new Set(["base_content_conflict", "base_content_changed", "base_content_lineage_changed", "base_content_withdrawn",
+	"restore_generation_changed",
 	"base_content_disabled", "base_content_protocol_required", "base_content_not_synced", "base_content_unavailable",
 	"base_content_busy", "base_content_too_large", "invalid_base_content", "base_editor_required", "target_unavailable", "operation_id_conflict",
 	"bases_registry_disabled", "base_generation_changed", "base_inspection_busy", "base_definition_unavailable", "base_definition_too_large",
@@ -42,13 +43,13 @@ export class BaseContentTransport {
 	}
 	async publish(entryId: string, pending: BasePending): Promise<BaseAccepted> {
 		pending = copyBasePending(pending, entryId);
-		const value = await this.request(this.path(entryId), "PUT", this.envelope(pending));
+		const value = await this.request(this.path(entryId), "PUT", this.envelope(pending), undefined, pending.restoreGeneration ?? null);
 		try { return await parseBaseAccepted(value, pending, entryId); }
 		catch { throw new BaseContentFailure("pause", "invalid_base_response"); }
 	}
 	async withdraw(entryId: string, pending: BasePending): Promise<BaseWithdrawal> {
 		pending = copyBasePending(pending, entryId);
-		const value = await this.request(this.path(entryId) + "/withdraw", "POST", this.envelope(pending));
+		const value = await this.request(this.path(entryId) + "/withdraw", "POST", this.envelope(pending), undefined, pending.restoreGeneration ?? null);
 		try {
 			if (baseObject(value) && value.status === "accepted") return { status: "accepted", result: await parseBaseAccepted(value.result, pending, entryId) };
 			if (!baseObject(value) || value.status !== "withdrawn" || value.operation_id !== pending.operationId || value.entry_id !== entryId) throw new Error();
@@ -65,7 +66,7 @@ export class BaseContentTransport {
 			return { status: value.status, operation_id: pending.operationId, entry_id: entryId };
 		} catch { throw new BaseContentFailure("pause", "invalid_base_response"); }
 	}
-	protected async request(path: string, method: "GET" | "PUT" | "POST", body?: string, responseLimit = method === "GET" ? 360_000 : 16_384): Promise<unknown> {
+	protected async request(path: string, method: "GET" | "PUT" | "POST", body?: string, responseLimit = method === "GET" ? 360_000 : 16_384, restoreGeneration: string | null = null): Promise<unknown> {
 		let timer: number | undefined, ended = false;
 		const credentials = async () => {
 			let value: BaseCredential;
@@ -78,7 +79,8 @@ export class BaseContentTransport {
 			const credential = await credentials();
 			let response: Response;
 			try { response = await this.fetcher(this.identity.serverId + path, { method, body, sensitive: true,
-				headers: { Authorization: "Bearer " + credential.accessToken, "Content-Type": "application/json" } }); }
+				headers: { Authorization: "Bearer " + credential.accessToken, "Content-Type": "application/json",
+					...(restoreGeneration === null ? {} : { "X-Relay-Restore-Generation": restoreGeneration }) } }); }
 			catch (error) {
 				if (error instanceof RelayHttpError) throw new BaseContentFailure("retry", "server_unavailable", error.status, error.retryAfterMs);
 				throw new BaseContentFailure("retry", "network_unavailable");
@@ -110,6 +112,7 @@ export class BaseContentTransport {
 			if (!response.ok) {
 				const message = baseObject(value) && baseObject(value.error) ? value.error.message : baseObject(value) ? value.detail : undefined;
 				const code = baseObject(message) && typeof message.code === "string" && codes.has(message.code) ? message.code : "base_request_rejected";
+				if (code === "restore_generation_changed") throw new BaseContentFailure("pause", code, response.status);
 				if (["base_content_changed", "base_content_not_synced", "base_content_unavailable", "base_definition_changed", "base_definition_not_synced", "base_definition_unavailable"].includes(code)) throw new BaseContentFailure("retry", code, response.status);
 				if (["base_content_conflict", "stale_base_revision", "base_registry_conflict"].includes(code)) throw new BaseContentFailure("conflict", code, response.status);
 				if (["base_content_disabled", "base_content_protocol_required", "bases_registry_disabled"].includes(code) || response.status === 404 && code !== "target_unavailable") throw new BaseContentFailure("pause", code, response.status);

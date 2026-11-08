@@ -1,7 +1,9 @@
 import { v4 as uuidv4 } from "uuid";
-import { BASE_LOCAL_QUOTA, baseId, basePath, copyBaseBytes, copyBasePending, parseBaseAccepted, validateBaseSnapshot,
+import { BASE_LOCAL_QUOTA, baseId, basePath, baseRestoreBinding, copyBaseBytes, copyBasePending, parseBaseAccepted, parseBaseRestoreContext, validateBaseSnapshot,
 	type BaseSnapshot, type BasePending, type BaseWithdrawal, type BaseAccepted } from "./BaseContentProtocol";
 import { RECOVERY_FOLDER } from "../conflictCopyPath";
+import { restoreGeneration, restoreMetadata, type RestoreBinding, type RestoreContext } from "../collaboration/RestoreGeneration";
+import { BaseContentFailure } from "./BaseContentTransport";
 
 export interface BaseStoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface BaseConflict { reason: string; local: ArrayBuffer | null; remote: BaseSnapshot }
@@ -15,6 +17,7 @@ export interface BaseRestore {
 }
 export interface BaseSyncRecord {
 	entryId: string; revision: number; baseline?: BaseSnapshot; pending?: BasePending;
+	restoreContext?: RestoreContext;
 	conflict?: BaseConflict; download?: BaseDownload;
 	reviewRequired?: "withdrawn";
 	retirement?: BaseRetirement;
@@ -45,9 +48,9 @@ export class BaseSyncStore {
 			!baseId(identity.accountId) || !baseId(identity.shareId) || !identity.vaultId || identity.vaultId.length > 512 ||
 			!Number.isSafeInteger(quota) || quota < 1 || quota > BASE_LOCAL_QUOTA) throw new Error("Invalid Bases storage identity");
 		identity = { ...identity, serverId: url.toString().replace(/\/+$/, "") };
-		// Version 2 accounts for retained restoration bytes. Older workers must
-		// close instead of archiving these records with an outdated quota model.
-		const open = factory.open("team-relay-bases:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]), 2);
+		// Older workers would drop pending restore bindings. Preserve all stores
+		// while forcing those workers to close instead of silently restamping work.
+		const open = factory.open("team-relay-bases:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]), 3);
 		open.onupgradeneeded = event => {
 			if (event.oldVersion !== 0) return;
 			open.result.createObjectStore("files", { keyPath: "entryId" });
@@ -97,6 +100,27 @@ export class BaseSyncStore {
 	}
 	private reviewed(record: BaseSyncRecord): void {
 		if (record.conflict || record.reviewRequired || record.retirement) throw new Error("Review the retained Bases conflict first");
+	}
+	private bound(record: BaseSyncRecord, binding: RestoreBinding): void {
+		const context = parseBaseRestoreContext(record.restoreContext?.supported, record.restoreContext?.generation);
+		if (restoreGeneration(binding.restoreGeneration) !== (context?.generation ?? null)) throw new BaseContentFailure("pause", "restore_generation_changed");
+	}
+	async requireBinding(entryId: string, binding: RestoreBinding): Promise<void> {
+		await this.transaction("readonly", async tx => this.bound(await this.current(tx, entryId), binding));
+	}
+	/** Call under the native entry lock. The revision is captured before the
+	 * network read so another window's observation cannot be rolled back. */
+	async observeRestoreContext(entryId: string, revision: number, context: RestoreContext | undefined, current: () => boolean): Promise<void> {
+		const next = parseBaseRestoreContext(context?.supported, context?.generation) ?? { supported: false, generation: null };
+		await this.transaction("readwrite", async tx => {
+			const before = await this.current(tx, entryId); this.check(before, revision);
+			if (!current()) throw new BaseContentFailure("pause", "base_context_changed");
+			const prior = parseBaseRestoreContext(before.restoreContext?.supported, before.restoreContext?.generation) ?? { supported: false, generation: null };
+			if (prior.generation !== null && (!next.supported || next.generation === null)) throw new BaseContentFailure("pause", "restore_guard_unavailable");
+			if (prior.generation === next.generation && prior.supported === next.supported) return;
+			await this.write(tx, before, { ...before, restoreContext: next });
+			if (!current()) throw new BaseContentFailure("pause", "base_context_changed");
+		});
 	}
 
 	/** A tombstone never settles or discards an unknown pending publication.
@@ -163,15 +187,17 @@ export class BaseSyncStore {
 		snapshot = await validateBaseSnapshot(snapshot, entryId);
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
+			this.bound(before, baseRestoreBinding(snapshot));
 			this.reviewed(before);
 			await this.write(tx, before, { ...before, baseline: snapshot });
 		});
 	}
 
-	async stage(entryId: string, revision: number, expected: BaseSnapshot["state"], bytes: ArrayBuffer): Promise<BasePending> {
-		const pending = copyBasePending({ operationId: uuidv4(), expected, bytes }, entryId);
+	async stage(entryId: string, revision: number, expected: BaseSnapshot["state"], bytes: ArrayBuffer, binding: RestoreBinding = {}): Promise<BasePending> {
+		const pending = copyBasePending({ operationId: uuidv4(), expected, bytes, ...restoreMetadata(binding) }, entryId);
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
+			this.bound(before, pending);
 			this.reviewed(before);
 			await this.write(tx, before, { ...before, pending });
 		});
@@ -188,8 +214,10 @@ export class BaseSyncStore {
 		return this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId);
 			if (before.pending?.operationId !== operationId) return false;
+			this.bound(before, before.pending);
 			const after = { ...before }; delete after.pending;
-			if (validated) after.baseline = { state: validated.state, bytes: before.pending.bytes };
+			if (validated) after.baseline = { state: validated.state, bytes: before.pending.bytes,
+				...(before.pending.restoreGeneration !== undefined ? { restoreContext: { supported: true, generation: restoreGeneration(before.pending.restoreGeneration) } } : {}) };
 			else after.reviewRequired = "withdrawn";
 			await this.write(tx, before, after, validated ? undefined : { entryId, id: operationId, createdAt: Date.now(), record: before });
 			return true;
@@ -227,10 +255,11 @@ export class BaseSyncStore {
 		if (choice === "local" ? local === null : remote.bytes === null) throw new Error("The chosen Bases copy is unavailable");
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
+			this.bound(before, baseRestoreBinding(remote));
 			if (before.retirement) throw new Error("This Bases identity was removed. Recover it as a separate file.");
 			if (!before.conflict && !before.reviewRequired) throw new Error("The Bases conflict was already reviewed");
 			const after = { ...before }; delete after.conflict; delete after.reviewRequired;
-			if (choice === "local") after.pending = { operationId: uuidv4(), expected: remote.state, bytes: local! };
+			if (choice === "local") after.pending = { operationId: uuidv4(), expected: remote.state, bytes: local!, ...baseRestoreBinding(remote) };
 			else after.download = { id: uuidv4(), before: local, remote };
 			// The displayed copies may be newer than the initial conflict. Preserve
 			// those too before an explicit server choice can overwrite local edits.
@@ -247,18 +276,19 @@ export class BaseSyncStore {
 		if (download.remote.bytes === null) throw new Error("The Bases file has not been published");
 		await this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId); this.check(before, revision); this.idle(before);
+			this.bound(before, baseRestoreBinding(download.remote));
 			this.reviewed(before);
 			await this.write(tx, before, { ...before, download });
 		});
 		return download;
 	}
 	/** A failed local replacement becomes a conflict; retain its original intent. */
-	async rejectDownload(entryId: string, downloadId: string, localBytes: ArrayBuffer | null): Promise<boolean> {
+	async rejectDownload(entryId: string, downloadId: string, localBytes: ArrayBuffer | null, reason: "local-changed-during-download" | "restore-changed" = "local-changed-during-download"): Promise<boolean> {
 		const local = localBytes === null ? null : copyBaseBytes(localBytes);
 		return this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId);
 			if (before.download?.id !== downloadId) return false;
-			const after = { ...before, conflict: { reason: "local-changed-during-download", local, remote: before.download.remote } };
+			const after = { ...before, conflict: { reason, local, remote: before.download.remote } };
 			delete after.download;
 			await this.write(tx, before, after, { entryId, id: downloadId, createdAt: Date.now(), record: before });
 			return true;
@@ -269,6 +299,7 @@ export class BaseSyncStore {
 		return this.transaction("readwrite", async tx => {
 			const before = await this.current(tx, entryId);
 			if (before.download?.id !== downloadId) return false;
+			this.bound(before, baseRestoreBinding(before.download.remote));
 			const after = { ...before, baseline: before.download.remote }; delete after.download;
 			await this.write(tx, before, after); return true;
 		});

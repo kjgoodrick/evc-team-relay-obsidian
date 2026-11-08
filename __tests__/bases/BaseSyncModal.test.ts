@@ -148,3 +148,14 @@ test("read-only users can inspect an unknown result without withdrawing, replayi
 		s.changed(true); await flush(); expect(s.modal.contentEl.querySelector('[role="status"]')).toBeNull();
 	} finally { s.modal.onClose(); }
 });
+
+test("older restore requests expose read-only inspection and export while retry and withdrawal stay disabled", async () => {
+	const s = fixture(); try {
+		Object.assign(s.row.record, { pending: { operationId: "operation" }, restoreContext: { supported: true, generation: "new-generation" } });
+		await flush(); expect(s.modal.contentEl.textContent).toContain("earlier restore generation");
+		expect(s.button("Retry sync").disabled).toBe(true); expect(s.button("Check delivery / withdraw").disabled).toBe(true);
+		expect(s.button("Check saved result").disabled).toBe(false); expect(s.button("Export recovery copies").disabled).toBe(false);
+		s.button("Retry sync").click(); s.button("Check delivery / withdraw").click();
+		expect(s.host.retry).not.toHaveBeenCalled(); expect(s.host.withdraw).not.toHaveBeenCalled();
+	} finally { s.modal.onClose(); }
+});

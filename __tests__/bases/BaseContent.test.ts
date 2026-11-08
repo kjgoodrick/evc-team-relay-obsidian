@@ -234,3 +234,67 @@ test("read-only status freezes the exact request and validates accepted, withdra
 	new Uint8Array(pending.bytes).fill(0); pending.expected.path = "Other.base"; resume(await credentials()); await checking;
 	expect(JSON.parse(fetcher.mock.calls[0][1].body).content_base64).toBe(encodeBaseBytes(bytes("new")));
 });
+
+test("restore snapshots reject unsupported metadata and require review for an unproven initialization", async () => {
+	const remote = await snapshot(null);
+	for (const metadata of [{ restore_guard: true }, { restore_generation: null }, { restore_guard: false, restore_generation: id(60) }, { restore_guard: true, restore_generation: "bad" }]) {
+		await expect(parseBaseSnapshot({ ...wire(remote), ...metadata }, id(3))).rejects.toThrow();
+	}
+	const current = await parseBaseSnapshot({ ...wire(remote), restore_guard: true, restore_generation: id(60) }, id(3));
+	expect(await decideBaseSync(undefined, bytes("unproven local file"), current, true)).toBe("restore-changed");
+});
+
+test("Bases restore observation rejects stale readers, downgrades and late staged intents", async () => {
+	const store = await BaseSyncStore.open(identity, new IDBFactory());
+	try {
+		const expected = await snapshot("base"), captured = await store.get(id(3));
+		await store.observeRestoreContext(id(3), captured.revision, { supported: true, generation: id(60) }, () => true);
+		const before = await store.get(id(3));
+		await expect(store.observeRestoreContext(id(3), captured.revision, { supported: true, generation: id(61) }, () => true)).rejects.toThrow("changed");
+		await expect(store.observeRestoreContext(id(3), before.revision, undefined, () => true)).rejects.toMatchObject({ code: "restore_guard_unavailable" });
+		await expect(store.stage(id(3), before.revision, expected.state, bytes("old intent"))).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(await store.get(id(3))).toEqual(before);
+	} finally { store.close(); }
+});
+
+test("publish and withdrawal freeze restore bindings before credential refresh, outside their canonical body", async () => {
+	const before = await snapshot("base");
+	for (const action of ["publish", "withdraw"] as const) {
+		const pending = { operationId: id(4), expected: before.state, bytes: bytes("new"), restoreGeneration: id(60) };
+		const result = { protocol_version: 1, ...await accepted(pending) };
+		const fetcher = jest.fn().mockResolvedValue(reply(200, action === "publish" ? result : { status: "accepted", result }));
+		let resume!: (value: Awaited<ReturnType<typeof credentials>>) => void;
+		const token = new Promise<Awaited<ReturnType<typeof credentials>>>(resolve => { resume = resolve; });
+		const sending = new BaseContentTransport(identity, () => token, fetcher)[action](id(3), pending);
+		pending.restoreGeneration = id(61); resume(await credentials()); await sending;
+		expect(new Headers(fetcher.mock.calls[0][1].headers).get("X-Relay-Restore-Generation")).toBe(id(60));
+		expect(JSON.parse(fetcher.mock.calls[0][1].body)).not.toHaveProperty("restoreGeneration");
+	}
+});
+
+test("Bases database upgrade closes old workers and preserves original pending and recovery bytes", async () => {
+	const factory = new IDBFactory(), name = "team-relay-bases:" + JSON.stringify([identity.serverId, identity.accountId, identity.vaultId, identity.shareId]);
+	const prior = await new Promise<IDBDatabase>((resolve, reject) => {
+		const opening = factory.open(name, 2);
+		opening.onupgradeneeded = () => { opening.result.createObjectStore("files", { keyPath: "entryId" }); opening.result.createObjectStore("recoveries", { keyPath: ["entryId", "id"] }); opening.result.createObjectStore("meta"); };
+		opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+	});
+	const record = { entryId: id(3), revision: 1, pending: { operationId: id(4), expected: (await snapshot("base")).state, bytes: bytes("old pending") } };
+	await new Promise<void>((resolve, reject) => {
+		const tx = prior.transaction(["files", "recoveries", "meta"], "readwrite"); tx.objectStore("files").put(record);
+		tx.objectStore("recoveries").put({ entryId: id(3), id: id(5), createdAt: 1, record }); tx.objectStore("meta").put(record.pending.bytes.byteLength * 2, "bytes");
+		tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+	});
+	let closed = false; prior.onversionchange = () => { closed = true; prior.close(); };
+	const upgraded = await BaseSyncStore.open(identity, factory);
+	try {
+		expect(closed).toBe(true); expect(await upgraded.get(id(3))).toEqual(record);
+		expect((await upgraded.recoveries(id(3)))[0].record).toEqual(record);
+		const obsolete = await new Promise<string>((resolve, reject) => {
+			const opening = factory.open(name, 2); opening.onerror = event => { event.preventDefault(); resolve(opening.error!.name); }; opening.onsuccess = () => { opening.result.close(); reject(new Error("Old worker opened new storage")); };
+		});
+		expect(obsolete).toBe("VersionError");
+		await upgraded.observeRestoreContext(id(3), 1, { supported: true, generation: id(60) }, () => true);
+		expect((await upgraded.get(id(3))).pending).toEqual(record.pending);
+	} finally { upgraded.close(); }
+});

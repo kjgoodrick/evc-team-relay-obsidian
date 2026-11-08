@@ -1,7 +1,7 @@
 # Restore-generation client foundation
 
 This is a tested discussion-command, picture-upload, group-capture, inbox and
-timeline-marker and combined-permission restore guard, not a complete restore workflow.
+timeline-marker, permission and Bases-content restore guard, not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
@@ -164,3 +164,13 @@ server guard. Legacy file-only forms send no binding and remain usable only on
 original-lineage shares; use the combined editor after a restore. The legacy
 list response shape remains unchanged, and no client silently adopts a new
 binding for its old rules.
+
+
+Guarded Bases content publish/withdraw now carries immutable request bindings as
+well. Its separate per-entry snapshot/worker/recovery model and storage version 3
+are documented in [the Bases implementation](../src/bases/README.md#restore-generation).
+The actual restored HTTP scenario exercises explicit initialization review,
+lost acceptance/reopening/exact retry, older pending work, and historical receipt
+inspection. PostgreSQL verifies publication and withdrawal waiting across a
+restore both reject before receipt/content changes. Registry/inventory mutation
+guards and full restored-work reconciliation remain.
