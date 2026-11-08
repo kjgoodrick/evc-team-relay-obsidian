@@ -1,3 +1,4 @@
+import { DiscussionExportModal } from "./DiscussionExport";
 import { targetNeedsReview, uncheckedTarget, type CommentTargetStatus } from "../CommentTargetStatus";
 import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
@@ -255,6 +256,8 @@ class ThreadCard {
 }
 
 export class CommentsView extends ItemView {
+	private exportModal?: DiscussionExportModal;
+	private exportButton?: HTMLButtonElement;
 	private session?: DiscussionSession;
 	private entryId?: string;
 	private watch?: () => void;
@@ -306,6 +309,7 @@ export class CommentsView extends ItemView {
 		this.timer = window.setTimeout(() => { this.timer = undefined; void this.render().catch(() => { this.status?.setText("Comments could not be loaded. Refresh to retry."); }); }, 50);
 	}
 	private reset(): void {
+		this.exportModal?.close(); this.exportModal = undefined; this.exportButton = undefined;
 		this.search?.dispose(); this.search = undefined;
 		this.targetWatch?.(); this.targetWatch = undefined; this.targetEpoch++; this.targetCheck = undefined; this.targetStatuses.clear(); this.targetFilter = undefined; this.targetSummary = undefined;
 		this.generation++; this.session = undefined; this.entryId = undefined;
@@ -336,6 +340,19 @@ export class CommentsView extends ItemView {
 			if (target.message) this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message });
 			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
 			const storage = this.contentEl.createEl("button", { text: "Storage on this device" }); storage.onclick = () => { if (this.session) this.host.openCommentStorage(this.session); };
+			this.exportButton = this.contentEl.createEl("button", { text: "Export discussions", attr: { type: "button" } });
+			this.exportButton.onclick = () => {
+				const session = this.session, scopeId = this.entryId;
+				if (!session || !scopeId || !session.canExport || !session.permission(scopeId)?.read) return;
+				this.exportModal?.close();
+				this.exportModal = new DiscussionExportModal(this.app, session, scopeId,
+					target.path + (target.kind === "base" ? " · " + target.baseViewName : ""), () => {
+						const current = this.host.current();
+						return !this.closed && current.session === session && current.entryId === scopeId;
+					});
+				this.exportModal.open();
+			};
+
 			const search = this.contentEl.createEl("button", { text: "Search and filter comments", attr: { "aria-expanded": "false" } });
 			const searchContainer = this.contentEl.createDiv();
 			search.onclick = () => {
@@ -364,6 +381,9 @@ export class CommentsView extends ItemView {
 				target.kind === "base" ? () => this.host.commentCurrentBase(session, entryId) : undefined,
 				target.kind === "base" ? anchor => this.host.targetLabel(session, entryId, anchor) : undefined);
 		}
+		if (this.exportButton) this.exportButton.disabled = !this.session.canExport || !this.session.permission(this.entryId)?.read;
+		this.exportModal?.validate();
+
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");
 		this.targetWatch ??= this.host.watchTargetStatus(this.session, this.entryId, () => { this.targetEpoch++; this.schedule(); });
 		this.contentEl.querySelector("h2")?.setText(target.path.split("/").pop() ?? "Comments");

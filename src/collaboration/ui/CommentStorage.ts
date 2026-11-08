@@ -1,9 +1,10 @@
-import { Modal, TFolder, type App } from "obsidian";
+import { Modal, type App } from "obsidian";
 import type { DiscussionSession } from "../DiscussionSession";
 import type { DiscussionStorageUsage } from "../storage/CachePolicy";
 import type { LocalWorkSummary } from "../storage/LocalWorkRecords";
 import { CommentLocalWorkModal } from "./CommentLocalWork";
 import type { LocalWorkIO } from "../LocalWorkRecovery";
+import { commentArchiveIO } from "./CommentArchiveIO";
 
 const mib = 1024 * 1024;
 const size = (bytes: number) => `${(bytes / mib).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`;
@@ -110,17 +111,7 @@ export class CommentStorageModal extends Modal {
 	}
 	private io(): LocalWorkIO {
 		if (this.recoveryIO) return this.recoveryIO;
-		const vault = this.app.vault;
-		return {
-			mkdir: async path => {
-				let file = vault.getAbstractFileByPath(path);
-				if (!file) { try { file = await vault.createFolder(path); } catch { file = vault.getAbstractFileByPath(path); } }
-				if (!(file instanceof TFolder)) throw new Error("The local recovery folder is unavailable.");
-			},
-			write: async (path, text) => { await vault.create(path, text); },
-			writeBinary: async (path, bytes) => { await vault.createBinary(path, bytes); },
-			read: path => vault.adapter.read(path), readBinary: path => vault.adapter.readBinary(path),
-		};
+		return commentArchiveIO(this.app);
 	}
 	private async exportWork(): Promise<void> {
 		if (!this.current() || this.busy || !this.usage) return;

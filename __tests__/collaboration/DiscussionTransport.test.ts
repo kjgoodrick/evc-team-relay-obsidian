@@ -151,3 +151,31 @@ test("text commands allow a bounded 64 KiB dependency without increasing whole-n
 	expect(() => queuedEnvelope(id(2), { ...operation, payload: { ...operation.payload, anchor: { ...anchor, document_id: id(9) } } })).toThrow("invalid_local_anchor");
 	expect(() => queuedEnvelope(id(2), { ...operation, payload: { ...operation.payload, anchor: { ...anchor, dependency: toBase64(new Uint8Array(65537)) } } })).toThrow("invalid_local_anchor");
 });
+
+test("export negotiates independently, binds saved view/account and never posts a command", async () => {
+	const { exportFixture } = await import("../mocks/DiscussionExport");
+	const fixture = exportFixture(); fixture.entry.id = id(4);
+	const fetcher = jest.fn().mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_export: true } }));
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	expect((await transport.capabilities()).export).toBe(true);
+	fetcher.mockResolvedValue(reply(200, fixture)); expect((await transport.exportSnapshot(id(4))).entry.id).toBe(id(4));
+	expect(fetcher.mock.calls.at(-1)![0]).toContain(`/entries/${id(4)}/export`);
+	expect(fetcher.mock.calls.at(-1)![1]).toMatchObject({ method: "GET", sensitive: true });
+	fixture.exporter_id = id(9); fetcher.mockResolvedValue(reply(200, fixture));
+	await expect(transport.exportSnapshot(id(4))).rejects.toMatchObject({ code: "invalid_read_response" });
+	fixture.exporter_id = id(1); fixture.records = []; fixture.entry.kind = "base"; fixture.view_id = id(20);
+	fetcher.mockResolvedValue(reply(200, fixture)); await transport.exportSnapshot(`base:${id(4)}:${id(20)}`);
+	expect(fetcher.mock.calls.at(-1)![0]).toContain(`/export?view_id=${id(20)}`);
+});
+
+test("export discards a late account/view result and bounds streamed response bytes before JSON parsing", async () => {
+	const { exportFixture } = await import("../mocks/DiscussionExport");
+	let current = true;
+	const fetcher = jest.fn(async () => { current = false; return reply(200, exportFixture()); });
+	await expect(new DiscussionTransport(identity, credentials, fetcher).exportSnapshot(id(3), () => current)).rejects.toMatchObject({ code: "action_context_changed" });
+	let chunks = 0, canceled = false;
+	const stream = new ReadableStream({ pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); }, cancel() { canceled = true; } });
+	await expect(new DiscussionTransport(identity, credentials, jest.fn().mockResolvedValue(new Response(stream))).exportSnapshot(id(3)))
+		.rejects.toMatchObject({ code: "invalid_read_response" });
+	expect(chunks).toBeLessThanOrEqual(10); expect(canceled).toBe(true);
+});

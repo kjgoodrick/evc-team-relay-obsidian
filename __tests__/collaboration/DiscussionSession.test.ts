@@ -704,3 +704,34 @@ test("closing a reaction cancellation during withdrawal retains recovery state u
 		visible = true; expect(await f.session.cancelSavedReaction(op, () => visible)).toBe("withdrawn");
 	} finally { await f.close(); }
 });
+
+test("read-only export requires its online capability and preserves local drafts without command delivery", async () => {
+	const { exportFixture, exportDisk } = await import("../mocks/DiscussionExport");
+	const f = await fixture(), disk = exportDisk();
+	const capture = jest.fn().mockResolvedValue(exportFixture());
+	Object.assign(f.transport, { exportSnapshot: capture });
+	try {
+		await expect(f.session.saveDiscussionExport(entry, disk.io, () => true)).rejects.toThrow("export enabled");
+		f.transport.capabilities.mockResolvedValue({ discussions: true, export: true } as never);
+		f.transport.permissions.mockResolvedValue({ read: true, comment: false, edit: false, moderate: false }); await f.session.refresh();
+		await f.store.saveDraft({ id: "kept", scopeId: entry, revision: 0, body: "Unsent local draft" });
+		const path = await f.session.saveDiscussionExport(entry, disk.io, () => true, false);
+		expect(disk.texts.has(path + "/COMPLETE.json")).toBe(true); expect((await f.store.getDraft("kept"))?.body).toBe("Unsent local draft");
+		expect(f.transport.send).not.toHaveBeenCalled(); expect(f.transport.sendOnline).not.toHaveBeenCalled();
+		f.session.setForeground(false); await expect(f.session.saveDiscussionExport(entry, disk.io, () => true)).rejects.toThrow("export enabled");
+	} finally { await f.close(); }
+});
+
+test("export stops across authentication loss, even when access returns before the download finishes; concurrent exports are bounded", async () => {
+	const { exportFixture, exportDisk } = await import("../mocks/DiscussionExport");
+	const f = await fixture(), disk = exportDisk(); let finish!: (value: unknown) => void;
+	Object.assign(f.transport, { exportSnapshot: jest.fn(() => new Promise(resolve => { finish = resolve; })) });
+	try {
+		f.transport.capabilities.mockResolvedValue({ discussions: true, export: true } as never); await f.session.refresh();
+		const saving = f.session.saveDiscussionExport(entry, disk.io, () => true, false), rejected = expect(saving).rejects.toThrow("access changed");
+		await expect(f.session.saveDiscussionExport(entry, disk.io, () => true)).rejects.toThrow("Another");
+		f.transport.capabilities.mockRejectedValueOnce(new DiscussionFailure("authenticate", "authentication_required", 401)); await f.session.refresh();
+		await f.session.refresh(); finish(exportFixture()); await rejected;
+		expect(disk.folders).toHaveLength(0);
+	} finally { await f.close(); }
+});

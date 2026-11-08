@@ -1,3 +1,4 @@
+import { DISCUSSION_EXPORT_MAX_BYTES, parseDiscussionExport } from "./DiscussionExportProtocol";
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { baseRecordIds, parseBaseRecordContexts } from "./BaseRecordContexts";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
@@ -36,7 +37,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
-for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query"]) errorCodes.add(code);
+for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query", "discussion_export_disabled", "discussion_export_limit"]) errorCodes.add(code);
 for (const code of ["reattach_disabled", "stale_anchor_revision", "reattach_scope_changed", "reattach_readers_changed", "reattach_target_unanchored"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
@@ -188,11 +189,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; inbox?: boolean; search?: boolean; export?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -231,9 +232,19 @@ export class DiscussionTransport implements DiscussionSender {
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
 			...(formulaGroups === undefined ? {} : { baseFormulaGroups: formulaGroups === true && baseTargets.includes("group") }),
 			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
+			...(value.features.discussion_export === undefined ? {} : { export: value.features.discussion_commands && value.features.discussion_export === true }),
 			...(value.features.discussion_search === undefined ? {} : { search: value.features.discussion_commands && value.features.discussion_search === true }),
 			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
 	}
+	async exportSnapshot(scopeId: string, current?: () => boolean) {
+		const scope = parseDiscussionScope(scopeId);
+		if (!scope) throw new DiscussionFailure("reject", "invalid_local_target");
+		const path = this.scopePath(scopeId) + "/export" + (scope.viewId ? "?view_id=" + scope.viewId : "");
+		const value = await this.request(path, undefined, { responseLimit: DISCUSSION_EXPORT_MAX_BYTES, boundedText: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, item => parseDiscussionExport(item, { ...this.identity, scopeId }));
+	}
+
 	async search(input: DiscussionSearchRequest) {
 		const request = searchRequest(input), envelope = searchEnvelope(request);
 		return this.parse(await this.request(`/shares/${this.identity.shareId}/search`, envelope, { responseLimit: 512 * 1024 }), value => parseSearchPage(value, request));
@@ -284,10 +295,10 @@ export class DiscussionTransport implements DiscussionSender {
 		if (verified.state === "staged") throw new DiscussionFailure("pause", "invalid_picture_response");
 		return verified;
 	}
-	async pictureContent(entryId: string, pictureId: string, variant: "content" | "thumbnail", expected: PictureRendition): Promise<ArrayBuffer> {
+	async pictureContent(entryId: string, pictureId: string, variant: "content" | "thumbnail", expected: PictureRendition, current?: () => boolean): Promise<ArrayBuffer> {
 		if (!isId(pictureId) || !["content", "thumbnail"].includes(variant)) throw new DiscussionFailure("reject", "invalid_local_target");
 		try { expected = parsePictureRendition(expected, variant === "thumbnail"); } catch { throw new DiscussionFailure("reject", "invalid_local_picture"); }
-		return await this.request(this.scopePath(entryId) + "/pictures/" + pictureId + "/" + variant, undefined, { binary: expected }) as ArrayBuffer;
+		return await this.request(this.scopePath(entryId) + "/pictures/" + pictureId + "/" + variant, undefined, { binary: expected, current }) as ArrayBuffer;
 	}
 	async anchorContext(entryId: string): Promise<{ entryId: string; generation: string }> {
 		const actual = parseDiscussionScope(entryId)?.entryId;
@@ -489,7 +500,7 @@ export class DiscussionTransport implements DiscussionSender {
 			v => parseChanges(v, viewId, parseDiscussionScope(entryId)!.entryId));
 	}
 
-	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number; current?: () => boolean } = {}): Promise<unknown> {
+	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number; boundedText?: boolean; current?: () => boolean } = {}): Promise<unknown> {
 		let timer: number | undefined;
 		let ended = false;
 		const attempt = async () => {
@@ -537,7 +548,22 @@ export class DiscussionTransport implements DiscussionSender {
 			}
 			// Bound parsing even when a misconfigured proxy returns a large HTML page.
 			let raw: string;
-			try { raw = await response.text(); } catch { throw new DiscussionFailure("retry", "network_unavailable"); }
+			try {
+				if (options.boundedText && response.body) {
+					const reader = response.body.getReader(), chunks: string[] = [], decoder = new TextDecoder("utf-8", { fatal: true });
+					let count = 0;
+					try {
+						for (;;) {
+							if (ended || options.current && !options.current()) throw new DiscussionFailure("pause", "action_context_changed");
+							const chunk = await reader.read(); if (chunk.done) break;
+							count += chunk.value.byteLength;
+							if (count > options.responseLimit!) throw new DiscussionFailure("pause", "invalid_read_response");
+							chunks.push(decoder.decode(chunk.value, { stream: true }));
+						}
+						chunks.push(decoder.decode()); raw = chunks.join("");
+					} finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+				} else raw = await response.text();
+			} catch (error) { if (error instanceof DiscussionFailure) throw error; throw new DiscussionFailure("retry", "network_unavailable"); }
 			if (new TextEncoder().encode(raw).byteLength > (options.responseLimit ?? (body === undefined ? 512 * 1024 : 65536))) {
 				if (response.ok) throw new DiscussionFailure("pause", "invalid_command_response", response.status);
 				raw = "";

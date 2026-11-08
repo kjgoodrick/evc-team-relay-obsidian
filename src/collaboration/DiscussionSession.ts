@@ -1,3 +1,4 @@
+import { saveDiscussionExport } from "./DiscussionExport";
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
 import { baseRecordIds, parseBaseRecordContexts, type BaseRecordContexts } from "./BaseRecordContexts";
 import { parseTimelineMarkerCatalog, timelineMarkerAnchor, type TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
@@ -81,6 +82,8 @@ export class DiscussionSession {
 	private recoveryEnabled = false;
 	private inboxEnabled = false;
 	private searchEnabled = false;
+	private exportEnabled = false;
+	private exporting = false;
 	private reattachEnabled = false;
 	private reattachments: DiscussionReattachment;
 	private baseKinds: BaseTargetKind[] = [];
@@ -140,6 +143,22 @@ export class DiscussionSession {
 		return this.trackLocal(saveLocalWorkRecovery(this.store, io, () => !this.closed && visible(), retainedId, progress)
 			.finally(() => { if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); } }));
 	}
+	async saveDiscussionExport(scopeId: string, io: LocalWorkIO, visible: () => boolean, includePictures = true, progress?: (text: string) => void): Promise<string> {
+		if (!this.canExport || !this.permission(scopeId)?.read) throw new Error("Connect and open readable comments on a server with discussion export enabled.");
+		if (this.exporting) throw new Error("Another discussion export is running. Wait for it to finish.");
+		const epoch = this.authenticationEpoch, generation = this.knownDocumentGeneration(scopeId);
+		let valid = true;
+		const current = () => valid && visible() && this.canExport && epoch === this.authenticationEpoch &&
+			this.permission(scopeId)?.read === true && this.knownDocumentGeneration(scopeId) === generation;
+		const stop = this.onChange(() => { if (!current()) valid = false; });
+		this.exporting = true;
+		return this.trackLocal(saveDiscussionExport(this.transport, { ...this.transport.identity, scopeId }, io, current, includePictures, progress)
+			.catch(error => {
+				if (!this.closed && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				throw error;
+			}).finally(() => { stop(); this.exporting = false; }));
+	}
+
 	async releaseLocalWorkRecovery(id: string): Promise<void> {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		if (!await this.trackLocal(this.store.releaseLocalWork(id))) throw new Error("The retained capture changed in another window. Refresh before reviewing it.");
@@ -164,6 +183,7 @@ export class DiscussionSession {
 	get status(): SessionStatus { return this.statusValue; }
 	get canQueue(): boolean { return !this.closed && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && this.foreground && this.statusValue === "ready"; }
+	get canExport(): boolean { return this.online && this.exportEnabled; }
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
 	get canReattach(): boolean { return this.online && this.reattachEnabled; }
 	get canRecoverSavedCommand(): boolean { return this.online && this.recoveryEnabled; }
@@ -277,6 +297,7 @@ export class DiscussionSession {
 			this.recoveryEnabled = capability.recovery === true;
 			this.inboxEnabled = capability.inbox === true;
 			this.searchEnabled = capability.search === true;
+			this.exportEnabled = capability.export === true;
 			this.reattachEnabled = capability.reattach === true;
 			this.baseKinds = capability.baseTargets ?? [];
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
