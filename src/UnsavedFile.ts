@@ -65,13 +65,6 @@ export class UnsavedFile implements TFile {
 	}
 }
 
-function promisifyRequest<T>(request: IDBRequest<T>, errorMessage: string): Promise<T> {
-	return new Promise((resolve, reject) => {
-		request.onsuccess = () => resolve(request.result);
-		request.onerror = () => reject(request.error ?? new Error(errorMessage));
-	});
-}
-
 /**
  * Persists UnsavedFile contents to IndexedDB, keyed by document guid, so an
  * unsaved edit survives an Obsidian reload before the real file exists.
@@ -111,14 +104,17 @@ export class UnsavedFileStore {
 		errorMessage: string,
 	): Promise<T> {
 		const db = await this.database();
-		try {
-			const store = db
-				.transaction(UnsavedFileStore.STORE_NAME, mode)
-				.objectStore(UnsavedFileStore.STORE_NAME);
-			return await promisifyRequest(run(store), errorMessage);
-		} catch (e: unknown) {
-			throw e instanceof Error ? e : new Error(String(e));
-		}
+		return new Promise<T>((resolve, reject) => {
+			const tx = db.transaction(UnsavedFileStore.STORE_NAME, mode);
+			let request: IDBRequest<T>;
+			try { request = run(tx.objectStore(UnsavedFileStore.STORE_NAME)); }
+			catch (error) { tx.abort(); reject(error instanceof Error ? error : new Error(String(error))); return; }
+			// Request success only means the operation was admitted. A quota,
+			// storage or explicit abort may still roll back the transaction.
+			tx.oncomplete = () => resolve(request.result);
+			tx.onabort = () => reject(tx.error ?? request.error ?? new Error(errorMessage));
+			tx.onerror = () => { /* onabort reports the final transaction outcome */ };
+		});
 	}
 
 	async persistUnsaved(guid: string, contents: string): Promise<void> {
