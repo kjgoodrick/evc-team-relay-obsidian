@@ -87,7 +87,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 		this._indexeddbPersistence = this.openPersistence();
 		this.retainRestoreReviewIn(this._indexeddbPersistence);
 
-		void this.awaitFirstSync().then(() => this.bootstrapAfterSync());
+		void this.awaitFirstSync().then(() => this.bootstrapAfterSync()).catch(error => this.warn("Document startup paused", error));
 		withToggle(featureKey.enableDeltaLogging, () => this.attachDeltaLogger());
 	}
 
@@ -97,7 +97,9 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 		return this._parent?.config.onpremServerId ?? this.onpremServerId;
 	}
 	get restoreReviewRequired(): boolean {
-		return !!this._parent?._liveProvider?.managedIndex?.restoreReview || super.restoreReviewRequired;
+		const index = this._parent?._liveProvider?.managedIndex;
+		// This legacy document cache still belongs to the original lineage.
+		return !!index?.restoreReview || !!index?.snapshot?.restore_generation || super.restoreReviewRequired;
 	}
 
 	private openPersistence(): LocalDocumentStore {
@@ -191,13 +193,14 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 		this.attachActivityObserver();
 		this.refreshFileStats();
 		this.recordPersistenceMetadata();
+		if (this.restoreReviewRequired) return;
 
 		const serverSynced = await this.getServerAcked();
 		if (!serverSynced) {
 			await this.onceEverSynced();
 			await this.markServerAcked();
 		}
-		void this.vaultShare.noteUploaded(this);
+		void this.vaultShare.noteUploaded(this).catch(error => this.warn("Document metadata was not acknowledged", error));
 	}
 
 	relocate(newPath: string, vaultShare: VaultShare) {
@@ -448,16 +451,16 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 		return mimeTypeForPath(this.entryPath);
 	}
 
-	syncToVault() {
-		if (!this.obsidianFile) {
-			return;
-		}
-		if (this.vaultShare.isDeletePending(this.entryPath)) {
-			this.warn("skipping save for pending delete", this.entryPath);
-			return;
-		}
-		void this.obsidianVault.modify(this.obsidianFile, this.content);
-		this.warn("file saved", this.entryPath);
+	async syncToVault(): Promise<void> {
+		const file = this.obsidianFile;
+		if (!file || this.restoreReviewRequired) return;
+		try {
+			const check = this.vaultShare.captureDocumentWrite(this), content = this.content;
+			await this.assertNoRestoreReview(); check();
+			if (this.obsidianFile !== file || this.content !== content) return;
+			await this.obsidianVault.modify(file, content);
+			this.warn("file saved", this.entryPath);
+		} catch (error) { this.warn("Document save paused; local cached content is retained", error); }
 	}
 
 	scheduleSave = debounce(() => this.syncToVault(), 2000);
@@ -471,6 +474,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	}
 
 	async markServerAcked(): Promise<void> {
+		await this.assertNoRestoreReview();
 		await this._indexeddbPersistence.rememberServerSync();
 	}
 

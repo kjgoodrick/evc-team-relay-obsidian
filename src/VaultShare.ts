@@ -24,6 +24,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
+import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { SingleFlight, LazyValue, warnIfSlow } from "./asyncCache";
 import { FolderAddress, ResourceAddress, RemoteFolderAddress } from "./ResourceAddress";
 
@@ -416,6 +417,22 @@ export class VaultShare extends ProviderBacked {
 		};
 		check();
 		return { binding: context?.binding ?? {}, managed: !!index, check };
+	}
+
+	/** Keep a document write tied to the source selected before an asynchronous read. */
+	captureDocumentWrite(doc: Document | CanvasDocument): () => void {
+		const path = doc.entryPath, id = doc.entityGuid, sharePath = this.path, shareId = this.entityGuid;
+		const server = this.config.onpremServerId, provider = this._liveProvider, crdt = doc.crdtDoc;
+		const checkAuth = this.credentialCache.captureFileContext?.(ResourceAddress.serialize(doc.resourceAddress), server);
+		const check = () => {
+			if (doc.restoreReviewRequired) throw new RelayRestoreRequiredError();
+			if (this.isTornDown || this.isRecoveringStructure || this.path !== sharePath || this.entityGuid !== shareId
+				|| this.config.onpremServerId !== server || this._liveProvider !== provider || doc.vaultShare !== this
+				|| doc.entryPath !== path || doc.entityGuid !== id || doc.crdtDoc !== crdt || crdt.isDestroyed
+				|| this.deletedEntries.has(doc) || this.isDeletePending(path)) throw new Error("Document context changed. Local content is retained.");
+			checkAuth?.();
+		};
+		check(); return check;
 	}
 
 	/** Reserve the file identity in the server inventory before asking for content access. */
@@ -2196,10 +2213,14 @@ export class VaultShare extends ProviderBacked {
 		return this.vaultApi.adapter.exists(normalizePath(this.absolutePath(doc.entryPath)));
 	}
 
-	writeContents(doc: SyncableEntry, content: string): Promise<void> {
+	async writeContents(doc: SyncableEntry, content: string): Promise<void> {
 		if (this.deletedEntries.has(doc) || this.isDeletePending(doc.entryPath)) {
 			this.log("skipping write for pending delete", doc.entryPath);
 			return Promise.resolve();
+		}
+		if (isDocument(doc) || isCanvasDocument(doc)) {
+			const check = this.captureDocumentWrite(doc);
+			await doc.assertNoRestoreReview(); check();
 		}
 		const vaultPath = normalizePath(this.absolutePath(doc.entryPath));
 		this.log("writing to ", vaultPath);
@@ -2333,7 +2354,13 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	async noteUploaded(file: SyncableEntry, upload?: AttachmentUpload): Promise<void> {
+		if (!this.folderIndex || this.deletedEntries.has(file) || this.isDeletePending(file.entryPath)) return;
 		if (this.usesBaseSync(file.entryPath, file.entityGuid)) return;
+		let checkDocument: (() => void) | undefined;
+		if (isDocument(file) || isCanvasDocument(file)) {
+			checkDocument = this.captureDocumentWrite(file);
+			await file.assertNoRestoreReview(); checkDocument();
+		}
 		if (upload && isAttachmentFile(file)) {
 			upload.check();
 			// A late success acknowledges only the exact bytes sent. Reading the
@@ -2344,6 +2371,7 @@ export class VaultShare extends ProviderBacked {
 			return;
 		}
 		const meta = await this._metaForUpload(file);
+		checkDocument?.();
 		if (meta) {
 			this._commitMeta(file, meta);
 		}
@@ -2693,7 +2721,7 @@ export class VaultShare extends ProviderBacked {
 				void (isDocument(item) ? item.markSyncOrigin("local") : item.markSyncOrigin("local"));
 				this.log(`[${item.entryPath}] Uploading file`);
 				await this.transfers.enqueueUpload(item, { priority });
-				void this.noteUploaded(item);
+				void this.noteUploaded(item).catch(error => this.warn("Document metadata was not acknowledged", error));
 			}
 		})();
 

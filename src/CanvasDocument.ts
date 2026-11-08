@@ -110,7 +110,7 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 		this._indexeddbPersistence = this.openPersistence();
 		this.retainRestoreReviewIn(this._indexeddbPersistence);
 
-		void this.awaitFirstSync().then(() => this.bootstrapAfterSync());
+		void this.awaitFirstSync().then(() => this.bootstrapAfterSync()).catch(error => this.warn("Canvas startup paused", error));
 	}
 
 	/** Read live rather than the value captured at construction — see the
@@ -119,7 +119,8 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 		return this._parent?.config.onpremServerId ?? this.onpremServerId;
 	}
 	get restoreReviewRequired(): boolean {
-		return !!this._parent?._liveProvider?.managedIndex?.restoreReview || super.restoreReviewRequired;
+		const index = this._parent?._liveProvider?.managedIndex;
+		return !!index?.restoreReview || !!index?.snapshot?.restore_generation || super.restoreReviewRequired;
 	}
 
 	private openPersistence(): LocalDocumentStore {
@@ -147,13 +148,14 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	private async bootstrapAfterSync(): Promise<void> {
 		this.refreshFileStats();
 		this.recordPersistenceMetadata();
+		if (this.restoreReviewRequired) return;
 
 		const serverSynced = await this.getServerAcked();
 		if (!serverSynced) {
 			await this.onceEverSynced();
 			await this.markServerAcked();
 		}
-		void this.vaultShare.noteUploaded(this);
+		void this.vaultShare.noteUploaded(this).catch(error => this.warn("Canvas metadata was not acknowledged", error));
 	}
 
 	public get crdtEdges(): Y.Map<CanvasEdgeData> {
@@ -221,6 +223,7 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	}
 
 	async markServerAcked(): Promise<void> {
+		await this.assertNoRestoreReview();
 		await this._indexeddbPersistence.rememberServerSync();
 	}
 

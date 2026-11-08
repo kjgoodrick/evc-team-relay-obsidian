@@ -100,6 +100,17 @@ describe("TransferQueue — uploads that didn't land are sent again", () => {
 		queue.wake();
 	});
 
+	test.each(["before scheduling", "while waiting"])("restore %s stops background upload retries", async timing => {
+		const doc = makeDoc(makeShare("A"), "note.md");
+		void queue.enqueueUpload(doc); await flushMacrotasks();
+		if (timing === "before scheduling") Object.defineProperty(doc, "restoreReviewRequired", { value: true });
+		finish.get(doc.entityGuid)?.(false); await flushMacrotasks();
+		if (timing === "while waiting") Object.defineProperty(doc, "restoreReviewRequired", { value: true });
+		await clock.advance(120_000);
+		expect(started).toHaveLength(1); expect(clock.pending()).toBe(0);
+		expect(queue.laneStats().uploads.retries.pending).toBe(0);
+	});
+
 	test("an upload that came back unsynced is retried after a short delay", async () => {
 		const doc = makeDoc(makeShare("A"), "note.md");
 		void queue.enqueueUpload(doc, { priority: true });

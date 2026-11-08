@@ -227,7 +227,8 @@ export class ProviderBacked extends Loggable {
 			if (this.restorePersistence === store && !store._destroyed && this.restoreReviewRequired) this.pauseForRestore();
 		}).catch(error => this.warn("Unable to read document restore review", error));
 	}
-	private async checkStoredRestoreReview(): Promise<void> {
+	/** Source writes and token acquisition both honor durable restore review. */
+	async assertNoRestoreReview(): Promise<void> {
 		const store = this.restorePersistence;
 		if (store) {
 			await store.loadRestoreReview();
@@ -414,7 +415,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	async requestProviderToken(): Promise<DocumentGrant> {
-		if (this.restorePersistence) await this.checkStoredRestoreReview();
+		if (this.restorePersistence) await this.assertNoRestoreReview();
 		if (this.restoreReviewRequired) throw new RelayRestoreRequiredError();
 		this.log("requesting a provider token");
 		return this.credentialCache.getToken(
@@ -586,7 +587,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	public async ensureActiveProvider<T extends ProviderBacked>(this: T): Promise<T> {
-		if (this.restorePersistence) await this.checkStoredRestoreReview();
+		if (this.restorePersistence) await this.assertNoRestoreReview();
 		if (this.hasFreshProviderToken()) {
 			return Promise.resolve(this);
 		}

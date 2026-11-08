@@ -1090,6 +1090,7 @@ export class TransferQueue extends Loggable {
 	 * be retried later", not as an error.
 	 */
 	async uploadDocumentViaSocket(doc: Document | CanvasDocument): Promise<boolean> {
+		if (doc.restoreReviewRequired) return false;
 		// Wait for this item's OWN local persistence (IndexedDB) to finish
 		// loading before trusting anything read off its Y.Doc below. Without
 		// this, `doc.content`/exported canvas data can read as empty for a doc
@@ -1111,6 +1112,7 @@ export class TransferQueue extends Loggable {
 
 		const synced = this.readSyncedContent(doc);
 		const vaultContents = await this.readVaultContents(doc);
+		if (doc.restoreReviewRequired) return false;
 		const contentsMatch = this.contentsAreInSync(doc, synced, vaultContents);
 
 		// NB: despite the name, this is true for ANY doc in a Team-Relay-linked
@@ -1137,7 +1139,7 @@ export class TransferQueue extends Loggable {
 		const borrowed = this.pullHolds.has(doc.entityGuid) || this.handedToUpload.has(doc.entityGuid);
 		const intent = borrowed ? "disconnected" : doc.connectionIntent;
 		const connected = await doc.bringOnline();
-		if (!connected) {
+		if (!connected || doc.restoreReviewRequired) {
 			this.warn("[uploadDocumentViaSocket] connect failed for", doc.entryPath);
 			return false;
 		}
@@ -1177,6 +1179,7 @@ export class TransferQueue extends Loggable {
 			// reconnect round-trip.
 			await this.delay(PULL_SYNC_GRACE_MS);
 		}
+		if (doc.restoreReviewRequired) return false;
 
 		// For relay-linked folders (hosted or on-prem, see note above): after
 		// syncing with the relay, reconcile content. The vault file is treated as
@@ -1200,6 +1203,7 @@ export class TransferQueue extends Loggable {
 			// current disk and CRDT contents, not the pre-connection snapshots.
 			const beforeRead = doc.content;
 			const currentVaultContents = await this.readVaultContents(doc);
+			if (doc.restoreReviewRequired) return false;
 			if (!doc.editLock && doc.content !== beforeRead) {
 				this.log(`[uploadDocumentViaSocket] ${doc.entryPath}: text changed during disk read; deferring stale snapshot`);
 				return false;
@@ -1224,6 +1228,7 @@ export class TransferQueue extends Loggable {
 		// the base alone when it could not write: the CRDT may have moved on
 		// since, and a base ahead of the disk would read the stale file as a
 		// local edit on the next sync and push it over the peer's text.
+		if (doc.restoreReviewRequired) return false;
 		if (usable && isRelayOnPrem && isDocument(doc) && !doc.editLock && !baseSettled) {
 			await doc.setSyncBase(doc.content);
 		}
@@ -1238,7 +1243,7 @@ export class TransferQueue extends Loggable {
 			doc.goOffline();
 			doc.vaultShare.credentialCache.dropFromQueue(ResourceAddress.serialize(doc.resourceAddress));
 		}
-		return true;
+		return !doc.restoreReviewRequired;
 	}
 
 	/**
@@ -1352,7 +1357,8 @@ export class TransferQueue extends Loggable {
 		// once `signal` is aborted the caller has already freed this pull's
 		// slot, so the continuation must not write anything and must drop
 		// whatever connection it opened, then stop.
-		const aborted = () => signal?.aborted === true;
+		const aborted = () => signal?.aborted === true || doc.restoreReviewRequired === true;
+		if (aborted()) return { outcome: "aborted" };
 		onPhase?.("read-vault");
 		const vaultContentsBefore = await this.readVaultContents(doc);
 		if (aborted()) return { outcome: "aborted" };
@@ -1891,6 +1897,7 @@ export class TransferQueue extends Loggable {
 		aborted: () => boolean,
 		onPhase: PullControl["onPhase"],
 	): Promise<"seed-local" | "no-base" | "aborted"> {
+		if (aborted() || doc.restoreReviewRequired) return "aborted";
 		const text = doc.crdtDoc.getText("contents");
 		claimInitIfUnclaimed(doc.crdtDoc, doc._liveProvider.awareness);
 		await awaitClaimSettled(doc.crdtDoc, { socket: doc._liveProvider.ws });
@@ -1917,6 +1924,7 @@ export class TransferQueue extends Loggable {
 		// the file never gets the peer's edit. A file changed meanwhile is a
 		// local edit, not that agreement: no base then.
 		const diskContents = await this.readVaultContents(doc);
+		if (doc.restoreReviewRequired) return "aborted";
 		if (sameTextContent(fileContents, diskContents)) await doc.setSyncBase(fileContents);
 		return "seed-local";
 	}
@@ -1937,6 +1945,7 @@ export class TransferQueue extends Loggable {
 		doc: Document,
 		vaultContents: string,
 	): Promise<boolean> {
+		if (doc.restoreReviewRequired) return false;
 		if (doc.editLock) return true;
 		const syncedText = doc.content;
 		if (!syncedText) {
@@ -1951,6 +1960,7 @@ export class TransferQueue extends Loggable {
 			// The claim also yields to concurrent edits. Seed the latest file,
 			// and check ownership after the read in case a peer inserted meanwhile.
 			const currentVaultContents = await this.readVaultContents(doc);
+			if (doc.restoreReviewRequired) return false;
 			if (doc.editLock) return true;
 			const text = doc.crdtDoc.getText("contents");
 			if (currentVaultContents && wonInitClaim(doc.crdtDoc, text)) {
@@ -1985,6 +1995,7 @@ export class TransferQueue extends Loggable {
 			// preserving as before -- noisy-but-safe over silently discarding
 			// someone else's edit.
 			const base = await doc.getSyncBase();
+			if (doc.restoreReviewRequired) return false;
 			if (doc.editLock) return true;
 			if (doc.content !== syncedText) return false;
 			if (base !== undefined && base === syncedText) {
@@ -2026,6 +2037,7 @@ export class TransferQueue extends Loggable {
 					),
 					RECONCILE_SETTLE_OUTER_TIMEOUT_MS,
 				);
+				if (doc.restoreReviewRequired) return false;
 				if (doc.editLock) return true;
 				if (settled === undefined) {
 					this.warn(
@@ -2066,7 +2078,7 @@ export class TransferQueue extends Loggable {
 		// be sitting in bufferedAmount well past a fixed timer, and
 		// disconnecting at that point drops it silently.
 		await waitForBufferFlush(doc._liveProvider.ws);
-		return true;
+		return !doc.restoreReviewRequired;
 	}
 
 	/**
@@ -2086,6 +2098,7 @@ export class TransferQueue extends Loggable {
 		vaultContents: string,
 		priorSyncedText: string,
 	): Promise<boolean> {
+		if (doc.restoreReviewRequired) return false;
 		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 		const result = await reconcileWithConflictCopy(
 			doc.crdtDoc,
@@ -2094,7 +2107,7 @@ export class TransferQueue extends Loggable {
 				doc.vaultShare.writeConflictCopy(doc, relayContent, `relay conflict ${timestamp}`),
 			undefined,
 			(...args) => this.log("[uploadDocumentViaSocket]", ...args),
-			() => !doc.editLock,
+			() => !doc.editLock && !doc.restoreReviewRequired,
 		);
 		if (result.reconciled) {
 			this.log(
@@ -2108,7 +2121,7 @@ export class TransferQueue extends Loggable {
 					`could not safely preserve relay content before overwriting`,
 			);
 		}
-		return result.reconciled || sameTextContent(doc.content, vaultContents);
+		return !doc.restoreReviewRequired && (result.reconciled || sameTextContent(doc.content, vaultContents));
 	}
 
 	/**
@@ -2121,6 +2134,7 @@ export class TransferQueue extends Loggable {
 	}
 
 	async fetchCanvas(canvas: CanvasDocument, retry = 3, wait = 3000) {
+		if (canvas.restoreReviewRequired) return;
 		// Relay-linked canvases sync over the WebSocket; see fetchDocument().
 		if (this.isRelayLinked(canvas)) {
 			await this.fallbackToWebsocketSync(canvas, "fetchCanvas", () =>
@@ -2158,7 +2172,7 @@ export class TransferQueue extends Loggable {
 				return;
 			}
 			if (canvas.vaultShare.folderIndex.tracks(canvas.entryPath)) {
-				void canvas.vaultShare.writeContents(canvas, canvas.canvasJson);
+				await canvas.vaultShare.writeContents(canvas, canvas.canvasJson);
 				this.log("[fetchCanvas] flushed");
 			}
 		} catch (e: unknown) {
@@ -2187,6 +2201,7 @@ export class TransferQueue extends Loggable {
 		wait = 3000,
 		slowRounds = SLOW_REFETCH_SCHEDULE_MS.length,
 	) {
+		if (doc.restoreReviewRequired) return;
 		// Relay-linked docs sync over the WebSocket: skip the HTTP
 		// `as-update` round trip that would only fall back to it anyway.
 		// Under bulk syncs it used to fire once per fetched doc and log an
@@ -2253,7 +2268,7 @@ export class TransferQueue extends Loggable {
 				return;
 			}
 			if (doc.vaultShare.folderIndex.tracks(doc.entryPath)) {
-				void doc.vaultShare.writeContents(doc, doc.content);
+				await doc.vaultShare.writeContents(doc, doc.content);
 				this.log("[getDocument] flushed");
 			}
 		} catch (e: unknown) {
@@ -2374,7 +2389,7 @@ export class TransferQueue extends Loggable {
 	): Promise<boolean> {
 		try {
 			const synced = await this.uploadDocumentViaSocket(doc);
-			if (synced && !(isDocument(doc) && doc.editLock) && doc.vaultShare.folderIndex.tracks(doc.entryPath) && shouldFlush()) {
+			if (synced && !doc.restoreReviewRequired && !(isDocument(doc) && doc.editLock) && doc.vaultShare.folderIndex.tracks(doc.entryPath) && shouldFlush()) {
 				await flush();
 				this.log(`[${label}] WS sync fallback successful, flushed to disk`);
 				return true;
@@ -2413,6 +2428,7 @@ export class TransferQueue extends Loggable {
 	 * last delay the share's periodic pass is what picks it up again.
 	 */
 	private scheduleUploadRetry(doc: Document | CanvasDocument, priority: boolean): void {
+		if (doc.restoreReviewRequired) { this.clearUploadRetry(doc.entityGuid); return; }
 		if (!this.clock) return;
 		const retry = this.uploadRetries.get(doc.entityGuid) ?? { attempt: 0 };
 		if (retry.timer !== undefined) return;
@@ -2431,7 +2447,7 @@ export class TransferQueue extends Loggable {
 			// Deleted, renamed away or its share went offline meanwhile: the
 			// share's own reconnect or next pass covers what is still there.
 			const share = doc.vaultShare;
-			if (share.trackedEntries?.get(doc.entityGuid) !== doc || !share.isOnline) {
+			if (doc.restoreReviewRequired || share.trackedEntries?.get(doc.entityGuid) !== doc || !share.isOnline) {
 				this.uploadRetries.delete(doc.entityGuid);
 				return;
 			}

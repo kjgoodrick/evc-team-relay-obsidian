@@ -100,6 +100,28 @@ describe("reconcileRelayContent's claim+settle fast path has its own outer bound
 		awaitReconcileSettledMock.mockClear();
 	});
 
+	test("restore while a reconciliation claim waits preserves both source text and the comparison base", async () => {
+		const { fakeDoc, ydoc, writeConflictCopy, getBase } = makeFakeDoc({ syncedText: "old CRDT text", vaultContents: "local disk edit", initialBase: "old CRDT text" });
+		awaitReconcileSettledImpl = async () => { Object.defineProperty(fakeDoc, "restoreReviewRequired", { value: true }); };
+		wonReconcileClaimMock.mockReturnValue(true);
+		const queue = new TransferQueue({} as never, new MockClock(), {} as never);
+		expect(await queue.uploadDocumentViaSocket(fakeDoc)).toBe(false);
+		expect(fakeDoc.content).toBe("old CRDT text"); expect(getBase()).toBe("old CRDT text");
+		expect(writeConflictCopy).not.toHaveBeenCalled(); ydoc.destroy();
+	});
+
+	test("restore during conflict-copy preservation prevents the subsequent CRDT replacement", async () => {
+		const { fakeDoc, ydoc, writeConflictCopy, getBase } = makeFakeDoc({ syncedText: "old CRDT text", vaultContents: "local disk edit", initialBase: undefined });
+		writeConflictCopy.mockImplementation(async () => {
+			Object.defineProperty(fakeDoc, "restoreReviewRequired", { value: true });
+			return "preserved.md";
+		});
+		const queue = new TransferQueue({} as never, new MockClock(), {} as never);
+		expect(await queue.uploadDocumentViaSocket(fakeDoc)).toBe(false);
+		expect(writeConflictCopy).toHaveBeenCalledWith(fakeDoc, "old CRDT text", expect.any(String));
+		expect(fakeDoc.content).toBe("old CRDT text"); expect(getBase()).toBeUndefined(); ydoc.destroy();
+	});
+
 	test("REGRESSION: awaitReconcileSettled never resolves -- outer timeout fires, edit preserved as conflict copy, never silently discarded", async () => {
 		const { fakeDoc, writeConflictCopy, getBase } = makeFakeDoc({
 			syncedText: "TWO-CLIENT-RESTART-PROBE initial",

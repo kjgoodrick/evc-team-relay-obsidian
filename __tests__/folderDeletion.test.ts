@@ -10,6 +10,7 @@ import { TFolder } from "obsidian";
 import { makeDocumentRecord, makeFolderRecord } from "../src/ItemKinds";
 import type { AttachmentSyncSettings } from "../src/AttachmentSyncSettings";
 import type { SyncableEntry } from "../src/SyncableEntry";
+import { DocumentAddress } from "../src/ResourceAddress";
 
 const attachmentSettings = {
 	subscribe: () => () => {},
@@ -21,6 +22,8 @@ function fixture() {
 	const share = Object.create(VaultShare.prototype) as VaultShare;
 	Object.assign(share, {
 		path: "Shared",
+		entityGuid: "test-share",
+		credentialCache: {},
 		crdtDoc,
 		folderIndex,
 		trackedEntries: new Map(),
@@ -29,6 +32,7 @@ function fixture() {
 		deletedEntries: new WeakSet(),
 		log: jest.fn(),
 	});
+	Object.defineProperty(share, "config", { value: {} });
 	return { share, folderIndex, crdtDoc };
 }
 
@@ -138,7 +142,10 @@ describe("shared subfolder deletion", () => {
 		expect(removed.dismantle).toHaveBeenCalledTimes(1);
 		expect(kept.dismantle).not.toHaveBeenCalled();
 		// A newly created instance can reuse the path after deletion.
-		await share.noteUploaded(trackedDoc("notes/a.md", "replacement"));
+		const replacement = trackedDoc("notes/a.md", "replacement"), replacementDoc = new Y.Doc();
+		Object.assign(replacement, { _parent: share, crdtDoc: replacementDoc });
+		Object.defineProperty(replacement, "resourceAddress", { value: new DocumentAddress(share.entityGuid, "replacement") });
+		await share.noteUploaded(replacement); replacementDoc.destroy();
 		expect(folderIndex.guidFor("notes/a.md")).toBe("replacement");
 	});
 

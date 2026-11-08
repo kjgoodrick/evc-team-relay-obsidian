@@ -270,3 +270,28 @@ acceptance. Safe resumed cache namespaces, verified source replacement and full
 review remain required; the legacy cache's versionless IndexedDB open means a
 version bump alone cannot exclude older workers. No native restore workflow,
 restored-data drill or coordinator is claimed by this admission/pause test.
+
+## Background source writes
+
+Native document writes and inventory acknowledgments also check durable review.
+They retain the document/share path, identity, server, account session and live
+provider selected before waiting. Renaming, deletion, structural recovery,
+provider/account replacement, unload or restore review before the native write
+starts prevents that write. Editor saves also abandon a text snapshot superseded
+while reading the review marker. A legacy document cache pauses when its parent
+has already adopted a nonnull restored inventory, even without an inventory
+review record. That inventory cannot authorize automatic reuse of old CRDT work.
+
+Background pull, upload reconciliation, conflict-copy replacement and queued
+upload retries stop at known restore review. Late startup/metadata callbacks no
+longer acknowledge that old work; already deleted entries retain their prior
+no-op acknowledgment behavior. Ordinary writes and a new entry at a previously
+deleted path remain supported. Tests cover detection during reconciliation claims
+and conflict-copy writes, delayed native writes, account/path/provider changes,
+cached review and both pending and newly scheduled retries.
+
+These are pre-write guards. Obsidian's adapter does not provide an atomic
+compare-and-write transaction across a native file and IndexedDB. A write already
+handed to the host may still finish. Verified original-byte backups, protected
+source replacement, new cache namespaces and the full restore/review flow remain
+required before enabling restore as a supported user operation.
