@@ -34,7 +34,7 @@ class DeleteCommentModal extends AccountModal {
 	constructor(app: App, private session: DiscussionSession, private entryId: string, private threadId: string, private message: DiscussionMessage) { super(app, session); }
 	onOpen(): void {
 		this.setTitle("Remove comment");
-		this.contentEl.createEl("p", { text: "The comment will be replaced by a removal marker. Its edit history remains available to its author and moderators." });
+		this.contentEl.createEl("p", { text: "The comment will be replaced by a removal marker. Its text, history and pictures will no longer be available through ordinary discussion views." });
 		const reason = this.contentEl.createEl("textarea", { attr: { rows: "2", placeholder: "Reason (required when removing someone else’s comment)", "aria-label": "Removal reason" } });
 		const status = this.contentEl.createDiv({ attr: { role: "status" } });
 		const button = this.contentEl.createEl("button", { text: "Remove comment", cls: "mod-warning" });
@@ -236,7 +236,7 @@ class ThreadCard {
 				} }).catch(() => { this.error.setText("Reaction could not be saved. Check your connection and permissions."); button.disabled = false; });
 			};
 		}
-		if (!message.deleted || message.author_id === this.session.identity.accountId || permission?.moderate) {
+		if (!message.deleted) {
 			const history = actions.createEl("button", { text: "History" }); history.disabled = !this.session.online;
 			history.title = this.session.online ? "Compare comment revisions" : "Reconnect to view comment history";
 			history.onclick = () => new CommentHistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();

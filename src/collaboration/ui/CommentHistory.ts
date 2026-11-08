@@ -88,7 +88,7 @@ export class CommentHistoryPanel {
 				const serial = this.serial;
 				const [thread, message] = await Promise.all([this.session.cachedThread(this.scopeId, this.threadId), this.session.cachedMessage(this.scopeId, this.threadId, this.messageId)]);
 				if (!this.allowed() || serial !== this.serial || !this.current) continue;
-				if (!thread || message?.deleted && message.author_id !== this.session.identity.accountId && !this.session.permission(this.scopeId)?.moderate) {
+				if (!thread || message?.deleted) {
 					this.invalidate("This comment or its history is no longer available. Refresh to check access.");
 				} else if (message && message.revision > this.current.latest) this.load(this.selected);
 			}

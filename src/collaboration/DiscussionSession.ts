@@ -533,7 +533,7 @@ export class DiscussionSession {
 			try {
 				if (!current()) throw new Error("History access changed.");
 				const head = await this.transport.message(scopeId, threadId, messageId);
-				if (!current() || head.thread.removed) throw new Error("History access changed.");
+				if (!current() || head.thread.removed || head.message.deleted) throw new Error("History access changed.");
 				const revision = Math.min(selected ?? head.message.revision, head.message.revision);
 				const page = await this.transport.history(scopeId, threadId, messageId, Math.max(0, revision - 2), revision === 1 ? 1 : 2);
 				const [thread, message] = await Promise.all([
@@ -541,7 +541,7 @@ export class DiscussionSession {
 				const epoch = await this.store.checkpoint(scopeId);
 				if (!current() || epoch.generation !== checkpoint.generation || isRecord(thread?.value) && thread.value.removed ||
 					isRecord(message?.value) && (typeof message.value.revision === "number" && message.value.revision > head.message.revision ||
-						message.value.deleted && message.value.author_id !== this.identity.accountId && !this.permission(scopeId)?.moderate)) throw new Error("History changed. Refresh to check access.");
+						message.value.deleted)) throw new Error("History changed. Refresh to check access.");
 				const chosen = page.revisions.find(item => item.revision === revision);
 				const previous = page.revisions.find(item => item.revision === revision - 1);
 				if (!chosen || revision > 1 && !previous) throw new Error("The requested revision is unavailable.");

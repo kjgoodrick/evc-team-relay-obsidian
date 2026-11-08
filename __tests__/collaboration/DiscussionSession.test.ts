@@ -753,3 +753,24 @@ test("whole-folder export needs no open note and shares the session concurrency 
 		await expect(session.saveDiscussionCollection(disk.io, () => true, false)).rejects.toThrow("Another"); await saving;
 	} finally { await session.close(); }
 });
+
+test.each([false, true])("ordinary history rejects deleted author messages before reading revisions and after a delayed response (moderator=%s)", async moderate => {
+	const f = await linkedFixture(), history = jest.fn().mockResolvedValue(historyPage());
+	Object.assign(f.transport, { history });
+	try {
+		f.transport.permissions.mockResolvedValue({ read: true, comment: true, edit: false, moderate }); await f.session.refresh();
+		f.transport.message.mockResolvedValue({ ...f.read, message: { ...f.read.message, deleted: true, body: null } });
+		await expect(f.session.historyWindow(entry, id(5), id(6))).rejects.toThrow("access changed");
+		expect(history).not.toHaveBeenCalled();
+		f.transport.message.mockResolvedValue(f.read);
+		let release!: (value: HistoryPage) => void, entered!: () => void;
+		const waiting = new Promise<void>(resolve => { entered = resolve; });
+		history.mockImplementationOnce(() => new Promise(resolve => { release = resolve; entered(); }));
+		const reading = f.session.historyWindow(entry, id(5), id(6)), rejected = expect(reading).rejects.toThrow(); await waiting;
+		const checkpoint = await f.store.checkpoint(entry);
+		await f.store.cacheRemoteRead(entry, checkpoint.generation, [
+			{ id: `message:${id(5)}:${id(6)}`, revision: 900, value: { ...f.read.message, deleted: true, body: null } },
+		]);
+		release(historyPage()); await rejected;
+	} finally { await f.close(); }
+});

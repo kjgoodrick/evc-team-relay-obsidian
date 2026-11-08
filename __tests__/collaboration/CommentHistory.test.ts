@@ -30,7 +30,7 @@ function fixture() {
 }
 afterEach(() => { jest.useRealTimers(); Object.defineProperty(document, "hidden", { configurable: true, value: false }); });
 
-test("opens the newest pair, navigates directly, keeps only two full revisions and shows original/deletion metadata", async () => {
+test("opens the newest pair, navigates directly, keeps only two full revisions and shows the original revision", async () => {
 	const f = fixture();
 	try {
 		await settle(); expect(f.parent.textContent).toContain("Revision 3 of 3");
@@ -39,10 +39,7 @@ test("opens the newest pair, navigates directly, keeps only two full revisions a
 		const input = f.parent.querySelector("input")!; input.value = "1";
 		f.parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true })); await settle();
 		expect(f.parent.querySelectorAll("article")).toHaveLength(1); expect(f.parent.textContent).toContain("original comment");
-		f.session.historyWindow.mockResolvedValue({ latest: 4, selected: { ...revision(4), body: null, actor_id: id(9), reason: "Moderator removal" }, previous: revision(3) });
-		f.click("Latest revision"); await settle();
-		expect(f.parent.textContent).toContain("Comment removed"); expect(f.parent.textContent).toContain("Reason: Moderator removal");
-		expect(f.session.historyWindow.mock.calls.map(call => call[3])).toEqual([undefined, 2, 1, undefined]);
+		expect(f.session.historyWindow.mock.calls.map(call => call[3])).toEqual([undefined, 2, 1]);
 	} finally { f.close(); }
 });
 
@@ -95,8 +92,9 @@ test("a known deletion clears history for a reader and failed reauthorization ca
 	} finally { f.close(); }
 });
 
-test("an author can reauthorize a deletion and history pictures release their listeners and decoded URLs on navigation", async () => {
+test.each([false, true])("deletion clears author/moderator history and releases picture listeners and decoded URLs (moderator=%s)", async moderate => {
 	const f = fixture();
+	f.session.permission = () => ({ read: true, comment: true, moderate });
 	Object.assign(URL, { createObjectURL: jest.fn(() => "blob:history-picture"), revokeObjectURL: jest.fn() });
 	Object.assign(f.session, { pictures: { load: jest.fn().mockResolvedValue({ bytes: new ArrayBuffer(8), mime: "image/png", width: 2, height: 2 }) } });
 	try {
@@ -107,8 +105,11 @@ test("an author can reauthorize a deletion and history pictures release their li
 		expect(f.listeners.size).toBe(2); expect(f.parent.querySelector("img")?.alt).toBe("Previous diagram");
 		f.session.cachedMessage.mockResolvedValue({ revision: 5, author_id: id(1), deleted: true });
 		f.session.historyWindow.mockResolvedValue({ latest: 5, selected: { ...revision(5), body: null, reason: "Removed by author" }, previous: picture });
-		f.emit(); await settle(); expect(f.parent.textContent).toContain("Removed by author");
-		expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:history-picture"); expect(f.listeners.size).toBe(2);
+		const calls = f.session.historyWindow.mock.calls.length;
+		f.emit(); await settle(); expect(f.parent.textContent).not.toContain("Removed by author");
+		expect(f.parent.querySelector("article")).toBeNull(); expect(f.parent.querySelector("img")).toBeNull();
+		expect(f.session.historyWindow).toHaveBeenCalledTimes(calls);
+		expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:history-picture"); expect(f.listeners.size).toBe(1);
 		f.panel.dispose(); expect(f.listeners.size).toBe(0); expect(f.parent.querySelector("img")).toBeNull();
 	} finally { f.close(); }
 });

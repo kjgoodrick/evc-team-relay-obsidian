@@ -541,3 +541,21 @@ test("marker threads expose read-only comparison and close it when the discussio
 		thread = { ...thread, activity_sequence: 2, anchor_revision: 2 }; notify(); await until(() => closed.mock.calls.length > 0);
 	} finally { await view.onClose(); store.close(); opened.mockRestore(); closed.mockRestore(); }
 });
+
+test.each([false, true])("removed author comments do not offer ordinary history (moderator=%s)", async moderate => {
+	const { store, session, typed } = await fixture();
+	session.permission = () => ({ read: true, comment: true, edit: false, moderate });
+	const thread: ThreadSummary = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false,
+		created_sequence: 1, activity_sequence: 2, created_at: "2026-11-05T00:00:00Z" };
+	session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+	session.messages.mockResolvedValue({ messages: [{ id: id(5), author_id: id(1), revision: 2, deleted: true, body: null,
+		created_sequence: 1, created_at: thread.created_at, edited_at: thread.created_at, reactions: [] }], hasMore: false });
+	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: () => () => {},
+		current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+	const view = new CommentsView({} as WorkspaceLeaf, host);
+	try {
+		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Comment removed"));
+		const actions = view.contentEl.querySelector(".relay-comment-message-actions")!;
+		expect(actions.textContent).not.toContain("History"); expect(actions.textContent).not.toContain("Edit");
+	} finally { await view.onClose(); store.close(); }
+});

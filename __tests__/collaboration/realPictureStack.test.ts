@@ -184,6 +184,16 @@ integration("offline picture dependencies recover a lost upload ack against real
 			expect(recoveredThread.thread.state).toBe("open"); expect(recoveredThread.messages).toHaveLength(3);
 		} finally { await session.close(); }
 
+		await owner.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
+			type: "message.delete", thread_id: threadId, message_id: messageId, expected_revision: 2, reason: "Synthetic removal privacy check",
+		} });
+		for (const reader of [transport, owner]) {
+			await expect(reader.history(fixture.entry, threadId, messageId)).rejects.toMatchObject({ status: 404 });
+			await expect(reader.picture(fixture.entry, pictureId)).rejects.toMatchObject({ status: 404 });
+			await expect(reader.pictureContent(fixture.entry, pictureId, "content", picture.renditions.content!)).rejects.toMatchObject({ status: 404 });
+			await expect(reader.pictureContent(fixture.entry, pictureId, "thumbnail", picture.renditions.thumbnail!)).rejects.toMatchObject({ status: 404 });
+		}
+
 		const secondId = randomUUID(), second = await prepareLocalPicture(secondId, fixture.entry, original);
 		await store.saveDraft({ id: "revoked-picture", scopeId: fixture.entry, revision: 0, body: { text: "Keep my picture", mentions: [], pictures: [{ type: "picture", picture_id: secondId }] } }, null, [second]);
 		const queuedId = randomUUID();

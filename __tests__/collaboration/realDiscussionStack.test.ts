@@ -134,7 +134,7 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 	} finally { stopHistory?.(); await historySession?.close(); worker.stop(); incoming.stop(); await Promise.all([worker.settled(), incoming.settled()]); store.close(); }
 }, 30_000);
 
-integration("rich history retains structure and removal history is limited to its author or moderators", async () => {
+integration("rich live history retains structure and ordinary removal history is hidden even from its author/moderator", async () => {
 	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as { base: string; share: string; entry: string; reviewer: string; owner: string; token: string; ownerToken: string };
 	if (new URL(fixture.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
 	const identity = { serverId: fixture.base, accountId: fixture.owner, shareId: fixture.share, vaultId: "history-owner" };
@@ -168,9 +168,11 @@ integration("rich history retains structure and removal history is limited to it
 			selected: { revision: 2, body: rich("After") }, previous: { revision: 1, body: rich("Before") } });
 		await owner.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
 			type: "message.delete", thread_id: thread, message_id: message, expected_revision: 2, reason: "Synthetic removal" } });
-		await expect(readerSession.historyWindow(fixture.entry, thread, message)).rejects.toMatchObject({ status: 404 });
-		expect(await authorSession.historyWindow(fixture.entry, thread, message)).toMatchObject({ latest: 3,
-			selected: { revision: 3, body: null, reason: "Synthetic removal" }, previous: { revision: 2, body: rich("After") } });
+		for (const session of [readerSession, authorSession]) await expect(session.historyWindow(fixture.entry, thread, message)).rejects.toThrow();
+		for (const transport of [reader, owner]) {
+			await expect(transport.history(fixture.entry, thread, message, 0, 50)).rejects.toMatchObject({ status: 404 });
+			expect((await transport.message(fixture.entry, thread, message)).message).toMatchObject({ deleted: true, body: null, reactions: [] });
+		}
 	} finally { stops.forEach(stop => stop()); await Promise.all([authorSession.close(), readerSession.close()]); }
 }, 30_000);
 
