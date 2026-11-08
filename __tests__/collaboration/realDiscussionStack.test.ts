@@ -173,6 +173,14 @@ integration("rich live history retains structure and ordinary removal history is
 			await expect(transport.history(fixture.entry, thread, message, 0, 50)).rejects.toMatchObject({ status: 404 });
 			expect((await transport.message(fixture.entry, thread, message)).message).toMatchObject({ deleted: true, body: null, reactions: [] });
 		}
+		const recoveryUrl = fixture.base + `/v1/collaboration/shares/${fixture.share}/entries/${fixture.entry}/threads/${thread}/messages/${message}/moderation-history`;
+		const recovery = await fetch(recoveryUrl, { method: "POST", headers: { Authorization: "Bearer " + fixture.ownerToken, "Content-Type": "application/json" },
+			body: JSON.stringify({ protocol_version: 1, reason: "Synthetic history recovery proof", after: 1, limit: 2 }) });
+		expect(recovery.status).toBe(200); expect(recovery.headers.get("cache-control")).toBe("no-store");
+		const recovered = await recovery.json(); expect(recovered.audit_id).toMatch(/^[0-9a-f-]{36}$/);
+		expect(recovered.revisions).toMatchObject([{ revision: 2, body: rich("After") }, { revision: 3, body: null }]);
+		expect((await fetch(recoveryUrl, { method: "POST", headers: { Authorization: "Bearer " + fixture.token, "Content-Type": "application/json" },
+			body: JSON.stringify({ reason: "Synthetic denied recovery" }) })).status).toBe(403);
 	} finally { stops.forEach(stop => stop()); await Promise.all([authorSession.close(), readerSession.close()]); }
 }, 30_000);
 
