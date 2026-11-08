@@ -60,6 +60,13 @@ transaction. Older pending cards explain restore review and offer receipt
 inspection, without presenting ordinary retry/replacement controls. Selecting
 and copying the saved text remains available. Reconciliation of original
 requests and their dependents into the restored service remains unfinished.
+The saved-work browser now offers receipt inspection without opening the source
+note, plus an explicit offline-capable local draft copy of a quarantined body.
+The copy has no target and requires a separate current-target review before
+becoming a new discussion draft. It preserves old requests, generations and
+dependents; repeated creation keeps edited/discarded-copy state. This content
+recovery does not restore original thread/reply structure or authorize replay.
+See [local copies of restore-held requests](local-work-import-preview.md#local-copies-of-requests-held-after-restore).
 
 Picture staging, upload admission and final metadata commit retain the original
 generation. The server upload ticket binds it across body receipt and object

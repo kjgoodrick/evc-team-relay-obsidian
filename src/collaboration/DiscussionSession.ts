@@ -246,6 +246,19 @@ export class DiscussionSession {
 	get canReattach(): boolean { return this.online && this.reattachEnabled; }
 	get canRecoverSavedCommand(): boolean { return this.online && this.recoveryEnabled; }
 	get canCheckSavedCommand(): boolean { return this.online && this.commandStatusEnabled; }
+	get canCopyRestoredCommand(): boolean { return !this.closed && !this.restoreReconciling && this.restoreLineage !== null; }
+	/** Own content only, including offline. The destination remains unset until
+	 * the user explicitly reviews a current target in the ordinary copy flow. */
+	copyRestoredCommand(operation: OutboxOperation, visible: () => boolean): Promise<{ draft?: Draft; created: boolean }> {
+		const epoch = this.authenticationEpoch, generation = this.restoreLineage;
+		const current = () => visible() && this.canCopyRestoredCommand && epoch === this.authenticationEpoch && generation === this.restoreLineage;
+		return this.trackLocal((async () => {
+			if (!current() || generation === null) throw new Error("Reopen this restored-work review before making a local draft copy.");
+			if (!isRecord(operation.payload)) throw new Error("The saved comment body is unavailable.");
+			const body = protocolJson(editableCommentDraft(parseBody(operation.payload.body), () => "Member"));
+			return this.store.copyRestoredCommandDraft(operation, body, generation, current);
+		})().finally(() => { if (!this.closed) { this.broadcast(); this.notify(); } }));
+	}
 	/** Receipt inspection needs no cached source note, and never alters the queue. */
 	checkSavedCommand(operation: QueuedCommand & Pick<OutboxOperation, "preparedAnchor">, visible: () => boolean) {
 		return this.trackLocal((async () => {

@@ -54,6 +54,21 @@ test("reads an actual completed export without changing saved work and freezes r
 	} finally { f.close(); }
 });
 
+test("restored-request draft provenance survives a verified recovery export and inspection", async () => {
+	const f = await fixture();
+	try {
+		const previous = await f.store.localWorkSummary(); if (previous) await f.store.releaseLocalWork(previous.id);
+		await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+		const original = (await f.store.getOperation(id(4)))!;
+		const body = protocolJson(editableCommentDraft(bodyFromText("Possibly delivered"), () => "Member"));
+		const copied = await f.store.copyRestoredCommandDraft(original, body, id(90));
+		const path = await saveLocalWorkRecovery(f.store, f.io, () => true), inspected = await inspectLocalWorkRecovery(f.io, path, () => true);
+		expect(inspected.snapshot.drafts).toContainEqual(copied.draft);
+		expect(inspected.snapshot.actions).toContainEqual({ key: "restoredDraft:" + copied.draft!.id, value: expect.objectContaining({ sourceOperationId: id(4), copiedGeneration: id(90) }) });
+		expect(await f.store.getOperation(id(4))).toEqual(original);
+	} finally { f.close(); }
+});
+
 test.each([null, id(90)])("preserves optional restore-generation metadata during archive inspection: %s", async generation => {
 	const f = await fixture();
 	try {

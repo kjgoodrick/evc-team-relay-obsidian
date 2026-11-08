@@ -67,6 +67,7 @@ export class SavedDraftCopyModal extends Modal {
 			if (body.rich) renderCommentBody(this.body!, body.rich, () => "Member"); else this.body!.createEl("p", { text: body.text.slice(0, 8000) || "Draft with no text." });
 			if (!body.rich && body.text.length > 8000) this.body!.createEl("p", { text: "Preview shortened. The complete text will be copied." });
 			this.body!.createEl("p", { text: `${review.originals.length} retained originals will be copied. This creates a new discussion draft, including when the saved content began as a reply or edit.` });
+			if (review.source.id.startsWith("restored:")) this.body!.createEl("p", { text: "This copy comes from a request saved before the service was restored. Check the current discussion and any saved receipt before sending; creating a new discussion may duplicate an earlier change." });
 			let omit: HTMLInputElement | undefined;
 			const required = review.source.scopeId !== review.destinationScope && review.missingOriginals.length > 0;
 			if (review.missingOriginals.length) {

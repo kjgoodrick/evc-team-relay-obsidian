@@ -42,7 +42,7 @@ export class CommentLocalWorkModal extends Modal {
 	private list?: HTMLElement;
 	private status?: HTMLElement;
 	private navigation?: HTMLElement;
-	private receipts = new Set<() => void>();
+	private workControls = new Set<() => void>();
 	constructor(app: App, private session: DiscussionSession, private context: () => boolean) { super(app); }
 	private accountCurrent = () => this.context() && this.session.status !== "closed";
 	private current = () => this.live && this.accountCurrent();
@@ -50,7 +50,7 @@ export class CommentLocalWorkModal extends Modal {
 	async onOpen(): Promise<void> {
 		this.live = true; this.generation++;
 		this.setTitle("Saved comment work");
-		this.stop = this.session.onChange(() => { this.validate(); if (this.current()) { this.composer?.update(); this.receipts.forEach(update => update()); } });
+		this.stop = this.session.onChange(() => { this.validate(); if (this.current()) { this.composer?.update(); this.workControls.forEach(update => update()); } });
 		await this.showList();
 	}
 	private async showList(): Promise<void> {
@@ -61,7 +61,7 @@ export class CommentLocalWorkModal extends Modal {
 			if (!this.current() || this.composer !== editor) return;
 			editor.dispose(); this.composer = undefined;
 		}
-		this.receipts.clear(); this.contentEl.empty();
+		this.workControls.clear(); this.contentEl.empty();
 		this.contentEl.createEl("p", { text: "Your local drafts and waiting changes for this shared folder. A note or saved view can be missing or inaccessible. Pages show current saved state; refresh after changes in another window." });
 		const tabs = this.contentEl.createDiv({ attr: { role: "group", "aria-label": "Saved work type" } });
 		for (const mode of ["drafts", "waiting"] as const) {
@@ -110,7 +110,7 @@ export class CommentLocalWorkModal extends Modal {
 	}
 	private renderDraft(item: LocalDraftItem): void {
 		const { draft } = item, card = this.list!.createEl("section", { cls: "relay-comment-saved-work" });
-		card.createEl("h3", { text: item.pendingSend ? "Draft · delivery unconfirmed" : item.recovery ? "Recovered draft" : item.imported ? "Imported local draft" : "Saved draft" });
+		card.createEl("h3", { text: item.pendingSend ? "Draft · delivery unconfirmed" : item.recovery ? "Recovered draft" : item.imported ? "Imported local draft" : draft.id.startsWith("restored:") ? "Copy of a saved request" : "Saved draft" });
 		card.createEl("p", { text: draftText(draft).slice(0, 1000) || "Draft with no text; it may contain pictures." });
 		card.createEl("p", { text: `Saved revision ${draft.revision}` });
 		if (item.pendingSend) card.createEl("p", { text: "Editing is locked until delivery is checked from the original discussion. Copy or export remains available." });
@@ -128,6 +128,7 @@ export class CommentLocalWorkModal extends Modal {
 		card.createEl("p", { text: operation.type === "reaction.set" ? "Cancellation checks delivery before retiring this change. It never sends an opposite reaction." : "This saved command is read-only here. Receipt checks keep it unchanged. Review recovery from the original discussion before changing or sending it again." });
 		if (operation.type !== "picture.upload" && (operation.type !== "base.group.create" || operation.preparedAnchor !== undefined)) this.renderReceipt(card, operation);
 		else card.createEl("p", { text: operation.type === "picture.upload" ? "Picture uploads have separate receipts. Check the saved comment that uses this picture." : "This group request has no saved final target, so its comment receipt cannot be checked yet." });
+		if (operation.error === "restore_generation_changed" && ["thread.create", "base.group.create", "reply.create", "message.edit"].includes(operation.type)) this.renderRestoredCopy(card, operation);
 		if (operation.type === "reaction.set" && operation.error !== "restore_generation_changed") {
 			const cancel = card.createEl("button", { text: "Cancel saved reaction", attr: { type: "button" } });
 			cancel.onclick = () => { if (!this.current()) return; this.reaction?.close(); this.reaction = new CancelReactionModal(this.app, this.session, operation, this.current); this.reaction.open(); };
@@ -147,7 +148,7 @@ export class CommentLocalWorkModal extends Modal {
 			if (nextBinding !== binding || available && !next) { serial++; busy = false; status.setText("The connection or server context changed. Check the receipt again when connected."); }
 			binding = nextBinding; available = next; button.disabled = busy || !available;
 		};
-		this.receipts.add(controls); controls();
+		this.workControls.add(controls); controls();
 		if (!available) status.setText("Connect to a server that supports receipt inspection to check this request.");
 		button.onclick = () => {
 			controls(); if (!current() || busy || !available) return;
@@ -160,10 +161,30 @@ export class CommentLocalWorkModal extends Modal {
 				.finally(() => { if (current() && serial === request) { busy = false; controls(); } });
 		};
 	}
+	private renderRestoredCopy(card: HTMLElement, operation: OutboxOperation): void {
+		card.createEl("p", { text: "Make an editable local copy to use at a newly selected target. Earlier delivery may be unknown; check the current discussion and receipt before sending new work. The original request and its dependents stay saved." });
+		const button = card.createEl("button", { text: "Make local draft copy", attr: { type: "button" } });
+		const status = card.createDiv({ attr: { role: "status", "aria-live": "polite" } });
+		const page = this.generation; let busy = false;
+		const current = () => this.current() && this.generation === page && card.parentElement === this.list;
+		const controls = () => { if (current()) button.disabled = busy || !this.session.canCopyRestoredCommand; };
+		this.workControls.add(controls); controls();
+		button.onclick = () => {
+			if (!current() || busy || !this.session.canCopyRestoredCommand) return;
+			const binding = JSON.stringify(this.session.restoreBinding), valid = () => current() && JSON.stringify(this.session.restoreBinding) === binding;
+			busy = true; controls(); status.setText("Saving a local draft copy…");
+			void this.session.copyRestoredCommand(operation, valid).then(result => {
+				if (!valid()) return;
+				if (result.draft) this.openDraft(result.draft);
+				else status.setText("This request's local copy was already removed. Repeated copying will not recreate it; the original request remains saved.");
+			}).catch(error => { if (valid()) status.setText(error instanceof Error ? error.message : "The draft copy could not be saved. The original request remains saved."); })
+				.finally(() => { busy = false; if (current()) { controls(); if (!valid()) status.setText("The restore context changed. Review this request again before copying."); } });
+		};
+	}
 	private openDraft(draft: Draft): void {
 		if (!this.current() || this.composer) return;
-		this.generation++; this.contentEl.empty();
-		this.contentEl.createEl("p", { text: draft.id.startsWith("imported:") ? "Edit this imported draft on this device. Its captured target is retained for later review. To use it in a new discussion, open the destination's comments and choose Use saved work at this target. Only retained original pictures are shown here." : "Edit this saved draft on this device. Its saved target stays attached. To send it, review the target from the original discussion. Only retained original pictures are shown here; shared pictures are not downloaded. Unconfirmed sends remain locked." });
+		this.generation++; this.workControls.clear(); this.contentEl.empty();
+		this.contentEl.createEl("p", { text: draft.id.startsWith("restored:") ? "Edit this local copy of a request saved before the service was restored. Its original request and dependent work stay saved. To use this copy, open the destination's comments and choose Use saved work at this target. Check the current discussion before sending; the earlier change may already be present. Only retained original pictures are shown here." : draft.id.startsWith("imported:") ? "Edit this imported draft on this device. Its captured target is retained for later review. To use it in a new discussion, open the destination's comments and choose Use saved work at this target. Only retained original pictures are shown here." : "Edit this saved draft on this device. Its saved target stays attached. To send it, review the target from the original discussion. Only retained original pictures are shown here; shared pictures are not downloaded. Unconfirmed sends remain locked." });
 		this.status = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
 		const back = this.contentEl.createEl("button", { text: "Back to saved work", attr: { type: "button" } }); back.onclick = () => { void this.showList(); };
 		this.composer = new CommentComposer(this.contentEl, this.session, draft.scopeId, draft.id,
@@ -173,6 +194,6 @@ export class CommentLocalWorkModal extends Modal {
 	}
 	onClose(): void {
 		this.live = false; this.reaction?.close(); this.reaction = undefined; this.generation++; this.stop?.(); this.stop = undefined;
-		this.composer?.dispose(); this.composer = undefined; this.receipts.clear(); this.contentEl.empty();
+		this.composer?.dispose(); this.composer = undefined; this.workControls.clear(); this.contentEl.empty();
 	}
 }

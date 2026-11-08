@@ -10,6 +10,7 @@ import type { RestoreBinding } from "../../src/collaboration/RestoreGeneration";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { CommentLocalWorkModal } from "../../src/collaboration/ui/CommentLocalWork";
 import { CommentComposer } from "../../src/collaboration/ui/CommentComposer";
+import type { RichCommentEditor } from "../../src/collaboration/ui/RichCommentEditor";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 import { copyToClipboard } from "../../src/utils/clipboard";
@@ -33,6 +34,9 @@ async function fixture() {
 	const session = { store, identity, status: "unavailable", online: false, canQueue: false, canAttachPictures: false,
 		canCheckSavedCommand: false, restoreBinding: {} as RestoreBinding,
 		checkSavedCommand: jest.fn(async (_operation: OutboxOperation, _visible: () => boolean): Promise<CommandStatus> => ({ status: "unknown" })),
+		canCopyRestoredCommand: false,
+		copyRestoredCommand: jest.fn(async (operation: OutboxOperation, visible: () => boolean) => store.copyRestoredCommandDraft(operation,
+			protocolJson(editableCommentDraft(bodyFromText("Waiting reply"), () => "Member")), id(90), visible)),
 		permission: () => undefined, participants: jest.fn(() => []), displayName: jest.fn(() => "Member"), queue: jest.fn(),
 		trackLocal: <T>(promise: Promise<T>) => promise,
 		onChange: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -118,6 +122,49 @@ test("reopened saved-work browsing cannot adopt a receipt from the previous life
 		expect(f.modal.contentEl.textContent).not.toContain("recorded this request as cancelled");
 		f.button("Check server receipt").click(); await until(() => f.modal.contentEl.textContent!.includes("No matching receipt"));
 		expect(await f.store.getOperation(id(40))).toEqual(f.saved);
+	} finally { f.close(); }
+});
+
+test("an offline restored request opens one editable local copy while the original remains held", async () => {
+	const f = await receiptFixture();
+	try {
+		f.session.canCopyRestoredCommand = true; f.notify(); expect(f.button("Check server receipt").disabled).toBe(true);
+		f.button("Make local draft copy").click();
+		await until(() => !!f.modal.contentEl.querySelector("textarea") && !f.modal.contentEl.querySelector("textarea")!.disabled);
+		expect(f.modal.contentEl.textContent).toContain("local copy of a request"); expect(f.modal.contentEl.querySelector("textarea")!.value).toBe("Waiting reply");
+		expect(f.button("Send").hidden).toBe(true); expect(f.session.checkSavedCommand).not.toHaveBeenCalled(); expect(f.session.queue).not.toHaveBeenCalled();
+		const editor = (f.modal as unknown as { composer: { rich: RichCommentEditor } }).composer.rich.view;
+		editor.dispatch(editor.state.tr.insertText("Edit the separate copy", 1, editor.state.doc.content.size - 1));
+		f.button("Back to saved work").click(); await until(() => !!f.button("Make local draft copy"));
+		f.button("Make local draft copy").click(); await until(() => !!f.modal.contentEl.querySelector("textarea") && !f.modal.contentEl.querySelector("textarea")!.disabled);
+		expect(f.modal.contentEl.querySelector("textarea")!.value).toBe("Edit the separate copy"); expect(await f.store.getOperation(id(40))).toEqual(f.saved);
+		expect((await f.store.localDraftPage()).items).toHaveLength(1);
+	} finally { f.close(); }
+});
+
+test("a copied request discarded from saved drafts is not recreated by the original request's button", async () => {
+	const f = await receiptFixture();
+	try {
+		f.session.canCopyRestoredCommand = true; f.notify();
+		const copied = await f.session.copyRestoredCommand(f.saved, () => true); await f.store.removeDraft(copied.draft!.id, 0);
+		f.button("Make local draft copy").click(); await until(() => f.modal.contentEl.textContent!.includes("already removed"));
+		expect((await f.store.localDraftPage()).items).toEqual([]); expect(await f.store.getOperation(id(40))).toEqual(f.saved);
+	} finally { f.close(); }
+});
+
+test.each(["account", "page", "restore"])("a local-copy completion cannot reopen the editor after %s changes", async change => {
+	const f = await receiptFixture();
+	try {
+		f.session.canCopyRestoredCommand = true; f.notify(); let finish!: (result: { draft?: Draft; created: boolean }) => void;
+		f.session.copyRestoredCommand.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		f.button("Make local draft copy").click(); f.button("Make local draft copy").click(); expect(f.session.copyRestoredCommand).toHaveBeenCalledTimes(1);
+		const valid = f.session.copyRestoredCommand.mock.calls[0][1];
+		if (change === "account") f.invalidate();
+		if (change === "page") f.button("Drafts").click();
+		if (change === "restore") { f.session.restoreBinding = { restoreGeneration: id(91) }; f.notify(); }
+		expect(valid()).toBe(false); finish({ draft: { ...draft(), body: { text: "Stale completion", mentions: [] } }, created: true });
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(f.modal.contentEl.querySelector("textarea")).toBeNull(); expect(await f.store.getOperation(id(40))).toEqual(f.saved);
 	} finally { f.close(); }
 });
 

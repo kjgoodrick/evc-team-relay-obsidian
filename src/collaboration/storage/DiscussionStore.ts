@@ -773,6 +773,49 @@ export class DiscussionStore {
 		});
 	}
 
+	/** Copy body content from an older, quarantined lineage into an unaddressed
+	 * local draft. This is not acceptance, withdrawal, replacement or dependency
+	 * replay. A separate, explicit destination review is required before sending. */
+	async copyRestoredCommandDraft(original: OutboxOperation, body: Json, generation: string, current: () => boolean = () => true): Promise<{ draft?: Draft; created: boolean }> {
+		generation = restoreGeneration(generation) ?? "";
+		const expected = boundedJson(original as unknown as Json); original = JSON.parse(expected) as OutboxOperation;
+		body = JSON.parse(boundedJson(body)) as Json;
+		if (!isId(generation) || !isId(original.operationId) || !parseDiscussionScope(original.scopeId)
+			|| !["thread.create", "base.group.create", "reply.create", "message.edit"].includes(original.type)
+			|| !["rejected", "review"].includes(original.state) || original.error !== "restore_generation_changed"
+			|| restoreGeneration(original.restoreGeneration) === generation || !isRecord(original.payload) || !isRecord(body)
+			|| typeof body.text !== "string" || !Array.isArray(body.mentions) || body.mentions.length
+			|| Object.keys(body).some(key => !["text", "mentions", "pictures", "rich"].includes(key))
+			|| canonical(protocolJson(parseBody(original.payload.body))) !== canonical(protocolJson(parseBody(body.rich)))) throw new Error("Choose an unchanged saved comment from an older restored lineage.");
+		const ids = pictureIds(body, true);
+		if (canonical([...ids].sort()) !== canonical([...pictureIds(original.payload.body)].sort())) throw new Error("The copied pictures do not match the saved comment.");
+		if (!current()) throw new Error("The restored-work review changed.");
+		const sourceDigest = await pictureHash(new TextEncoder().encode(expected).buffer);
+		if (!current()) throw new Error("The restored-work review changed.");
+		const draftId = `restored:${original.operationId}:${generation}`, key = "restoredDraft:" + draftId;
+		const origin = { version: 1, sourceOperationId: original.operationId, scopeId: original.scopeId, sourceDigest,
+			sourceGeneration: restoreGeneration(original.restoreGeneration), copiedGeneration: generation };
+		return this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
+			if (!current()) throw new Error("The restored-work review changed.");
+			await requireRestoreBinding(tx, { restoreGeneration: generation });
+			const saved: OutboxOperation | undefined = await request(tx.objectStore("outbox").get(original.operationId));
+			if (!saved || canonical(saved as unknown as Json) !== expected) throw new Error("The saved request changed after review.");
+			const preferences = tx.objectStore("preferences"), drafts = tx.objectStore("drafts");
+			const previous: Json | undefined = await request(preferences.get(key)), existing: Draft | undefined = await request(drafts.get(draftId));
+			if (previous !== undefined) {
+				if (canonical(previous) !== canonical(origin) || existing && existing.scopeId !== original.scopeId) throw new Error("The previous restored-draft copy needs review.");
+				if (!current()) throw new Error("The restored-work review changed.");
+				return { draft: existing, created: false };
+			}
+			if (existing) throw new Error("The restored-draft identity is already used.");
+			const draft: Draft = { id: draftId, scopeId: original.scopeId, revision: 0, body };
+			await request(drafts.add(draft)); await setPictureReferences(tx, "draft", draftId, original.scopeId, ids);
+			await request(preferences.add(origin, key));
+			if (!current()) throw new Error("The restored-work review changed.");
+			return { draft, created: true };
+		});
+	}
+
 	/** Call only after server withdrawal of the exact wire command. An unprepared
 	 * group is the exception: the lease-CAS check below proves it was never sent.
 	 * The original payload stays immutable; no worker sends the review draft.

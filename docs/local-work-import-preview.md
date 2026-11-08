@@ -134,9 +134,66 @@ are retained as data and must not be passed directly to delivery workers. Exact
 receipt reconciliation and an explicit destination/permission review must precede
 any future sending workflow.
 
+## Local copies of requests held after restore
+
+**Saved comment work → Waiting changes → Make local draft copy** now preserves
+the body of a restore-held creation, reply, edit or group request as a separate
+editable draft. It works offline once this account/share has learned a nonnull
+restore generation. It requires an unchanged original request from a different
+generation, held as rejected or already withdrawn for review with
+`restore_generation_changed`. Reactions and picture-upload commands are not body
+drafts. An unprepared group body can be copied without acquiring a group target.
+
+The copy preserves the rich body, mention identities and picture references;
+retained originals gain draft references without being duplicated or uploaded.
+The new draft has **no selected target**, does not appear in the ordinary
+selection-draft list and cannot send from the saved-work editor. To use its
+content, explicitly open the destination comments, choose **Use saved work at
+this target**, review that destination and create a new discussion draft. The
+original request, receipt uncertainty, old generation and dependent operations
+remain unchanged. A prior accepted change may already exist in the current
+discussion; receipt inspection and current-discussion review remain important.
+
+The local copy is idempotent per request/observed generation. Repeated or
+competing clicks open the existing copy, including subsequent edits. If that
+copy was discarded, repeat clicks report its removal rather than recreating it.
+A later observed restore has a separate copy identity. Creation checks the
+persisted restore context and exact original record in the same transaction as
+the draft, original-picture references and provenance. Account/review changes,
+identity collisions and quota/write failures leave the original work untouched
+and roll back incomplete copies. Late completion cannot open an editor after
+navigation, account changes or another restore.
+
+Verified recovery exports include `restoredDraft:` provenance alongside the
+draft and original request. The provenance contains a digest of the reviewed
+source record and source/copy generations; it grants no server authority.
+Current readers accept it, while older strict readers reject that new action
+prefix instead of silently dropping it. The envelope remains version 1,
+storageVersion 23, as with the existing optional restore metadata. Copy receipts
+remain local and are retained after draft discard; they are not remote command
+receipts or proof of server cancellation.
+
+This is explicit content recovery into a new discussion. Full reconciliation
+that retains original thread/reply structure, resolves old waiting records,
+replays reviewed dependents, or safely resumes source synchronization remains
+unfinished. No old operation is automatically resent or assigned the current
+generation.
+
 ## Verification
 
-The latest plugin regression passes **3,536 tests across 264 suites** (29 tests in
+The restored-request draft checkpoint passes **3,951 tests across 283 suites**
+(39 tests in 25 opt-in suites skipped), **102 focused storage/copy/import/UI
+tests**, and **four actual restored-service HTTP tests** (the optional picture
+service scenario is skipped). The ordinary session copies a quarantined body
+offline, preserves the original request and deduplicates the second copy.
+Store tests cover competing windows, edited/discarded copies, changed requests
+or generations, transactional quota/cancellation rollback, original pictures,
+unchanged dependent work and export provenance. DOM tests cover offline editing,
+repeat copying, removed copies and late results after context changes. Main
+types, frozen test-type baseline, changed-source lint and the preview build pass
+with the existing 15 build warnings. Native/mobile acceptance remains pending.
+
+Earlier request/import verification passed **3,536 tests across 264 suites** (29 tests in
 20 opt-in suites skipped). The request-review/session/group/transport checks pass
 **114 tests**; an additional focused storage/import/transport run passes **66**
 overlapping tests after removing a network-layer import from the local review

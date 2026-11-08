@@ -85,6 +85,12 @@ integration("the ordinary session reconciles restore before delivery and preserv
 			payload: { type: "thread.state", thread_id: thread, state: "resolved", expected_state_revision: 1 } });
 		expect((await transport.state(fixture.entry, thread)).thread.state).toBe("resolved");
 		offline = true; await session.refresh(); session.setForeground(false); await session.outbox.settled();
+		const savedOriginal = (await store.getOperation(legacy.operationId))!;
+		const copied = await session.copyRestoredCommand(savedOriginal, () => true);
+		expect(copied.created).toBe(true); expect(copied.draft?.target).toBeUndefined();
+		expect(copied.draft?.body).toEqual(protocolJson(editableCommentDraft(bodyFromText("Preserve original queued text"), () => "Member")));
+		expect(await store.getOperation(legacy.operationId)).toEqual(savedOriginal);
+		expect((await session.copyRestoredCommand(savedOriginal, () => true)).created).toBe(false);
 		const reply: QueuedCommand = { operationId: randomUUID(), scopeId: fixture.entry, type: "reply.create", dependsOn: [], ...session.restoreBinding,
 			payload: protocolJson({ type: "reply.create", thread_id: thread, message_id: randomUUID(), body: bodyFromText("Saved while offline") }) };
 		await session.queue(reply);
