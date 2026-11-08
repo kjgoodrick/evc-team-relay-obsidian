@@ -23,7 +23,8 @@ export class DiscussionDrafts {
 	private navigation = 0;
 	constructor(parent: HTMLElement, private session: DiscussionSession, private entryId: string,
 		private reveal: (anchor: LocalDiscussionAnchor) => void, private imageFile?: () => void, private baseView?: () => Promise<void>,
-		private targetLabel?: (anchor: LocalDiscussionAnchor) => string | undefined) {
+		private targetLabel?: (anchor: LocalDiscussionAnchor) => string | undefined,
+		private copyWork?: (anchor: LocalDiscussionAnchor, active: string | undefined, current: () => boolean) => void) {
 		this.controls = parent.createDiv({ cls: "relay-comment-drafts" });
 		this.select = this.controls.createEl("select", { attr: { "aria-label": "Discussion draft" } });
 		this.select.onchange = () => { void this.choose(this.select.value); };
@@ -132,6 +133,25 @@ export class DiscussionDrafts {
 		}
 		this.select.value = this.currentId;
 		this.controls.querySelectorAll("button").forEach(button => button.remove());
+		if (this.copyWork && this.composer && this.session.canCopySavedDraft?.(this.entryId)) {
+			try {
+				const anchor = active === this.wholeNoteId ? { version: 1 as const, type: "note" as const } : parseLocalDiscussionAnchor(activeDraft?.target);
+				const copy = this.controls.createEl("button", { text: "Use saved work at this target", attr: { type: "button" } });
+				copy.disabled = !this.session.canCopySavedDraft(this.entryId, anchor);
+				copy.onclick = () => {
+					if (this.closed || this.changing || !this.session.canCopySavedDraft(this.entryId, anchor)) return;
+					this.changing = true; copy.disabled = true; this.select.disabled = true;
+					const current = () => !this.closed && navigation === this.navigation && this.currentId === active;
+					void this.composer!.flush().then(savedDraft => {
+						if (!current()) return;
+						if (!savedDraft) { this.status.setText("Save or copy your current text before choosing another saved draft."); return; }
+						this.copyWork?.(anchor, typeof saved === "string" ? saved : undefined, current);
+					})
+					.catch(() => { if (current()) this.status.setText("Save or copy your current text before choosing another saved draft."); })
+					.finally(() => { this.changing = false; this.select.disabled = false; this.update(); });
+				};
+			} catch { /* A malformed target must be recaptured before copying into it. */ }
+		}
 		if (this.pages.length) {
 			const previous = this.controls.createEl("button", { text: "Previous drafts" });
 			previous.onclick = () => { this.after = this.pages.pop(); this.update(); };

@@ -12,6 +12,7 @@ import { DiscussionReattachment } from "./DiscussionReattachment";
 import { saveLocalWorkRecovery, type LocalWorkIO } from "./LocalWorkRecovery";
 import { restoreLocalDraft } from "./LocalDraftImport";
 import type { InspectedLocalWork, LocalWorkImportIO } from "./LocalWorkImport";
+import { copySavedDraft, reviewSavedDraftCopy, type SavedDraftCopyReview } from "./SavedDraftCopy";
 import type { ReviewedAbandonment } from "./storage/DiscussionStore";
 import { editableCommentDraft } from "./ui/CommentDraft";
 import { parseBody } from "./DiscussionProtocol";
@@ -150,6 +151,23 @@ export class DiscussionSession {
 	async restoreLocalDraft(io: LocalWorkImportIO, copy: InspectedLocalWork, draftId: string, visible: () => boolean, progress?: (text: string) => void) {
 		if (this.closed) throw new Error("This discussion account is closed.");
 		return this.trackLocal(restoreLocalDraft(this.store, io, copy, draftId, () => !this.closed && visible(), progress)
+			.finally(() => { if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); } }));
+	}
+	canCopySavedDraft(scopeId: string, target?: LocalDiscussionAnchor): boolean {
+		const generation = target?.type === "base_group_pending" ? target.capture.generation : target?.type === "base" || target?.type === "image_file" ? target.generation : target ? sourceAnchor(target)?.generation : undefined;
+		return this.canQueue && this.permission(scopeId)?.read === true && this.permission(scopeId)?.comment === true && (generation === undefined || generation === this.knownDocumentGeneration(scopeId));
+	}
+	async reviewSavedDraftCopy(sourceId: string, scopeId: string, target: LocalDiscussionAnchor, active: string | undefined, visible: () => boolean): Promise<SavedDraftCopyReview> {
+		const epoch = this.authenticationEpoch, generation = this.knownDocumentGeneration(scopeId);
+		const current = () => visible() && this.canCopySavedDraft(scopeId, target) && epoch === this.authenticationEpoch && generation === this.knownDocumentGeneration(scopeId);
+		if (!current()) throw new Error("Open a writable comment target before copying saved work.");
+		return this.trackLocal(reviewSavedDraftCopy(this.store, sourceId, scopeId, target, active, current));
+	}
+	async copySavedDraft(review: SavedDraftCopyReview, destinationId: string, omitMissing: boolean, visible: () => boolean) {
+		const scopeId = review.destinationScope, epoch = this.authenticationEpoch, generation = this.knownDocumentGeneration(scopeId);
+		const current = () => visible() && this.canCopySavedDraft(scopeId, review.target) && epoch === this.authenticationEpoch && generation === this.knownDocumentGeneration(scopeId);
+		if (!current()) throw new Error("Open a writable comment target before copying saved work.");
+		return this.trackLocal(copySavedDraft(this.store, review, destinationId, omitMissing, current)
 			.finally(() => { if (!this.closed) { this.channel?.postMessage("cache"); this.notify(); } }));
 	}
 	async saveDiscussionExport(scopeId: string, io: LocalWorkIO, visible: () => boolean, includePictures = true, progress?: (text: string) => void): Promise<string> {

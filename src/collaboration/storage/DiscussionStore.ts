@@ -235,6 +235,51 @@ export class DiscussionStore {
 			return row;
 		});
 	}
+	/** Copy reviewed own work into a separate target draft. The source, its pending
+	 * status, destination choice, originals and activation are fenced atomically. */
+	async copyDraftForTarget(source: Draft, draft: Draft, pictures: { originalId: string; source: LocalPicture }[], active: string | undefined, current: () => boolean): Promise<{ draft: Draft; created: boolean }> {
+		const expected = boundedJson(source as unknown as Json);
+		source = JSON.parse(expected) as Draft; draft = JSON.parse(boundedJson(draft as unknown as Json)) as Draft;
+		const prefix = "selection:" + draft.scopeId + ":";
+		if (!parseDiscussionScope(draft.scopeId) || !draft.id.startsWith(prefix) || !isId(draft.id.slice(prefix.length)) || draft.revision !== 0 || source.id === draft.id || pictures.length > 100) throw new Error("Invalid destination draft.");
+		const ids = pictureIds(draft.body, true), sourceIds = pictureIds(source.body, true), prepared: { originalId: string; source: LocalPicture }[] = [];
+		let total = 0;
+		for (const picture of pictures) {
+			if (!current()) throw new Error("The destination or draft review changed.");
+			if ((total += picture.source.size) > 100 * 1024 * 1024) throw new Error("Original pictures exceed the local recovery limit.");
+			if (!sourceIds.includes(picture.originalId) || !ids.includes(picture.source.id) || picture.source.scopeId !== draft.scopeId) throw new Error("Picture recovery does not match the reviewed draft.");
+			const bytes = await prepareLocalPicture(picture.source.id, draft.scopeId, picture.source.bytes);
+			if (bytes.sha256 !== picture.source.sha256 || bytes.size !== picture.source.size) throw new Error("An original picture changed before copying.");
+			prepared.push({ originalId: picture.originalId, source: bytes });
+		}
+		if (ids.some(id => !prepared.some(item => item.source.id === id) && (source.scopeId !== draft.scopeId || !sourceIds.includes(id)))) throw new Error("Pictures without originals cannot move to another discussion.");
+		return this.transaction(["drafts", "outbox", ...PICTURE_STORES], "readwrite", async tx => {
+			if (!current()) throw new Error("The destination or draft review changed.");
+			const drafts = tx.objectStore("drafts"), prefs = tx.objectStore("preferences"), saved: Draft | undefined = await request(drafts.get(source.id));
+			if (!saved || canonical(saved as unknown as Json) !== expected) throw new Error("The saved draft changed after review. Review it again.");
+			if (source.id.startsWith("recovery:") || await request(prefs.get("online:" + source.id)) || await request(prefs.get("recovery:" + source.id))) throw new Error("Check the saved request's delivery before copying this draft.");
+			const choice = await request(prefs.get("activeNewDraft:" + draft.scopeId)), existing: Draft | undefined = await request(drafts.get(draft.id));
+			const receiptKey = "draftCopy:" + draft.id, receipt: unknown = await request(prefs.get(receiptKey));
+			if (receipt !== undefined && (!isRecord(receipt) || receipt.sourceId !== source.id || receipt.sourceRevision !== source.revision || receipt.sourceScope !== source.scopeId || receipt.destinationScope !== draft.scopeId)) throw new Error("The previous copy receipt needs review.");
+			if (receipt !== undefined && !existing) throw new Error("The copied draft was already removed. Choose a new copy if needed.");
+			if (choice !== active && choice !== draft.id) throw new Error("The destination choice changed in another view.");
+			if (existing) {
+				if (receipt === undefined || canonical(existing as unknown as Json) !== canonical(draft as unknown as Json)) throw new Error("The copied draft has already changed. Reopen it instead of copying again.");
+				if (!current()) throw new Error("The destination or draft review changed.");
+				return { draft: existing, created: false };
+			}
+			for (const item of prepared) {
+				const original: LocalPicture | undefined = await request(tx.objectStore("pictureSources").get(item.originalId));
+				if (!original || original.scopeId !== source.scopeId || original.sha256 !== item.source.sha256 || original.size !== item.source.size) throw new Error("An original picture changed after review.");
+			}
+			await request(drafts.add(draft)); await setPictureReferences(tx, "draft", draft.id, draft.scopeId, ids);
+			await putPictureSources(tx, prepared.map(item => item.source), draft.scopeId, ids);
+			await request(prefs.add({ sourceId: source.id, sourceRevision: source.revision, sourceScope: source.scopeId, destinationScope: draft.scopeId }, receiptKey));
+			await request(prefs.put(draft.id, "activeNewDraft:" + draft.scopeId));
+			if (!current()) throw new Error("The destination or draft review changed.");
+			return { draft, created: true };
+		});
+	}
 	async pictureCacheEpoch(): Promise<number> {
 		return (await this.pictureCachePolicy()).epoch;
 	}

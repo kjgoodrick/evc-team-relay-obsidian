@@ -112,7 +112,7 @@ export class CommentLocalWorkModal extends Modal {
 		card.createEl("p", { text: `Saved revision ${draft.revision}` });
 		if (item.pendingSend) card.createEl("p", { text: "Editing is locked until delivery is checked from the original discussion. Copy or export remains available." });
 		if (item.recovery) card.createEl("p", { text: "Review the original discussion before sending. Discard requires review of dependent waiting work." });
-		if (item.imported) card.createEl("p", { text: "Restored from a recovery copy. You can edit or copy it here. Choosing a discussion target and sending imported drafts are not available in this preview." });
+		if (item.imported) card.createEl("p", { text: "Restored from a recovery copy. You can edit or copy it here. To create a discussion draft, open the destination's comments and choose use saved work at this target." });
 		const open = card.createEl("button", { text: item.pendingSend ? "Inspect saved draft" : "Open saved draft", attr: { type: "button" } });
 		open.onclick = () => { this.openDraft(draft); }; this.copy(card, () => draftText(draft));
 	}
@@ -131,7 +131,7 @@ export class CommentLocalWorkModal extends Modal {
 	private openDraft(draft: Draft): void {
 		if (!this.current() || this.composer) return;
 		this.generation++; this.contentEl.empty();
-		this.contentEl.createEl("p", { text: draft.id.startsWith("imported:") ? "Edit this imported draft on this device. Its captured target is retained for later review. Sending imported drafts is not available in this preview. Only retained original pictures are shown here." : "Edit this saved draft on this device. Its saved target stays attached. To send it, review the target from the original discussion. Only retained original pictures are shown here; shared pictures are not downloaded. Unconfirmed sends remain locked." });
+		this.contentEl.createEl("p", { text: draft.id.startsWith("imported:") ? "Edit this imported draft on this device. Its captured target is retained for later review. To use it in a new discussion, open the destination's comments and choose Use saved work at this target. Only retained original pictures are shown here." : "Edit this saved draft on this device. Its saved target stays attached. To send it, review the target from the original discussion. Only retained original pictures are shown here; shared pictures are not downloaded. Unconfirmed sends remain locked." });
 		this.status = this.contentEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
 		const back = this.contentEl.createEl("button", { text: "Back to saved work", attr: { type: "button" } }); back.onclick = () => { void this.showList(); };
 		this.composer = new CommentComposer(this.contentEl, this.session, draft.scopeId, draft.id,

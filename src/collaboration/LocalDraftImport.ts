@@ -1,13 +1,12 @@
 import { v4 as uuid } from "uuid";
 import { inspectLocalWorkRecovery, type InspectedLocalWork, type LocalWorkImportIO } from "./LocalWorkImport";
-import { isRecord, protocolJson, sourceAnchor } from "./DiscussionProtocol";
-import { parseLocalDiscussionAnchor, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
-import { parseDiscussionScope } from "./DiscussionScope";
+import { protocolJson } from "./DiscussionProtocol";
+import type { LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
 import { pictureIds, type LocalPicture } from "./PictureProtocol";
 import { importOrigin } from "./storage/ImportedDrafts";
 import type { DiscussionStore, Draft, StoreIdentity } from "./storage/DiscussionStore";
-import { readCommentDraft, type CommentDraft } from "./ui/CommentDraft";
-import { commentBodyText } from "./ui/CommentBody";
+import type { CommentDraft } from "./ui/CommentDraft";
+import { reviewedDraftBody, reviewedDraftTarget } from "./SavedDraftReview";
 
 export interface RecoveryDraftReview { source: Draft; body: CommentDraft; target?: LocalDiscussionAnchor; originalPictures: number; missingPictures: number }
 
@@ -18,16 +17,7 @@ export function recoveryDraftReview(copy: InspectedLocalWork, draftId: string, d
 	importOrigin({ version: 1, manifestSha256: copy.manifestSha256, snapshotId: copy.snapshot.id, draftId, scopeId: source.scopeId, identity: copy.snapshot.identity }, destination);
 	if (draftId.startsWith("recovery:") || copy.snapshot.actions.some(action => action.key === "online:" + draftId || action.key === "recovery:" + draftId) ||
 		copy.snapshot.operations.some(operation => operation.reviewDraftId === draftId)) throw new Error("This draft has a saved delivery or recovery action. Check its delivery before restoring; request recovery is not available here yet.");
-	const value = source.body;
-	if (typeof value !== "string" && (!isRecord(value) || typeof value.text !== "string" || !Array.isArray(value.mentions) ||
-		Object.keys(value).some(key => !["text", "mentions", "pictures", "rich", "undoPictures", "editBaseRevision"].includes(key)))) throw new Error("This draft format needs a newer recovery tool. The source copy is retained.");
-	const body = readCommentDraft(value);
-	if (isRecord(value) && JSON.stringify(value.mentions) !== JSON.stringify(body.mentions)) throw new Error("Saved mentions need review before this draft can be restored.");
-	if (body.rich) body.text = commentBodyText(body.rich, () => "Member");
-	const target = source.target === undefined ? undefined : parseLocalDiscussionAnchor(source.target), scope = parseDiscussionScope(source.scopeId)!;
-	if (target && (target.type === "base_group_pending" ? target.entry_id !== scope.entryId || target.capture.view_id !== scope.viewId :
-		target.type === "image_file" ? target.asset.entry_id !== source.scopeId : target.type === "base" ? target.view_id !== scope.viewId :
-		!!sourceAnchor(target) && sourceAnchor(target)!.document_id !== source.scopeId)) throw new Error("The saved draft target does not match its discussion.");
+	const body = reviewedDraftBody(source.body), target = source.target === undefined ? undefined : reviewedDraftTarget(source.scopeId, source.target);
 	const ids = pictureIds(body, true), pictures = new Map(copy.snapshot.pictures.map(picture => [picture.id, picture]));
 	let originalPictures = 0;
 	for (const id of ids) {

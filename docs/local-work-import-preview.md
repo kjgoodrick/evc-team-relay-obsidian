@@ -9,8 +9,13 @@ and shared folder are required; a different source vault is allowed for recovery
 on another device. Imported copies can be opened, edited, copied or discarded in
 **Saved comment work**, even when the old note is inaccessible.
 
-This is a partial import feature. Choosing a destination discussion and sending
-an imported draft remain unfinished. Waiting commands, unconfirmed online actions
+Choose a destination in the comments sidebar, then **Use saved work at this
+target** to turn recovered content into a new discussion draft. This also works
+for ordinary local drafts. Review and send from the normal composer. Saved replies
+or edits are copied as new discussions; applying their old request identities is
+a separate recovery operation.
+
+This is a partial import feature. Waiting commands, unconfirmed online actions
 and server-cancellation recovery drafts are not applied by this panel. They may
 already have reached the server and need exact receipt/withdrawal reconciliation.
 No import read or write contacts the server, resumes delivery, populates shared
@@ -82,9 +87,10 @@ any future sending workflow.
 
 ## Verification
 
-The final plugin regression passes **3,489 tests across 260 suites** (29 tests in
-20 opt-in suites skipped). The focused import/export/storage group passes **98
-tests**. Preview build/main types and changed-source lint pass; the existing 15
+The final plugin regression passes **3,509 tests across 262 suites** (29 tests in
+20 opt-in suites skipped). The focused destination-copy/session/import/UI group
+passes **142 tests**; the earlier import/export/storage checkpoint passed 98.
+Preview build/main types and changed-source lint pass; the existing 15
 build warnings remain. Test types report 206 errors/45 signatures against the
 frozen 207/46 baseline, with no new errors.
 
@@ -106,3 +112,38 @@ Obsidian recovery copies into disposable IndexedDB stores, verifies repeated
 imports create no second draft and leaves all source files unchanged. Both copies
 contain one text draft and no pictures; picture coverage comes from exporter/store
 tests. This filesystem proof is not native UI or physical-mobile acceptance.
+
+## Copying saved content to a chosen target
+
+The sidebar offers copying for a current commentable target. Text/image/saved-view
+selections use their exact captured anchor; an invalid selection cannot fall back
+to a whole note. Image and Bases start controls first create a selection, then
+expose copying at that target. The active composer must save before the picker
+opens. The picker pages ten local drafts, excludes pending delivery/recovery,
+and shows content, destination and picture availability before creating a draft.
+
+The copy can use own work whose old target is missing or inaccessible. Within the
+same account/share, retained originals receive fresh IDs in the destination scope.
+Server-only references may remain in the same scope; crossing scopes requires an
+explicit choice to omit references without retained originals. The source stays
+unchanged. Copied edits lose their old edit-base revision because the destination
+is a new discussion. Pending group captures get a fresh request identity while
+preserving exact saved-view, lane and range evidence.
+
+The source revision/body, pending-action flags, original-picture identity and
+active destination choice are rechecked inside the transaction. Draft, picture
+references/bytes, copy receipt and activation commit together. Source edits or
+discard, newly pending sends, competing destination choices, quota failures and
+context loss cannot leave a partial copy. Repeating the same copy intent cannot
+overwrite an edited copy or recreate a removed copy. The new draft survives reload
+in the ordinary selection list. Copy receipts remain until local account cleanup.
+
+Copying reads local work and does not wake delivery. A separate Send uses the
+existing queue and current server authorization, including target dependencies
+and picture checks. Automated coverage includes exact Bases cells, image pins and
+timeline lane ranges. Real HTTP/MinIO checks prove no upload while copying,
+successful explicit sending with a fresh picture identity, and preservation of
+the source draft/bytes. Native desktop/mobile copying remains unverified while
+the Mac is locked. Original-request reconciliation, cross-account/share recovery,
+copying into existing replies/edits, and physical-mobile resource acceptance
+remain unfinished.

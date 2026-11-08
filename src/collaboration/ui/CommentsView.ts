@@ -1,4 +1,5 @@
 import { DiscussionExportModal } from "./DiscussionExport";
+import { SavedDraftCopyModal } from "./SavedDraftCopy";
 import { targetNeedsReview, uncheckedTarget, type CommentTargetStatus } from "../CommentTargetStatus";
 import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
@@ -267,6 +268,7 @@ class ThreadCard {
 }
 
 export class CommentsView extends ItemView {
+	private copyModal?: SavedDraftCopyModal;
 	private removedModal?: RemovedCommentsModal;
 	private removedButton?: HTMLButtonElement;
 	private exportModal?: DiscussionExportModal;
@@ -322,6 +324,7 @@ export class CommentsView extends ItemView {
 		this.timer = window.setTimeout(() => { this.timer = undefined; void this.render().catch(() => { this.status?.setText("Comments could not be loaded. Refresh to retry."); }); }, 50);
 	}
 	private reset(): void {
+		this.copyModal?.close(); this.copyModal = undefined;
 		this.removedModal?.close(); this.removedModal = undefined; this.removedButton = undefined;
 		this.exportModal?.close(); this.exportModal = undefined; this.exportButton = undefined;
 		this.search?.dispose(); this.search = undefined;
@@ -401,11 +404,18 @@ export class CommentsView extends ItemView {
 			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); },
 				target.kind === "image" ? () => this.host.commentCurrentImage(session, entryId) : undefined,
 				target.kind === "base" ? () => this.host.commentCurrentBase(session, entryId) : undefined,
-				target.kind === "base" ? anchor => this.host.targetLabel(session, entryId, anchor) : undefined);
+				target.kind === "base" ? anchor => this.host.targetLabel(session, entryId, anchor) : undefined,
+				(anchor, active, current) => {
+					this.copyModal?.close();
+					this.copyModal = new SavedDraftCopyModal(this.app, session, entryId, anchor, active,
+						() => !this.closed && this.session === session && this.entryId === entryId && current(), target.path + (target.baseViewName ? " · " + target.baseViewName : ""));
+					this.copyModal.open();
+				});
 		}
 		if (this.exportButton) this.exportButton.disabled = !this.session.canExport || !this.session.permission(this.entryId)?.read;
 		if (this.removedButton) this.removedButton.hidden = !this.session.canReviewRemoved?.(this.entryId);
 		this.removedModal?.validate();
+		this.copyModal?.validate();
 		this.exportModal?.validate();
 
 		this.watch ??= this.session.watch(this.entryId, () => this.schedule(), target.kind ?? "note");

@@ -64,7 +64,7 @@ export class CommentRecoveryImportModal extends Modal {
 		const copy = this.copy, parent = this.results!; parent.empty();
 		parent.createEl("p", { text: `Captured ${new Date(copy.snapshot.createdAt).toLocaleString()} · ${copy.snapshot.drafts.length} drafts · ${copy.snapshot.operations.length} waiting requests · ${copy.snapshot.pictures.length} originals` });
 		parent.createEl("p", { text: `Source vault: ${copy.snapshot.identity.vaultId} · Server: ${copy.snapshot.identity.serverId}` });
-		parent.createEl("p", { text: "Restored copies appear in saved comment work. You can edit or copy their text there. Choosing a new discussion target and sending an imported copy are not available in this preview." });
+		parent.createEl("p", { text: "Restored copies appear in saved comment work. To use one in a new discussion, open the destination's comments, select its target, then choose use saved work at this target. Review and send from the new draft's composer." });
 		for (const draft of copy.snapshot.drafts.slice(this.page * 10, this.page * 10 + 10)) {
 			const card = parent.createEl("section", { cls: "relay-comment-saved-work" });
 			card.createEl("h3", { text: "Saved draft" });

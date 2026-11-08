@@ -51,6 +51,21 @@ test("local cache controls work offline without resuming command delivery", asyn
 	} finally { await f.close(); }
 });
 
+test("reviewed draft copying uses the destination's access and generation without sending or waking delivery", async () => {
+	const f = await fixture();
+	try {
+		f.session.setForeground(false); await f.session.outbox.settled(); const wake = jest.spyOn(f.session.outbox, "wake");
+		const source = { id: "imported:" + id(77), scopeId: id(88), revision: 0, body: "Own work from an inaccessible old note" };
+		await f.store.saveDraft(source);
+		const review = await f.session.reviewSavedDraftCopy(source.id, entry, { version: 1, type: "note" }, undefined, () => true);
+		const result = await f.session.copySavedDraft(review, "selection:" + entry + ":" + id(78), false, () => true);
+		expect(result.draft).toMatchObject({ scopeId: entry, body: { text: source.body } }); expect(await f.store.getDraft(source.id)).toEqual(source);
+		expect(wake).not.toHaveBeenCalled(); expect(f.transport.send).not.toHaveBeenCalled(); expect(f.transport.uploadPicture).not.toHaveBeenCalled();
+		await expect(f.session.copySavedDraft(review, "selection:" + entry + ":" + id(79), false, () => false)).rejects.toThrow("target");
+		await expect(f.session.reviewSavedDraftCopy(source.id, id(99), { version: 1, type: "note" }, undefined, () => true)).rejects.toThrow("target");
+	} finally { await f.close(); }
+});
+
 test("discarding a reviewed ordinary draft works offline, notifies editors and never sends a command", async () => {
 	const f = await fixture(), discarded = jest.fn();
 	const stop = f.session.onDraftDiscarded(discarded);

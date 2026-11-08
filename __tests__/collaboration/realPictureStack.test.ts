@@ -9,6 +9,7 @@ import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionStore, type QueuedCommand } from "../../src/collaboration/storage/DiscussionStore";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import { commentDraftBody, readCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 import type { PlatformRequestInit } from "../../src/platformFetch";
 
 Object.assign(globalThis, { IDBKeyRange });
@@ -182,6 +183,34 @@ integration("offline picture dependencies recover a lost upload ack against real
 			expect(puts).toBe(beforeOnlineRecoveryPuts); expect(await uiStore.getDraft(pendingDraft.id)).toBeUndefined();
 			const recoveredThread = await transport.thread(fixture.entry, recoveryThread);
 			expect(recoveredThread.thread.state).toBe("open"); expect(recoveredThread.messages).toHaveLength(3);
+			// Own local recovery content can move from an unavailable old target.
+			// Copying performs no upload/send; explicit composer delivery uses fresh
+			// picture IDs scoped to the readable destination and preserves the source.
+			const oldScope = randomUUID(), savedPictureId = randomUUID();
+			const savedSource = { id: "imported:" + randomUUID(), scopeId: oldScope, revision: 0,
+				body: { text: "Copied own recovered work", mentions: [], pictures: [{ type: "picture", picture_id: savedPictureId, alt: "Recovered source" }] } };
+			await uiStore.saveDraft(savedSource, null, [await prepareLocalPicture(savedPictureId, oldScope, original)]);
+			session.setForeground(false); await session.outbox.settled(); const uploadsBeforeCopy = puts;
+			const copyReview = await session.reviewSavedDraftCopy(savedSource.id, fixture.entry, { version: 1, type: "note" }, undefined, () => true);
+			const copied = await session.copySavedDraft(copyReview, "selection:" + fixture.entry + ":" + randomUUID(), false, () => true);
+			expect(puts).toBe(uploadsBeforeCopy); expect(await uiStore.getDraft(savedSource.id)).toEqual(savedSource);
+			const copiedBody = commentDraftBody(readCommentDraft(copied.draft.body)), copyThread = randomUUID(), copyMessage = randomUUID(), copyOperation = randomUUID();
+			await session.queue({ operationId: copyOperation, scopeId: fixture.entry, type: "thread.create", dependsOn: [], payload: {
+				type: "thread.create", thread_id: copyThread, message_id: copyMessage, anchor: copied.draft.target!, body: protocolJson(copiedBody) } }, copied.draft);
+			expect(await uiStore.getDraft(copied.draft.id)).toBeUndefined();
+			session.setForeground(true); await session.refresh(); await session.outbox.settled();
+			// Earlier lost acknowledgments can leave the normal retry timer active.
+			// Wait for automatic delivery rather than bypassing its backoff.
+			for (let attempt = 0; attempt < 200 && (await uiStore.getOperation(copyOperation))?.state === "queued"; attempt++) {
+				await new Promise(resolve => setTimeout(resolve, 25)); await session.outbox.settled();
+			}
+			expect((await uiStore.getOperation(copyOperation))?.state).toBe("accepted");
+			const copiedRead = await transport.thread(fixture.entry, copyThread); expect(copiedRead.messages).toHaveLength(1); expect(copiedRead.messages[0].body).toMatchObject(copiedBody);
+			expect(copiedRead.messages[0].body?.blocks[0]).toEqual({ type: "paragraph", children: [{ type: "text", text: "Copied own recovered work", marks: [] }] });
+			const copiedPicture = copiedBody.blocks.find(block => block.type === "picture")!;
+			if (copiedPicture.type !== "picture") throw new Error("Expected copied picture");
+			expect(copiedPicture.picture_id).not.toBe(savedPictureId); expect((await transport.picture(fixture.entry, copiedPicture.picture_id)).state).toBe("attached");
+			expect((await uiStore.pictureSource(savedPictureId, oldScope))?.bytes).toEqual(original);
 		} finally { await session.close(); }
 
 		await owner.sendOnline({ operationId: randomUUID(), scopeId: fixture.entry, payload: {
