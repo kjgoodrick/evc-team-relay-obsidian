@@ -1,7 +1,7 @@
 # Restore-generation client foundation
 
-This is a tested discussion-command, picture-upload, group-capture and inbox restore
-guard, not a complete restore workflow.
+This is a tested discussion-command, picture-upload, group-capture, inbox and
+timeline-marker restore guard, not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
@@ -88,6 +88,17 @@ and never retries automatically. The inbox explains the reason and lets the user
 keep the server state before making a new choice. Version 27 specifically fences
 older workers whose inbox parser would discard this binding.
 
+Shared marker saves capture the binding before asynchronous axis validation and
+retain it in the durable management slot. Exact retries after lost responses or
+reload send that same header. Local completion checks the binding again, so a
+late receipt after another window's restore cannot turn the old slot into a
+current acceptance. The server checks under its share lock before marker receipt
+or revision lookup. `discussion_timeline_marker_restore_guard` is advertised
+independently of new-marker authoring so accepted-receipt retries remain possible
+when that feature is disabled. Old pending marker requests remain inspectable;
+the dialog explains the restore and offers no ordinary retry/discard. Read-only
+receipt reconciliation for these old marker requests remains unfinished.
+
 Validation includes fake-IndexedDB multiwindow, rollback, unseen-scope response,
 dependency, picture preservation, inbox and online-draft tests. The real HTTP
 proof runs an isolated loopback control plane with a synthetic nonnull generation:
@@ -113,3 +124,15 @@ verify that no value, witness or receipt is committed.
 
 These proofs do not restore database/object/CRDT backups or supply
 native Obsidian/mobile acceptance evidence.
+
+Marker-specific HTTP proof:
+
+```sh
+.venv/bin/python tests/integration/base_content_client.py \
+  --plugin /path/to/evc-team-relay-obsidian --restore-guard
+```
+
+It loses an accepted marker response, reopens the ordinary session, recovers the
+same request with the same binding, and rejects a legacy retry. PostgreSQL also
+checks that a marker save blocked on the share lock sees a concurrently rotated
+generation even when its ORM identity was loaded earlier.

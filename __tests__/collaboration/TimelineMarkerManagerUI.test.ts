@@ -1,5 +1,6 @@
 /** @jest-environment jsdom */
 import type { App } from "obsidian";
+import type { RestoreBinding } from "../../src/collaboration/RestoreGeneration";
 import { TimelineMarkerManager } from "../../src/collaboration/ui/TimelineMarkerManager";
 import type { BaseCommentContext } from "../../src/collaboration/BaseCommentContext";
 import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
@@ -41,7 +42,7 @@ function fixture() {
 		if (!current() || JSON.stringify(expected) !== JSON.stringify(preference)) return false;
 		preference = value; return true;
 	});
-	const access = { current: true, read: true, edit: true, online: true, enabled: true, status: "ready", generation: id(4) };
+	const access = { current: true, read: true, edit: true, online: true, enabled: true, status: "ready", generation: id(4), restoreGeneration: id(90) };
 	const proof: TimelineAxisContext = { protocol_version: 1, entry_id: id(1), definition_id: id(2), view_id: id(3), generation: id(4), registry_revision: 2,
 		axis: { id: id(5), kind: "axis", revision: 2, fingerprint: "a".repeat(64), axis: { version: 1, renderer: "sabidurian-timeline", start_property: { source: "note", name: "start" }, end_property: null, time_zone: "America/Denver" } } };
 	const placement = { view_id: id(3), active: true, axis_definition_id: id(5), axis_definition_revision: 2, axis: proof.axis.axis };
@@ -55,7 +56,7 @@ function fixture() {
 	const state = jest.fn(async () => recovery);
 	const accepted = (request: TimelineMarkerCommand): TimelineMarkerReceipt => ({ ...detail, operation_id: request.operation_id, catalog_revision: request.expected_catalog_revision + 1,
 		marker: { ...detail.marker, id: request.command.marker_id, revision: request.command.expected_marker_revision + 1, active: request.command.type !== "marker.archive" } });
-	const save = jest.fn(async (_scope: string, request: TimelineMarkerCommand) => { const receipt = accepted(request); recovery = { version: 1, scope_id: scope, request, status: "accepted", receipt }; return receipt; });
+	const save = jest.fn(async (_scope: string, request: TimelineMarkerCommand, _binding?: RestoreBinding) => { const receipt = accepted(request); recovery = { version: 1, scope_id: scope, request, status: "accepted", receipt }; return receipt; });
 	const retry = jest.fn(async () => { if (!recovery) throw new Error("Missing intent"); const receipt = accepted(recovery.request); recovery = { version: 1, scope_id: scope, request: recovery.request, status: "accepted", receipt }; return receipt; });
 	const acknowledge = jest.fn(async () => { recovery = undefined; return true; });
 	const readAxis = jest.fn(async () => proof), readCatalog = jest.fn(async () => catalog), readDetail = jest.fn(async () => detail), closed = jest.fn();
@@ -68,7 +69,7 @@ function fixture() {
 		binding: { name: "Planning", type: "sabidurian-timeline", viewId: id(3), snapshot: { definition_id: id(2), generation: id(4), revision: 2,
 			views: [{ id: id(3), name: "Planning", type: "sabidurian-timeline" }, { id: id(30), name: "Roadmap", type: "sabidurian-timeline" },
 				{ id: id(40), name: "Schedule", type: "sabidurian-timeline" }, { id: null, name: "Unmatched", type: "sabidurian-timeline" }, { id: id(50), name: "Table", type: "table" }] } },
-		session: { trackLocal: <T>(promise: Promise<T>) => promise, store: { preference: readPreference, comparePreference }, get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
+		session: { get restoreBinding() { return { restoreGeneration: access.restoreGeneration }; }, trackLocal: <T>(promise: Promise<T>) => promise, store: { preference: readPreference, comparePreference }, get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
 			onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
 			permission: () => ({ read: access.read, edit: access.edit, comment: true }), canAnchorBase: () => access.enabled, readTimelineAxis: readAxis,
 			readTimelineMarkerInventory: readCatalog, readTimelineMarkerDetail: readDetail, readTimelineMarkerPlacementAxis: readPlacementAxis, markerManagement: { state, save, retry, acknowledge } },
@@ -311,4 +312,25 @@ test.each(["close", "authentication", "generation", "edit", "offline", "recovery
 		command: { type: "marker.archive", marker_id: id(20), expected_marker_revision: 1 } } });
 	for (const listener of f.listeners) listener(); await flush(); finish(proof); await flush();
 	expect(button("Add checked placement")).toBeUndefined(); expect(f.save).not.toHaveBeenCalled(); f.manager.close(); expect(f.listeners.size).toBe(0);
+});
+
+
+test("marker save captures restore identity before awaiting axis validation", async () => {
+	const f = await loaded(); let finish!: (value: TimelineAxisContext) => void;
+	f.readAxis.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+	button("Save marker").click(); f.access.restoreGeneration = id(91); finish(f.proof); await flush();
+	expect(f.save.mock.calls[0][2]).toEqual({ restoreGeneration: id(90) }); f.manager.close();
+});
+
+test("an old-generation pending marker stays inspectable without offering retry or discard", async () => {
+	const f = await loaded();
+	f.save.mockImplementationOnce(async (_scope, request) => {
+		f.setRecovery({ version: 1, scope_id: scope, request, status: "pending", error: "restore_generation_changed" });
+		throw new Error("Restored service");
+	});
+	button("Save marker").click(); await flush();
+	expect(document.body.textContent).toContain("saved before the service was restored");
+	expect(button("Retry original save")).toBeUndefined(); expect(button("Acknowledge and reload")).toBeUndefined();
+	expect(document.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain("Launch");
+	expect(button("New shared marker").disabled).toBe(true); f.manager.close();
 });

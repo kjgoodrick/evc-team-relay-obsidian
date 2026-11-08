@@ -88,6 +88,7 @@ export class DiscussionSession {
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
 	private baseGroupRestoreGuard = false;
+	private timelineMarkerRestoreGuard = false;
 	private recoveryEnabled = false;
 	private commandStatusEnabled = false;
 	private moderationRecoveryEnabled = false;
@@ -234,6 +235,7 @@ export class DiscussionSession {
 	}
 	get status(): SessionStatus { return this.statusValue; }
 	get restoreBinding(): RestoreBinding { return this.restoreLineage === null ? {} : { restoreGeneration: this.restoreLineage }; }
+	get canManageTimelineMarkers(): boolean { return this.restoreLineage === null || this.timelineMarkerRestoreGuard; }
 	get canQueue(): boolean { return !this.closed && !this.restoreReconciling && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && !this.restoreReconciling && this.foreground && this.statusValue === "ready"; }
 	get canExportCollection(): boolean { return this.canExport && this.exportCatalogEnabled; }
@@ -435,6 +437,7 @@ export class DiscussionSession {
 			this.imageFilesEnabled = capability.imageFiles === true;
 			this.picturesEnabled = capability.pictures === true && (this.restoreLineage === null || capability.pictureRestoreGuard === true);
 			this.baseGroupRestoreGuard = capability.baseGroupRestoreGuard === true;
+			this.timelineMarkerRestoreGuard = capability.timelineMarkerRestoreGuard === true;
 			this.recoveryEnabled = capability.recovery === true;
 			this.commandStatusEnabled = capability.commandStatus === true;
 			this.moderationRecoveryEnabled = capability.moderationRecovery === true;
@@ -443,7 +446,7 @@ export class DiscussionSession {
 			this.exportEnabled = capability.export === true;
 			this.exportCatalogEnabled = capability.exportCatalog === true;
 			this.reattachEnabled = capability.reattach === true;
-			this.baseKinds = (capability.baseTargets ?? []).filter(kind => this.restoreLineage === null || this.baseGroupRestoreGuard || !["group", "group_summary"].includes(kind));
+			this.baseKinds = (capability.baseTargets ?? []).filter(kind => this.restoreLineage === null || (kind === "timeline_marker" ? this.timelineMarkerRestoreGuard : this.baseGroupRestoreGuard || !["group", "group_summary"].includes(kind)));
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
 			this.baseFileGroupProperties = capability.baseFileGroupProperties ?? [];
 			this.baseFormulaGroups = capability.baseFormulaGroups === true;

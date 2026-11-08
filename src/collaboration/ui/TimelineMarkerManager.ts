@@ -106,19 +106,21 @@ export class TimelineMarkerManager extends Modal {
 		const state = this.recovery, json = JSON.stringify(state ?? null); if (this.recoveryJson === json) return;
 		this.recoveryJson = json; this.recoveryEl.replaceChildren(); this.retryButton = undefined; this.acknowledgeButton = undefined; this.acknowledgeConfirmation = undefined;
 		if (!state) return;
+		const restored = state.status === "pending" && state.error === "restore_generation_changed";
 		const box = this.recoveryEl.createEl("section", { cls: "relay-timeline-marker-recovery", attr: { "aria-label": "Marker save result" } });
 		box.createEl("h3", { text: state.status === "pending" ? "Marker save not confirmed" : state.status === "accepted" ? "Marker save confirmed" : "Marker save needs review" });
 		const operation = state.request.command;
 		box.createEl("p", { text: operation.type === "marker.put" ? operation.content.label + " · " + timelineRangeLabel(operation.content.range, operation.content.kind) : "Archive marker in every view" });
-		box.createEl("p", { text: state.status === "pending" ? "The original request is saved on this device. Retry it after reconnecting. Starting another save could duplicate an already accepted change, so this result must be recovered first." :
+		box.createEl("p", { text: restored ? "This marker request was saved before the service was restored. Its original values are retained below. It cannot be retried against the restored service; the original result needs review first." :
+			state.status === "pending" ? "The original request is saved on this device. Retry it after reconnecting. Starting another save could duplicate an already accepted change, so this result must be recovered first." :
 			state.status === "accepted" ? "This request was accepted. The marker may have changed again since then. Acknowledge to load its current state." :
 			state.error === "base_generation_changed" ? "The base was restored or replaced. This request cannot apply to its current generation; it may have succeeded in the earlier one. Review the saved request before reloading." :
 			"The saved request conflicts with the current revisions or another operation. Review its values before discarding this attempted edit and loading the current marker." });
 		if (state.status !== "accepted" && state.error) box.createEl("p", { text: "Result: " + state.error });
 		const details = box.createEl("details"); details.createEl("summary", { text: "Saved request and result — select to copy" });
 		const copy = details.createEl("textarea", { attr: { "aria-label": "Saved marker request and result", rows: "8", readonly: "" } }); copy.value = JSON.stringify(state, null, 2);
-		if (state.status === "pending") this.retryButton = this.button(box, "Retry original save", () => { void this.recover(false); });
-		else {
+		if (state.status === "pending" && !restored) this.retryButton = this.button(box, "Retry original save", () => { void this.recover(false); });
+		else if (state.status !== "pending") {
 			if (state.status === "rejected") {
 				const label = box.createEl("label", { text: "I have reviewed this result. Reload the current marker and discard this attempted edit." });
 				this.acknowledgeConfirmation = label.createEl("input", { attr: { type: "checkbox" } }); this.acknowledgeConfirmation.onchange = () => this.updateControls();
@@ -329,11 +331,12 @@ export class TimelineMarkerManager extends Modal {
 	}
 	private async save(archive: boolean): Promise<void> {
 		if (!this.current() || !this.canSave() || this.busy || this.loading || this.recovery || this.recoveryError || archive && this.dirty) return;
+		const binding = this.context.session.restoreBinding;
 		this.busy = true; this.updateControls();
 		try {
 			if (!archive) { const proof = await readNativeTimelineAxis(this.context); if (!this.current()) return; if (proof.registry_revision !== this.catalog?.registry_revision) throw new Error("The saved view changed. Review the latest marker metadata before saving."); }
 			if (!this.canSave()) return;
-			const request = this.request(archive, uuid()); await this.context.session.markerManagement.save(this.context.entryId, request);
+			const request = this.request(archive, uuid()); await this.context.session.markerManagement.save(this.context.entryId, request, binding);
 		} catch (error) { if (this.current()) this.status.textContent = this.error(error); }
 		finally { this.busy = false; await this.checkRecovery(); if (this.current()) this.updateControls(); }
 	}

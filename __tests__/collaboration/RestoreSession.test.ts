@@ -138,3 +138,15 @@ test("a restored session enables inbox changes only with an advertised mutation 
 		await f.session.refresh(); expect(await f.store.preference("inboxEnabled")).toBe(true);
 	} finally { await f.close(); }
 });
+
+
+test("restored sessions separately require the timeline marker mutation guard", async () => {
+	const f = await fixture(id(90));
+	try {
+		const capability = { ...caps(id(90)), baseTargets: ["view", "timeline_marker"] };
+		f.transport.capabilities.mockResolvedValue(capability); await f.ready();
+		expect(f.session.canManageTimelineMarkers).toBe(false); expect(f.session.canAnchorBase("timeline_marker")).toBe(false);
+		f.transport.capabilities.mockResolvedValue({ ...capability, timelineMarkerRestoreGuard: true }); await f.session.refresh();
+		expect(f.session.canManageTimelineMarkers).toBe(true); expect(f.session.canAnchorBase("timeline_marker")).toBe(true);
+	} finally { await f.close(); }
+});

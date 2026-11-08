@@ -1,4 +1,5 @@
 import type { DiscussionSession } from "./DiscussionSession";
+import { restoreGeneration, restoreMetadata, type RestoreBinding } from "./RestoreGeneration";
 import { DiscussionFailure } from "./DiscussionTransport";
 import { isRecord, protocolJson } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
@@ -11,7 +12,7 @@ import { parseTimelineMarkerCommand, parseTimelineMarkerReceipt, type TimelineMa
 // become valid after acknowledgement in the same generation.
 const finalConflicts = new Set(["stale_base_revision", "timeline_marker_catalog_changed", "timeline_marker_changed", "base_generation_changed", "operation_id_conflict",
 	"timeline_axis_changed", "timeline_axis_unavailable", "base_view_unavailable"]);
-export type TimelineMarkerManagementState = { version: 1; scope_id: string; request: TimelineMarkerCommand } & (
+export type TimelineMarkerManagementState = RestoreBinding & { version: 1; scope_id: string; request: TimelineMarkerCommand } & (
 	{ status: "pending"; error?: string } | { status: "accepted"; receipt: TimelineMarkerReceipt } | { status: "rejected"; error: string }
 );
 const keyFor = (scopeId: string) => {
@@ -21,8 +22,8 @@ const keyFor = (scopeId: string) => {
 function parseState(value: unknown, entryId: string): TimelineMarkerManagementState | undefined {
 	if (value == null) return;
 	if (!isRecord(value) || value.version !== 1 || typeof value.scope_id !== "string" || keyFor(value.scope_id).entryId !== entryId ||
-		!Object.keys(value).every(key => ["version", "scope_id", "request", "status", "error", "receipt"].includes(key))) throw new Error("Marker save recovery data needs repair.");
-	const common = { version: 1 as const, scope_id: value.scope_id, request: parseTimelineMarkerCommand(value.request) };
+		!Object.keys(value).every(key => ["version", "scope_id", "request", "status", "error", "receipt", "restoreGeneration"].includes(key))) throw new Error("Marker save recovery data needs repair.");
+	const common = { ...restoreMetadata(value as RestoreBinding), version: 1 as const, scope_id: value.scope_id, request: parseTimelineMarkerCommand(value.request) };
 	if (value.status === "accepted" && value.error === undefined) return { ...common, status: "accepted", receipt: parseTimelineMarkerReceipt(value.receipt, entryId, common.request) };
 	if ((value.status === "pending" || value.status === "rejected") && value.receipt === undefined &&
 		(value.error === undefined || typeof value.error === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value.error))) {
@@ -40,22 +41,35 @@ export class TimelineMarkerManagement {
 	state(scopeId: string): Promise<TimelineMarkerManagementState | undefined> {
 		if (this.session.status === "closed") return Promise.reject(new Error("This discussion account is closed."));
 		const { key, entryId } = keyFor(scopeId);
-		return this.session.trackLocal(this.session.store.preference(key).then(value => parseState(value, entryId)));
+		return this.session.trackLocal((async () => {
+			const state = parseState(await this.session.store.preference(key), entryId);
+			if (state?.status === "pending") {
+				try { await this.session.store.requireRestoreBinding(state); }
+				catch (error) {
+					if (error instanceof DiscussionFailure && error.code === "restore_generation_changed") return { ...state, error: error.code };
+					throw error;
+				}
+			}
+			return state;
+		})());
 	}
 	private authorized(scopeId: string, creating = false): void {
 		if (!this.session.online || !this.session.permission(scopeId)?.read || !this.session.permission(scopeId)?.edit) throw new Error("Reconnect with edit permission on this saved view before managing markers.");
+		if (!this.session.canManageTimelineMarkers) throw new DiscussionFailure("pause", "restore_guard_unavailable");
 		if (creating && !this.session.canAnchorBase("timeline_marker")) throw new Error("Shared marker creation is not enabled.");
 	}
-	save(scopeId: string, input: TimelineMarkerCommand): Promise<TimelineMarkerReceipt> {
+	save(scopeId: string, input: TimelineMarkerCommand, binding: RestoreBinding = this.session.restoreBinding): Promise<TimelineMarkerReceipt> {
 		this.authorized(scopeId, true);
+		binding = restoreMetadata(binding);
 		const request = parseTimelineMarkerCommand(input), { key, entryId } = keyFor(scopeId);
 		if (new TextEncoder().encode(JSON.stringify(request)).byteLength > 65536) throw new Error("This marker save exceeds the command limit.");
 		return this.session.trackLocal((async () => {
 			const raw = await this.session.store.preference(key), previous = parseState(raw, entryId);
 			if (previous && JSON.stringify(previous.request) !== JSON.stringify(request)) throw new Error("Review the previous marker save before starting another. Its original intent is retained.");
+			if (previous && restoreGeneration(previous.restoreGeneration) !== restoreGeneration(binding.restoreGeneration)) throw new DiscussionFailure("pause", "restore_generation_changed");
 			if (!previous) {
-				const pending: TimelineMarkerManagementState = { version: 1, scope_id: scopeId, request, status: "pending" };
-				if (!await this.session.store.comparePreference(key, raw, protocolJson(pending))) throw new Error("Another window started a marker save. Review that save before continuing.");
+				const pending: TimelineMarkerManagementState = { ...binding, version: 1, scope_id: scopeId, request, status: "pending" };
+				if (!await this.session.store.comparePreference(key, raw, protocolJson(pending), undefined, binding)) throw new Error("Another window started a marker save. Review that save before continuing.");
 				this.changed(scopeId, "pending");
 			}
 			return this.retry(scopeId);
@@ -67,17 +81,20 @@ export class TimelineMarkerManagement {
 		const flight = this.session.trackLocal((async () => {
 			const state = parseState(await this.session.store.preference(key), entryId);
 			if (!state) throw new Error("There is no saved marker operation to recover.");
+			await this.session.store.requireRestoreBinding(state);
 			if (state.status === "accepted") return state.receipt;
 			if (state.status === "rejected") throw new DiscussionFailure("reject", state.error, 409);
 			this.authorized(scopeId);
+			const binding = restoreMetadata(state), current = () => this.session.online && this.session.canManageTimelineMarkers &&
+				restoreGeneration(this.session.restoreBinding.restoreGeneration) === restoreGeneration(binding.restoreGeneration);
 			try {
-				const receipt = parseTimelineMarkerReceipt(await this.session.transport.manageTimelineMarker(scopeId, state.request), entryId, state.request);
-				const final = await this.finish(key, entryId, state, { version: 1, scope_id: state.scope_id, request: state.request, status: "accepted", receipt });
+				const receipt = parseTimelineMarkerReceipt(await this.session.transport.manageTimelineMarker(scopeId, state.request, binding, current), entryId, state.request);
+				const final = await this.finish(key, entryId, state, { ...binding, version: 1, scope_id: state.scope_id, request: state.request, status: "accepted", receipt });
 				if (final?.status !== "accepted") throw new Error("The save completed, but its local receipt needs recovery. Retry the same operation.");
 				return final.receipt;
 			} catch (error) {
 				const code = error instanceof DiscussionFailure && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) ? error.code : "marker_save_unconfirmed";
-				const final = await this.finish(key, entryId, state, { version: 1, scope_id: state.scope_id, request: state.request,
+				const final = await this.finish(key, entryId, state, { ...binding, version: 1, scope_id: state.scope_id, request: state.request,
 					status: error instanceof DiscussionFailure && error.status === 409 && finalConflicts.has(code) ? "rejected" : "pending", error: code });
 				if (final?.status === "accepted") return final.receipt;
 				throw error;
@@ -86,11 +103,12 @@ export class TimelineMarkerManagement {
 		this.flights.set(key, flight); return flight;
 	}
 	private async finish(key: string, entryId: string, original: TimelineMarkerManagementState, next: TimelineMarkerManagementState): Promise<TimelineMarkerManagementState | undefined> {
+		await this.session.store.requireRestoreBinding(original);
 		for (let attempt = 0; attempt < 16; attempt++) {
 			const raw = await this.session.store.preference(key), current = parseState(raw, entryId);
-			if (!current || JSON.stringify(current.request) !== JSON.stringify(original.request)) return;
+			if (!current || JSON.stringify(current.request) !== JSON.stringify(original.request) || restoreGeneration(current.restoreGeneration) !== restoreGeneration(original.restoreGeneration)) return;
 			if (current.status === "accepted" || current.status === "rejected" && next.status !== "accepted") return current;
-			if (await this.session.store.comparePreference(key, raw, protocolJson(next))) { this.changed(next.scope_id, next.status); return next; }
+			if (await this.session.store.comparePreference(key, raw, protocolJson(next), undefined, original)) { this.changed(next.scope_id, next.status); return next; }
 		}
 		throw new Error("Another window updated marker recovery. Refresh its status.");
 	}
