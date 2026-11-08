@@ -68,8 +68,10 @@ permission/generation, trusted download provenance or stopped writers. A
 artifacts in a new directory through an exclusive-creation adapter contract.
 [Bounded downloads](source-installation-downloads-preview.md) and an
 [exclusive desktop staging adapter](source-installation-host-io-preview.md) are
-implemented. The native installer, resumable installation and user-facing
-activation still need connection. Every write must recheck the journal,
+implemented. A [resumable native installer](source-installation-materialization-preview.md)
+now copies verified plans to new desktop folders while keeping sync paused.
+Cache/mapping activation and user-facing integration still need connection.
+Every write must recheck the journal,
 destination isolation and bytes; an earlier verification cannot prevent later
 filesystem changes.
 
