@@ -4,7 +4,7 @@ import { FileView, MarkdownView, TFile, type Plugin, type WorkspaceLeaf, type Ma
 import { createHash, webcrypto } from "node:crypto";
 import { StringValue } from "../mocks/nativeBaseValues";
 import type { BasePresenceState } from "../../src/collaboration/presence/BasePositionProtocol";
-import type { ImagePresenceState } from "../../src/collaboration/presence/LocationProtocol";
+import type { ImageLocation, ImagePresenceState } from "../../src/collaboration/presence/LocationProtocol";
 import type { AuthSession } from "../../src/AuthSession";
 import { Account } from "../../src/Account";
 import { ProviderBacked } from "../../src/ProviderBacked";
@@ -632,7 +632,6 @@ test.each(["denial", "bytes", "blur", "logout"] as const)("direct-image split pa
 		root.getClientRects = () => (shown ? [root.getBoundingClientRect()] : []) as unknown as DOMRectList;
 		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(f.image.view);
 		await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster(); socket.imageState();
-		const deniedSubscriptions = new Set<unknown>();
 		const painted = async () => {
 			await until(() => [root, f.image.view.contentEl].every(element => element.querySelector(".relay-image-presence")));
 			for (const element of [root, f.image.view.contentEl]) box(element.querySelector<HTMLElement>(".relay-image-presence")!);
@@ -663,6 +662,114 @@ test.each(["denial", "bytes", "blur", "logout"] as const)("direct-image split pa
 		socket.imageState(); await settled(); expect(root.querySelector(".relay-image-presence")).toBeNull();
 	} finally { f.close(); root.remove(); network.close(); }
 });
+
+
+test("note and image observers share an eight-pane budget and duplicate images reuse one proof", async () => {
+	const network = crossNetwork(true, () => f.image.location, true, undefined, undefined, true), f = fixture(true, true);
+	const roots: HTMLElement[] = [], bindings: typeof f.registry.trackedViews = [];
+	const box = (node: HTMLElement) => {
+		Object.defineProperties(node, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: 250 }, clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: 250 } });
+		node.getBoundingClientRect = () => new DOMRect(0, 0, 400, 250); node.getClientRects = () => [node.getBoundingClientRect()] as unknown as DOMRectList;
+	};
+	try {
+		for (let i = 0; i < 7; i++) {
+			const root = document.body.appendChild(document.createElement("div")); roots.push(root); box(root);
+			const view = Object.assign(Object.create(MarkdownView.prototype), f.notes[0].view, { contentEl: root, containerEl: root });
+			const binding = Object.assign(new (DocumentViewBinding as unknown as new () => object)(), f.notes[0].binding, { hostView: view });
+			bindings.push(binding); f.registry.trackedViews.push(binding);
+		}
+		for (let i = 0; i < 12; i++) {
+			const root = document.body.appendChild(document.createElement("div")), image = root.appendChild(f.image.element.cloneNode() as HTMLImageElement); roots.push(root);
+			Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } }); box(root); box(image);
+			f.extraViews.push(Object.assign(Object.create(FileView.prototype), f.image.view, { contentEl: root, containerEl: root }));
+		}
+		box(f.image.view.contentEl); box(f.image.element);
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.controller.refresh();
+		await until(() => document.querySelectorAll(".relay-image-presence").length === 1);
+		f.registry.trackedViews = f.registry.trackedViews.filter(binding => !bindings.includes(binding)); f.controller.refresh();
+		await until(() => document.querySelectorAll(".relay-image-presence").length === 8);
+		await until(() => socket.frames.filter(frame => frame.type === "observe").length === 1);
+		expect(jest.mocked(platformFetch).mock.calls.filter(([url]) => String(url).includes("/image-location?"))).toHaveLength(1);
+		expect(f.vault.readBinary).toHaveBeenCalledTimes(1); expect(network.sockets).toHaveLength(1);
+		f.extraViews.splice(0); f.controller.refresh(); await until(() => document.querySelectorAll(".relay-image-presence").length === 1);
+	} finally { f.close(); roots.forEach(root => root.remove()); network.close(); }
+});
+
+test.each(["note", "image"] as const)("passive image panes isolate their proof, roster and denial from the foreground %s", async foreground => {
+	const id = "00000000-0000-4000-8000-000000000030";
+	const network = crossNetwork(true, () => f.image.location, false, undefined, undefined, true), f = fixture(true, true);
+	const root = document.body.appendChild(document.createElement("div")), element = root.appendChild(f.image.element.cloneNode() as HTMLImageElement);
+	Object.defineProperties(element, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
+	const otherFile = { ...f.image.file, path: "Other.png", stat: { ...f.image.file.stat } } as TFile, otherRecord = { ...f.image.record, id };
+	const other = Object.assign(Object.create(FileView.prototype), f.image.view, { file: otherFile, contentEl: root, containerEl: root }) as FileView;
+	element.src = "app://local/Other.png"; f.extraViews.push(other);
+	const fileAt = f.vault.getFileByPath, shareFor = f.registry.shareRegistry.shareFor, recordFor = f.folder.folderIndex.recordFor, registered = f.folder._liveProvider.managedIndex.registered;
+	f.vault.getFileByPath = path => path === otherFile.path ? otherFile : fileAt(path);
+	Object.assign(f.vault, { getResourcePath: (file: TFile) => "app://local/" + file.path });
+	f.registry.shareRegistry.shareFor = path => path === otherFile.path ? f.folder : shareFor(path);
+	f.folder.folderIndex.recordFor = path => path === otherFile.path ? otherRecord : recordFor(path);
+	f.folder._liveProvider.managedIndex.registered = (path, entry) => path === otherFile.path && entry === id || registered(path, entry);
+	const fetcher = jest.mocked(platformFetch).getMockImplementation()!;
+	jest.mocked(platformFetch).mockImplementation((url, init) => String(url).includes("/image-location?") && String(url).endsWith(id) ? Promise.resolve({ status: 200, ok: true,
+		text: async () => JSON.stringify({ protocol_version: 1, location: { ...f.image.location, entry_id: id } }) } as Response) : fetcher(url, init));
+	const box = (node: HTMLElement) => {
+		Object.defineProperties(node, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: 250 }, clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: 250 } });
+		node.getBoundingClientRect = () => new DOMRect(0, 0, 400, 250); node.getClientRects = () => [node.getBoundingClientRect()] as unknown as DOMRectList;
+	};
+	try {
+		[root, element, f.image.view.contentEl, f.image.element].forEach(box);
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+		if (foreground === "image") f.select(f.image.view); else f.controller.refresh();
+		const observations = () => socket.frames.filter(frame => frame.type === "observe" && (frame.location as { entry_id: string }).entry_id === id);
+		await until(() => observations().length === 1);
+		if (foreground === "image") {
+			await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster(); socket.imageState();
+			await until(() => !!f.image.view.contentEl.querySelector(".relay-image-presence")); box(f.image.view.contentEl.querySelector<HTMLElement>(".relay-image-presence")!);
+		}
+		const target = { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" };
+		const send = () => {
+			const subscription_id = observations().at(-1)!.subscription_id;
+			socket.message({ type: "roster", subscription_id, status: "available", peers: [{ target, name: "Image peer" }] });
+			socket.message({ type: "image_states", subscription_id, status: "available", peers: [{ target, state: { pointer: { x: 0.75, y: 0.25 }, viewport: null } }] });
+		};
+		const painted = async () => {
+			send(); await until(() => !!root.querySelector(".relay-image-presence")); box(root.querySelector<HTMLElement>(".relay-image-presence")!);
+			window.dispatchEvent(new Event("resize")); await until(() => root.querySelector(".relay-image-presence-pointer")?.textContent === "Image peer");
+		};
+		await painted(); expect(f.controller.peers.map(peer => peer.name)).toEqual(foreground === "image" ? ["Peer"] : []);
+		expect(f.image.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent).toBe(foreground === "image" ? "Peer" : undefined);
+		const reads = f.vault.readBinary.mock.calls.length, requests = jest.mocked(platformFetch).mock.calls.filter(([url]) => String(url).includes("/image-location?")).length;
+		for (let i = 0; i < 10; i++) f.controller.refresh();
+		element.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 125 })); await settled();
+		expect(socket.frames.some(frame => frame.type === "image_state" && (frame.location as ImageLocation).entry_id === id)).toBe(false);
+		expect(f.vault.readBinary).toHaveBeenCalledTimes(reads);
+		expect(jest.mocked(platformFetch).mock.calls.filter(([url]) => String(url).includes("/image-location?"))).toHaveLength(requests);
+		await f.controller.setVisible(false); expect(root.querySelector(".relay-image-presence-pointer")).not.toBeNull();
+		const initialSubscription = observations()[0].subscription_id;
+		for (const view of [f.notes[1].view, f.image.view, f.notes[0].view]) {
+			f.select(view); await settled();
+			expect(observations()).toHaveLength(1);
+			expect(socket.frames.some(frame => frame.type === "unobserve" && frame.subscription_id === initialSubscription)).toBe(false);
+			expect(root.querySelector(".relay-image-presence-pointer")?.textContent).toBe("Image peer");
+		}
+		f.select(foreground === "image" ? f.image.view : f.notes[0].view); await settled();
+		if (foreground === "image") {
+			box(f.image.view.contentEl.querySelector<HTMLElement>(".relay-image-presence")!);
+			socket.roster(); socket.imageState(); window.dispatchEvent(new Event("resize")); await settled();
+		}
+		const denied = observations().at(-1)!.subscription_id;
+		socket.message({ type: "roster", subscription_id: denied, status: "unavailable" });
+		await until(() => !root.querySelector(".relay-image-presence-pointer")); expect(f.controller.canRetry).toBe(true);
+		expect(f.controller.peers.map(peer => peer.name)).toEqual(foreground === "image" ? ["Peer"] : []);
+		expect(f.image.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent).toBe(foreground === "image" ? "Peer" : undefined);
+		for (let i = 0; i < 10; i++) f.controller.refresh(); await settled(); expect(observations()).toHaveLength(1);
+		f.controller.retry(); await until(() => observations().length === 2); await painted();
+		socket.message({ type: "roster", subscription_id: denied, status: "available", peers: [{ target, name: "Old peer" }] });
+		expect(root.querySelector(".relay-image-presence-pointer")?.textContent).toBe("Image peer");
+		f.logout(); expect(root.querySelector(".relay-image-presence")).toBeNull(); expect(network.sockets).toHaveLength(1);
+	} finally { f.close(); root.remove(); network.close(); }
+});
+
 
 
 test("Reading embedded-image capture, identity overlays and Jump/Follow share the note socket", async () => {

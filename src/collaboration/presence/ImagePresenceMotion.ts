@@ -85,10 +85,14 @@ export class ImagePresenceMotion {
 		if (this.closed || this.frame !== undefined) return;
 		this.frame = this.win.requestAnimationFrame(() => {
 			this.frame = undefined;
-			const fit = this.options.current() ? renderedImageFit(this.image, this.root) : undefined, box = this.layer.getBoundingClientRect();
-			const sx = box.width / this.layer.clientWidth, sy = box.height / this.layer.clientHeight;
-			if (!fit || ![sx, sy].every(value => Number.isFinite(value) && value > 0)) { this.layer.hidden = true; return; }
+			const fit = this.options.current() ? renderedImageFit(this.image, this.root) : undefined;
+			if (!fit) { this.layer.hidden = true; return; }
+			// A hidden layer has no native layout box. Restore it before measuring
+			// so transient pane/layout changes cannot leave it permanently hidden.
 			this.layer.hidden = false;
+			const box = this.layer.getBoundingClientRect();
+			const sx = box.width / this.layer.clientWidth, sy = box.height / this.layer.clientHeight;
+			if (![sx, sy].every(value => Number.isFinite(value) && value > 0)) { this.layer.hidden = true; return; }
 			const wanted = new Set<string>();
 			for (const peer of this.peers.slice(0, 127)) {
 				const pointer = peer.imageState?.pointer; if (!pointer) continue;

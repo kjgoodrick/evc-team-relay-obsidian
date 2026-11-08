@@ -1,4 +1,4 @@
-# Multiple presence observations: transport and note panes
+# Multiple presence observations: transport, note and image panes
 
 November 7, 2026. The optional `presence_multi_watch_preview` capability allows
 up to eight additional note/image/saved-view subscriptions on the existing
@@ -83,5 +83,45 @@ The actual-service suite passes seven tests in six suites after coalescing; its
 disposable HTTP process and SQLite fixture are removed. No server code changed
 in this host checkpoint.
 
-Different direct-image/Bases passive panes, broader cross-share/native two-client
-coverage, physical mobile/touch, resource and accessibility acceptance remain.
+## Different directly opened images
+
+Visible managed-image panes now use their own authorized image scope while a note,
+another image or a saved Base owns the foreground. Same-file foreground copies
+reuse its proof; different images independently fetch and verify their current
+generation and content hash. Duplicate panes share a bounded proof cache and one
+subscription. Notes and images share an eight-passive-pane budget, with stable
+note priority; there is still only one presence socket and no passive publication.
+
+Each image scope has separate roster/state caches and denial/retry handling.
+Foreground roster updates cannot overwrite a different image's participants.
+Changed native resources, files, accounts and hidden/disconnected panes release
+their surfaces. Ordinary foreground changes preserve still-eligible image panes
+and their subscriptions, avoiding verification and subscription churn. Logout and
+backgrounding clear them. Explicit Retry obtains fresh authorization and ignores
+late deliveries from the denied subscription.
+
+Native Obsidian 1.13.7 used `/private/tmp/evc-different-image-native-20261107` with
+two managed images containing identical bytes but different entry identities.
+Only passive `Other.png` displayed Bob while `chart.png` was active. Movement,
+foreground Live Preview/Reading notes, repeated image-to-note transitions, hidden
+owner presence, full reload and remote withdrawal/resumption pass. Initial native
+transition gaps prompted preservation of eligible passive observers; the final
+build passes the repeated sequence. A separate deterministic rendering regression
+also exposed a hidden layer measuring itself at zero size: restoring visibility
+before measurement now allows recovery when valid image geometry returns.
+
+The final note and both image hashes match their originals. The disposable vault
+is closed, the original vault window restored and the peer/local services stopped.
+Evidence: `/private/tmp/different-image-native-evidence.json`; validation logs:
+`/private/tmp/different-image-*.log`. Temporary read-only diagnostics were cleared
+by full reload. No live-vault installation or production deployment occurred.
+
+Final validation: **3,289 plugin tests / 250 suites**, 22 environment-specific
+skips; build/main types pass with 15 existing warnings; test types remain at 206
+errors / 45 signatures within the frozen baseline; changed-source lint passes.
+The 62 focused host/motion tests include shared pane limits, duplicate proof/byte
+reuse, foreground isolation, denial/retry, preserved subscriptions, no passive
+publication and hidden-layout recovery. Server code is unchanged.
+
+Passive Bases panes, broader cross-share/native two-client coverage, physical
+mobile/touch, resource and accessibility acceptance remain.

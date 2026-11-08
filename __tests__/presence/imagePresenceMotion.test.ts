@@ -83,6 +83,24 @@ test("unsupported transforms withdraw geometry and close cancels pending paint a
 	} finally { f.close(); }
 });
 
+test("a temporarily hidden overlay recovers when its native image geometry returns", async () => {
+	const f = fixture(), visibleBox = f.layer.getBoundingClientRect;
+	try {
+		// Native hidden elements have no layout box, unlike jsdom's fixed fixture.
+		f.layer.getBoundingClientRect = () => f.layer.hidden ? new DOMRect() : visibleBox();
+		Object.defineProperties(f.layer, {
+			clientWidth: { configurable: true, get: () => f.layer.hidden ? 0 : 200 },
+			clientHeight: { configurable: true, get: () => f.layer.hidden ? 0 : 200 },
+		});
+		f.options.current = () => false;
+		f.motion.setPeers([f.peer]); await settle(); expect(f.layer.hidden).toBe(true);
+		f.options.current = () => true;
+		window.dispatchEvent(new Event("resize")); await settle();
+		expect(f.layer.hidden).toBe(false);
+		expect(f.layer.querySelector(".relay-image-presence-pointer")?.textContent).toBe(f.peer.name);
+	} finally { f.close(); }
+});
+
 test("closing one image overlay preserves the shared note positioning root for the other", async () => {
 	const f = fixture(), image = f.root.appendChild(document.createElement("img"));
 	box(image, 100, 100); Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 100 }, naturalHeight: { value: 100 } });

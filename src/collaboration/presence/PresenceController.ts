@@ -206,11 +206,6 @@ export class PresenceController extends Component {
 			const owner = view?.containerEl.ownerDocument;
 			const foreground = !!view?.containerEl.isConnected && !!owner?.hasFocus() && !owner.hidden && !this.blurred.has(owner);
 			this.locations?.update(view, foreground && !this.registry.isShutDown, this.visible);
-			if (this.locations) {
-				const images: FileView[] = [];
-				this.plugin.app.workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof FileView) images.push(leaf.view); });
-				this.locations.setImageObservers(images);
-			}
 			const reading = surface === "reading" && noteView ? readingCommentBinding(noteView) : undefined;
 			const bound = !!candidate && (surface === "editor" ? candidate.isTracking :
 				reading?.documentId === candidate.boundDocument.entityGuid && reading.text === candidate.boundDocument.crdtText);
@@ -270,6 +265,11 @@ export class PresenceController extends Component {
 		}
 		this.surfaces.setReaders(scopes);
 		this.locations?.setNoteObservers(images);
+		if (this.locations) {
+			const views: FileView[] = [];
+			this.plugin.app.workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof FileView) views.push(leaf.view); });
+			this.locations.setImageObservers(views);
+		}
 	}
 	private notify(): void { for (const listener of this.listeners) { try { listener(); } catch { /* Isolate UI. */ } } }
 	private publishLocation(location: PresenceLocation): void {
