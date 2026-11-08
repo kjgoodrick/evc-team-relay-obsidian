@@ -16,6 +16,7 @@ import { ItemKind } from "../../src/ItemKinds";
 import { trackNativeSourceMutation } from "../../src/storage/native-document-writes";
 import { seedSourceInstallationCaches } from "../../src/SourceInstallationCaches";
 import { openSourceDocumentCache } from "../../src/storage/source-document-cache";
+import { admitSourceStartup } from "../../src/storage/source-startup-admission";
 
 jest.mock("obsidian", () => ({ Platform: { isMobile: false }, FileSystemAdapter: class {} }));
 const encode = (text: string) => new TextEncoder().encode(text).buffer;
@@ -122,6 +123,16 @@ test("an existing unowned empty destination is never adopted", async () => {
 	const f = await fixture(); await fs.mkdir(installed(""));
 	await expect(materializeSourceInstallation(f.journal, f.staging, f.native, f.request)).rejects.toThrow("no installation ownership marker");
 	expect(await fs.readdir(installed(""))).toEqual([]);
+});
+
+test("recovery can use a hold left by paused startup without releasing the original source barrier", async () => {
+	const f = await fixture();
+	await expect(admitSourceStartup(vault, "Team", f.request.source, { check: () => {} })).rejects.toThrow("awaiting recovery");
+	expect(await materializeSourceInstallation(f.journal, f.staging, f.native, f.request)).toMatchObject({ created: 2, resumed: 0 });
+	await expect(trackNativeSourceMutation(vault, ["Team/Note.md"], async () => {})).rejects.toThrow("paused");
+	const next = await reopen(f);
+	expect(await materializeSourceInstallation(next.journal, f.staging, next.native, next.request)).toMatchObject({ created: 0, resumed: 2 });
+	await expect(trackNativeSourceMutation(vault, ["Team/Note.md"], async () => {})).rejects.toThrow("paused");
 });
 
 test("a failed publication leaves no partial final file and can resume", async () => {

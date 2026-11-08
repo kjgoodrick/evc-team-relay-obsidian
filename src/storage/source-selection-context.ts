@@ -14,6 +14,7 @@ export class SourceSelectionContext {
 	readonly scope: Readonly<SourceSelectionScope>;
 	readonly revision: string | null;
 	readonly choice: Readonly<SourceChoice>;
+	readonly nativeRoot: string | undefined;
 	readonly binding: Readonly<RestoreBinding> | undefined;
 	readonly inventory: Readonly<SourceCacheDescriptor> | undefined;
 	private unavailable = false;
@@ -22,7 +23,7 @@ export class SourceSelectionContext {
 	private checkingChange = false;
 	private checkAgain = false;
 	private constructor(private readonly journal: SourceSelectionJournal, scope: SourceSelectionScope, state: SourceSelectionState) {
-		this.scope = Object.freeze(scope); this.revision = state.revision; this.choice = Object.freeze({ ...state.active });
+		this.scope = Object.freeze(scope); this.revision = state.revision; this.choice = Object.freeze({ ...state.active }); this.nativeRoot = state.nativeRoot;
 		this.binding = this.choice.kind === "source" ? Object.freeze({ restoreGeneration: this.choice.restoreGeneration }) : undefined;
 		this.inventory = this.binding ? sourceInventoryCacheSync({ ...this.scope, ...this.binding }) : undefined;
 		this.detachChanges = watchSourceSelection(journal.name, () => this.selectionChanged());
@@ -48,7 +49,7 @@ export class SourceSelectionContext {
 	}
 	async assertCurrent(): Promise<void> {
 		this.check();
-		try { await this.journal.assertActive(this.revision, this.choice); this.check(); }
+		try { await this.journal.assertActive(this.revision, this.choice, this.nativeRoot); this.check(); }
 		catch (error) { this.close(); throw error; }
 	}
 	private selectionChanged(): void {
@@ -73,6 +74,15 @@ export class SourceSelectionContext {
 	assertFolder(hostAppId: string, serverId: string | undefined, s3rn: string): void {
 		this.check();
 		if (this.scope.hostAppId !== hostAppId || this.scope.serverId !== serverId || this.scope.s3rn !== s3rn) throw new Error("The selected source belongs to another folder or server.");
+	}
+	/** A generation choice alone is not evidence that this native folder was
+	 * installed. In particular, stale settings must never attach original files
+	 * to a restored cache after an interrupted mapping/activation sequence. */
+	assertNativeRoot(path: string): void {
+		this.check();
+		if (this.choice.kind === "source" && (!this.nativeRoot || path !== this.nativeRoot)) {
+			throw new Error("The selected source has no verified installation at this folder. Review the saved recovery location before synchronization.");
+		}
 	}
 	document(s3rn: string): Readonly<SourceCacheDescriptor & { bufferKey: string }> | undefined {
 		const descriptor = this.documentDescriptor(s3rn);

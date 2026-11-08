@@ -56,6 +56,13 @@ function path(value: unknown): string {
 			|| /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw fail();
 	return value;
 }
+
+/** The durable activation location uses the same native-root rules as a plan. */
+export function sourceInstallationNativeRoot(value: unknown): string {
+	const root = path(value);
+	if (overlaps(root, RECOVERY_FOLDER) || root.split("/").some(part => key(part) === key(RECOVERY_FOLDER))) throw fail();
+	return root;
+}
 const overlaps = (a: string, b: string) => key(a) === key(b) || key(a).startsWith(key(b) + "/") || key(b).startsWith(key(a) + "/");
 function artifact(value: unknown, limit = MAX_FILE): InstallationArtifact {
 	exact(value, ["bytes", "sha256"]);
@@ -92,9 +99,8 @@ export function parseSourceInstallationPlan(value: unknown): SourceInstallationP
 	exact(value.archive, ["path", "manifestSha256"]);
 	const archive = { path: path(value.archive.path), manifestSha256: digest(value.archive.manifestSha256) };
 	if (!archive.path.startsWith(RECOVERY_FOLDER + "/")) throw fail();
-	const originalRoot = path(value.originalRoot), destinationRoot = path(value.destinationRoot);
-	if (overlaps(originalRoot, destinationRoot) || overlaps(originalRoot, RECOVERY_FOLDER) || overlaps(destinationRoot, RECOVERY_FOLDER)) throw fail();
-	if ([originalRoot, destinationRoot].some(root => root.split("/").some(part => key(part) === key(RECOVERY_FOLDER)))) throw fail();
+	const originalRoot = sourceInstallationNativeRoot(value.originalRoot), destinationRoot = sourceInstallationNativeRoot(value.destinationRoot);
+	if (overlaps(originalRoot, destinationRoot)) throw fail();
 	const inventory = artifact(value.inventory, MAX_SOURCE), ids = new Set<string>();
 	const paths: PathNode = { spelling: "", children: new Map() };
 	let total = inventory.bytes, pathNodes = 0, pathComponents = 0;

@@ -1,9 +1,10 @@
 import "fake-indexeddb/auto";
-import { admitSourceStartup } from "../src/storage/source-startup-admission";
+import { admitSourceStartup, borrowPausedSourceDrain } from "../src/storage/source-startup-admission";
 import { SourceSelectionJournal } from "../src/storage/source-selection-journal";
 import { SourceSelectionContext } from "../src/storage/source-selection-context";
 import { trackNativeDocumentWrite } from "../src/storage/native-document-writes";
 import { RemoteFolderAddress, ResourceAddress } from "../src/ResourceAddress";
+import { RECOVERY_FOLDER } from "../src/conflictCopyPath";
 
 function fixture() {
 	return { vault: {}, scope: { hostAppId: crypto.randomUUID(), serverId: "fixture", controlPlaneUrl: "https://fixture.test",
@@ -87,4 +88,51 @@ test("a journal I/O failure does not fall back to legacy admission", async () =>
 	finally { spy.mockRestore(); }
 	await expect(write(s.vault)).rejects.toThrow("paused");
 	const context = await admitSourceStartup(s.vault, "Team", s.scope, options); context.close(); await write(s.vault);
+});
+
+async function activate(scope: ReturnType<typeof fixture>["scope"], destinationRoot?: string) {
+	const journal = await SourceSelectionJournal.open(scope), reviewId = crypto.randomUUID();
+	try {
+		let state = await journal.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: null, reviewId, restoreGeneration: crypto.randomUUID() });
+		state = await journal.apply({ type: "prepare", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId,
+			preparation: { archive: { path: `${RECOVERY_FOLDER}/fixture`, manifestSha256: "a".repeat(64) }, plan: { id: crypto.randomUUID(), sha256: "b".repeat(64) } } });
+		state = await journal.apply({ type: "start", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId });
+		return await journal.apply({ type: "commit", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId, ...(destinationRoot ? { destinationRoot } : {}) });
+	} finally { journal.close(); }
+}
+
+test("a restored source starts only at its committed native root after reopening", async () => {
+	const s = fixture(); await activate(s.scope, "Restored Team");
+	const prepare = jest.fn(async (_context: SourceSelectionContext) => {});
+	await expect(admitSourceStartup(s.vault, "Team", s.scope, options, prepare)).rejects.toThrow("no verified installation");
+	expect(prepare).not.toHaveBeenCalled(); await expect(write(s.vault)).rejects.toThrow("paused");
+	const reopenedVault = {}, context = await admitSourceStartup(reopenedVault, "Restored Team", s.scope, options, prepare);
+	try {
+		expect(context.nativeRoot).toBe("Restored Team"); expect(prepare).toHaveBeenCalledTimes(1);
+		await write(reopenedVault, "Restored Team/Note.md");
+	} finally { context.close(); }
+});
+
+test("an older preview choice without a durable native root remains held for review", async () => {
+	const s = fixture(); await activate(s.scope);
+	await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("no verified installation");
+	await expect(write(s.vault)).rejects.toThrow("paused");
+	const context = await SourceSelectionContext.open(s.scope);
+	try { expect(context.choice.kind).toBe("source"); expect(context.nativeRoot).toBeUndefined(); expect(() => context.assertNativeRoot("Team")).toThrow("no verified installation"); }
+	finally { context.close(); }
+});
+
+test("a borrowed paused-source drain excludes concurrent startup and releases only its lease", async () => {
+	const s = fixture(), journal = await SourceSelectionJournal.open(s.scope);
+	try {
+		const state = await journal.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: null, reviewId: crypto.randomUUID(), restoreGeneration: crypto.randomUUID() });
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("awaiting recovery");
+		const lease = borrowPausedSourceDrain(s.vault, "Team", s.scope)!; expect(lease).toBeDefined();
+		expect(() => borrowPausedSourceDrain(s.vault, "Team", s.scope)).toThrow("already being checked");
+		await expect(admitSourceStartup(s.vault, "Team", s.scope, options)).rejects.toThrow("already being checked");
+		await lease.wait(options); lease.release(); lease.release();
+		await expect(lease.wait(options)).rejects.toThrow("lease ended"); await expect(write(s.vault)).rejects.toThrow("paused");
+		await journal.apply({ type: "cancel", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId });
+		const context = await admitSourceStartup(s.vault, "Team", s.scope, options); context.close(); await write(s.vault);
+	} finally { journal.close(); }
 });

@@ -2,6 +2,7 @@ import { restoreGeneration } from "../collaboration/RestoreGeneration";
 import { RECOVERY_FOLDER } from "../conflictCopyPath";
 import { sourceInventoryCache, type SourceInventoryIdentity } from "./source-document-cache";
 import { notifySourceSelection } from "./source-selection-events";
+import { sourceInstallationNativeRoot } from "../SourceInstallationPlan";
 
 export type SourceChoice = { kind: "legacy" } | { kind: "source"; restoreGeneration: string | null };
 export interface SourcePreparation {
@@ -19,12 +20,16 @@ export interface SourceSelectionState {
 	scopeIdentity: string;
 	revision: string | null;
 	active: SourceChoice;
+	/** Absent on older preview choices; those choices cannot start a native
+	 * folder until a reviewed installation supplies its durable location. */
+	nativeRoot?: string;
 	retired: (string | null)[];
 	pending: PendingSourceSelection | null;
 }
 type Change = { type: "begin"; reviewId: string; restoreGeneration: string | null }
 	| { type: "prepare"; reviewId: string; preparation: SourcePreparation }
-	| { type: "start" | "commit" | "cancel"; reviewId: string };
+	| { type: "start" | "cancel"; reviewId: string }
+	| { type: "commit"; reviewId: string; destinationRoot?: string };
 export type SourceSelectionCommand = Change & { operationId: string; expectedRevision: string | null };
 interface Receipt { command: string; revision: string }
 
@@ -54,7 +59,8 @@ function command(value: SourceSelectionCommand): SourceSelectionCommand {
 	switch (value.type) {
 		case "begin": return { ...base, type: value.type, restoreGeneration: generation(value.restoreGeneration) };
 		case "prepare": return { ...base, type: value.type, preparation: preparation(value.preparation) };
-		case "start": case "commit": case "cancel": return { ...base, type: value.type };
+		case "start": case "cancel": return { ...base, type: value.type };
+		case "commit": return { ...base, type: value.type, ...("destinationRoot" in value ? { destinationRoot: sourceInstallationNativeRoot(value.destinationRoot) } : {}) };
 		default: throw invalid();
 	}
 }
@@ -81,6 +87,10 @@ function parse(value: unknown, scopeIdentity: string): SourceSelectionState {
 		else pending.preparation = preparation(item.preparation!);
 	}
 	const parsed: SourceSelectionState = { version: 1, scopeIdentity, revision, active, retired, pending };
+	if (Object.prototype.hasOwnProperty.call(row, "nativeRoot")) {
+		if (active.kind !== "source") throw invalid();
+		parsed.nativeRoot = sourceInstallationNativeRoot(row.nativeRoot);
+	}
 	// Refuse unknown or noncanonical fields instead of silently dropping future
 	// schema information or treating a corrupt journal as the legacy default.
 	const same = (a: unknown, b: unknown): boolean => {
@@ -113,7 +123,10 @@ function advance(current: SourceSelectionState, change: SourceSelectionCommand):
 				if (pending.phase !== "applying") throw new Error("Source installation has not started.");
 				if (next.active.kind === "source") next.retired.push(next.active.restoreGeneration);
 				if (next.retired.length > 1024) throw new Error("Source selection history needs maintenance before another activation.");
-				next.active = { kind: "source", restoreGeneration: pending.restoreGeneration }; next.pending = null; break;
+				next.active = { kind: "source", restoreGeneration: pending.restoreGeneration }; next.pending = null;
+				if (change.destinationRoot !== undefined) next.nativeRoot = change.destinationRoot;
+				else delete next.nativeRoot; // An old caller cannot reuse the previous generation's location.
+				break;
 			case "cancel":
 				if (pending.phase === "applying") throw new Error("Source installation may have changed native files. Recover it before synchronization.");
 				next.pending = null; break;
@@ -159,12 +172,13 @@ export class SourceSelectionJournal {
 		// Freeze/normalize the command before the first asynchronous boundary.
 		return this.transaction(command(input));
 	}
-	async assertActive(revision: string | null, choice: SourceChoice): Promise<void> {
+	async assertActive(revision: string | null, choice: SourceChoice, nativeRoot?: string): Promise<void> {
 		const expectedRevision = revision === null ? null : uuid(revision);
+		const expectedRoot = nativeRoot === undefined ? undefined : sourceInstallationNativeRoot(nativeRoot);
 		const expected: SourceChoice = choice.kind === "legacy" ? { kind: "legacy" }
 			: choice.kind === "source" ? { kind: "source", restoreGeneration: generation(choice.restoreGeneration) } : (() => { throw invalid(); })();
 		const state = await this.read();
-		if (state.pending || state.revision !== expectedRevision || state.active.kind !== expected.kind
+		if (state.pending || state.revision !== expectedRevision || state.active.kind !== expected.kind || state.nativeRoot !== expectedRoot
 			|| state.active.kind === "source" && (expected.kind !== "source" || state.active.restoreGeneration !== expected.restoreGeneration)) {
 			throw new Error("The source selection changed or is awaiting recovery. Synchronization remains paused.");
 		}

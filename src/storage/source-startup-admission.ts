@@ -12,6 +12,31 @@ function registry(): StartupHolds {
 	return host[key] as StartupHolds;
 }
 
+/** Let the recovery installer drain an existing paused-startup hold without
+ * dropping its barrier or competing for a second overlapping hold. Releasing
+ * this lease only ends its exclusive use; the source remains paused. */
+export function borrowPausedSourceDrain(vault: object, path: string, scope: SourceSelectionScope): Pick<NativeSourceWriteHold, "wait" | "release"> | undefined {
+	const identity = sourceInventoryCacheSync({ ...scope, restoreGeneration: null }).identity;
+	const entry = registry().get(vault)?.get(identity);
+	if (!entry) return undefined;
+	if (entry.path !== path.normalize("NFC").toLowerCase()) throw new Error("The paused source location changed. Review its original location before installation.");
+	if (entry.busy) throw new Error("The paused source is already being checked. Wait before installing it.");
+	entry.busy = true; let released = false, waiting = 0;
+	const check = () => { if (released || registry().get(vault)?.get(identity) !== entry) throw new Error("The paused-source recovery lease ended"); };
+	return {
+		wait: async options => {
+			check(); waiting++; const checkContext = options.check;
+			try { await entry.hold.wait({ ...options, check: () => { check(); checkContext(); } }); }
+			finally { waiting--; }
+		},
+		release: () => {
+			if (released) return;
+			if (waiting) throw new Error("The paused-source drain has not settled");
+			check(); released = true; entry.busy = false;
+		},
+	};
+}
+
 /** Close tracked native admission before reading a source journal. A pending,
  * corrupt, blocked or unavailable journal leaves its native hold in place.
  * A later successful read can drain and release that same hold, including after
@@ -43,7 +68,7 @@ export async function admitSourceStartup(vault: object, path: string, input: Sou
 	try {
 		await entry.hold.wait({ check, signal, timeoutMs }); check();
 		context = await SourceSelectionContext.open(scope); check();
-		await context.assertCurrent(); check();
+		await context.assertCurrent(); context.assertNativeRoot(path); check();
 		if (prepare) { await prepare(context); check(); await context.assertCurrent(); check(); }
 		entry.hold.release(); scopes.delete(identity);
 		return context;

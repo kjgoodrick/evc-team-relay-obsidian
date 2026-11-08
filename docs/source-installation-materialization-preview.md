@@ -56,6 +56,11 @@ inspection and restart, while the durable applying state keeps ordinary sync
 paused. A lost journal-start response requires reading the saved journal before
 retrying; copying is not started after an uncertain response.
 
+If startup already left the original source held, the installer borrows its
+exclusive drain lease. Completion releases that lease, not the existing source
+barrier. This permits recovery after a plugin/app restart while keeping the
+original folder paused. The final activation/handoff workflow remains separate.
+
 Registered holds cover this plugin in one host realm. They do not lock other
 processes, older plugins or arbitrary native editors. The final user-facing
 coordinator must establish their isolation before materialization/activation.

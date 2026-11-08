@@ -17,6 +17,34 @@ async function step(journal: SourceSelectionJournal, state: SourceSelectionState
 }
 afterEach(() => { journals.splice(0).forEach(journal => journal.close()); jest.restoreAllMocks(); jest.useRealTimers(); });
 
+test("activation stores its native root atomically with the selected generation and exact retry receipt", async () => {
+	const journal = await open(); let state = await journal.apply(begin());
+	state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	const command = { type: "commit" as const, operationId: crypto.randomUUID(), expectedRevision: state.revision,
+		reviewId: state.pending!.reviewId, destinationRoot: "Restored Team" };
+	const selected = await journal.apply(command);
+	expect(selected.nativeRoot).toBe("Restored Team"); expect(selected.pending).toBeNull();
+	await journal.assertActive(selected.revision, selected.active, "Restored Team");
+	await expect(journal.assertActive(selected.revision, selected.active)).rejects.toThrow("changed");
+	await expect(journal.assertActive(selected.revision, selected.active, "Original Team")).rejects.toThrow("changed");
+	expect(await journal.apply(command)).toEqual(selected);
+	await expect(journal.apply({ ...command, destinationRoot: "Original Team" })).rejects.toThrow("different work");
+	expect(await journal.read()).toEqual(selected);
+});
+
+test.each(["", "/Team", "../Team", "Team/../Other", ".obsidian", "Team/.hidden", "TEAM/Relay Recovery (local only)", "Relay Recovery (local only)/Child", "Team/CON", "Team/e\u0301"])("unsafe activation root is refused: %s", async destinationRoot => {
+	const journal = await open(); let state = await journal.apply(begin()); state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	await expect(journal.apply({ type: "commit", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId, destinationRoot })).rejects.toThrow();
+	expect(await journal.read()).toEqual(state);
+});
+
+test("an older commit caller cannot carry the previous generation's root into a new choice", async () => {
+	const journal = await open(); let state = await journal.apply(begin()); state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	state = await journal.apply({ type: "commit", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId, destinationRoot: "First restore" });
+	state = await journal.apply(begin(state.revision)); state = await step(journal, state, "prepare"); state = await step(journal, state, "start");
+	state = await step(journal, state, "commit"); expect(state.nativeRoot).toBeUndefined();
+});
+
 test("every interrupted phase survives reopening and denies admission until committed", async () => {
 	const value = scope(); let journal = await open(value), state = await journal.read();
 	await journal.assertActive(null, { kind: "legacy" });
@@ -85,7 +113,7 @@ test.each(["begin", "commit"])("a late %s transaction abort preserves the prior 
 	const journal = await open(); let prior = await journal.read(), change = begin();
 	if (type === "commit") {
 		prior = await journal.apply(change); prior = await step(journal, prior, "prepare"); prior = await step(journal, prior, "start");
-		change = { type: "commit", operationId: crypto.randomUUID(), expectedRevision: prior.revision, reviewId: prior.pending!.reviewId };
+		change = { type: "commit", operationId: crypto.randomUUID(), expectedRevision: prior.revision, reviewId: prior.pending!.reviewId, destinationRoot: "Restored Team" };
 	}
 	const add = IDBObjectStore.prototype.add;
 	const spy = jest.spyOn(IDBObjectStore.prototype, "add").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
@@ -96,7 +124,7 @@ test.each(["begin", "commit"])("a late %s transaction abort preserves the prior 
 	await expect(journal.apply(change)).rejects.toThrow("aborted"); spy.mockRestore();
 	expect(await journal.read()).toEqual(prior);
 	const saved = await journal.apply(change); expect(saved.revision).not.toBe(prior.revision);
-	if (type === "commit") expect(saved.pending).toBeNull(); else expect(saved.pending!.reviewId).toBe(change.reviewId);
+	if (type === "commit") { expect(saved.pending).toBeNull(); expect(saved.nativeRoot).toBe("Restored Team"); } else expect(saved.pending!.reviewId).toBe(change.reviewId);
 	expect(await journal.apply(change)).toEqual(saved);
 });
 
