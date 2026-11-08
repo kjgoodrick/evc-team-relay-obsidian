@@ -13,6 +13,7 @@ export class BaseSyncModal extends Modal {
 	private context = 0;
 	private error = "";
 	private rows: BaseSyncRow[] = [];
+	private checked?: { entryId: string; operationId: string; status: "accepted" | "withdrawn" | "unknown" };
 	private reviewed?: { row: BaseSyncRow; review: BaseConflictReview };
 	private removal?: { row: BaseSyncRow; review: BaseRetirementReview };
 	private restoration?: { row: BaseSyncRow; review: BaseRestoreReview; key: string; path: string };
@@ -21,7 +22,7 @@ export class BaseSyncModal extends Modal {
 	onOpen(): void {
 		this.closed = false; this.contentEl.addClass("evc-bases-sync");
 		this.unsubscribe = this.host.onChange(reset => {
-			if (reset) { this.context++; this.serial++; this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; this.rows = []; this.render(); }
+			if (reset) { this.context++; this.serial++; this.checked = undefined; this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; this.rows = []; this.render(); }
 			if (!this.busy || reset) void this.refresh();
 		}); void this.refresh();
 	}
@@ -58,13 +59,26 @@ export class BaseSyncModal extends Modal {
 				})));
 			} else if (row.file) {
 				controls.addButton(button => button.setButtonText("Retry sync").setDisabled(this.busy).onClick(() => this.act(() => this.host.retry(this.folder, row.file!))));
-				if (row.record.pending) controls.addButton(button => button.setButtonText("Check delivery / withdraw").setDisabled(this.busy).onClick(() => this.act(() => this.host.withdraw(this.folder, row.file!))));
+				if (row.record.pending) {
+					const operationId = row.record.pending.operationId;
+					controls.addButton(button => button.setButtonText("Check saved result").setDisabled(this.busy).onClick(() => this.act(async () => {
+						const context = this.context, receipt = await this.host.checkStatus(this.folder, row.file!);
+						if (context === this.context && !this.closed) this.checked = { entryId: row.entryId, operationId, status: receipt.status };
+					})));
+					controls.addButton(button => button.setButtonText("Check delivery / withdraw").setDisabled(this.busy || !this.folder.canWriteManagedPath(row.path)).onClick(() => this.act(() => this.host.withdraw(this.folder, row.file!))));
+				}
 				if (row.record.conflict || row.record.reviewRequired) controls.addButton(button => button.setButtonText("Review copies").setDisabled(this.busy).onClick(() => this.act(async () => {
 					const context = this.context, review = await this.host.review(this.folder, row.file!);
 					if (context === this.context) { this.removal = undefined; this.restoration = undefined; this.reviewed = { row, review }; }
 				})));
 			}
 			controls.addButton(button => button.setButtonText("Export recovery copies").setDisabled(this.busy).onClick(() => this.act(async () => { await this.host.export(this.folder, row.entryId); })));
+			if (this.checked?.entryId === row.entryId && row.record.pending?.operationId === this.checked.operationId) {
+				const message = this.checked.status === "accepted" ? "The server has an acceptance receipt for this exact saved request." :
+					this.checked.status === "withdrawn" ? "The server has a withdrawal receipt for this exact saved request." :
+					"No matching receipt is available. The request may have succeeded before a restore; this does not prove it was never saved.";
+				this.contentEl.createEl("p", { text: message + " This check did not change the file or resend or withdraw the request. The pending request and local copies remain retained for recovery.", attr: { role: "status", "aria-live": "polite" } });
+			}
 			if (this.reviewed?.row.entryId === row.entryId) this.renderReview(row, this.reviewed.review);
 			if (this.removal?.row.entryId === row.entryId) this.renderRemoval(row, this.removal.review);
 			if (this.restoration?.row.entryId === row.entryId) this.renderRestore(this.restoration);
@@ -113,7 +127,7 @@ export class BaseSyncModal extends Modal {
 	}
 	private async act(action: () => Promise<void>): Promise<void> {
 		if (this.busy || this.closed) return;
-		this.busy = true; this.error = ""; this.render();
+		this.busy = true; this.error = ""; this.checked = undefined; this.render();
 		try { await action(); } catch (error) { this.error = baseSyncMessage(error); this.reviewed = undefined; this.removal = undefined; this.restoration = undefined; }
 		finally { this.busy = false; await this.refresh(); }
 	}

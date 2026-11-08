@@ -66,7 +66,18 @@ It captures immutable request bytes before token refresh, checks account identit
 before sending and after response delivery, verifies accepted digests and exact
 operation identity, and sanitizes failures. A timeout leaves acceptance unknown.
 `withdraw` either returns an accepted receipt or confirms that every later send
-of that exact request is fenced. No mutation is automatically replaced or retried.
+of that exact request is fenced. The transport never retries on its own.
+
+`status` checks an exact historical receipt using current read access, including
+when edit access or new publication is disabled. Accepted and withdrawn receipts
+are distinguished from unknown. A missing receipt does not establish that an old
+request never committed. The native **Check saved result** control only displays
+this observation: it does not acknowledge inventory, settle local pending work,
+change disk, publish, withdraw, or trigger sync. Original pending bytes remain
+available for explicit recovery. Account/record changes fence late observations;
+read-only users cannot use the separate withdrawal control. Removed identities
+still use their existing local recovery flow. Native acceptance of this new
+receipt control and full restore reconciliation remain outstanding.
 
 `BaseSyncStore.ts` uses a separate IndexedDB namespace per server/account/vault/
 share. Baselines, pending requests, prepared downloads and conflict copies are

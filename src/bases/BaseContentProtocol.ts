@@ -13,6 +13,7 @@ export interface BasePending { operationId: string; expected: BaseContentState; 
 export interface BaseAccepted { operation_id: string; state: BaseContentState }
 export type BaseWithdrawal = { status: "accepted"; result: BaseAccepted } |
 	{ status: "withdrawn"; operation_id: string; entry_id: string };
+export type BaseCommandStatus = BaseWithdrawal | { status: "unknown"; operation_id: string; entry_id: string };
 
 export const baseId = (value: unknown): value is string => typeof value === "string" &&
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);

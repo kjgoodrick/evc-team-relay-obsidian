@@ -42,6 +42,7 @@ function fixture() {
 		reviewRemoval: jest.fn(async () => ({ record: row.record, local: review.local })), moveRemoved: jest.fn(async () => {}),
 		reviewRestore: jest.fn(async () => ({ record: row.record, copies: [{ key: "removed", label: "Saved original", bytes: bytes("original") }, { key: "baseline", label: "Last synchronized", bytes: bytes("base") }] })),
 		restore: jest.fn(async () => {}), resumeRestore: jest.fn(async () => {}), cancelRestore: jest.fn(async () => {}),
+		checkStatus: jest.fn(async () => ({ status: "unknown" as const, entry_id: "entry", operation_id: "operation" })),
 		withdraw: jest.fn(async () => {}), export: jest.fn(async () => "export"), onChange: (listener: typeof changed) => { changed = listener; return () => {}; } };
 	const folder = { canWriteManagedPath: jest.fn(() => true) };
 	const modal = new BaseSyncModal({} as App, host as unknown as BaseSyncHost, folder as unknown as VaultShare);
@@ -132,5 +133,18 @@ test("an account reset during a delayed restore review never renders old-account
 		const original = await s.host.reviewRestore(); s.host.reviewRestore.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
 		s.button("Restore as new file").click(); s.changed(true); finish(original); await flush();
 		expect(s.modal.contentEl.querySelector("textarea")).toBeNull(); expect(s.modal.contentEl.querySelector("select")).toBeNull();
+	} finally { s.modal.onClose(); }
+});
+
+
+test("read-only users can inspect an unknown result without withdrawing, replaying or losing pending work", async () => {
+	const s = fixture(); try {
+		Object.assign(s.row.record, { pending: { operationId: "operation" } }); s.folder.canWriteManagedPath.mockReturnValue(false);
+		await flush(); expect(s.button("Check saved result").disabled).toBe(false); expect(s.button("Check delivery / withdraw").disabled).toBe(true);
+		s.button("Check saved result").click(); await flush();
+		expect(s.host.checkStatus).toHaveBeenCalledWith(s.folder, s.row.file);
+		expect(s.modal.contentEl.querySelector('[role="status"]')?.textContent).toContain("may have succeeded before a restore");
+		expect(s.row.record.pending?.operationId).toBe("operation"); expect(s.host.withdraw).not.toHaveBeenCalled(); expect(s.host.retry).not.toHaveBeenCalled();
+		s.changed(true); await flush(); expect(s.modal.contentEl.querySelector('[role="status"]')).toBeNull();
 	} finally { s.modal.onClose(); }
 });

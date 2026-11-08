@@ -6,7 +6,7 @@ import type { ShareRegistry, VaultShare } from "../VaultShare";
 import type { RelayOnPremSettings } from "../RelayOnPremConfig";
 import type { SettingsScope } from "../SettingsPersistence";
 import { RECOVERY_FOLDER, isConflictCopyPath } from "../conflictCopyPath";
-import { baseId, basePath, encodeBaseBytes, retiredBaseEntries } from "./BaseContentProtocol";
+import { baseId, basePath, encodeBaseBytes, retiredBaseEntries, type BaseCommandStatus } from "./BaseContentProtocol";
 import { BaseContentFailure, BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseSyncRecord, type BaseStoreIdentity } from "./BaseSyncStore";
 import { BaseSyncRunner, sameBaseBytes, type BaseConflictReview, type BaseSyncAccess } from "./BaseSyncRunner";
@@ -36,6 +36,7 @@ export function baseSyncMessage(error: unknown, retryMessage = "Bases sync will 
 	const messages: Record<string, string> = {
 		base_context_changed: "Bases sync paused because the account, file or permissions changed.",
 		base_review_changed: "A copy changed after you opened this review. Refresh the review before choosing.",
+		base_receipt_unavailable: "A saved Bases request or its read-only receipt check is unavailable. The pending request is retained.",
 		base_editor_required: "Editing permission is required to publish this Bases file. Local edits are retained.",
 		base_content_disabled: "Bases sync is not enabled on this server.",
 		base_content_protocol_required: "This server needs an update before it can sync Bases safely.",
@@ -136,6 +137,7 @@ export class BaseSyncHost extends Component {
 				}, lock);
 				slot.store = store; slot.runner = new BaseSyncRunner(store, {
 					read: entryId => transport.read(entryId),
+					status: (entryId, pending) => transport.status(entryId, pending),
 					publish: async (entryId, pending) => {
 						const accepted = await transport.publish(entryId, pending);
 						if (slot.current()) await folder._liveProvider?.managedIndex?.acknowledgeBaseContent(pending.expected, accepted.state);
@@ -419,6 +421,10 @@ export class BaseSyncHost extends Component {
 	async withdraw(folder: VaultShare, file: AttachmentFile): Promise<void> {
 		const slot = await this.requireSlot(folder), result = await slot.runner!.withdraw(file.entityGuid, this.access(slot, file, true));
 		if (result === "busy") throw new Error("Another window is syncing this file. Try again shortly."); slot.entries.delete(file.entityGuid);
+	}
+	async checkStatus(folder: VaultShare, file: AttachmentFile): Promise<BaseCommandStatus> {
+		const slot = await this.requireSlot(folder);
+		return slot.runner!.checkStatus(file.entityGuid, this.access(slot, file, true));
 	}
 	async export(folder: VaultShare, entryId: string): Promise<string> {
 		const slot = await this.requireSlot(folder), vault = this.plugin.app.vault;

@@ -30,6 +30,12 @@ integration("real Bases HTTP preserves offline writes and resolves unknown deliv
 		});
 		await expect(losesResponse.publish(fixture.entry, original)).rejects.toMatchObject({ action: "retry" });
 		expect((await store.get(fixture.entry)).pending?.operationId).toBe(original.operationId);
+		const savedRequest = await store.get(fixture.entry);
+		const receipt = await real.status(fixture.entry, original); expect(receipt.status).toBe("accepted");
+		expect(await store.get(fixture.entry)).toEqual(savedRequest);
+		const beforeCheck = await real.read(fixture.entry);
+		expect((await real.status(fixture.entry, { ...original, operationId: crypto.randomUUID() })).status).toBe("unknown");
+		expect(await real.read(fixture.entry)).toEqual(beforeCheck);
 		const delivered = await real.withdraw(fixture.entry, original);
 		expect(delivered.status).toBe("accepted");
 		await store.settle(fixture.entry, original.operationId, delivered);
@@ -40,6 +46,7 @@ integration("real Bases HTTP preserves offline writes and resolves unknown deliv
 		await expect(real.publish(fixture.entry, local)).rejects.toMatchObject({ action: "conflict" });
 		const withdrawn = await real.withdraw(fixture.entry, local);
 		expect(withdrawn.status).toBe("withdrawn");
+		expect(await real.status(fixture.entry, local)).toEqual(withdrawn);
 		await store.settle(fixture.entry, local.operationId, withdrawn);
 		await expect(real.publish(fixture.entry, local)).rejects.toMatchObject({ code: "base_content_withdrawn" });
 		const remoteSnapshot = await real.read(fixture.entry);
@@ -50,6 +57,7 @@ integration("real Bases HTTP preserves offline writes and resolves unknown deliv
 		expect((await store.recoveries(fixture.entry))[0].record.pending?.operationId).toBe(local.operationId);
 		const reviewer = new BaseContentTransport({ ...identity, accountId: fixture.reviewer }, async () => ({ accountId: fixture.reviewer, accessToken: fixture.reviewerToken }), (url, init) => fetch(url, init));
 		expect(await reviewer.read(fixture.entry)).toEqual(remoteSnapshot);
+		expect((await reviewer.status(fixture.entry, original)).status).toBe("unknown");
 		await expect(reviewer.publish(fixture.entry, { ...remote, operationId: crypto.randomUUID(), expected: remoteSnapshot.state })).rejects.toMatchObject({ code: "base_editor_required" });
 
 		// Drive the actual worker through review, another lost response/restart,

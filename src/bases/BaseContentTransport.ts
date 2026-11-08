@@ -1,7 +1,7 @@
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import { baseId, baseObject, copyBasePending, encodeBaseBytes, parseBaseAccepted, parseBaseSnapshot,
-	type BaseAccepted, type BasePending, type BaseSnapshot, type BaseWithdrawal } from "./BaseContentProtocol";
+	type BaseAccepted, type BasePending, type BaseSnapshot, type BaseWithdrawal, type BaseCommandStatus } from "./BaseContentProtocol";
 
 export interface BaseTransportIdentity { serverId: string; accountId: string; shareId: string }
 export type BaseCredential = { accountId: string; accessToken: string } | undefined;
@@ -53,6 +53,16 @@ export class BaseContentTransport {
 			if (baseObject(value) && value.status === "accepted") return { status: "accepted", result: await parseBaseAccepted(value.result, pending, entryId) };
 			if (!baseObject(value) || value.status !== "withdrawn" || value.operation_id !== pending.operationId || value.entry_id !== entryId) throw new Error();
 			return { status: "withdrawn", operation_id: pending.operationId, entry_id: entryId };
+		} catch { throw new BaseContentFailure("pause", "invalid_base_response"); }
+	}
+	async status(entryId: string, pending: BasePending): Promise<BaseCommandStatus> {
+		pending = copyBasePending(pending, entryId);
+		const value = await this.request(this.path(entryId) + "/status", "POST", this.envelope(pending));
+		try {
+			if (!baseObject(value)) throw new Error();
+			if (value.status === "accepted" && Object.keys(value).length === 2) return { status: "accepted", result: await parseBaseAccepted(value.result, pending, entryId) };
+			if ((value.status !== "unknown" && value.status !== "withdrawn") || Object.keys(value).length !== 3 || value.operation_id !== pending.operationId || value.entry_id !== entryId) throw new Error();
+			return { status: value.status, operation_id: pending.operationId, entry_id: entryId };
 		} catch { throw new BaseContentFailure("pause", "invalid_base_response"); }
 	}
 	protected async request(path: string, method: "GET" | "PUT" | "POST", body?: string, responseLimit = method === "GET" ? 360_000 : 16_384): Promise<unknown> {

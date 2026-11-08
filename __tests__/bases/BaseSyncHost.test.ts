@@ -301,3 +301,23 @@ test("Bases settings are independent of other files while the shared file wire t
 		expect(kinds.kindForPath("Planning.base")).toBe(ItemKind.File); expect(kinds.enabledSyncKinds()).toContain(ItemKind.File); expect(kinds.supportsSync("Other.bin")).toBe(false);
 	} finally { kinds.destroy(); scope.destroy(); settings.destroy(); }
 });
+
+test("native receipt inspection uses the read-only route and does not acknowledge inventory or alter a pending save", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync(); s.edit("views: []\n# pending");
+		const originalFetch = fetchMock.getMockImplementation()!;
+		fetchMock.mockImplementation(async (...args) => {
+			if (args[1]?.method === "PUT") throw new Error("Synthetic offline save");
+			return originalFetch(...args);
+		});
+		await s.file.pushToRemote(); const before = (await s.host.rows(s.folder))[0].record;
+		expect(before.pending).toBeDefined(); s.manifest.owner = false; s.manifest.permissions[path] = "read";
+		fetchMock.mockImplementation(async (url, init) => {
+			expect(url).toMatch(/\/base-content\/status$/); expect(init?.method).toBe("POST");
+			return reply(200, { status: "unknown", operation_id: before.pending!.operationId, entry_id: entryId });
+		});
+		expect((await s.host.checkStatus(s.folder, s.file)).status).toBe("unknown");
+		expect((await s.host.rows(s.folder))[0].record).toEqual(before);
+		expect(s.index.acknowledgeBaseContent).not.toHaveBeenCalled(); expect(s.vault.process).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});

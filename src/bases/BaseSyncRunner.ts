@@ -1,4 +1,4 @@
-import { copyBaseBytes, decideBaseSync, type BaseSnapshot } from "./BaseContentProtocol";
+import { copyBaseBytes, decideBaseSync, type BaseSnapshot, type BaseCommandStatus } from "./BaseContentProtocol";
 import { BaseContentFailure, type BaseContentTransport } from "./BaseContentTransport";
 import { BaseSyncStore, type BaseDownload, type BaseSyncRecord } from "./BaseSyncStore";
 
@@ -30,7 +30,7 @@ function sameSnapshot(a: BaseSnapshot | undefined, b: BaseSnapshot): boolean {
 /** One bounded reconciliation. Native actors and review actions must share the
  * same exclusive lock. Durable intents survive destruction of this runner. */
 export class BaseSyncRunner {
-	constructor(readonly store: BaseSyncStore, private transport: Pick<BaseContentTransport, "read" | "publish" | "withdraw">,
+	constructor(readonly store: BaseSyncStore, private transport: Pick<BaseContentTransport, "read" | "publish" | "withdraw"> & Partial<Pick<BaseContentTransport, "status">>,
 		private lock: BaseSyncLock) {}
 	private check(access: BaseSyncAccess, remote?: BaseSnapshot): void {
 		if (!access.current() || remote && remote.state.path !== access.path) throw new BaseContentFailure("pause", "base_context_changed");
@@ -140,5 +140,18 @@ export class BaseSyncRunner {
 			const result = await this.transport.withdraw(entryId, record.pending); this.check(access);
 			await this.store.settle(entryId, record.pending.operationId, result); return "waiting";
 		}) ?? "busy";
+	}
+	/** Observation only: retain the exact pending bytes and do not trigger sync,
+	 * settlement or replacement merely because a historical receipt exists. */
+	async checkStatus(entryId: string, access: BaseSyncAccess): Promise<BaseCommandStatus> {
+		const result = await this.lock(entryId, async () => {
+			this.check(access); const record = await this.store.get(entryId);
+			if (!record.pending || !this.transport.status) throw new BaseContentFailure("pause", "base_receipt_unavailable");
+			const receipt = await this.transport.status(entryId, record.pending); this.check(access);
+			if ((await this.store.get(entryId)).revision !== record.revision) throw new BaseContentFailure("pause", "base_review_changed");
+			return receipt;
+		});
+		if (!result) throw new BaseContentFailure("pause", "base_content_busy");
+		return result;
 	}
 }

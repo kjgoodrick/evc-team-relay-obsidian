@@ -282,3 +282,31 @@ test("Web Locks use the same disk scope for different accounts, and unsupported 
 	expect(names[0]).toBe(names[1]);
 	await expect(nativeBaseLock(identity, null)(entryId, async () => "never")).rejects.toThrow("base_lock_unavailable");
 });
+
+test.each(["accepted", "withdrawn", "unknown"] as const)("read-only %s receipt review preserves pending bytes without local or server mutation", async status => {
+	const s = await setup(); try {
+		await s.runner.sync(entryId, s.access);
+		const pending = await s.store.stage(entryId, (await s.store.get(entryId)).revision, s.remote().state, bytes("pending"));
+		const accepted = { operation_id: pending.operationId, state: (await snapshot("pending", 2)).state };
+		const check = jest.fn(async () => status === "accepted" ? { status, result: accepted } : { status, operation_id: pending.operationId, entry_id: entryId });
+		const runner = new BaseSyncRunner(s.store, { ...s.transport, status: check }, exclusiveLock());
+		const before = await s.store.get(entryId); s.setWritable(false);
+		expect((await runner.checkStatus(entryId, s.access)).status).toBe(status);
+		expect(await s.store.get(entryId)).toEqual(before); expect(await s.store.recoveries(entryId)).toEqual([]);
+		expect(s.transport.publish).not.toHaveBeenCalled(); expect(s.transport.withdraw).not.toHaveBeenCalled(); expect(s.access.replace).not.toHaveBeenCalled();
+	} finally { s.store.close(); }
+});
+
+test.each(["account", "record"])("receipt review refuses a late response after %s changed", async change => {
+	const s = await setup(); try {
+		await s.runner.sync(entryId, s.access);
+		const pending = await s.store.stage(entryId, (await s.store.get(entryId)).revision, s.remote().state, bytes("pending"));
+		const runner = new BaseSyncRunner(s.store, { ...s.transport, status: async () => {
+			if (change === "account") s.setCurrent(false);
+			else await s.store.retainRetirement(entryId, (await s.store.get(entryId)).revision, path, bytes("pending"));
+			return { status: "unknown", operation_id: pending.operationId, entry_id: entryId };
+		} }, exclusiveLock());
+		await expect(runner.checkStatus(entryId, s.access)).rejects.toThrow(change === "account" ? "base_context_changed" : "base_review_changed");
+		expect((await s.store.get(entryId)).pending).toEqual(pending);
+	} finally { s.store.close(); }
+});

@@ -212,3 +212,25 @@ test("transport rejects corrupted or oversized successful responses and mismatch
 	await expect(new BaseContentTransport(identity, credentials, async () => new Response("x".repeat(400_000))).read(id(3))).rejects.toMatchObject({ code: "invalid_base_response" });
 	await expect(new BaseContentTransport(identity, credentials, async () => reply(200, { status: "withdrawn", operation_id: id(90), entry_id: id(3) })).withdraw(id(3), pending)).rejects.toMatchObject({ code: "invalid_base_response" });
 });
+
+test("read-only status freezes the exact request and validates accepted, withdrawn and unknown receipts", async () => {
+	const base = await snapshot("base"), pending = { operationId: id(4), expected: base.state, bytes: bytes("new") }, result = await accepted(pending);
+	for (const status of [{ status: "accepted", result: { protocol_version: 1, ...result } },
+		{ status: "withdrawn", operation_id: pending.operationId, entry_id: id(3) }, { status: "unknown", operation_id: pending.operationId, entry_id: id(3) }]) {
+		const fetcher = jest.fn().mockResolvedValue(reply(200, status));
+		const transport = new BaseContentTransport(identity, credentials, fetcher);
+		expect((await transport.status(id(3), pending)).status).toBe(status.status);
+		expect(fetcher).toHaveBeenCalledTimes(1); expect(fetcher.mock.calls[0][0]).toMatch(/base-content\/status$/);
+		expect(new Headers(fetcher.mock.calls[0][1].headers).has("X-Relay-Restore-Generation")).toBe(false);
+	}
+	for (const invalid of [{ status: "unknown", operation_id: id(8), entry_id: id(3) }, { status: "unknown", operation_id: pending.operationId, entry_id: id(8) },
+		{ status: "unknown", operation_id: pending.operationId, entry_id: id(3), result }, { status: "accepted", result: { protocol_version: 1, ...result, operation_id: id(8) } }]) {
+		await expect(new BaseContentTransport(identity, credentials, async () => reply(200, invalid)).status(id(3), pending)).rejects.toMatchObject({ code: "invalid_base_response" });
+	}
+	let resume!: (value: Awaited<ReturnType<typeof credentials>>) => void;
+	const fetcher = jest.fn().mockResolvedValue(reply(200, { status: "accepted", result: { protocol_version: 1, ...result } }));
+	const token = new Promise<Awaited<ReturnType<typeof credentials>>>(resolve => { resume = resolve; });
+	const checking = new BaseContentTransport(identity, () => token, fetcher).status(id(3), pending);
+	new Uint8Array(pending.bytes).fill(0); pending.expected.path = "Other.base"; resume(await credentials()); await checking;
+	expect(JSON.parse(fetcher.mock.calls[0][1].body).content_base64).toBe(encodeBaseBytes(bytes("new")));
+});
