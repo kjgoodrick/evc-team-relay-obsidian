@@ -1,5 +1,6 @@
 import { ItemKind } from "./ItemKinds";
 import { LocalDocumentStore } from "./storage/local-document-store";
+import type { SourceCacheDescriptor } from "./storage/source-document-cache";
 import { trackNativeDocumentWrite } from "./storage/native-document-writes";
 import * as Y from "yjs";
 import { ProviderBacked } from "./ProviderBacked";
@@ -56,6 +57,9 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	_unsavedFileStore?: UnsavedFileStore;
 	_teardownCallbacks: Unsubscriber[] = [];
 	queuedTextOps: ((data: string) => string)[] = [];
+	private readonly sourceCache?: Readonly<SourceCacheDescriptor & { bufferKey: string }>;
+	private readonly selectedRestoreGeneration: string | null = null;
+	private get bufferKey(): string { return this.sourceCache?.bufferKey ?? this.entityGuid; }
 
 	constructor(
 		path: string,
@@ -66,7 +70,11 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 		const s3rn = parent.workspaceId
 			? new RemoteDocumentAddress(parent.workspaceId, parent.entityGuid, guid)
 			: new DocumentAddress(parent.entityGuid, guid);
-		super(guid, s3rn, parent.credentialCache, loginManager, parent.config.onpremServerId);
+		parent.sourceSelection?.assertFolder(parent.hostAppId, parent.config.onpremServerId, ResourceAddress.serialize(parent.resourceAddress));
+		const sourceCache = parent.sourceSelection?.document(ResourceAddress.serialize(s3rn));
+		super(guid, s3rn, parent.credentialCache, loginManager, parent.config.onpremServerId, parent.sourceSelection?.binding, parent.sourceSelection);
+		this.sourceCache = sourceCache;
+		this.selectedRestoreGeneration = parent.sourceSelection?.binding?.restoreGeneration ?? null;
 
 		this._parent = parent;
 		this.entryPath = path;
@@ -99,14 +107,15 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	}
 	get restoreReviewRequired(): boolean {
 		const index = this._parent?._liveProvider?.managedIndex;
-		// This legacy document cache still belongs to the original lineage.
-		return !!index?.restoreReview || !!index?.snapshot?.restore_generation || super.restoreReviewRequired;
+		const generation = index?.snapshot?.restore_generation;
+		const selected = this.selectedRestoreGeneration ?? null;
+		return !!index?.restoreReview || generation !== undefined && generation !== selected || super.restoreReviewRequired;
 	}
 
 	private openPersistence(): LocalDocumentStore {
 		try {
-			const key = `${this.vaultShare.hostAppId}-relay-doc-${this.entityGuid}`;
-			return new LocalDocumentStore(key, this.crdtDoc);
+			const key = this.sourceCache?.name ?? `${this.vaultShare.hostAppId}-relay-doc-${this.entityGuid}`;
+			return new LocalDocumentStore(key, this.crdtDoc, this.sourceCache?.identity);
 		} catch (e: unknown) {
 			this.warn("Unable to open persistence.", this.entityGuid);
 			console.error(e);
@@ -268,10 +277,9 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 		}
 		try {
 			const storedContents = await this._parent.unsavedStore
-				.readUnsaved(this.entityGuid)
-				.catch(() => null);
+				.readUnsaved(this.bufferKey);
 			const fileContents =
-				storedContents !== null && storedContents !== ""
+				storedContents !== null
 					? storedContents
 					: await this._parent.readContents(this);
 			return this.setUnsavedFile(fileContents.replace(/\r\n/g, "\n"));
@@ -288,7 +296,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 			this._unsavedFile = new UnsavedFile(this._parent.vaultApi, "local disk", contents);
 		}
 		this._parent.unsavedStore
-			.persistUnsaved(this.entityGuid, contents)
+			.persistUnsaved(this.bufferKey, contents)
 			.catch((e: unknown) => {});
 		return this._unsavedFile;
 	}
@@ -298,7 +306,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 			this._unsavedFile.unsavedText = "";
 			this._unsavedFile = undefined;
 		}
-		await this._parent.unsavedStore.discardUnsaved(this.entityGuid).catch((e: unknown) => {});
+		await this._parent.unsavedStore.discardUnsaved(this.bufferKey).catch((e: unknown) => {});
 	}
 
 	/**
@@ -530,7 +538,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	}
 
 	public dispose(): void {
-		void this._unsavedFileStore?.discardUnsaved(this.entityGuid);
+		void this._unsavedFileStore?.discardUnsaved(this.bufferKey);
 	}
 
 	// Helper method to update file stats

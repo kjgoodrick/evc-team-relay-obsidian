@@ -27,6 +27,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
+import type { SourceSelectionContext } from "./storage/source-selection-context";
 import { trackNativeDocumentWrite, trackNativeSourceMutation, waitForNativeDocumentWrites } from "./storage/native-document-writes";
 import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
@@ -286,12 +287,14 @@ export class VaultShare extends ProviderBacked {
 		// createLocalVaultShare, QuickShareModal) -- see the field's own
 		// comment above for why this must stay separate from isAuthority.
 		freshlyCreated: boolean = false,
+		public readonly sourceSelection?: SourceSelectionContext,
 	) {
 		const s3rn = workspaceId
 			? new RemoteFolderAddress(workspaceId, guid)
 			: new FolderAddress(guid);
 
-		super(guid, s3rn, tokenStore, loginManager, _config.readValue().onpremServerId);
+		sourceSelection?.assertFolder(hostAppId, _config.readValue().onpremServerId, ResourceAddress.serialize(s3rn));
+		super(guid, s3rn, tokenStore, loginManager, _config.readValue().onpremServerId, sourceSelection?.binding, sourceSelection);
 		this.freshlyCreated = freshlyCreated;
 		this.path = path;
 		this.setLoggers(`[VaultShare](${this.path})`);
@@ -300,7 +303,7 @@ export class VaultShare extends ProviderBacked {
 		this.trackedEntries = new Map();
 		this.pathSet = new FileSet();
 		this.uploadClaims = new VaultScopedMap<string>(
-			`${hostAppId}-evc-team-relay/folders/${this.entityGuid}/pendingUploads`,
+			sourceSelection?.pendingUploadsKey ?? `${hostAppId}-evc-team-relay/folders/${this.entityGuid}/pendingUploads`,
 			this.obsidianApp,
 		);
 		this._pruneStalePendingUploads();
@@ -333,6 +336,7 @@ export class VaultShare extends ProviderBacked {
 		});
 
 		this._localDb = this._openPersistence();
+		if (sourceSelection) this.retainRestoreReviewIn(this._localDb);
 		// Read the stored records the moment they load, before any server
 		// change can reach the index (bringOnline() waits for the same load).
 		if (!this.freshlyCreated) void this.recordsBeforeSync();
@@ -419,6 +423,7 @@ export class VaultShare extends ProviderBacked {
 		const path = file.entryPath, id = file.entityGuid, server = this.config.onpremServerId;
 		const sharePath = this.path, shareId = this.entityGuid;
 		const check = () => {
+			this.sourceSelection?.check();
 			if (this.isTornDown || this._liveProvider !== provider || this._liveProvider?.managedIndex !== index || this.path !== sharePath || this.entityGuid !== shareId
 				|| file.vaultShare !== this || file.entryPath !== path
 				|| file.entityGuid !== id || this.config.onpremServerId !== server || this.isRecoveringStructure
@@ -435,6 +440,7 @@ export class VaultShare extends ProviderBacked {
 		const server = this.config.onpremServerId, provider = this._liveProvider, crdt = doc.crdtDoc;
 		const checkAuth = this.credentialCache.captureFileContext?.(ResourceAddress.serialize(doc.resourceAddress), server);
 		const check = () => {
+			this.sourceSelection?.check();
 			if (doc.restoreReviewRequired) throw new RelayRestoreRequiredError();
 			if (this.isTornDown || this.isRecoveringStructure || this.path !== sharePath || this.entityGuid !== shareId
 				|| this.config.onpremServerId !== server || this._liveProvider !== provider || doc.vaultShare !== this
@@ -779,7 +785,8 @@ export class VaultShare extends ProviderBacked {
 
 	private _openPersistence(): LocalDocumentStore {
 		try {
-			return new LocalDocumentStore(this.entityGuid, this.crdtDoc);
+			const descriptor = this.sourceSelection?.inventory;
+			return new LocalDocumentStore(descriptor?.name ?? this.entityGuid, this.crdtDoc, descriptor?.identity);
 		} catch (e: unknown) {
 			this.warn("IndexedDB persistence layer failed to open:", this.entityGuid);
 			console.error(e);

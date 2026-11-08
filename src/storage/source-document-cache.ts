@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { digest as sha256 } from "lib0/hash/sha256";
 import { ResourceAddress } from "../ResourceAddress";
 import { restoreGeneration, type RestoreBinding } from "../collaboration/RestoreGeneration";
 import { LocalDocumentStore } from "./local-document-store";
@@ -43,7 +44,7 @@ export function assertSourceCacheBinding(metadata: string, s3rn: string, serverI
 /** No token or transient login session belongs in a durable source identity.
  * Logging in again must not discard offline work. Authorization is checked by
  * the credential layer independently before this history can reach a server. */
-async function sourceCache(identity: SourceCacheIdentity, kind: CacheKind): Promise<Readonly<SourceCacheDescriptor>> {
+function sourceCache(identity: SourceCacheIdentity, kind: CacheKind): Readonly<SourceCacheDescriptor> {
 	for (const value of [identity.hostAppId, identity.serverId]) {
 		if (typeof value !== "string" || !value.trim() || value.length > 256) throw new Error("Invalid source cache identity");
 	}
@@ -53,13 +54,20 @@ async function sourceCache(identity: SourceCacheIdentity, kind: CacheKind): Prom
 		hostAppId: identity.hostAppId, serverId: identity.serverId,
 		controlPlaneUrl: endpoint, s3rn: identity.s3rn,
 		restoreGeneration: restoreGeneration(identity.restoreGeneration) });
-	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(metadata));
-	const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+	const hash = [...sha256(new TextEncoder().encode(metadata))].map(byte => byte.toString(16).padStart(2, "0")).join("");
 	return Object.freeze({ name: `relay-${kind}-v1-${hash}`, identity: metadata });
 }
 
 export async function sourceDocumentCache(identity: SourceDocumentIdentity): Promise<Readonly<SourceCacheDescriptor & { bufferKey: string }>> {
-	const descriptor = await sourceCache(identity, "source");
+	return sourceDocumentCacheSync(identity);
+}
+
+/** Constructors must select their cache before opening a provider or buffer.
+ * Hash only the bounded identity metadata; this does not read source contents,
+ * touch storage or choose a generation on the caller's behalf. The synchronous
+ * browser digest produces exactly the same names as the original WebCrypto API. */
+export function sourceDocumentCacheSync(identity: SourceDocumentIdentity): Readonly<SourceCacheDescriptor & { bufferKey: string }> {
+	const descriptor = sourceCache(identity, "source");
 	return Object.freeze({ ...descriptor, bufferKey: descriptor.name });
 }
 
@@ -67,6 +75,10 @@ export async function sourceDocumentCache(identity: SourceDocumentIdentity): Pro
  * The transport must also receive this selection; an empty cache is not consent
  * to adopt whichever server generation happens to answer first. */
 export async function sourceInventoryCache(identity: SourceInventoryIdentity): Promise<Readonly<SourceCacheDescriptor>> {
+	return sourceInventoryCacheSync(identity);
+}
+
+export function sourceInventoryCacheSync(identity: SourceInventoryIdentity): Readonly<SourceCacheDescriptor> {
 	return sourceCache(identity, "inventory");
 }
 

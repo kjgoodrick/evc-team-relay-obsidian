@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import type { VaultShare } from "./VaultShare";
 import { mimeTypeForPath } from "./mimeLookup";
 import { LocalDocumentStore } from "./storage/local-document-store";
+import type { SourceCacheDescriptor } from "./storage/source-document-cache";
 import { LazyValue } from "./asyncCache";
 import type { Unsubscriber } from "./notifiers/Notifier";
 import type {
@@ -75,6 +76,8 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	unsubscribes: Unsubscriber[] = [];
 	private _hasPendingCrdtUpdate: boolean = false;
 	private _hostCanvasRef: unknown;
+	private readonly sourceCache?: Readonly<SourceCacheDescriptor>;
+	private readonly selectedRestoreGeneration: string | null = null;
 
 	constructor(
 		path: string,
@@ -85,7 +88,11 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 		const s3rn = parent.workspaceId
 			? new RemoteCanvasAddress(parent.workspaceId, parent.entityGuid, guid)
 			: new CanvasAddress(parent.entityGuid, guid);
-		super(guid, s3rn, parent.credentialCache, loginManager, parent.config.onpremServerId);
+		parent.sourceSelection?.assertFolder(parent.hostAppId, parent.config.onpremServerId, ResourceAddress.serialize(parent.resourceAddress));
+		const sourceCache = parent.sourceSelection?.document(ResourceAddress.serialize(s3rn));
+		super(guid, s3rn, parent.credentialCache, loginManager, parent.config.onpremServerId, parent.sourceSelection?.binding, parent.sourceSelection);
+		this.sourceCache = sourceCache;
+		this.selectedRestoreGeneration = parent.sourceSelection?.binding?.restoreGeneration ?? null;
 
 		this._parent = parent;
 		this.entryPath = path;
@@ -120,13 +127,15 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	}
 	get restoreReviewRequired(): boolean {
 		const index = this._parent?._liveProvider?.managedIndex;
-		return !!index?.restoreReview || !!index?.snapshot?.restore_generation || super.restoreReviewRequired;
+		const generation = index?.snapshot?.restore_generation;
+		const selected = this.selectedRestoreGeneration ?? null;
+		return !!index?.restoreReview || generation !== undefined && generation !== selected || super.restoreReviewRequired;
 	}
 
 	private openPersistence(): LocalDocumentStore {
 		try {
-			const key = `${this.vaultShare.hostAppId}-relay-canvas-${this.entityGuid}`;
-			return new LocalDocumentStore(key, this.crdtDoc);
+			const key = this.sourceCache?.name ?? `${this.vaultShare.hostAppId}-relay-canvas-${this.entityGuid}`;
+			return new LocalDocumentStore(key, this.crdtDoc, this.sourceCache?.identity);
 		} catch (e: unknown) {
 			this.warn("Unable to open persistence.", this.entityGuid);
 			console.error(e);

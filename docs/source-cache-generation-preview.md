@@ -21,10 +21,11 @@ uses it for token acquisition, cached-grant checks, renewals, unsubscribe and
 restore pauses. An attached source cache must match the current server endpoint,
 document and generation before token use. An identified cache requires an
 explicit selection even when selecting the original, null generation. A restored provider attached to a
-legacy unbound cache is refused. The normal automatic `Document` and
-`CanvasDocument` paths still select their original lineage and remain paused
-after a restore; this change does not migrate their data or enable a Resume
-button.
+legacy unbound cache is refused. Explicit
+[journal-selected constructor contexts](source-selection-context-preview.md)
+now choose the folder, Markdown/Canvas and buffer namespaces together. The main
+automatic factory still omits that context, selects the original lineage and
+remains paused after a restore. No Resume button has been enabled.
 
 Folder inventories now have a separate `team-relay-inventory-cache` identity and
 `relay-inventory-v1-<sha256>` namespace. Their canonical folder address cannot be
@@ -43,7 +44,8 @@ store. Tests verify that old and new histories, quarantine markers and buffers
 survive independently across reopen. The API does not read or import old cache
 or buffer keys. Its caller supplies the new document and explicitly selected
 identity; it must not transplant the previous document's state into that new
-document. Existing automatic source code still uses its legacy buffer keys.
+document. The constructor context threads the selected key through buffer reads,
+saves, clearing and disposal; calls without it keep their legacy buffer keys.
 
 The actual disposable FastAPI/Rust scenario rotates a share generation, pauses
 the original automatic client, and opens a separate source using the normal
@@ -72,7 +74,7 @@ their own buffers and private inventories. Identity and catalog changes during
 capture require a retry.
 
 Remaining integration includes the reviewed activation decision and durable
-selection-journal integration, automatic folder/document/buffer selection, native file
+selection-journal startup integration, automatic context selection, native file
 replacement, and draining or isolating older workers
 that still know original vault paths. Cache names alone cannot stop an old
 window writing a native file. Production maintenance/admission/cutover, original-request

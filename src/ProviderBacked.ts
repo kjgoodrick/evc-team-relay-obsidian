@@ -22,6 +22,7 @@ import { decodeJwt } from "jose";
 import type { NotePresenceSurface } from "./collaboration/presence/PresenceSettings";
 import type { LocalDocumentStore } from "./storage/local-document-store";
 import { restoreMetadata, type RestoreBinding } from "./collaboration/RestoreGeneration";
+import type { SourceSelectionContext } from "./storage/source-selection-context";
 
 const EMPTY_TOKEN: DocumentGrant = {
 	token: "",
@@ -134,6 +135,7 @@ export class ProviderBacked extends Loggable {
 	private restorePaused = false;
 	private restorePersistence?: LocalDocumentStore;
 	private readonly restoreBinding: RestoreBinding;
+	private readonly selectionIdentity?: string;
 	private readonly sourceSelectionExplicit: boolean;
 	private detachAuthSession?: () => void;
 	private detachProfileRefresh?: () => void;
@@ -160,9 +162,11 @@ export class ProviderBacked extends Loggable {
 		// Immutable selection for a separately opened source cache. Existing
 		// automatic documents retain the original lineage by omitting it.
 		initialRestoreBinding?: RestoreBinding,
+		private readonly selectionContext?: SourceSelectionContext,
 	) {
 		super();
 		this.restoreBinding = Object.freeze(restoreMetadata(initialRestoreBinding ?? {}));
+		this.selectionIdentity = selectionContext?.identityFor(ResourceAddress.serialize(_resourceAddress));
 		this.sourceSelectionExplicit = initialRestoreBinding !== undefined;
 		this.authSession = authSession;
 		// Per-server, NOT the plugin-wide `authSession.currentUser` — that
@@ -240,6 +244,10 @@ export class ProviderBacked extends Loggable {
 	}
 	/** Source writes and token acquisition both honor durable restore review. */
 	async assertNoRestoreReview(): Promise<void> {
+		if (this.selectionContext) {
+			try { await this.selectionContext.assertCurrent(); }
+			catch (error) { this.goOffline(); throw error; }
+		}
 		const store = this.restorePersistence;
 		if (store) {
 			await store.loadRestoreReview();
@@ -249,6 +257,9 @@ export class ProviderBacked extends Loggable {
 		if (this.restoreReviewRequired) { this.pauseForRestore(); throw new RelayRestoreRequiredError(); }
 	}
 	private assertSourceCacheBinding(): void {
+		this.selectionContext?.check();
+		if (this.selectionIdentity !== undefined) this.credentialCache.assertDocumentSourceCache(this.selectionIdentity,
+			ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding);
 		const store = this.restorePersistence;
 		if (!store) return; // A low-level provider may have no local source store.
 		if (store.cacheIdentity !== undefined) {
@@ -440,16 +451,29 @@ export class ProviderBacked extends Loggable {
 	}
 
 	async requestProviderToken(): Promise<DocumentGrant> {
-		if (this.restorePersistence) await this.assertNoRestoreReview();
+		if (this.restorePersistence || this.selectionContext) await this.assertNoRestoreReview();
 		if (this.restoreReviewRequired) throw new RelayRestoreRequiredError();
 		this.log("requesting a provider token");
-		return this.credentialCache.getToken(
+		let applied: { token: DocumentGrant; completion: Promise<void> } | undefined;
+		const receive = this.selectionContext ? (grant: DocumentGrant) => {
+			const completion = this.applySelectedToken(grant);
+			applied = { token: grant, completion };
+			// This callback is also retained by background token renewal. Observe
+			// failures even after the original request has finished awaiting it.
+			void completion.catch(error => this.warn("Selected source token was not applied", error));
+		} : this.applyRefreshedToken.bind(this);
+		const token = await this.credentialCache.getToken(
 			ResourceAddress.serialize(this.resourceAddress),
 			this.getVaultPath(),
-			this.applyRefreshedToken.bind(this),
+			receive,
 			this.getOnpremServerId(),
 			this.restoreBinding,
 		);
+		if (this.selectionContext) {
+			await (applied?.token === token ? applied.completion : this.applySelectedToken(token));
+			await this.assertNoRestoreReview();
+		}
+		return token;
 	}
 
 	hasFreshProviderToken(): boolean {
@@ -477,7 +501,15 @@ export class ProviderBacked extends Loggable {
 		return !!this.issuedToken?.token && Date.now() + RECONNECT_TOKEN_MARGIN_MS <= expiry;
 	}
 
-	applyRefreshedToken(clientToken: DocumentGrant): void {
+	applyRefreshedToken(clientToken: DocumentGrant): void | Promise<void> {
+		if (this.selectionContext) return this.applySelectedToken(clientToken).catch(error => this.warn("Selected source token was not applied", error));
+		this.applyToken(clientToken);
+	}
+	private async applySelectedToken(clientToken: DocumentGrant): Promise<void> {
+		try { await this.assertNoRestoreReview(); this.applyToken(clientToken); }
+		catch (error) { this.goOffline(); throw error; }
+	}
+	private applyToken(clientToken: DocumentGrant): void {
 		if (this.restoreReviewRequired || !this.sourceCacheBindingCurrent()) return;
 		if (this.credentialCache.isDocumentGrantCurrent?.(clientToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId(), this.restoreBinding) === false) return;
 		// point the live provider connection at the freshly-issued token
@@ -616,7 +648,7 @@ export class ProviderBacked extends Loggable {
 	}
 
 	public async ensureActiveProvider<T extends ProviderBacked>(this: T): Promise<T> {
-		if (this.restorePersistence) await this.assertNoRestoreReview();
+		if (this.restorePersistence || this.selectionContext) await this.assertNoRestoreReview();
 		if (this.hasFreshProviderToken()) {
 			return Promise.resolve(this);
 		}
