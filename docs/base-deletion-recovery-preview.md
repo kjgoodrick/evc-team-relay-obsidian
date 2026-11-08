@@ -43,6 +43,54 @@ managed inventory transport, recovery modal, native creation and guarded sync.
 The fixture is closed and its services stopped. Local evidence:
 `/private/tmp/base-deletion-native-evidence.json`.
 
+## Offline deletion and competing edits
+
+A second native Obsidian **1.13.7** fixture at
+`/private/tmp/evc-base-offline-native-20261107` verifies the explicit shared-folder
+**Relay: disconnect/connect** workflow. This control takes sync offline; the
+separate Disconnect button in share management unlinks a local folder and is
+not used for this test.
+
+1. Start with a synchronized Base, disconnect the share, then delete the Base
+   through the native file command. Independent API readback confirms the server
+   still holds the original while the local file is absent.
+2. Fully reload Obsidian. The share remains disconnected, the local deletion
+   persists and the server remains unchanged.
+3. Reconnect. The original identity is retired, the local file stays absent,
+   and Bases recovery offers the retained synchronized copy.
+4. **Restore as new file** creates a distinct managed identity with identical
+   bytes. The source note remains unchanged.
+5. Disconnect again and delete that restored file. Publish a competing edit
+   through the real content API before reconnecting. Native Obsidian reports
+   **Deleted locally** versus the current server path; the conflict survives a
+   full reload and the server's newer bytes remain intact.
+6. **Use server layout** resolves the structural conflict and writes its private
+   recovery record. Bases content still requires explicit **Review copies →
+   Use server** because the local file is missing. This second review displays
+   the competing edit; after acceptance the file is Up to date and byte-for-byte
+   equal to the unchanged server snapshot. Layout selection alone is not content
+   restoration.
+
+This fixture is closed and its services stopped. Local evidence:
+`/private/tmp/base-offline-native-evidence.json`.
+
+Five opt-in integration cases in `__tests__/bases/realBaseLifecycle.test.ts` also
+pass against disposable actual HTTP services, the private Yjs inventory and the
+IndexedDB store. They cover lost accepted deletion responses across two client
+restarts; retained baseline and unsent bytes after retirement; deletion versus a
+newer content version; a fresh identity at a retired path; a new remote child
+blocking an offline folder deletion; and a concurrent move preventing deletion
+of the moved Base. The missing-file host port and IndexedDB runtime are test
+adapters; those cases do not substitute for the native checks above.
+
+From the control-plane directory, run with the plugin dependencies and relay
+binary available:
+
+```sh
+.venv/bin/python tests/integration/managed_stack.py \
+  --plugin /path/to/evc-team-relay-obsidian --base-lifecycle
+```
+
 ## Verification and remaining work
 
 **3,309 tests / 251 suites** pass, with production build/main types and the frozen
@@ -52,7 +100,9 @@ account changes, parent replacement at three asynchronous boundaries, and an
 untracked cache record's status. Controlled races complement native ordinary
 deletion/restoration; they are not native crash-race evidence.
 
-Offline local deletion/reconnect, arbitrary external renames, nested-folder
-deletion/moves, broader restore races, cache reclamation and mobile acceptance
-remain. The prior native remote-deletion/offline-edit recovery checks remain
+The added five real-service cases, frozen test-type gate and harness Ruff checks
+pass. This increment changes acceptance coverage rather than runtime behavior.
+Arbitrary external renames, native nested-folder deletion/moves, broader restore
+races, cache reclamation and mobile acceptance remain. The prior native
+remote-deletion/offline-edit recovery checks remain
 separate evidence. Production and live-vault behavior have not been exercised.
