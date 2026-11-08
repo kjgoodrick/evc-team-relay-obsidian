@@ -4,6 +4,7 @@ import { BlobClient } from "../../src/BlobClient";
 import { RelayCredentialCache } from "../../src/RelayCredentialCache";
 import { RelayOnPremTokenProvider } from "../../src/auth/RelayOnPremTokenProvider";
 import { ManagedIndexTransport } from "../../src/client/ManagedIndexTransport";
+import { readManagedAttachment } from "../../src/client/readManagedAttachment";
 import { RemoteFileAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { sha256Hex } from "../../src/contentDigest";
 import type { AttachmentFile } from "../../src/AttachmentFile";
@@ -56,6 +57,9 @@ integration("actual attachment client checks uploads and reads verified distinct
 		expect((await fetch(readGrant.baseUrl + "/upload-url", { method: "POST", headers: { Authorization: `Bearer ${readGrant.token}` } })).status).toBe(403);
 		expect((await fetch(inspectionUrl, { method: "PUT", body: "first exact image revision" })).status).toBe(403);
 		await expect(cache.requestFileInspectionToken(ResourceAddress.serialize(file.s3rn), revisions[0], "image/png", "fixture", {})).rejects.toThrow("read-only attachment grant");
+		const preview = await readManagedAttachment(cache, ResourceAddress.serialize(file.s3rn), revisions[0], "fixture", { restoreGeneration: f.generation });
+		preview.check(); expect(new TextDecoder().decode(preview.content)).toBe("first exact image revision");
+		await expect(readManagedAttachment(cache, ResourceAddress.serialize(file.s3rn), revisions[0], "fixture", { restoreGeneration: f.generation }, { maxBytes: 2 })).rejects.toThrow("unsupported size");
 		const oldUrl = `${f.base}/shares/${f.share}/files/${f.entry}/content?token=${f.oldToken}`;
 		expect((await fetch(oldUrl, { method: "PUT", body: "original credential" })).status).toBe(409);
 		const bad = await provider.requestFileToken("relay-onprem", f.share, f.entry, "a".repeat(64), "image/png", 3, { restoreGeneration: f.generation });

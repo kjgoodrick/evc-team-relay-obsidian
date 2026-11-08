@@ -20,11 +20,24 @@ parsing. Inspection responses and transport failures do not enter network body
 diagnostics. A caller-supplied context check fences cancellation; the eventual
 download coordinator must supply a deadline and discard late results.
 
-This is the credential boundary, not a completed native recovery downloader or
-activation UI. The current Obsidian `platformFetch` adapter buffers responses
-through `requestUrl`; a streaming transport or another genuinely bounded transfer
-mechanism is still required before the staging download adapter can promise
-receive-time limits. The ordinary attachment synchronization path is unchanged.
+`readManagedAttachment` now consumes the fresh grant using an abortable streaming
+GET, with no ordinary attachment object, local write, upload or cache renewal.
+It requires the exact configured endpoint/share/file, refuses redirects and
+omits cookies/referrers. It checks the captured account/server/caller context and
+grant expiry while reading, bounds decoded bytes to the caller's budget and the
+server's 25 MiB attachment limit, and verifies SHA-256 before returning content.
+Identity responses with a declared length must match it exactly; compressed or
+chunked responses grow a bounded buffer and still verify the decoded digest.
+Timeout/cancellation abort the request and release its reader; late credentials
+or responses cannot deliver content. Server inspection content uses `no-store`.
+
+This helper is not connected to native recovery preparation/activation yet.
+Its default streaming `fetch` requires a host with streaming support and a server
+CORS configuration allowing that native host's origin. Those desktop/mobile
+conditions still need verification; no origin policy or live configuration was
+changed. The current Obsidian `platformFetch` adapter buffers responses through
+`requestUrl` and cannot substitute for this helper's streaming transport. There
+is no buffered fallback. The ordinary attachment synchronization path is unchanged.
 
 Validation includes managed and legacy grants, owner/read-only member access,
 both upload paths, explicit null and restored generations, permission/session
@@ -39,3 +52,10 @@ The focused server suite passes 60 tests; client credential/context checks pass
 27 opt-in suites skipped). Main types, changed-source lint, unchanged test-type
 ratchet (205 errors/44 signatures versus 207/46) and production preview build
 pass, with 15 existing build warnings.
+
+The subsequent streaming helper adds coverage for exact and unknown lengths,
+compressed decoded bytes, a larger multi-chunk body, empty files, digest
+mismatches, byte limits before/during reads, refused/redirected URLs, expired
+grants, cancellation during authentication, stalled/late responses and account
+changes while reading. The real HTTP/MinIO fixture also exercises the helper's
+successful selected-revision download and a lower caller-budget refusal.
