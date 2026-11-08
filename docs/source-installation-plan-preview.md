@@ -59,8 +59,10 @@ mobile/resource measurements remain to be evaluated for larger histories.
 
 The verifier is read-only and returns data, not activation authority. It proves
 artifact integrity and internal content consistency, not current server
-permission/generation, trusted download provenance or stopped writers. Exclusive
-staging publication, the native installer, resumable installation and user-facing
+permission/generation, trusted download provenance or stopped writers. A
+[staging primitive](source-installation-staging-preview.md) now builds and verifies
+artifacts in a new directory through an exclusive-creation adapter contract.
+Production adapters, the native installer, resumable installation and user-facing
 activation still need connection. Every write must recheck the journal,
 destination isolation and bytes; an earlier verification cannot prevent later
 filesystem changes.
