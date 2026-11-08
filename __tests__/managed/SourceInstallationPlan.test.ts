@@ -82,6 +82,8 @@ test.each([
 	["future version", (p: any) => { p.version = 2; }],
 	["replacement mode", (p: any) => { p.mode = "replace-folder"; }],
 	["missing generation", (p: any) => { delete p.source.restoreGeneration; }],
+	["invalid managed folder", (p: any) => { p.source.s3rn = "s3rn:relay:relay:relay-onprem:folder:invalid"; }],
+	["noncanonical managed folder", (p: any) => { p.source.s3rn = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA")); }],
 	["credential URL", (p: any) => { p.source.controlPlaneUrl = "https://secret@fixture.test"; }],
 	["noncanonical URL", (p: any) => { p.source.controlPlaneUrl += "/"; }],
 	["same root", (p: any) => { p.destinationRoot = "TEAM"; }],
@@ -95,13 +97,16 @@ test.each([
 	["stream path", (p: any) => { p.entries[1].path = "Notes/a:stream"; }],
 	["trailing space", (p: any) => { p.entries[1].path = "Notes/Note.md "; }],
 	["Unicode alias", (p: any) => { p.entries[1].path = "Notes/e\u0301.md"; }],
+	["unpaired surrogate", (p: any) => { p.entries[1].path = "Notes/\uD800.md"; }],
 	["duplicate identity", (p: any) => { p.entries[1].record.id = p.entries[0].record.id; }],
 	["uppercase identity", (p: any) => { p.entries[1].record.id = "00000000-0000-4000-8000-00000000ABCD"; }],
 	["oversized path component", (p: any) => { p.entries[1].path = "Notes/" + "é".repeat(128); }],
+	["oversized UTF-8 path", (p: any) => { p.entries[1].path = Array(9).fill("é".repeat(120)).join("/"); }],
 	["duplicate path", (p: any) => { p.entries[2].path = p.entries[1].path; }],
 	["case alias", (p: any) => { p.entries[2].path = "notes/note.md"; }],
 	["parent case alias", (p: any) => { p.entries[2].path = "notes/Other.png"; }],
 	["file parent", (p: any) => { p.entries[1].path = "Picture.png/Note.md"; }],
+	["file added after its child", (p: any) => { p.entries[0].path = "Picture.png/Folder"; }],
 	["missing history", (p: any) => { delete p.entries[1].source; }],
 	["folder bytes", (p: any) => { p.entries[0].file = p.entries[1].file; }],
 	["wrong attachment hash", (p: any) => { p.entries[2].record.hash = "a".repeat(64); }],
@@ -112,6 +117,33 @@ test.each([
 ])("invalid %s is refused before the plan is encoded", async (_label, change) => {
 	const { plan } = await fixture(); change(plan);
 	expect(() => parseSourceInstallationPlan(plan)).toThrow(); await expect(encodeSourceInstallationPlan(plan)).rejects.toThrow();
+});
+
+test("shared deep path prefixes use a bounded tree and preserve exact spellings", async () => {
+	const { plan } = await fixture(), sample = plan.entries[1], prefix = Array(500).fill("p").join("/");
+	plan.entries = Array.from({ length: 300 }, (_, i) => ({ ...sample, path: `${prefix}/Note${i}.md`, record: { ...sample.record, id: id(1000 + i) } }));
+	expect(parseSourceInstallationPlan(plan).entries).toHaveLength(300);
+	plan.entries[299].path = "P" + plan.entries[299].path.slice(1);
+	expect(() => parseSourceInstallationPlan(plan)).toThrow();
+});
+
+test("well-formed supplementary Unicode remains a valid native path", async () => {
+	const { plan } = await fixture(); plan.entries[1].path = "Notes/😀.md";
+	expect(parseSourceInstallationPlan(plan).entries[1].path).toBe("Notes/😀.md");
+});
+
+test.each(["distinct nodes", "repeated components"])("excessive path-tree %s are refused even within the entry and byte limits", async kind => {
+	const { plan } = await fixture(), sample = plan.entries[1], prefix = Array(600).fill("p").join("/");
+	plan.entries = Array.from({ length: kind === "distinct nodes" ? 200 : 2000 }, (_, i) => ({ ...sample,
+		path: kind === "distinct nodes" ? `Root${i}/${prefix}/Note.md` : `${prefix}/Note${i}.md`, record: { ...sample.record, id: id(1000 + i) } }));
+	expect(() => parseSourceInstallationPlan(plan)).toThrow();
+});
+
+test("combined destination limits count UTF-8 bytes instead of UTF-16 units", async () => {
+	const { plan } = await fixture(), name = [...Array(8).fill("é".repeat(120)), "é".repeat(60)].join("/");
+	expect(new TextEncoder().encode(name).byteLength).toBe(2048);
+	plan.destinationRoot = name; plan.entries[1].path = name;
+	expect(() => parseSourceInstallationPlan(plan)).toThrow();
 });
 
 test.each(["plan.json", "inventory.yjs", `files/${id(6)}.bin`, `sources/${id(6)}.yjs`, `files/${id(7)}.bin`])("corrupted artifact %s prevents restart verification", async name => {

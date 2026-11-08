@@ -26,8 +26,12 @@ add Canvas or PDF commenting.
 Validation rejects duplicate identities, unknown fields/versions, missing source
 generation, noncanonical endpoints/IDs, unsafe paths, Unicode/case aliases in
 files or parent directories, file/directory collisions, hidden/system paths and
-common Windows filename hazards. Path components are limited to 255 UTF-8 bytes;
-whole native destination paths are bounded to 4,096 characters. Plans are limited
+common Windows filename hazards. Unpaired surrogates are rejected so encoding
+cannot silently alias another filename. Path components are limited to 255 UTF-8
+bytes, relative paths to 2,048 bytes and combined native destinations to 4,096
+bytes. A component tree checks aliases and file/directory collisions in either
+entry order without constructing every full prefix repeatedly. It is bounded to
+100,000 distinct nodes and 1,000,000 visited components per plan. Plans are limited
 to 10,000 entries and 16 MiB JSON, each source/inventory update to 16 MiB, each
 native artifact to 256 MiB and all staged bytes to 64 GiB. Larger inputs need a
 future streaming path; they cannot silently create a partial installation plan.
@@ -62,7 +66,9 @@ artifact integrity and internal content consistency, not current server
 permission/generation, trusted download provenance or stopped writers. A
 [staging primitive](source-installation-staging-preview.md) now builds and verifies
 artifacts in a new directory through an exclusive-creation adapter contract.
-Production adapters, the native installer, resumable installation and user-facing
+[Bounded downloads](source-installation-downloads-preview.md) and an
+[exclusive desktop staging adapter](source-installation-host-io-preview.md) are
+implemented. The native installer, resumable installation and user-facing
 activation still need connection. Every write must recheck the journal,
 destination isolation and bytes; an earlier verification cannot prevent later
 filesystem changes.

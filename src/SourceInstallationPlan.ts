@@ -4,6 +4,7 @@ import { sha256Hex } from "./contentDigest";
 import { restoreGeneration } from "./collaboration/RestoreGeneration";
 import { verifyRecoveryArchive, type RecoveryArchiveReader, type RecoveryArchiveReference } from "./ManagedRecoveryArchive";
 import { sourceInventoryCacheSync, type SourceInventoryIdentity } from "./storage/source-document-cache";
+import { ResourceAddress, RemoteFolderAddress } from "./ResourceAddress";
 
 export interface InstallationArtifact { bytes: number; sha256: string }
 export interface InstallationEntry {
@@ -29,6 +30,10 @@ export interface SourceInstallationReference { id: string; sha256: string }
 export interface SourcePlanVerificationOptions { check?: () => void; signal?: AbortSignal; timeoutMs?: number }
 const MAX_PLAN = 16 * 1024 * 1024, MAX_SOURCE = 16 * 1024 * 1024, MAX_FILE = 256 * 1024 * 1024;
 const MAX_ENTRIES = 10_000, MAX_TOTAL = 64 * 1024 ** 3, hashPattern = /^[a-f0-9]{64}$/;
+const MAX_PATH_NODES = 100_000;
+const MAX_PATH_COMPONENTS = 1_000_000;
+const utf8 = new TextEncoder();
+interface PathNode { spelling: string; kind?: string; children: Map<string, PathNode> }
 const fail = () => new Error("Invalid or unsupported source installation plan");
 function exact(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== keys.length
@@ -45,9 +50,9 @@ function digest(value: unknown): string {
 }
 const key = (path: string) => path.normalize("NFC").toLowerCase();
 function path(value: unknown): string {
-	if (typeof value !== "string" || !value || value.length > 2048 || value.normalize("NFC") !== value
-		|| /[\\:<>"|?*]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
-		|| value.split("/").some(part => !part || new TextEncoder().encode(part).byteLength > 255 || part.startsWith(".") || /[. ]$/.test(part)
+	if (typeof value !== "string" || !value || value.length > 2048 || utf8.encode(value).byteLength > 2048 || value.normalize("NFC") !== value
+		|| /[\\:<>"|?*]/.test(value) || /[\uD800-\uDFFF]/u.test(value) || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+		|| value.split("/").some(part => !part || part.length > 85 && utf8.encode(part).byteLength > 255 || part.startsWith(".") || /[. ]$/.test(part)
 			|| /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw fail();
 	return value;
 }
@@ -80,6 +85,9 @@ export function parseSourceInstallationPlan(value: unknown): SourceInstallationP
 	const source = { ...value.source } as unknown as SourceInventoryIdentity;
 	if (source.restoreGeneration === undefined || source.restoreGeneration !== null && uuid(source.restoreGeneration) !== source.restoreGeneration) throw fail();
 	const descriptor = sourceInventoryCacheSync(source);
+	const folder = ResourceAddress.parse(source.s3rn);
+	if (!(folder instanceof RemoteFolderAddress)) throw fail();
+	uuid(folder.folderGuid);
 	if (JSON.parse(descriptor.identity).controlPlaneUrl !== source.controlPlaneUrl) throw fail();
 	exact(value.archive, ["path", "manifestSha256"]);
 	const archive = { path: path(value.archive.path), manifestSha256: digest(value.archive.manifestSha256) };
@@ -87,32 +95,38 @@ export function parseSourceInstallationPlan(value: unknown): SourceInstallationP
 	const originalRoot = path(value.originalRoot), destinationRoot = path(value.destinationRoot);
 	if (overlaps(originalRoot, destinationRoot) || overlaps(originalRoot, RECOVERY_FOLDER) || overlaps(destinationRoot, RECOVERY_FOLDER)) throw fail();
 	if ([originalRoot, destinationRoot].some(root => root.split("/").some(part => key(part) === key(RECOVERY_FOLDER)))) throw fail();
-	const inventory = artifact(value.inventory, MAX_SOURCE), ids = new Set<string>(), names = new Map<string, string>(), spellings = new Map<string, string>();
-	let total = inventory.bytes;
+	const inventory = artifact(value.inventory, MAX_SOURCE), ids = new Set<string>();
+	const paths: PathNode = { spelling: "", children: new Map() };
+	let total = inventory.bytes, pathNodes = 0, pathComponents = 0;
 	const entries = value.entries.map((input): InstallationEntry => {
 		if (!input || typeof input !== "object" || Array.isArray(input)) throw fail();
 		const row = input as Record<string, unknown>, entryRecord = record(row.record);
 		const folder = entryRecord.type === "folder", editing = entryRecord.type === "markdown" || entryRecord.type === "canvas";
 		exact(row, ["path", "record", ...(folder ? [] : ["file"]), ...(editing ? ["source"] : [])]);
 		const name = path(row.path);
-		if (name.split("/").some(part => key(part) === key(RECOVERY_FOLDER)) || names.has(key(name)) || ids.has(entryRecord.id)) throw fail();
-		if (destinationRoot.length + 1 + name.length > 4096) throw fail();
+		if (name.split("/").some(part => key(part) === key(RECOVERY_FOLDER)) || ids.has(entryRecord.id)) throw fail();
+		if (utf8.encode(`${destinationRoot}/${name}`).byteLength > 4096) throw fail();
 		const parts = name.split("/");
-		for (let count = 1; count <= parts.length; count++) {
-			const prefix = parts.slice(0, count).join("/"), previous = spellings.get(key(prefix));
-			if (previous !== undefined && previous !== prefix) throw fail();
-			spellings.set(key(prefix), prefix);
+		pathComponents += parts.length; if (pathComponents > MAX_PATH_COMPONENTS) throw fail();
+		let node = paths;
+		for (const part of parts) {
+			if (node.kind !== undefined && node.kind !== "folder") throw fail();
+			const folded = key(part);
+			let child = node.children.get(folded);
+			if (!child) {
+				if (++pathNodes > MAX_PATH_NODES) throw fail();
+				child = { spelling: part, children: new Map() }; node.children.set(folded, child);
+			} else if (child.spelling !== part) throw fail();
+			node = child;
 		}
-		names.set(key(name), entryRecord.type); ids.add(entryRecord.id);
+		if (node.kind !== undefined || !folder && node.children.size) throw fail();
+		node.kind = entryRecord.type; ids.add(entryRecord.id);
 		const file = folder ? undefined : artifact(row.file), update = editing ? artifact(row.source, MAX_SOURCE) : undefined;
 		if (!folder && !editing && file!.sha256 !== entryRecord.hash) throw fail();
 		total += (file?.bytes ?? 0) + (update?.bytes ?? 0);
 		if (!Number.isSafeInteger(total) || total > MAX_TOTAL) throw fail();
 		return { path: name, record: entryRecord, ...(file ? { file } : {}), ...(update ? { source: update } : {}) };
 	});
-	for (const name of names.keys()) for (let slash = name.indexOf("/"); slash >= 0; slash = name.indexOf("/", slash + 1)) {
-		if (names.has(name.slice(0, slash)) && names.get(name.slice(0, slash)) !== "folder") throw fail();
-	}
 	return { format: value.format, version: 1, id: uuid(value.id), reviewId: uuid(value.reviewId), source, archive,
 		originalRoot, destinationRoot, mode: "new-folder", inventory, entries };
 }
