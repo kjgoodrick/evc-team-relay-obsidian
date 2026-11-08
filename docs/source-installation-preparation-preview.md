@@ -33,8 +33,11 @@ committed decision.
 This proves preparation against a fresh **inventory** read, not a global server
 freeze or a simultaneous snapshot of every editing document. Current server
 admission, relevant editing-history freshness, writer isolation and native-byte
-checks remain required at installation. Production host/download adapters,
-persisting the UI's operation intent, prepared-state resume/reconciliation UI,
+checks remain required at installation. The
+[download adapters](source-installation-downloads-preview.md) now supply isolated
+sources, bounded attachments and fresh read-only inventory, with native transport
+acceptance still pending. Production host I/O, persisting the UI's operation intent,
+prepared-state resume/reconciliation UI,
 native installation and final activation are not connected yet. No user-facing
 activation control is enabled by this API.
 

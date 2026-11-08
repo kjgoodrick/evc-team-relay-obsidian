@@ -1,6 +1,6 @@
 import { RelayCredentialCache } from "../src/RelayCredentialCache";
 import { RelayOnPremTokenProvider, RelayRestoreRequiredError } from "../src/auth/RelayOnPremTokenProvider";
-import { ResourceAddress, RemoteDocumentAddress } from "../src/ResourceAddress";
+import { ResourceAddress, RemoteDocumentAddress, RemoteFolderAddress } from "../src/ResourceAddress";
 import type { IAuthProvider } from "../src/auth/IAuthProvider";
 import type { AuthSession } from "../src/AuthSession";
 import type { App } from "obsidian";
@@ -78,6 +78,25 @@ test("source inspection refuses an unavailable selected server before any reques
 	const s = setup();
 	await expect(s.cache.requestSourceInspectionToken(address, "Note.md", "missing", {})).rejects.toThrow("available server");
 	expect(fetch).not.toHaveBeenCalled();
+});
+
+test("inventory inspection requires a fresh read grant for the captured generation", async () => {
+	const s = setup(), root = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", share)), binding = { restoreGeneration: generation };
+	const writer = await s.cache.getToken(root, "", jest.fn(), "a", binding);
+	const one = await s.cache.requestInventoryInspectionToken(root, "a", binding);
+	const two = await s.cache.requestInventoryInspectionToken(root, "a", binding);
+	expect(one.grant.authorization).toBe("read-only"); expect(two.grant).not.toBe(one.grant);
+	expect(s.cache.peekToken(root, "a", binding)).toBe(writer);
+	expect(JSON.parse(fetch.mock.calls[1][1]!.body as string)).toMatchObject({ share_id: share, doc_id: share, mode: "read" });
+	one.check(); s.state.token = jwt("replacement"); expect(one.check).toThrow("changed");
+});
+
+test("inventory inspection rejects a restored generation even when ordinary index discovery allows it", async () => {
+	const s = setup(), root = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", share));
+	fetch.mockResolvedValueOnce(response("a", generation));
+	await expect(s.cache.requestInventoryInspectionToken(root, "a", {})).rejects.toThrow("read-only inventory context");
+	await expect(s.cache.requestInventoryInspectionToken(address, "a", {})).rejects.toThrow("managed folder");
+	expect(fetch).toHaveBeenCalledTimes(1);
 });
 
 test("identical document IDs on two servers have independent requests, grants and callbacks", async () => {

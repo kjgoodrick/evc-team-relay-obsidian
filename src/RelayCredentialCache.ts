@@ -5,7 +5,7 @@ import { AuthSession } from "./AuthSession";
 import { namedLogger } from "./logging";
 import type { DocumentGrant, FileGrant } from "./relay/TokenShapes";
 import type { App } from "obsidian";
-import { ResourceAddress, type ResourceAddressType, RemoteFileAddress } from "./ResourceAddress";
+import { ResourceAddress, type ResourceAddressType, RemoteFileAddress, RemoteFolderAddress } from "./ResourceAddress";
 import { platformFetch } from "./platformFetch";
 import { refresh as universalRefresh } from "./RelayCredentialRefresh";
 import {
@@ -121,6 +121,26 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		check();
 		if (grant.authorization !== "read-only" || grant.docId !== id || (grant.restoreGeneration ?? null) !== (binding.restoreGeneration ?? null)) {
 			throw new Error("The server did not return the requested read-only source context");
+		}
+		return { grant, check };
+	}
+	/** A recovery inventory refresh may read the selected generation, but must
+	 * never borrow a writer grant or join the ordinary index refresh loop. */
+	async requestInventoryInspectionToken(documentId: string, serverId: string | undefined, binding: RestoreBinding, checkContext = () => {}): Promise<{ grant: DocumentGrant; check: () => void }> {
+		binding = Object.freeze(restoreMetadata(binding));
+		const address = ResourceAddress.parse(documentId), source = this.captureDocumentSourceContext(serverId);
+		if (!source || !(address instanceof RemoteFolderAddress) || ResourceAddress.serialize(address) !== documentId) {
+			throw new Error("A managed folder and available server are required for inspection");
+		}
+		const provider = this.relayOnPremProviders.get(source.serverId)!;
+		const check = () => { source.check(); checkContext(); };
+		check();
+		const grant = await provider.requestToken(address.relayGuid, address.folderGuid, address.folderGuid, "read", undefined, binding, check);
+		check();
+		if (grant.authorization !== "read-only" || grant.docId !== address.folderGuid || grant.folder !== address.folderGuid
+			|| grant.restoreGuard !== true || (grant.restoreGeneration ?? null) !== (binding.restoreGeneration ?? null)
+			|| !grant.token || !grant.expiryTime || grant.expiryTime <= Date.now()) {
+			throw new Error("The server did not return the requested read-only inventory context");
 		}
 		return { grant, check };
 	}

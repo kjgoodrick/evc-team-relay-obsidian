@@ -399,6 +399,7 @@ export class RelayOnPremTokenProvider {
 			const fetched = platformFetch(
 				`${endpoint}/v1/tokens/relay`,
 				{
+					sensitive: true,
 					method: "POST",
 					headers: {
 						"Content-Type": "application/json",

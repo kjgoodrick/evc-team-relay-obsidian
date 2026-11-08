@@ -5,7 +5,9 @@ import { RelayCredentialCache } from "../../src/RelayCredentialCache";
 import { RelayOnPremTokenProvider } from "../../src/auth/RelayOnPremTokenProvider";
 import { ManagedIndexTransport } from "../../src/client/ManagedIndexTransport";
 import { readManagedAttachment } from "../../src/client/readManagedAttachment";
-import { RemoteFileAddress, ResourceAddress } from "../../src/ResourceAddress";
+import { readManagedInventory } from "../../src/client/readManagedInventory";
+import { createSourceInstallationDownloads } from "../../src/SourceInstallationDownloads";
+import { RemoteFileAddress, RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { sha256Hex } from "../../src/contentDigest";
 import type { AttachmentFile } from "../../src/AttachmentFile";
 import type { VaultShare } from "../../src/VaultShare";
@@ -34,6 +36,16 @@ integration("actual attachment client checks uploads and reads verified distinct
 	const blobs = new BlobClient(share);
 	try {
 		await index.flush(); expect(index.snapshot.restore_generation).toBe(f.generation);
+		const folderAddress = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", f.share));
+		const inspectedInventory = await readManagedInventory(cache, folderAddress, "fixture", { restoreGeneration: f.generation });
+		expect(inspectedInventory.records).toEqual(index.snapshot.records);
+		const readonlyIndex = (await cache.requestInventoryInspectionToken(folderAddress, "fixture", { restoreGeneration: f.generation })).grant;
+		expect((await fetch(`${readonlyIndex.url}/${f.share}`, { method: "POST", headers: { Authorization: `Bearer ${readonlyIndex.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ changes: [], activity: {} }) })).status).toBe(403);
+		const sourceIdentity = { hostAppId: "fixture", serverId: "fixture", controlPlaneUrl: f.base, s3rn: folderAddress, restoreGeneration: f.generation };
+		const installation = createSourceInstallationDownloads(cache, sourceIdentity, inspectedInventory);
+		const legacyBytes = await installation.attachment({ path: "Legacy.png", record: inspectedInventory.records["Legacy.png"] }, sourceIdentity, 1024);
+		expect(new TextDecoder().decode(legacyBytes)).toBe("verified legacy attachment fixture");
+		expect((await installation.revalidate(sourceIdentity)).records).toEqual(inspectedInventory.records);
 		const revisions: string[] = [];
 		const file = { s3rn: new RemoteFileAddress("relay-onprem", f.share, f.entry), entityGuid: f.entry, entryPath: "Upload.png", mimeType: "image/png",
 			stat: { mtime: 1, ctime: 1, size: 0 }, syncMeta: { hash: "" }, contentAddressedCache: {} } as unknown as AttachmentFile;
