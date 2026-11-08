@@ -2,7 +2,7 @@ import { Component, FileView, MarkdownView, Modal, Notice, Setting, setIcon, typ
 import * as Y from "yjs";
 import { v4 as uuidv4 } from "uuid";
 import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
-import { LocationHost } from "./LocationHost";
+import { LocationHost, type NoteImageObserver } from "./LocationHost";
 import { baseFollowPosition } from "./BasePresenceMotion";
 import { sameNote, type LocationEvent, type SurfaceLocation } from "./LocationProtocol";
 import type { AuthSession } from "../../AuthSession";
@@ -238,22 +238,29 @@ export class PresenceController extends Component {
 
 	private refreshReaders(): void {
 		const scopes: ReadingPresenceScope[] = [];
+		const images: NoteImageObserver[] = [];
 		for (const binding of this.registry.trackedViews) {
 			if (!(binding instanceof DocumentViewBinding) || !binding.boundDocument) continue;
-			const view = binding.hostView as MarkdownView, doc = binding.boundDocument, provider = doc._liveProvider;
-			if (!view || view.getMode() !== "preview") continue;
+			const view = binding.hostView as MarkdownView, doc = binding.boundDocument, provider = doc._liveProvider, text = doc.crdtText;
+			if (!view) continue;
+			const mode = view.getMode();
 			const permitted = () => {
 				const owner = view.containerEl.ownerDocument, reading = readingCommentBinding(view);
-				return !this.stopped && !this.registry.isShutDown && this.registry.trackedViews.includes(binding) && binding.boundDocument === doc &&
+				return !this.stopped && !this.registry.isShutDown && this.registry.trackedViews.includes(binding) && binding.boundDocument === doc && doc.crdtText === text &&
 					binding.connectionAllowed && binding.wantsConnection && doc.vaultShare.wantsConnection && doc.hasCurrentPresenceAccount() &&
 					!!this.auth.getCurrentUserForServer(doc.vaultShare.config.onpremServerId) && view.containerEl.isConnected && owner.hasFocus() && !owner.hidden && !this.blurred.has(owner) &&
-					view.getMode() === "preview" && !!view.file && view.file.extension === "md" && doc._obsidianFile === view.file &&
+					view.getMode() === mode && !!view.file && view.file.extension === "md" && doc._obsidianFile === view.file &&
 					this.plugin.app.vault.getFileByPath(view.file.path) === view.file && this.registry.shareRegistry.shareFor(view.file.path) === doc.vaultShare &&
-					reading?.documentId === doc.entityGuid && reading.text === doc.crdtText;
+					(mode === "preview" ? reading?.documentId === doc.entityGuid && reading.text === doc.crdtText : binding.isTracking);
 			};
-			if (permitted()) scopes.push({ view, text: doc.crdtText, id: doc.entityGuid, provider, current: () => permitted() && provider.wsconnected });
+			if (permitted()) {
+				const current = () => permitted() && provider.wsconnected;
+				if (mode === "preview") scopes.push({ view, text, id: doc.entityGuid, provider, current });
+				images.push({ view, text, current, targets: occurrences => this.surfaces.imageTargetsFor(view, text, doc.entityGuid, occurrences) });
+			}
 		}
 		this.surfaces.setReaders(scopes);
+		this.locations?.setNoteObservers(images);
 	}
 	private notify(): void { for (const listener of this.listeners) { try { listener(); } catch { /* Isolate UI. */ } } }
 	private publishLocation(location: PresenceLocation): void {

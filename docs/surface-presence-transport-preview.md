@@ -7,8 +7,11 @@ Jump/Follow. Notes, images and verified saved Bases views reuse one socket per
 foreground host/account. Bases participants and whole-view Jump/Follow are connected.
 Direct-image pointer overlays and position-aware Jump/Follow are also connected.
 Embedded-image capture, overlays and Jump/Follow are connected in the foreground
-note as well. These have automated host evidence; native image acceptance,
-visible split-pane image observation and the remaining group adapters remain unfinished.
+note as well. Same-note Reading/Live Preview split panes now reuse that
+subscription, with native exact-occurrence, Jump/Follow, privacy and reload
+evidence. See the [split-pane acceptance](embedded-image-split-presence-preview.md).
+Different-note/direct-image split observation, broader native image acceptance
+and remaining group adapters are unfinished.
 Supported group/lane and timeline-range presence now have host/bridge evidence.
 Precise cell/record/header capture, overlays and Jump/Follow are now connected
 through the native Bases and Time & Line adapters, with automated host evidence.

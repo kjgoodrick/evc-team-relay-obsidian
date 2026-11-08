@@ -141,12 +141,22 @@ export class NotePresenceSurfaces extends Component {
 	 * cannot identify repeated embeds or images inside transcluded notes. */
 	imageTargets(occurrences: ImageOccurrence[]): RenderedImageTarget[] {
 		const active = this.active; if (!active || this.closed) return [];
+		return this.imageTargetsFor(active.view, active.text, active.id, occurrences);
+	}
+	/** Display-only split panes resolve against their own renderer binding. The
+	 * active publisher and its selection/viewport are not changed. */
+	imageTargetsFor(view: MarkdownView, text: Y.Text, id: string, occurrences: ImageOccurrence[]): RenderedImageTarget[] {
+		if (this.closed) return [];
 		let targets: RenderedImageTarget[];
-		if (active.mode === "preview") targets = this.snapshots().flatMap(({ section, source, from, to }) =>
+		if (view.getMode() === "preview") targets = this.snapshotsFor(view, text, id).flatMap(({ section, source, from, to }) =>
 			readingImageTargets(section.containerEl, source.source, from, to, occurrences));
 		else {
-			const editor = this.editor();
-			if (!editor || !this.editorMatches(editor)) return [];
+			const editor = [...this.editors].find(editor => {
+				const info = editor.state.field(editorInfoField, false), binding = commentEditorBinding(editor);
+				return info?.editor === view.editor && info.file === view.file && binding?.documentId === id && binding.text === text;
+			});
+			if (!editor || (this.active?.view === view && this.active.text === text && this.active.id === id ?
+				!this.editorMatches(editor) : editor.state.doc.toString() !== text.toString())) return [];
 			targets = editorImageTargets(editor.dom, occurrences, node => editor.posAtDOM(node));
 		}
 		// Overlapping renderer sections must not give an image two identities.

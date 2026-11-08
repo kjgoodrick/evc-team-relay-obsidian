@@ -143,7 +143,7 @@ function fixture(crossNote = false, withImage = false, withBase = false) {
 		const stop = bindCommentEditor(editor, () => ({ documentId: note.doc.entityGuid, text: note.text }));
 		return { editor, stop };
 	});
-	return { controller, notes, editors, processors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select, base, workspace,
+	return { controller, notes, editors, extensions, processors, registry, settings, authListeners, viewListeners, focus, hidden, folder, openFile, select, base, workspace,
 		image: { file: imageFile, view: imageView, element: imageElement, record: imageRecord, location: imageLocation }, vault,
 		logout: () => { account = undefined; authListeners.forEach(fn => fn()); },
 		fileEvent: (event: "rename" | "delete" | "modify") => { if (event === "delete") deleted = true; events.get(event)?.forEach(fn => fn()); },
@@ -895,4 +895,77 @@ test.each([['sabidurian-timeline', false], ['sabidurian-timeline', true], ['sabi
 		expect(remote.beginRange).not.toHaveBeenCalled(); expect(remote.revealRange).not.toHaveBeenCalled(); expect(base.host.data).toBe(base.source);
 		f.logout(); expect(base.content.querySelector(".relay-base-presence")).toBeNull();
 	} finally { m.close(); expect(changed).toBeUndefined(); }
+});
+
+test.each(["reading", "live-preview"] as const)("same-note %s split panes share one embed watch without passive publication", async mode => {
+	const network = crossNetwork(true, () => f.image.location, true), f = fixture(true, true), [first, second] = f.notes;
+	const stops: (() => void)[] = [], anchors = new EmbeddedImageAnchors(first.text);
+	const oldRects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects"), oldBounds = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+	Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [] });
+	Object.defineProperty(Range.prototype, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 0, 8, 14) });
+	let remote: ReturnType<typeof remotePeer> | undefined, shown = true;
+	const box = (element: HTMLElement, height = 250) => {
+		Object.defineProperties(element, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: height }, clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: height } });
+		element.getBoundingClientRect = () => new DOMRect(0, 0, 400, height);
+		element.getClientRects = () => [element.getBoundingClientRect()] as unknown as DOMRectList;
+	};
+	try {
+		first.text.delete(0, first.text.length); first.text.insert(0, "![[Picture.png]]");
+		second.view.file = first.view.file; second.binding.boundDocument = first.binding.boundDocument;
+		second.view.getViewData = () => first.text.toString();
+		const images = [first, second].map(note => {
+			if (note === second && mode === "live-preview") {
+				note.mode("source"); f.editors[1].stop();
+				const editor = f.editors[1].editor, image = document.createElement("img"); image.src = "app://local/Picture.png";
+				Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
+				editor.setState(EditorState.create({ doc: first.text.toString(), extensions: [editorInfoField.init(() => ({ file: first.view.file, editor: second.view.editor } as never)), ...f.extensions,
+					EditorView.decorations.of(Decoration.set([Decoration.replace({ widget: new class extends WidgetType { toDOM() { return image; } }() }).range(0, first.text.length)]))] }));
+				stops.push(bindCommentEditor(editor, () => ({ documentId: first.doc.entityGuid, text: first.text })));
+				for (let element: HTMLElement | null = image; element && note.view.contentEl.contains(element); element = element.parentElement) box(element);
+				return image;
+			}
+			note.mode("preview"); stops.push(bindReadingComments(note.view, () => ({ documentId: first.doc.entityGuid, text: first.text })));
+			box(note.view.contentEl, 600);
+			const section = note.view.contentEl.appendChild(document.createElement("div")); box(section);
+			const image = section.appendChild(document.createElement("img")); image.src = "app://local/Picture.png"; box(image);
+			Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
+			const context = { sourcePath: first.view.file!.path, getSectionInfo: () => ({ text: first.text.toString(), lineStart: 0, lineEnd: 0 }),
+				addChild: (child: { onload(): void; unload(): void }) => { child.onload(); stops.push(() => child.unload()); } } as unknown as MarkdownPostProcessorContext;
+			f.processors.forEach(processor => processor(section, context)); return image;
+		});
+		second.view.contentEl.getClientRects = () => (shown ? [second.view.contentEl.getBoundingClientRect()] : []) as unknown as DOMRectList;
+		remote = remotePeer(f); f.controller.refresh();
+		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
+		await until(() => socket.frames.some(frame => frame.type === "watch_embeds"));
+		const embed = (await anchors.capture(anchors.images[0], { kind: "managed", entry_id: f.image.location.entry_id, generation: f.image.location.generation, sha256: f.image.location.content_sha256 },
+			{ width: 800, height: 500, orientation: "display" }, { pointer: { x: 0.5, y: 0.5 }, viewport: null }))!;
+		const send = () => socket.message({ type: "image_embeds", subscription_id: socket.frames.filter(frame => frame.type === "watch_embeds").at(-1)!.subscription_id, status: "available",
+			peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, embed }] });
+		const painted = async () => {
+			await until(() => [first, second].every(note => note.view.contentEl.querySelector(".relay-image-presence")));
+			for (const note of [first, second]) note.view.contentEl.querySelectorAll<HTMLElement>(".relay-image-presence").forEach(layer => box(layer, 600));
+			window.dispatchEvent(new Event("resize"));
+			await until(() => [first, second].every(note => note.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent === "Peer"));
+		};
+		send(); await painted(); expect(socket.frames.filter(frame => frame.type === "watch_embeds")).toHaveLength(1);
+		const reads = f.vault.readBinary.mock.calls.length;
+		for (let i = 0; i < 10; i++) { f.controller.refresh(); send(); }
+		images[1].dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 125 }));
+		await settled(); expect(socket.frames.some(frame => frame.type === "image_embed" && frame.embed)).toBe(false);
+		expect(f.vault.readBinary).toHaveBeenCalledTimes(reads); expect(network.sockets).toHaveLength(1);
+		await f.controller.setVisible(false); expect(second.view.contentEl.querySelector(".relay-image-presence-pointer")).not.toBeNull();
+		shown = false; f.controller.refresh(); expect(second.view.contentEl.querySelector(".relay-image-presence")).toBeNull();
+		shown = true; f.controller.refresh(); await painted();
+		second.binding.connectionAllowed = false; f.controller.refresh(); expect(second.view.contentEl.querySelector(".relay-image-presence")).toBeNull();
+		second.binding.connectionAllowed = true; f.controller.refresh(); await painted();
+		// Changing the foreground pane must not create a second publisher or
+		// leave the old pane's delayed verification attached to the wrong owner.
+		await f.controller.setVisible(true); f.select(second.view); send(); await painted();
+		expect(network.sockets).toHaveLength(1);
+		f.logout(); expect(first.view.contentEl.querySelector(".relay-image-presence")).toBeNull(); expect(second.view.contentEl.querySelector(".relay-image-presence")).toBeNull();
+	} finally {
+		stops.forEach(stop => stop()); anchors.close(); remote?.close(); f.close(); network.close();
+		if (oldRects) Object.defineProperty(Range.prototype, "getClientRects", oldRects); else Reflect.deleteProperty(Range.prototype, "getClientRects");
+		if (oldBounds) Object.defineProperty(Range.prototype, "getBoundingClientRect", oldBounds); else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+	}
 });

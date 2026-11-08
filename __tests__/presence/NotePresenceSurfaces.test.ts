@@ -160,6 +160,11 @@ test("Reading image targets distinguish repeated occurrences and reject stale or
 		const images = [{ from: 0, to: 16, destination: "one.png", syntax: "markdown" as const }, { from: 18, to: 34, destination: "one.png", syntax: "markdown" as const }];
 		const targets = f.surfaces.imageTargets(images);
 		expect(targets).toEqual([{ image: f.roots[0].querySelector("img"), occurrence: images[0] }, { image: f.roots[1].querySelector("img"), occurrence: images[1] }]);
+		f.surfaces.setActive();
+		expect(f.surfaces.imageTargets(images)).toEqual([]);
+		expect(f.surfaces.imageTargetsFor(f.view, f.text, "note", images)).toEqual(targets);
+		expect(f.surfaces.imageTargetsFor(f.view, f.text, "different-note", images)).toEqual([]);
+		f.surfaces.setActive(f.view, f.text, "note");
 		f.roots[0].appendChild(document.createElement("img")).src = "one.png";
 		expect(f.surfaces.imageTargets(images)).toEqual([targets[1]]);
 		f.text.insert(0, "new\n"); expect(f.surfaces.imageTargets(images)).toEqual([]);
