@@ -28,7 +28,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
 import type { SourceSelectionContext } from "./storage/source-selection-context";
-import { trackNativeDocumentWrite, trackNativeSourceMutation, waitForNativeDocumentWrites } from "./storage/native-document-writes";
+import { trackNativeSourceMutation, waitForNativeDocumentWrites } from "./storage/native-document-writes";
 import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
@@ -606,11 +606,11 @@ export class VaultShare extends ProviderBacked {
 				for (const part of path.split("/")) {
 					parent = parent ? `${parent}/${part}` : part; check();
 					const exists = await this.vaultApi.adapter.exists(parent); check();
-					if (!exists) { await trackNativeDocumentWrite(this.vaultApi, parent, () => this.vaultApi.createFolder(parent)); check(); }
+					if (!exists) { await this.mutateNativeSource([parent], () => this.vaultApi.createFolder(parent)); check(); }
 				}
 			},
-			write: async (path, text) => { check(); await trackNativeDocumentWrite(this.vaultApi, path, () => this.vaultApi.adapter.write(path, text)); check(); },
-			writeBinary: async (path, bytes) => { check(); await trackNativeDocumentWrite(this.vaultApi, path, () => this.vaultApi.adapter.writeBinary(path, bytes)); check(); },
+			write: async (path, text) => { check(); await this.mutateNativeSource([path], () => this.vaultApi.adapter.write(path, text)); check(); },
+			writeBinary: async (path, bytes) => { check(); await this.mutateNativeSource([path], () => this.vaultApi.adapter.writeBinary(path, bytes)); check(); },
 			readBinary: async path => { check(); const bytes = await this.vaultApi.adapter.readBinary(path); check(); return bytes; },
 		};
 	}
@@ -745,8 +745,10 @@ export class VaultShare extends ProviderBacked {
 					for (const file of roots) {
 						const target = `${backup.path}/originals/${file.path}`;
 						await mkdir(target.slice(0, target.lastIndexOf("/")));
-						(this.recoveryMoves ??= new Map()).set(file.path, target);
-						await trackNativeSourceMutation(this.vaultApi, [file.path, target], () => this.vaultApi.rename(file, target));
+						await this.mutateNativeSource([file.path, target], () => {
+							(this.recoveryMoves ??= new Map()).set(file.path, target);
+							return this.vaultApi.rename(file, target);
+						});
 					}
 					// Catch editor changes during disk operations before tearing down any
 					// live document. On failure its IndexedDB history is still intact.
@@ -983,7 +985,7 @@ export class VaultShare extends ProviderBacked {
 				}
 				await this.ensureParentDir(to);
 				const target = normalizePath(this.absolutePath(to));
-				await trackNativeSourceMutation(this.vaultApi, [source.path, target], () => this.fileOps.renameFile(source, target));
+				await this.mutateNativeSource([source.path, target], () => this.fileOps.renameFile(source, target));
 				console.debug(`[VaultShare] ${this.path}: followed server move ${from} -> ${to}`);
 			} catch (e: unknown) {
 				// The move failed, so the old root is still on disk: keep it out of adoption.
@@ -1829,16 +1831,16 @@ export class VaultShare extends ProviderBacked {
 		file: TAbstractFile,
 		diffLog?: string[],
 	): Promise<void> {
+		const check = this.captureNativeSource(); check();
 		// Applies a rename the server already committed to our local copy.
 		diffLog?.push(`renamed ${file.path} -> ${this.absolutePath(path)} per serverId state`);
 		if (file instanceof TFile) {
 			await this.ensureParentDir(path, diffLog);
 		}
 		const target = normalizePath(this.absolutePath(path));
-		await trackNativeSourceMutation(this.vaultApi, [file.path, target], () => this.fileOps.renameFile(file, target))
-			.then(() => {
-				doc.relocate(path, this);
-			});
+		check();
+		await this.mutateNativeSource([file.path, target], () => this.fileOps.renameFile(file, target));
+		check(); doc.relocate(path, this);
 	}
 
 	/** Creates `vpath`'s parent folder if it's missing. */
@@ -2451,7 +2453,7 @@ export class VaultShare extends ProviderBacked {
 		}
 		const vaultPath = normalizePath(this.absolutePath(doc.entryPath));
 		this.log("writing to ", vaultPath);
-		return trackNativeDocumentWrite(this.vaultApi, vaultPath, () => this.vaultApi.adapter.write(vaultPath, content));
+		return this.mutateNativeSource([vaultPath], () => this.vaultApi.adapter.write(vaultPath, content));
 	}
 
 	/**
@@ -2469,7 +2471,7 @@ export class VaultShare extends ProviderBacked {
 	): Promise<string> {
 		const conflictDocPath = buildConflictCopyPath(doc.entryPath, label);
 		const target = normalizePath(this.absolutePath(conflictDocPath));
-		await trackNativeDocumentWrite(this.vaultApi, target, () => this.vaultApi.adapter.write(target, content));
+		await this.mutateNativeSource([target], () => this.vaultApi.adapter.write(target, content));
 		return conflictDocPath;
 	}
 
@@ -2481,7 +2483,7 @@ export class VaultShare extends ProviderBacked {
 
 	makeFolder(path: string): Promise<void> {
 		const target = normalizePath(this.absolutePath(path));
-		return trackNativeDocumentWrite(this.vaultApi, target, () => this.vaultApi.adapter.mkdir(target));
+		return this.mutateNativeSource([target], () => this.vaultApi.adapter.mkdir(target));
 	}
 
 	containsPath(path: string): boolean {
@@ -3168,6 +3170,7 @@ export class VaultShare extends ProviderBacked {
 	}
 
 	private createOwnedFolderAt(entry: SyncableEntry, vpath: string): Promise<TFolder> {
+		const check = this.captureNativeSource();
 		const path = this.absolutePath(vpath);
 		const ancestors = vpath.split("/").map((_, index, parts) => parts.slice(0, index + 1).join("/"));
 		const before = new Map(ancestors.map((ancestor) => [ancestor, this.vaultApi.getAbstractFileByPath(this.absolutePath(ancestor))]));
@@ -3176,8 +3179,11 @@ export class VaultShare extends ProviderBacked {
 		const creation = Promise.resolve().then(async () => {
 			let node: TFolder;
 			try {
-				node = await trackNativeDocumentWrite(this.vaultApi, path, () => this.vaultApi.createFolder(path));
+				check();
+				node = await this.mutateNativeSource([path], () => this.vaultApi.createFolder(path));
+				check();
 			} catch (error: unknown) {
+				check();
 				// Another creator won this path. Its object belongs to that creator.
 				const existing = this.vaultApi.getAbstractFileByPath(path);
 				if (existing instanceof TFolder) return existing;
@@ -3344,8 +3350,23 @@ export class VaultShare extends ProviderBacked {
 		doc.dismantle();
 	}
 
+	/** A hold drains already-admitted I/O, while this session check refuses an
+	 * old asynchronous callback that reaches native admission after teardown. */
+	private captureNativeSource(): () => void {
+		const root = this.path, selection = this.sourceSelection;
+		return () => {
+			if (this.isTornDown || this.path !== root || this.sourceSelection !== selection) throw new Error("The shared-folder source changed. Local work is retained.");
+			selection?.assertFolder(this.hostAppId, this.config.onpremServerId, ResourceAddress.serialize(this.resourceAddress));
+		};
+	}
+	private async mutateNativeSource<T>(paths: readonly string[], mutation: () => Promise<T>): Promise<T> {
+		const check = this.captureNativeSource();
+		const result = await trackNativeSourceMutation(this.vaultApi, paths, () => { check(); return mutation(); });
+		check(); return result;
+	}
+
 	async trashFile(file: TAbstractFile): Promise<void> {
-		await trackNativeDocumentWrite(this.vaultApi, file.path, () => this.fileOps.trashFile(file));
+		await this.mutateNativeSource([file.path], () => this.fileOps.trashFile(file));
 	}
 
 	renameEntry(tfile: TAbstractFile, oldPath: string) {
@@ -3452,6 +3473,7 @@ export class VaultShare extends ProviderBacked {
 
 	dismantle() {
 		this.isTornDown = true;
+		this.sourceSelection?.close();
 		this.lostClaimSettler.cancelAll();
 		this.cancelInitialFolderSync?.();
 		this.cancelInitialFolderSync = null;

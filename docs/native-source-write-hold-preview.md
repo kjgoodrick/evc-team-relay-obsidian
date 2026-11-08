@@ -43,6 +43,15 @@ recognizable pause so their poller does not advance its completion watermark.
 Logging/configuration writes are outside this source-write contract. Host/editor,
 other-plugin, older-client and cross-realm admission still need coordination.
 
+Shared-folder mutations additionally capture their live folder session before
+native I/O and check it again afterward. Delayed moves and owned-folder creation
+also retain that check across their preceding asynchronous work. Teardown closes
+the folder's selection context. A callback reaching admission after teardown is
+refused; an operation already admitted stays drainable but cannot acknowledge an
+obsolete document or adopt a late-created folder. Its completed native result is
+retained rather than deleted by the closed session. Recovery-move event markers
+are installed only after native admission succeeds.
+
 No restore UI or automatic activation invokes this hold yet. The installation
 coordinator still needs to connect the durable selection journal, verify recovery
 and installation artifacts, stop all relevant writers, perform guarded native
@@ -61,3 +70,10 @@ Main types and changed-source lint pass (two pre-existing sentence-case warnings
 as does the preview build (15 existing warnings). The frozen test-type ratchet
 remains 205 errors/44 signatures against 207/46. Native/mobile acceptance and
 whole-installer integration remain.
+
+The subsequent lifecycle increment passes 265 focused tests and the full
+regression (4,082 tests across 290 suites; 40 tests/26 suites skipped). Main types,
+changed-source lint, the unchanged test-type ratchet and preview build pass
+(15 existing build warnings). The separate
+[startup admission gate](source-startup-admission-preview.md) additionally has
+focused cancellation, restart, scope-isolation and retry evidence.
