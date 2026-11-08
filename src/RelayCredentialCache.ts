@@ -124,6 +124,28 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		}
 		return { grant, check };
 	}
+	/** Fresh inspection credentials cannot reuse or populate ordinary attachment
+	 * grants. In particular, an owner's normal sync grant has upload authority. */
+	async requestFileInspectionToken(documentId: string, fileHash: string, contentType: string, serverId: string | undefined, binding: RestoreBinding, checkContext = () => {}): Promise<{ grant: FileGrant; check: () => void }> {
+		binding = Object.freeze(restoreMetadata(binding));
+		const address = ResourceAddress.parse(documentId), source = this.captureDocumentSourceContext(serverId);
+		if (!source || !(address instanceof RemoteFileAddress) || ResourceAddress.serialize(address) !== documentId
+			|| !/^[a-f0-9]{64}$/.test(fileHash)) {
+			throw new Error("A managed attachment, digest and available server are required for inspection");
+		}
+		const provider = this.relayOnPremProviders.get(source.serverId)!;
+		const check = () => { source.check(); checkContext(); };
+		check();
+		const grant = await provider.requestFileToken(address.relayGuid, address.folderGuid, address.fileGuid,
+			fileHash, contentType, 0, binding, { readOnly: true, check });
+		check();
+		if (grant.authorization !== "read-only" || grant.docId !== address.fileGuid || grant.folder !== address.folderGuid
+			|| grant.restoreGuard !== true || (grant.restoreGeneration ?? null) !== (binding.restoreGeneration ?? null)
+			|| grant.fileHash !== fileHash || !Number.isFinite(grant.expiryTime) || grant.expiryTime <= Date.now()) {
+			throw new Error("The server did not return the requested read-only attachment context");
+		}
+		return { grant, check };
+	}
 	private restoreKey(documentId: string, serverId?: string, binding: RestoreBinding = {}): string {
 		return JSON.stringify([this.documentServer(serverId) ?? "legacy", documentId, restoreMetadata(binding).restoreGeneration ?? null]);
 	}

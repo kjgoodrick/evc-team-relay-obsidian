@@ -4,7 +4,7 @@ import { BlobClient } from "../../src/BlobClient";
 import { RelayCredentialCache } from "../../src/RelayCredentialCache";
 import { RelayOnPremTokenProvider } from "../../src/auth/RelayOnPremTokenProvider";
 import { ManagedIndexTransport } from "../../src/client/ManagedIndexTransport";
-import { RemoteFileAddress } from "../../src/ResourceAddress";
+import { RemoteFileAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { sha256Hex } from "../../src/contentDigest";
 import type { AttachmentFile } from "../../src/AttachmentFile";
 import type { VaultShare } from "../../src/VaultShare";
@@ -46,6 +46,16 @@ integration("actual attachment client checks uploads and reads verified distinct
 			expect(new TextDecoder().decode(await blobs.pullFile(file))).toBe(value);
 		}
 		file.syncMeta!.hash = revisions[0]; expect(new TextDecoder().decode(await blobs.pullFile(file))).toBe("first exact image revision");
+		const inspection = await cache.requestFileInspectionToken(ResourceAddress.serialize(file.s3rn), revisions[0], "image/png", "fixture", { restoreGeneration: f.generation });
+		inspection.check(); expect(inspection.grant.authorization).toBe("read-only");
+		const readGrant = inspection.grant;
+		const inspected = await fetch(readGrant.baseUrl + "/download-url", { headers: { Authorization: `Bearer ${readGrant.token}` } });
+		expect(inspected.status).toBe(200);
+		const inspectionUrl = (await inspected.json() as { downloadUrl: string }).downloadUrl;
+		expect(await (await fetch(inspectionUrl)).text()).toBe("first exact image revision");
+		expect((await fetch(readGrant.baseUrl + "/upload-url", { method: "POST", headers: { Authorization: `Bearer ${readGrant.token}` } })).status).toBe(403);
+		expect((await fetch(inspectionUrl, { method: "PUT", body: "first exact image revision" })).status).toBe(403);
+		await expect(cache.requestFileInspectionToken(ResourceAddress.serialize(file.s3rn), revisions[0], "image/png", "fixture", {})).rejects.toThrow("read-only attachment grant");
 		const oldUrl = `${f.base}/shares/${f.share}/files/${f.entry}/content?token=${f.oldToken}`;
 		expect((await fetch(oldUrl, { method: "PUT", body: "original credential" })).status).toBe(409);
 		const bad = await provider.requestFileToken("relay-onprem", f.share, f.entry, "a".repeat(64), "image/png", 3, { restoreGeneration: f.generation });

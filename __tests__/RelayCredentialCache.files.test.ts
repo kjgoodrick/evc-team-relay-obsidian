@@ -27,6 +27,7 @@ beforeEach(() => {
 	fetch.mockReset().mockImplementation(async (url, options) => {
 		const headers = options?.headers as Record<string, string>;
 		return new Response(JSON.stringify({ token: "grant", base_url: String(url).replace("/file-token", "/files/id"),
+			...(JSON.parse(options?.body as string).read_only === true ? { read_only: true } : {}),
 			expires_at: new Date(Date.now() + 600_000).toISOString(), restore_guard: true, restore_generation: headers["X-Relay-Restore-Generation"] ?? null }));
 	});
 });
@@ -107,4 +108,76 @@ test("clearing credentials while a request waits cannot repopulate the cache", a
 	await expect(pending).rejects.toThrow("account or server changed");
 	await s.cache.resolveFileToken(address, "hash", "image/png", 0, "a"); expect(fetch).toHaveBeenCalledTimes(2);
 	s.cache.destroy();
+});
+
+test("inspection grants are fresh, explicitly read-only and isolated from cached sync grants", async () => {
+	const s = setup(), hash = "a".repeat(64);
+	const sync = await s.cache.resolveFileToken(address, hash, "image/png", 0, "a");
+	const inspect = () => s.cache.requestFileInspectionToken(address, hash, "image/png", "a", {});
+	const one = await inspect(), two = await inspect();
+	expect(one.grant.authorization).toBe("read-only"); expect(two.grant).not.toBe(one.grant);
+	expect(sync.authorization).toBe("full");
+	expect(await s.cache.resolveFileToken(address, hash, "image/png", 0, "a")).toBe(sync);
+	expect(fetch).toHaveBeenCalledTimes(3);
+	for (const call of fetch.mock.calls.slice(1)) {
+		expect(JSON.parse(call[1]?.body as string)).toMatchObject({ read_only: true, content_length: 0, sha256: hash });
+		expect(call[1]?.sensitive).toBe(true);
+	}
+	expect(s.cache.peekToken(address)).toBeUndefined();
+	s.cache.clear(); expect(one.check).toThrow("account or server changed"); s.cache.destroy();
+});
+
+test.each([
+	{ read_only: undefined }, { read_only: false }, { read_only: "true" },
+	{ restore_guard: false }, { restore_generation: generation },
+	{ expires_at: "invalid" }, { expires_at: "2000-01-01T00:00:00Z" }, { token: "" },
+])("inspection refuses unsupported or mismatched grant %j", async override => {
+	const s = setup();
+	fetch.mockResolvedValueOnce(new Response(JSON.stringify({ token: "grant", base_url: "https://a.test/file", read_only: true,
+		expires_at: new Date(Date.now() + 600_000).toISOString(), restore_guard: true, restore_generation: null, ...override })));
+	await expect(s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "a", {})).rejects.toThrow("read-only attachment grant");
+	s.cache.destroy();
+});
+
+test("inspection cancellation during authentication prevents transmission", async () => {
+	const s = setup(), auth = deferred<string>(); s.state.wait = auth.promise;
+	let cancelled = false;
+	const pending = s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "a", {}, () => {
+		if (cancelled) throw new Error("Inspection cancelled");
+	});
+	cancelled = true; auth.resolve(s.state.token);
+	await expect(pending).rejects.toThrow("Inspection cancelled");
+	expect(fetch).not.toHaveBeenCalled(); s.cache.destroy();
+});
+
+test("inspection checks its context after asynchronous grant body parsing", async () => {
+	const s = setup(), body = deferred<unknown>();
+	fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), json: () => body.promise } as Response);
+	const pending = s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "a", {});
+	await Promise.resolve(); await Promise.resolve();
+	s.state.token = token("second");
+	body.resolve({ token: "obsolete", base_url: "https://a.test/file", read_only: true, restore_guard: true,
+		restore_generation: null, expires_at: new Date(Date.now() + 600_000).toISOString() });
+	await expect(pending).rejects.toThrow("login changed"); s.cache.destroy();
+});
+
+test("inspection retains its original generation and never redirects a missing server", async () => {
+	const s = setup(), binding = { restoreGeneration: generation }, auth = deferred<string>(); s.state.wait = auth.promise;
+	const pending = s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "a", binding);
+	binding.restoreGeneration = "b1111111-1111-4111-8111-111111111111";
+	auth.resolve(s.state.token);
+	expect((await pending).grant.restoreGeneration).toBe(generation);
+	await expect(s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "missing", {})).rejects.toThrow("available server");
+	expect(fetch).toHaveBeenCalledTimes(1); s.cache.destroy();
+});
+
+test("inspection failures never expose response bodies or transport secrets", async () => {
+	const s = setup(), warning = jest.spyOn(console, "warn").mockImplementation(() => {});
+	for (const status of [403, 429, 500]) {
+		fetch.mockResolvedValueOnce(new Response("sensitive-response-secret", { status }));
+		await expect(s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "a", {})).rejects.not.toThrow("sensitive-response-secret");
+	}
+	fetch.mockRejectedValueOnce(new Error("https://private.test?token=sensitive-response-secret"));
+	await expect(s.cache.requestFileInspectionToken(address, "a".repeat(64), "image/png", "a", {})).rejects.not.toThrow("sensitive-response-secret");
+	expect(warning).not.toHaveBeenCalled(); warning.mockRestore(); s.cache.destroy();
 });

@@ -37,6 +37,7 @@ export interface FileTokenRequest {
 	sha256: string;
 	content_type: string;
 	content_length: number;
+	read_only?: true;
 }
 
 export interface FileTokenApiResponse {
@@ -47,6 +48,7 @@ export interface FileTokenApiResponse {
 	expires_in?: number;
 	restore_guard?: boolean;
 	restore_generation?: string | null;
+	read_only?: boolean;
 }
 
 export interface RelayOnPremTokenConfig {
@@ -556,13 +558,17 @@ export class RelayOnPremTokenProvider {
 		contentType: string,
 		contentLength: number,
 		binding: RestoreBinding = {},
+		options: { readOnly?: boolean; check?: () => void } = {},
 	): Promise<FileGrant> {
 		if (this.destroyed) throw new Error("Token provider was destroyed");
 		binding = restoreMetadata(binding);
+		const readOnly = options.readOnly === true, check = options.check;
 		const identity = this.getFileCredentialContext(), endpoint = this.normalizedUrl;
 		const checkIdentity = () => {
 			if (this.destroyed || identity !== this.getFileCredentialContext()) throw new Error("Attachment login changed or server changed. Retry using the current connection.");
+			check?.();
 		};
+		checkIdentity();
 		const token = await this.config.authProvider.getValidToken();
 		checkIdentity();
 
@@ -577,6 +583,7 @@ export class RelayOnPremTokenProvider {
 			sha256: fileHash,
 			content_type: contentType,
 			content_length: contentLength,
+			...(readOnly ? { read_only: true as const } : {}),
 		};
 
 		// Deliberately NOT routed through this.throttle: POST /file-token has no
@@ -587,6 +594,7 @@ export class RelayOnPremTokenProvider {
 			const response = await platformFetch(
 				`${endpoint}/v1/shares/${folderId}/file-token`,
 				{
+					...(readOnly ? { sensitive: true } : {}),
 					method: "POST",
 					headers: {
 						"Content-Type": "application/json",
@@ -601,6 +609,7 @@ export class RelayOnPremTokenProvider {
 			if (response.status === 429) {
 				const retryAfterSec = parseInt(response.headers.get("Retry-After") ?? "60", 10);
 				const retryAfterMs = (isNaN(retryAfterSec) ? 60 : retryAfterSec) * 1000;
+				if (readOnly) throw new RateLimitError(retryAfterMs, "Attachment inspection is rate limited");
 				const errorText = await response.text().catch(() => "");
 				checkIdentity();
 				console.warn(
@@ -613,6 +622,7 @@ export class RelayOnPremTokenProvider {
 			}
 
 			if (!response.ok) {
+				if (readOnly) throw new Error(`Attachment inspection grant refused (${response.status})`);
 				const errorText = await response.text();
 				checkIdentity();
 				throw new Error(`File token request failed: ${response.status} - ${errorText}`);
@@ -622,6 +632,12 @@ export class RelayOnPremTokenProvider {
 			checkIdentity();
 			const context = restoreContext(data.restore_guard, data.restore_generation);
 			const expiryTime = localExpiryTime(data.expires_at, response.headers.get("Date"), data.expires_in);
+			if (readOnly && (data.read_only !== true || context?.supported !== true
+				|| context.generation !== (binding.restoreGeneration ?? null)
+				|| typeof data.token !== "string" || !data.token || typeof data.base_url !== "string" || !data.base_url
+				|| !Number.isFinite(expiryTime) || expiryTime <= Date.now())) {
+				throw new Error("The server did not return the requested read-only attachment context");
+			}
 
 			const fileToken: FileGrant = {
 				token: data.token,
@@ -635,7 +651,7 @@ export class RelayOnPremTokenProvider {
 				expiryTime,
 				// Not read by BlobClient.ts (verified) — real read/write enforcement
 				// happens server-side per-route, not via this cached label.
-				authorization: "full",
+				authorization: readOnly ? "read-only" : "full",
 				contentType,
 				contentLength,
 				fileHash,
@@ -647,6 +663,10 @@ export class RelayOnPremTokenProvider {
 			return fileToken;
 		} catch (error: unknown) {
 			checkIdentity();
+			if (readOnly) {
+				if (error instanceof RateLimitError) throw error;
+				throw new Error("Could not obtain a read-only attachment grant for the requested source");
+			}
 			this.log("File token request error:", error);
 			throw error;
 		}
