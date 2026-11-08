@@ -13,6 +13,7 @@ import { assertSourceCacheBinding, sourceDocumentCache, sourceInventoryCache } f
 import type { LocalDocumentStore } from "../src/storage/local-document-store";
 import type { RestoreBinding } from "../src/collaboration/RestoreGeneration";
 import { RECOVERY_FOLDER } from "../src/conflictCopyPath";
+import { notifySourceSelection } from "../src/storage/source-selection-events";
 
 const contexts: SourceSelectionContext[] = [], journals: SourceSelectionJournal[] = [];
 function scope(): SourceSelectionScope { return { hostAppId: crypto.randomUUID(), serverId: "fixture", controlPlaneUrl: "https://fixture.test",
@@ -68,6 +69,95 @@ test("a changed review invalidates the old session permanently, including after 
 	await expect(old.assertCurrent()).rejects.toThrow("changed"); expect(() => old.document(child(value))).toThrow("changed");
 	await step(store, pending, "cancel"); await expect(old.assertCurrent()).rejects.toThrow("changed");
 	const fresh = await open(value); await fresh.assertCurrent(); expect(fresh.choice.kind).toBe("legacy"); expect(fresh.revision).not.toBeNull();
+});
+
+test("a committed decision automatically invalidates another open context and its providers", async () => {
+	const value = scope(), context = await open(value), store = await journal(value);
+	const markdown = wrapper(value, context, "markdown", crypto.randomUUID()), canvas = wrapper(value, context, "canvas", crypto.randomUUID());
+	try {
+		await markdown.doc.awaitFirstSync(); await canvas.doc.awaitFirstSync();
+		const first = jest.spyOn(markdown.doc._liveProvider, "disconnect"), second = jest.spyOn(canvas.doc._liveProvider, "disconnect");
+		const invalidated = new Promise<void>(resolve => context.onInvalidated(resolve));
+		await begin(store); await invalidated;
+		expect(first).toHaveBeenCalled(); expect(second).toHaveBeenCalled(); expect(() => context.check()).toThrow("closed");
+	} finally { await markdown.close(); await canvas.close(); }
+});
+
+test("a late aborted decision emits no change hint and leaves the other session active", async () => {
+	const value = scope(), context = await open(value), store = await journal(value), invalidated = jest.fn(); context.onInvalidated(invalidated);
+	const add = IDBObjectStore.prototype.add;
+	const spy = jest.spyOn(IDBObjectStore.prototype, "add").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+		const request = add.call(this, value, key);
+		if (this.name === "receipts") request.addEventListener("success", () => queueMicrotask(() => this.transaction.abort()), { once: true });
+		return request;
+	});
+	await expect(begin(store)).rejects.toThrow("aborted"); spy.mockRestore();
+	await context.assertCurrent(); expect(invalidated).not.toHaveBeenCalled(); expect(() => context.check()).not.toThrow();
+});
+
+test("untrusted notifications cannot close an unchanged source or select another generation", async () => {
+	const value = scope(), context = await open(value), store = await journal(value), invalidated = jest.fn(); context.onInvalidated(invalidated);
+	notifySourceSelection(store.name); await context.assertCurrent();
+	expect(invalidated).not.toHaveBeenCalled(); expect(context.choice).toEqual({ kind: "legacy" }); expect(context.binding).toBeUndefined();
+	const other = await journal(scope()); await begin(other); await context.assertCurrent(); expect(invalidated).not.toHaveBeenCalled();
+});
+
+test("same-realm notification works without BroadcastChannel", async () => {
+	const saved = Object.getOwnPropertyDescriptor(window, "BroadcastChannel");
+	Object.defineProperty(window, "BroadcastChannel", { configurable: true, value: undefined });
+	try {
+		const value = scope(), context = await open(value), store = await journal(value);
+		const invalidated = new Promise<void>(resolve => context.onInvalidated(resolve)); await begin(store); await invalidated;
+		expect(() => context.check()).toThrow("closed");
+	} finally { if (saved) Object.defineProperty(window, "BroadcastChannel", saved); else delete (window as unknown as Record<string, unknown>).BroadcastChannel; }
+});
+
+test("a native BroadcastChannel reaches a context outside the publisher's local listener registry", async () => {
+	expect(typeof window.BroadcastChannel).toBe("function");
+	const value = scope(), context = await open(value), store = await journal(value);
+	const host = window as unknown as Record<symbol, unknown>, key = Symbol.for("team-relay.source-selection-listeners.v1"), saved = host[key];
+	const invalidated = new Promise<void>(resolve => context.onInvalidated(resolve));
+	try { host[key] = new Map(); await begin(store); }
+	finally { host[key] = saved; }
+	await invalidated; expect(() => context.check()).toThrow("closed");
+});
+
+test("a decision in the read-to-listen gap prevents a context from being returned", async () => {
+	const value = scope(), store = await journal(value), read = SourceSelectionJournal.prototype.read;
+	let changed = false;
+	jest.spyOn(SourceSelectionJournal.prototype, "read").mockImplementation(async function (this: SourceSelectionJournal) {
+		const state = await read.call(this);
+		if (!changed && this.name === store.name) {
+			changed = true;
+			await store.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: crypto.randomUUID(), restoreGeneration: crypto.randomUUID() });
+		}
+		return state;
+	});
+	await expect(open(value)).rejects.toThrow("changed");
+});
+
+test("closing a context removes its notification listener", async () => {
+	const value = scope(), context = await open(value), store = await journal(value);
+	context.close(); const read = jest.spyOn(SourceSelectionJournal.prototype, "assertActive");
+	notifySourceSelection(store.name); expect(read).not.toHaveBeenCalled();
+});
+
+test("a burst of same-realm hints coalesces behind one in-flight journal check", async () => {
+	const saved = Object.getOwnPropertyDescriptor(window, "BroadcastChannel");
+	Object.defineProperty(window, "BroadcastChannel", { configurable: true, value: undefined });
+	try {
+		const value = scope(), context = await open(value), store = await journal(value), assert = SourceSelectionJournal.prototype.assertActive;
+		let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+		let checked!: () => void; const second = new Promise<void>(resolve => { checked = resolve; });
+		let reads = 0;
+		jest.spyOn(SourceSelectionJournal.prototype, "assertActive").mockImplementation(async function (this: SourceSelectionJournal, revision, choice) {
+			if (++reads === 1) await gate;
+			await assert.call(this, revision, choice); if (reads === 2) checked();
+		});
+		for (let i = 0; i < 100; i++) notifySourceSelection(store.name);
+		expect(reads).toBe(1); release(); await second; expect(reads).toBe(2); expect(() => context.check()).not.toThrow();
+		context.close();
+	} finally { if (saved) Object.defineProperty(window, "BroadcastChannel", saved); else delete (window as unknown as Record<string, unknown>).BroadcastChannel; }
 });
 
 test("scope input is captured before asynchronous reads; descriptors reject foreign folders and servers", async () => {

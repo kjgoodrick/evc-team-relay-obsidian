@@ -1,6 +1,7 @@
 import { restoreGeneration } from "../collaboration/RestoreGeneration";
 import { RECOVERY_FOLDER } from "../conflictCopyPath";
 import { sourceInventoryCache, type SourceInventoryIdentity } from "./source-document-cache";
+import { notifySourceSelection } from "./source-selection-events";
 
 export type SourceChoice = { kind: "legacy" } | { kind: "source"; restoreGeneration: string | null };
 export interface SourcePreparation {
@@ -199,7 +200,7 @@ export class SourceSelectionJournal {
 				} catch (error) { failure = error; tx.abort(); }
 			};
 			(receipt ?? historyCount).onsuccess = ready;
-			tx.oncomplete = () => { window.clearTimeout(timer); resolve(result); };
+			tx.oncomplete = () => { window.clearTimeout(timer); if (change) notifySourceSelection(this.name); resolve(result); };
 			tx.onabort = () => { window.clearTimeout(timer); reject(failure ?? tx.error ?? new Error("Saving the source selection was aborted.")); };
 			tx.onerror = () => { /* Only the final transaction outcome is authoritative. */ };
 		});

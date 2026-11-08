@@ -2,6 +2,7 @@ import { ResourceAddress } from "../ResourceAddress";
 import type { RestoreBinding } from "../collaboration/RestoreGeneration";
 import { SourceSelectionJournal, type SourceChoice, type SourceSelectionState } from "./source-selection-journal";
 import { sourceCacheEndpoint, sourceDocumentCacheSync, sourceInventoryCacheSync, type SourceCacheDescriptor, type SourceInventoryIdentity } from "./source-document-cache";
+import { watchSourceSelection } from "./source-selection-events";
 
 export type SourceSelectionScope = Omit<SourceInventoryIdentity, "restoreGeneration">;
 
@@ -17,10 +18,14 @@ export class SourceSelectionContext {
 	readonly inventory: Readonly<SourceCacheDescriptor> | undefined;
 	private unavailable = false;
 	private invalidationListeners = new Set<() => void>();
+	private detachChanges?: () => void;
+	private checkingChange = false;
+	private checkAgain = false;
 	private constructor(private readonly journal: SourceSelectionJournal, scope: SourceSelectionScope, state: SourceSelectionState) {
 		this.scope = Object.freeze(scope); this.revision = state.revision; this.choice = Object.freeze({ ...state.active });
 		this.binding = this.choice.kind === "source" ? Object.freeze({ restoreGeneration: this.choice.restoreGeneration }) : undefined;
 		this.inventory = this.binding ? sourceInventoryCacheSync({ ...this.scope, ...this.binding }) : undefined;
+		this.detachChanges = watchSourceSelection(journal.name, () => this.selectionChanged());
 	}
 	static async open(input: SourceSelectionScope): Promise<SourceSelectionContext> {
 		// Capture only durable fields before the first await; caller mutation must
@@ -32,7 +37,10 @@ export class SourceSelectionContext {
 		try {
 			const state = await journal.read();
 			if (state.pending) throw new Error("This source is awaiting recovery. Finish reviewing it before synchronization.");
-			return new SourceSelectionContext(journal, scope, state);
+			const context = new SourceSelectionContext(journal, scope, state);
+			// Close the gap between the first read and installing the listener.
+			try { await context.assertCurrent(); return context; }
+			catch (error) { context.close(); throw error; }
 		} catch (error) { journal.close(); throw error; }
 	}
 	check(): void {
@@ -42,6 +50,18 @@ export class SourceSelectionContext {
 		this.check();
 		try { await this.journal.assertActive(this.revision, this.choice); this.check(); }
 		catch (error) { this.close(); throw error; }
+	}
+	private selectionChanged(): void {
+		if (this.unavailable) return;
+		this.checkAgain = true;
+		if (this.checkingChange) return;
+		this.checkingChange = true;
+		void (async () => {
+			try {
+				while (this.checkAgain && !this.unavailable) { this.checkAgain = false; await this.assertCurrent(); }
+			} catch { /* assertCurrent closes every provider sharing this context. */ }
+			finally { this.checkingChange = false; }
+		})();
 	}
 	onInvalidated(listener: () => void): () => void {
 		if (this.unavailable) { listener(); return () => {}; }
@@ -82,7 +102,7 @@ export class SourceSelectionContext {
 	}
 	close(): void {
 		if (this.unavailable) return;
-		this.unavailable = true; this.journal.close();
+		this.unavailable = true; this.detachChanges?.(); this.detachChanges = undefined; this.journal.close();
 		const listeners = [...this.invalidationListeners]; this.invalidationListeners.clear();
 		for (const listener of listeners) {
 			try { listener(); } catch (error) { console.warn("Unable to disconnect a closed source session", error); }

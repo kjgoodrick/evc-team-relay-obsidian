@@ -38,6 +38,12 @@ are refused. Competing reviewers cannot overwrite each other's decisions.
 Cancelling review/preparation preserves the previous active choice but advances
 the revision, so earlier admission checks cannot be reused.
 
+Successful transaction completion emits a scoped change hint, including when a
+near-commit timeout left the caller uncertain. Aborted transactions emit none.
+Other open contexts reread the durable state before invalidating their providers;
+notifications cannot select a source or release an installation hold. See
+[context notification coverage](source-selection-context-preview.md).
+
 After a new source selection commits, its predecessor is retired. Later decisions
 cannot reactivate that old generation or reuse the already-active cache as a new
 selection. A server rollback must therefore use a new generation, matching the
