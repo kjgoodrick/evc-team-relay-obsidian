@@ -73,6 +73,19 @@ writes/deletes/aliases/claims accompany the private inventory. Account, server,
 share address/path, provider, unload, review or staging changes invalidate the
 operation; repeated capture detects changed files, buffers and histories.
 
+Where the host exposes an IndexedDB catalog, discovery also finds closed histories
+missing from those inventories. It examines only this vault's legacy document/
+Canvas cache names, then reads just `appId` and `s3rn` in a readonly transaction.
+Only an exact host, relay/folder, document identity and kind match adds a cache.
+It does not load unrelated update logs or comparison text. The full capture
+rechecks that association; a vanished or reassociated cache fails the copy.
+`cacheDiscovery` records the catalog status, matched identities and counts of
+unassociated/unreadable candidates. An unsupported or failed catalog leaves the
+known-inventory export available with explicitly limited discovery coverage.
+Discovery describes the catalog observed at the start, not caches created later.
+Legacy metadata has no independent server ID; this evidence is for a local copy
+only and cannot authorize uploading or resuming a cache on a server.
+
 Coverage is explicit in `recovery.json`: unassociated/other-device caches,
 discussion drafts/outbox and Bases request queues/registry are not included.
 Their separate recovery exports remain necessary. This is a verified source copy,
@@ -81,7 +94,8 @@ resume synchronization. A later edit can always make a saved copy outdated.
 
 The restored-share tests use real temporary files and fake IndexedDB to exercise
 offline export, known closed/live/missing caches, metadata, untracked/conflict
-files, scope exclusions, concurrent source/context changes, disk failures and
+files, closed inventory-orphan discovery, scope exclusions, concurrent source/
+association/context changes, unavailable catalogs, disk failures and
 retry. Dialog tests cover progress, success, errors and closing during a save.
 
 Native/mobile filesystem acceptance remains pending. Capture still keeps the

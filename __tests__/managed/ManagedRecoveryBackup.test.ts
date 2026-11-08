@@ -15,7 +15,7 @@ import { prepareRecoveryBackup, type RecoveryCapture } from "../../src/ManagedRe
 import { RECOVERY_FOLDER, isConflictCopyPath } from "../../src/conflictCopyPath";
 import { platformFetch } from "../../src/platformFetch";
 import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
-import { RemoteFolderAddress } from "../../src/ResourceAddress";
+import { RemoteFolderAddress, RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddress";
 import type { ManagedRestoreReview } from "../../src/client/ManagedIndexTransport";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
@@ -274,12 +274,48 @@ test.each(["disk edits", "inventory edits", "unsaved edits", "new file", "review
 test("failed and concurrent paused-share saves leave a retryable review", async () => {
 	const s = await restoreFixture(); const read = s.vault.readBinary;
 	let reject!: (error: Error) => void;
-	s.vault.readBinary = () => new Promise((_, fail) => { reject = fail; });
+	let started!: () => void; const reading = new Promise<void>(resolve => { started = resolve; });
+	s.vault.readBinary = () => new Promise((_, fail) => { reject = fail; started(); });
 	const pending = s.share.saveManagedRestoreRecoveryCopy();
 	await expect(s.share.saveManagedRestoreRecoveryCopy()).rejects.toThrow("already being saved");
+	await reading;
 	reject(new Error("disk unavailable")); await expect(pending).rejects.toThrow("disk unavailable");
 	s.vault.readBinary = read;
 	await expect(s.share.saveManagedRestoreRecoveryCopy()).resolves.toContain(RECOVERY_FOLDER);
+	expect(s.transport.restoreReview).toEqual(s.review); expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("paused-share copy recovers a closed inventory orphan using exact recorded cache identity", async () => {
+	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress;
+	const orphan = crypto.randomUUID(), other = crypto.randomUUID();
+	for (const id of [orphan, other]) {
+		const doc = new Y.Doc(), store = new LocalDocumentStore(`${s.host}-relay-doc-${id}`, doc); await store.whenSynced;
+		doc.getText("contents").insert(0, id === orphan ? "CLOSED ORPHAN HISTORY" : "OTHER SHARE HISTORY");
+		await store.set("appId", s.host);
+		await store.set("s3rn", ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, id === orphan ? address.folderGuid : crypto.randomUUID(), id)));
+		await store.close(); doc.destroy();
+	}
+	const folder = await s.share.saveManagedRestoreRecoveryCopy();
+	expect(await fs.readFile(path.join(root, folder, `documents/${orphan}.txt`), "utf8")).toBe("CLOSED ORPHAN HISTORY");
+	await expect(fs.access(path.join(root, folder, `documents/${other}.yjs`))).rejects.toThrow();
+	const metadata = JSON.parse(await fs.readFile(path.join(root, folder, "recovery.json"), "utf8"));
+	expect(metadata.cacheDiscovery).toMatchObject({ status: "available", documents: [expect.objectContaining({ id: orphan })], unreadable: 0 });
+	expect(JSON.stringify(metadata)).not.toContain(other);
+});
+
+test("an orphan cache reassociated during archive cannot be accepted as the original history", async () => {
+	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress, id = crypto.randomUUID();
+	const doc = new Y.Doc(), store = new LocalDocumentStore(`${s.host}-relay-doc-${id}`, doc); await store.whenSynced;
+	doc.getText("contents").insert(0, "ORIGINAL ORPHAN HISTORY");
+	await store.set("appId", s.host); await store.set("s3rn", ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, address.folderGuid, id)));
+	const write = s.vault.adapter.writeBinary; let changed = false;
+	s.vault.adapter.writeBinary = async (p, bytes) => {
+		await write(p, bytes); if (changed) return; changed = true;
+		await store.set("s3rn", ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, crypto.randomUUID(), id)));
+	};
+	try { await expect(s.share.saveManagedRestoreRecoveryCopy()).rejects.toThrow("association changed"); }
+	finally { await store.close(); doc.destroy(); }
+	expect(await fs.readFile(path.join(root, "Team/Local.md"), "utf8")).toBe("OFFLINE DISK EDIT");
 	expect(s.transport.restoreReview).toEqual(s.review); expect(fetchMock).not.toHaveBeenCalled();
 });
 

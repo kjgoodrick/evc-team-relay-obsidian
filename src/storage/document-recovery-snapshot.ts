@@ -37,6 +37,27 @@ function updateBytes(value: unknown): Uint8Array {
 	throw new Error("Document recovery cache contains an unsupported update record");
 }
 
+export interface DocumentRecoveryIdentity { exists: boolean; appId?: unknown; s3rn?: unknown }
+
+/** Read only association fields while looking for histories absent from the
+ * inventory. Do not load another share's update log or comparison text. */
+export async function readDocumentRecoveryIdentity(name: string): Promise<DocumentRecoveryIdentity> {
+	if (typeof name !== "string" || !name || name.length > 1024) throw new Error("Invalid document cache name");
+	const db = await openExisting(name);
+	if (!db) return { exists: false };
+	db.onversionchange = () => db.close();
+	try {
+		if (!db.objectStoreNames.contains("custom")) throw new Error("Unsupported document recovery cache schema");
+		return await new Promise<DocumentRecoveryIdentity>((resolve, reject) => {
+			const tx = db.transaction("custom", "readonly"), store = tx.objectStore("custom");
+			const appId = store.get("appId"), s3rn = store.get("s3rn");
+			tx.oncomplete = () => resolve({ exists: true, appId: appId.result, s3rn: s3rn.result });
+			tx.onabort = () => reject(tx.error ?? new Error("Unable to read the document cache identity"));
+			tx.onerror = () => { /* onabort reports the read failure */ };
+		});
+	} finally { db.close(); }
+}
+
 /**
  * Take one readonly transaction snapshot. Unlike opening LocalDocumentStore,
  * this never subscribes to a Y.Doc, appends live edits, or compacts the cache.

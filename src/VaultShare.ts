@@ -26,6 +26,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 import { LocalDocumentStore } from "./storage/local-document-store";
 import { readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
+import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
 import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { SingleFlight, LazyValue, warnIfSlow } from "./asyncCache";
@@ -471,8 +472,9 @@ export class VaultShare extends ProviderBacked {
 
 	openManagedConflicts(): void { new ManagedConflictsModal(this.obsidianApp, this).open(); }
 
-	private async captureRecoveryDocuments(records: Pick<ItemRecord, "id" | "type">[], check = () => {}): Promise<RecoveryCapture["documents"]> {
+	private async captureRecoveryDocuments(records: Pick<ItemRecord, "id" | "type">[], check = () => {}, discovered: DiscoveredRecoveryDocument[] = []): Promise<RecoveryCapture["documents"]> {
 		const documents: RecoveryCapture["documents"] = [], kinds = new Map<string, ItemKind>();
+		const associations = new Map(discovered.map(record => [record.id, record]));
 		for (const record of records) {
 			if (record.type !== ItemKind.Document && record.type !== ItemKind.Canvas) continue;
 			const previous = kinds.get(record.id);
@@ -485,6 +487,12 @@ export class VaultShare extends ProviderBacked {
 			try {
 				const cacheName = `${this.hostAppId}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${id}`;
 				const stored = await readDocumentRecoverySnapshot(cacheName); check();
+				const expected = associations.get(id);
+				if (expected && (!stored.exists || expected.cacheName !== cacheName
+					|| stored.custom.find(item => item.key === "appId")?.value !== expected.appId
+					|| stored.custom.find(item => item.key === "s3rn")?.value !== expected.s3rn)) {
+					throw new Error("A document cache association changed during recovery capture. Local work is retained; review and retry.");
+				}
 				Y.applyUpdate(doc, stored.update);
 				const live = this.trackedEntries.get(id);
 				if (isDocument(live) || isCanvasDocument(live)) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
@@ -537,6 +545,7 @@ export class VaultShare extends ProviderBacked {
 		};
 		check(); this.savingRestoreCopy = true;
 		try {
+			const discovery = await discoverDocumentRecovery(host, this.resourceAddress, check); check();
 			const capture = async (): Promise<RecoveryCapture> => {
 				check();
 				const files: RecoveryCapture["files"] = [];
@@ -547,6 +556,7 @@ export class VaultShare extends ProviderBacked {
 					files.push({ path, bytes });
 				}
 				const records: Pick<ItemRecord, "id" | "type">[] = [
+					...discovery.documents,
 					...Object.values(review.before?.records ?? {}), ...Object.values(review.observed.records), ...Object.values(review.local),
 					...crdt.getMap<ItemRecord>("filemeta_v0").values(), ...(this.folderIndex.stagedWrites?.values() ?? []),
 				];
@@ -556,14 +566,14 @@ export class VaultShare extends ProviderBacked {
 				}
 				const known = new Set(records.map(record => record.id));
 				for (const id of crdt.getMap<string>("docs").values()) if (!known.has(id)) records.push({ id, type: ItemKind.Document });
-				const documents = await this.captureRecoveryDocuments(records, check); check();
+				const documents = await this.captureRecoveryDocuments(records, check, discovery.documents); check();
 				return { files, documents, index: Y.encodeStateAsUpdate(crdt) };
 			};
 			const backup = await prepareRecoveryBackup(this.recoveryIO(check), capture, {
 				kind: "managed-restore-source-copy", version: 1, shareId, sharePath, serverId: server ?? null, hostAppId: host,
-				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText),
+				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText), cacheDiscovery: discovery,
 				coverage: { nativeFiles: "loaded files within the shared folder, excluding recovery directories",
-					documentCaches: "identities in retained inventories, conflicts, staged writes, legacy index and live documents",
+					documentCaches: "retained inventories, conflicts, staged writes, legacy index, live documents and caches with matching host/share/document metadata",
 					excluded: ["unassociated or other-device caches", "discussion drafts and outbox", "Bases request queues and registry", "previous recovery directories"],
 					authorizesResume: false },
 			});
