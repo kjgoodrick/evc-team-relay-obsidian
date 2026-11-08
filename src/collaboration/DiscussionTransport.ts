@@ -44,6 +44,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
 for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query", "discussion_export_disabled", "discussion_export_limit"]) errorCodes.add(code);
 for (const code of ["discussion_snapshot_disabled", "discussion_snapshot_limit", "discussion_snapshot_busy"]) errorCodes.add(code);
+errorCodes.add("discussion_sync_upgrade_required");
 for (const code of ["reattach_disabled", "stale_anchor_revision", "reattach_scope_changed", "reattach_readers_changed", "reattach_target_unanchored"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
@@ -557,7 +558,7 @@ export class DiscussionTransport implements DiscussionSender {
 		viewId = this.scopeView(entryId, viewId);
 		if (cursor !== undefined && (typeof cursor !== "string" || !cursor.length || cursor.length > 2048)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(entryId) + "/changes?limit=25" +
-			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor)) + this.viewQuery(viewId) + (viewId ? "&timeline_markers=true" : "")),
+			(cursor === undefined ? "" : "&cursor=" + encodeURIComponent(cursor)) + this.viewQuery(viewId) + (viewId ? "&timeline_markers=true" : "") + "&sync_protocol=1"),
 			v => parseChanges(v, viewId, parseDiscussionScope(entryId)!.entryId));
 	}
 

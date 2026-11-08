@@ -60,11 +60,18 @@ test("read transport bounds and encodes cursors, validates targets, and never ex
 	const fetcher = jest.fn().mockResolvedValue(new Response(JSON.stringify({ events: [], cursor: "new", has_more: false })));
 	const transport = new DiscussionTransport(identity, credential, fetcher);
 	await transport.changes(id(3), "opaque&injected=true");
-	expect(fetcher.mock.calls[0][0]).toBe(`https://relay.test/v1/collaboration/shares/${id(2)}/entries/${id(3)}/changes?limit=25&cursor=opaque%26injected%3Dtrue`);
+	expect(fetcher.mock.calls[0][0]).toBe(`https://relay.test/v1/collaboration/shares/${id(2)}/entries/${id(3)}/changes?limit=25&cursor=opaque%26injected%3Dtrue&sync_protocol=1`);
 	expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", sensitive: true });
 	await expect(transport.message(id(3), "../elsewhere", id(5))).rejects.toMatchObject({ code: "invalid_local_target" });
 	fetcher.mockResolvedValue(new Response(JSON.stringify({ ...page(), next_after: -1, private: "secret" })));
 	await expect(transport.thread(id(3), id(4))).rejects.toMatchObject({ action: "pause", code: "invalid_read_response" });
+});
+
+test("replay admission errors pause unsupported synchronization without exposing response details", async () => {
+	const fetcher = jest.fn().mockResolvedValue(new Response(JSON.stringify({ detail: { code: "discussion_sync_upgrade_required", private: "server-only detail" } }), { status: 426 }));
+	const transport = new DiscussionTransport(identity, credential, fetcher);
+	await expect(transport.changes(id(3))).rejects.toMatchObject({ action: "pause", code: "discussion_sync_upgrade_required", status: 426 });
+	expect(fetcher.mock.calls[0][0]).toContain("sync_protocol=1");
 });
 
 test("online-only state changes accept responses without inventing message fields and never enter the outbox", async () => {
