@@ -8,7 +8,7 @@ exports and coordinated service backup/restore.
 The archive lives under the existing device-local recovery folder, excluded from
 Team Relay synchronization. Each archive has a unique timestamp/UUID directory.
 Original file paths are preserved under `files/`; document identities select the
-`.yjs`, `.txt` and optional `.unsaved.txt` files under `documents/`.
+`.yjs`, `.txt`, `.cache.json` and optional `.unsaved.txt` files under `documents/`.
 `inventory.yjs` stores the private inventory and `recovery.json` records the
 reviewed recovery context.
 
@@ -49,8 +49,40 @@ dependencies, and the temporary recovery document disables garbage collection to
 preserve deleted content still present in the source. Tests cover later recovery
 of missing dependencies, retained deleted content and cache immutability.
 
-The snapshot reader exposes raw metadata for the forthcoming retained-work export;
-the current structural archive does not yet serialize every custom metadata value.
+Each `.cache.json` uses format `team-relay-document-cache-metadata`, version `1`.
+It records the cache name, existence, database version and update count, then
+encodes custom keys/values with explicit type tags. Dates, binary buffers/views,
+undefined, exceptional numbers, arrays and ordinary nested objects retain their
+types; object keys remain entries rather than executable prototype properties.
+Unsupported values, cycles and excessive nesting fail the export instead of
+silently dropping data. This is an export format, not an import/resume API.
+
+The restored-share dialog offers **Save local recovery copy**, available offline.
+It uses the same manifest/readback verifier and leaves source files, inventory,
+conflicts and restore review intact. The button is disabled while saving; success
+shows the archive path, and errors leave the action retryable. Closing the dialog
+does not cancel the copy or repopulate its detached content.
+
+This copy includes currently loaded native files inside the share, including
+untracked files, Bases source files and ordinary conflict copies. It excludes
+previous recovery directories to prevent recursive exports. Document identities
+come from the pre-restore/observed/local inventories, current index, structural
+conflicts, staged inventory writes, legacy index and live documents. Missing caches
+are explicitly recorded and remain absent. The review and pending inventory
+writes/deletes/aliases/claims accompany the private inventory. Account, server,
+share address/path, provider, unload, review or staging changes invalidate the
+operation; repeated capture detects changed files, buffers and histories.
+
+Coverage is explicit in `recovery.json`: unassociated/other-device caches,
+discussion drafts/outbox and Bases request queues/registry are not included.
+Their separate recovery exports remain necessary. This is a verified source copy,
+not proof that every queue is reconciled or permission to discard a cache or
+resume synchronization. A later edit can always make a saved copy outdated.
+
+The restored-share tests use real temporary files and fake IndexedDB to exercise
+offline export, known closed/live/missing caches, metadata, untracked/conflict
+files, scope exclusions, concurrent source/context changes, disk failures and
+retry. Dialog tests cover progress, success, errors and closing during a save.
 
 Native/mobile filesystem acceptance remains pending. Capture still keeps the
 affected source data in memory; streaming and larger resumable archives remain

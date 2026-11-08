@@ -2,7 +2,7 @@ import { RECOVERY_FOLDER } from "./conflictCopyPath";
 import { sha256Hex } from "./contentDigest";
 
 export interface RecoveryFile { path: string; bytes: ArrayBuffer }
-export interface RecoveryDocument { id: string; update: Uint8Array; text: string; unsaved?: string | null }
+export interface RecoveryDocument { id: string; update: Uint8Array; text: string; unsaved?: string | null; cacheMetadata?: string }
 export interface RecoveryCapture { files: RecoveryFile[]; documents: RecoveryDocument[]; index: Uint8Array }
 export interface RecoveryIO {
 	mkdir(path: string): Promise<void>;
@@ -18,7 +18,7 @@ const equal = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => {
 export function sameCapture(a: RecoveryCapture, b: RecoveryCapture): boolean {
 	return equal(a.index, b.index) && a.files.length === b.files.length && a.documents.length === b.documents.length
 		&& a.files.every(f => b.files.some(g => f.path === g.path && equal(f.bytes, g.bytes)))
-		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.text === e.text && d.unsaved === e.unsaved && equal(d.update, e.update)));
+		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.text === e.text && d.unsaved === e.unsaved && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)));
 }
 
 function copyCapture(value: RecoveryCapture): RecoveryCapture {
@@ -54,6 +54,7 @@ export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promi
 		artifacts.push({ path: `documents/${doc.id}.yjs`, bytes: bytes(doc.update) });
 		addText(`documents/${doc.id}.txt`, doc.text);
 		if (doc.unsaved != null) addText(`documents/${doc.id}.unsaved.txt`, doc.unsaved);
+		if (doc.cacheMetadata !== undefined) addText(`documents/${doc.id}.cache.json`, doc.cacheMetadata);
 	}
 	artifacts.push({ path: "inventory.yjs", bytes: bytes(first.index) });
 	addText("recovery.json", metadataText);

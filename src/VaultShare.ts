@@ -17,13 +17,15 @@ import {
 import { dirname, join, sep } from "path-browserify";
 
 import * as Y from "yjs";
-import { CONFLICTS, select, touches, type Records } from "./client/managedRecovery";
-import { prepareRecoveryBackup, sameCapture, type RecoveryCapture } from "./ManagedRecoveryBackup";
+import { CONFLICTS, select, touches, type Records, type StructuralConflict } from "./client/managedRecovery";
+import type { ManagedRestoreReview } from "./client/ManagedIndexTransport";
+import { prepareRecoveryBackup, sameCapture, type RecoveryCapture, type RecoveryIO } from "./ManagedRecoveryBackup";
 import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
 import { readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
+import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
 import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { SingleFlight, LazyValue, warnIfSlow } from "./asyncCache";
@@ -73,7 +75,7 @@ import { retiredBaseEntries } from "./bases/BaseContentProtocol";
 import { currentToggles } from "./featureToggleState";
 import { findNestingConflictPath } from "./vaultShareNesting";
 import { isRootSharePath, resolveShareFolder } from "./vaultRootPath";
-import { buildConflictCopyPath, isConflictCopyPath } from "./conflictCopyPath";
+import { buildConflictCopyPath, isConflictCopyPath, RECOVERY_FOLDER } from "./conflictCopyPath";
 import { partitionByKnownGuid } from "./mintGate";
 import { DocActivityChannel } from "./docActivity";
 import {
@@ -469,6 +471,107 @@ export class VaultShare extends ProviderBacked {
 
 	openManagedConflicts(): void { new ManagedConflictsModal(this.obsidianApp, this).open(); }
 
+	private async captureRecoveryDocuments(records: Pick<ItemRecord, "id" | "type">[], check = () => {}): Promise<RecoveryCapture["documents"]> {
+		const documents: RecoveryCapture["documents"] = [], kinds = new Map<string, ItemKind>();
+		for (const record of records) {
+			if (record.type !== ItemKind.Document && record.type !== ItemKind.Canvas) continue;
+			const previous = kinds.get(record.id);
+			if (previous && previous !== record.type) throw new Error("A retained document has conflicting types. Local work is unchanged.");
+			kinds.set(record.id, record.type);
+		}
+		for (const [id, kind] of kinds) {
+			check();
+			const doc = new Y.Doc({ gc: false });
+			try {
+				const cacheName = `${this.hostAppId}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${id}`;
+				const stored = await readDocumentRecoverySnapshot(cacheName); check();
+				Y.applyUpdate(doc, stored.update);
+				const live = this.trackedEntries.get(id);
+				if (isDocument(live) || isCanvasDocument(live)) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
+				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(id); check();
+				documents.push({ id, unsaved, cacheMetadata: encodeDocumentRecoveryMetadata(cacheName, stored), update: Y.encodeStateAsUpdate(doc),
+					text: kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
+			} finally { doc.destroy(); }
+		}
+		return documents;
+	}
+
+	private recoveryIO(check = () => {}): RecoveryIO {
+		return {
+			mkdir: async path => {
+				let parent = "";
+				for (const part of path.split("/")) {
+					parent = parent ? `${parent}/${part}` : part; check();
+					const exists = await this.vaultApi.adapter.exists(parent); check();
+					if (!exists) { await this.vaultApi.createFolder(parent); check(); }
+				}
+			},
+			write: async (path, text) => { check(); await this.vaultApi.adapter.write(path, text); check(); },
+			writeBinary: async (path, bytes) => { check(); await this.vaultApi.adapter.writeBinary(path, bytes); check(); },
+			readBinary: async path => { check(); const bytes = await this.vaultApi.adapter.readBinary(path); check(); return bytes; },
+		};
+	}
+
+	private savingRestoreCopy = false;
+	/** Save retained source work offline. This never adopts a generation, moves
+	 * originals, clears review or resumes any network operation. */
+	async saveManagedRestoreRecoveryCopy(): Promise<string> {
+		if (this.savingRestoreCopy) throw new Error("A local recovery copy is already being saved.");
+		const crdt = this.crdtDoc, review = crdt.getMap<ManagedRestoreReview>("managed_base_v1").get("restoreReview");
+		if (!review) throw new Error("This shared folder has no restore review to export.");
+		const reviewText = JSON.stringify(review), shareId = this.entityGuid, sharePath = this.path;
+		const server = this.config.onpremServerId, provider = this._liveProvider, host = this.hostAppId;
+		const address = ResourceAddress.serialize(this.resourceAddress), credentials = this.credentialCache, vault = this.vaultApi;
+		const checkAuth = credentials.captureFileContext(address, server);
+		const staging = () => JSON.stringify({ writes: [...(this.folderIndex.stagedWrites ?? [])], deletes: [...(this.folderIndex.stagedDeletes ?? [])],
+			aliases: [...(this.folderIndex.aliases ?? [])], claims: [...(this.uploadClaims ?? [])] });
+		const stagedText = staging();
+		const check = () => {
+			if (this.isTornDown || this.isRecoveringStructure || this.crdtDoc !== crdt || crdt.isDestroyed || this.entityGuid !== shareId
+				|| this.path !== sharePath || this.config.onpremServerId !== server || this._liveProvider !== provider || this.hostAppId !== host
+				|| this.vaultApi !== vault || this.credentialCache !== credentials || ResourceAddress.serialize(this.resourceAddress) !== address
+				|| JSON.stringify(crdt.getMap("managed_base_v1").get("restoreReview")) !== reviewText || staging() !== stagedText) {
+				throw new Error("The shared folder changed while saving recovery files. Local work is retained; review and retry.");
+			}
+			checkAuth();
+		};
+		check(); this.savingRestoreCopy = true;
+		try {
+			const capture = async (): Promise<RecoveryCapture> => {
+				check();
+				const files: RecoveryCapture["files"] = [];
+				for (const file of this.vaultApi.getAllLoadedFiles()) {
+					if (!(file instanceof TFile) || !this.containsPath(file.path) || file.path.split("/").includes(RECOVERY_FOLDER)) continue;
+					const path = file.path, bytes = await this.vaultApi.readBinary(file); check();
+					if (file.path !== path) throw new Error("A local file moved during recovery capture. Review and retry.");
+					files.push({ path, bytes });
+				}
+				const records: Pick<ItemRecord, "id" | "type">[] = [
+					...Object.values(review.before?.records ?? {}), ...Object.values(review.observed.records), ...Object.values(review.local),
+					...crdt.getMap<ItemRecord>("filemeta_v0").values(), ...(this.folderIndex.stagedWrites?.values() ?? []),
+				];
+				for (const conflict of crdt.getMap<StructuralConflict>(CONFLICTS).values()) records.push(...Object.values(conflict.base), ...Object.values(conflict.local));
+				for (const live of this.trackedEntries.values()) {
+					if (isDocument(live) || isCanvasDocument(live)) records.push({ id: live.entityGuid, type: isCanvasDocument(live) ? ItemKind.Canvas : ItemKind.Document });
+				}
+				const known = new Set(records.map(record => record.id));
+				for (const id of crdt.getMap<string>("docs").values()) if (!known.has(id)) records.push({ id, type: ItemKind.Document });
+				const documents = await this.captureRecoveryDocuments(records, check); check();
+				return { files, documents, index: Y.encodeStateAsUpdate(crdt) };
+			};
+			const backup = await prepareRecoveryBackup(this.recoveryIO(check), capture, {
+				kind: "managed-restore-source-copy", version: 1, shareId, sharePath, serverId: server ?? null, hostAppId: host,
+				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText),
+				coverage: { nativeFiles: "loaded files within the shared folder, excluding recovery directories",
+					documentCaches: "identities in retained inventories, conflicts, staged writes, legacy index and live documents",
+					excluded: ["unassociated or other-device caches", "discussion drafts and outbox", "Bases request queues and registry", "previous recovery directories"],
+					authorizesResume: false },
+			});
+			await backup.verify(); check();
+			return backup.path;
+		} finally { this.savingRestoreCopy = false; }
+	}
+
 	async resolveManagedConflict(id: string, choice: "server" | "local", reviewed: Records): Promise<string> {
 		const index = this._liveProvider.managedIndex;
 		if (!index) throw new Error("Reconnect the share to load its conflicts.");
@@ -481,32 +584,11 @@ export class VaultShare extends ProviderBacked {
 			const capture = async (): Promise<RecoveryCapture> => {
 				const files = [];
 				for (const file of affectedFiles()) if (file instanceof TFile) files.push({ path: file.path, bytes: await this.vaultApi.readBinary(file) });
-				const documents = [];
-				const seen = new Set<string>();
-				for (const record of records) {
-					if (seen.has(record.id) || (record.type !== "markdown" && record.type !== "canvas")) continue;
-					seen.add(record.id);
-					const doc = new Y.Doc({ gc: false });
-					try {
-						const stored = await readDocumentRecoverySnapshot(`${this.hostAppId}-relay-${record.type === "canvas" ? "canvas" : "doc"}-${record.id}`);
-						Y.applyUpdate(doc, stored.update);
-						const live = this.trackedEntries.get(record.id);
-						if (isDocument(live) || isCanvasDocument(live)) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
-						const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(record.id);
-						documents.push({ id: record.id, unsaved, update: Y.encodeStateAsUpdate(doc), text: record.type === "canvas" ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
-					} finally { doc.destroy(); }
-				}
+				const documents = await this.captureRecoveryDocuments(records);
 				return { files, documents, index: Y.encodeStateAsUpdate(this.crdtDoc) };
 			};
-			const mkdir = async (path: string) => {
-				let parent = "";
-				for (const part of path.split("/")) {
-					parent = parent ? `${parent}/${part}` : part;
-					if (!await this.vaultApi.adapter.exists(parent)) await this.vaultApi.createFolder(parent);
-				}
-			};
-			const backup = await prepareRecoveryBackup({ mkdir, write: (p, text) => this.vaultApi.adapter.write(p, text),
-				writeBinary: (p, bytes) => this.vaultApi.adapter.writeBinary(p, bytes), readBinary: p => this.vaultApi.adapter.readBinary(p) }, capture,
+			const io = this.recoveryIO(), mkdir = io.mkdir;
+			const backup = await prepareRecoveryBackup(io, capture,
 				{ shareId: this.entityGuid, sharePath: this.path, choice, conflict, server: select(server.records, conflict) });
 			backupPath = backup.path;
 			return async () => {

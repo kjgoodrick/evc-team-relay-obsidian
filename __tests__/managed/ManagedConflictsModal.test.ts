@@ -34,9 +34,10 @@ function fixture() {
 	const conflict = makeConflict(diff(base, local), base, local, "Competing moves");
 	doc.getMap(CONFLICTS).set(conflict.id, conflict);
 	const resolve = jest.fn(async () => { doc.getMap(CONFLICTS).delete(conflict.id); return "Relay Recovery (local only)/backup"; });
-	const share = { crdtDoc: doc, _liveProvider: { managedIndex: { snapshot: { records: remote } } }, resolveManagedConflict: resolve } as unknown as VaultShare;
+	const save = jest.fn(async () => "Relay Recovery (local only)/restore-copy");
+	const share = { crdtDoc: doc, _liveProvider: { managedIndex: { snapshot: { records: remote } } }, resolveManagedConflict: resolve, saveManagedRestoreRecoveryCopy: save } as unknown as VaultShare;
 	const modal = new ManagedConflictsModal({} as App, share); modal.onOpen();
-	return { modal, doc, resolve, conflict, remote, close: () => { modal.onClose(); doc.destroy(); } };
+	return { modal, doc, resolve, save, conflict, remote, close: () => { modal.onClose(); doc.destroy(); } };
 }
 
 test.each(["Use server layout", "Keep my local layout"])("the conflict dialog routes %s with the reviewed server state", async label => {
@@ -67,6 +68,46 @@ test("restore review explains the share-wide pause and offers no ordinary layout
 		expect(s.modal.contentEl.textContent).toContain("Shared folder restored");
 		expect(s.modal.contentEl.textContent).toContain("Synchronization is paused");
 		expect(s.modal.contentEl.textContent).toContain("1 local inventory entries");
-		expect(s.modal.contentEl.querySelector("button")).toBeNull(); expect(s.resolve).not.toHaveBeenCalled();
+		expect([...s.modal.contentEl.querySelectorAll("button")].map(b => b.textContent)).toEqual(["Save local recovery copy"]);
+		expect(s.resolve).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("restore export shows the verified path, keeps review visible and prevents concurrent saves", async () => {
+	const s = fixture(); try {
+		s.doc.getMap("managed_base_v1").set("restoreReview", { id: "restore", local: s.conflict.local });
+		let finish!: (path: string) => void;
+		s.save.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		s.modal.contentEl.querySelector("button")!.click();
+		expect(s.modal.contentEl.querySelector("button")!.disabled).toBe(true);
+		s.modal.contentEl.querySelector("button")!.click(); expect(s.save).toHaveBeenCalledTimes(1);
+		finish("Relay Recovery (local only)/verified"); await flush();
+		expect(s.modal.contentEl.textContent).toContain("Verified recovery copy: Relay Recovery (local only)/verified");
+		expect(s.modal.contentEl.textContent).toContain("Synchronization is paused"); expect(s.resolve).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
+test("a failed restore export displays its error and enables a fresh attempt", async () => {
+	const s = fixture(); try {
+		s.doc.getMap("managed_base_v1").set("restoreReview", { id: "restore", local: s.conflict.local });
+		s.save.mockRejectedValueOnce(new Error("Local edits arrived while saving recovery files"));
+		s.modal.contentEl.querySelector("button")!.click(); await flush();
+		expect(s.modal.contentEl.textContent).toContain("Local edits arrived while saving recovery files");
+		expect(s.modal.contentEl.querySelector("button")!.disabled).toBe(false);
+		s.modal.contentEl.querySelector("button")!.click(); await flush();
+		expect(s.modal.contentEl.textContent).toContain("Verified recovery copy");
+		expect(s.modal.contentEl.textContent).not.toContain("Local edits arrived");
+	} finally { s.close(); }
+});
+
+test("closing the dialog during export does not repopulate its detached content", async () => {
+	const s = fixture(); try {
+		s.doc.getMap("managed_base_v1").set("restoreReview", { id: "restore", local: s.conflict.local });
+		let finish!: (path: string) => void;
+		s.save.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		s.modal.contentEl.querySelector("button")!.click(); s.modal.onClose();
+		finish("Relay Recovery (local only)/verified"); await flush();
+		expect(s.modal.contentEl.childElementCount).toBe(0);
+		s.modal.onOpen(); expect(s.modal.contentEl.textContent).toContain("Verified recovery copy");
 	} finally { s.close(); }
 });

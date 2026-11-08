@@ -202,7 +202,11 @@ Existing file metadata, conflicts and activity remain intact, including later
 local edits. A restored inventory cannot trigger automatic conflict rebasing,
 claim adoption or source-metadata acknowledgment. Read/write authority is withheld
 for inventory consumers, retries stop, and reopening reports the retained pause.
-The conflict dialog explains why ordinary layout choices cannot resume it.
+The conflict dialog explains why ordinary layout choices cannot resume it and
+offers an offline, verified local source copy. The copy includes known retained
+document histories and metadata, unsaved buffers, loaded native files, inventory
+and review context. It leaves synchronization paused; discussion/Bases queues and
+unassociated caches are outside its explicitly recorded coverage.
 
 This checkpoint has no safe-resume or discard operation. Full inventory/CRDT/file
 reconciliation, verified byte recovery, minimum client versions, native acceptance
@@ -299,5 +303,6 @@ required before enabling restore as a supported user operation.
 The existing structural recovery archive now reads back and hashes every saved
 artifact, records a versioned checksum manifest and rechecks it before a layout
 decision moves originals. Its [format, verification and limits](managed-recovery-backup-preview.md)
-are documented separately. This strengthens source recovery; it does not yet
-export or reconcile an entire paused restored share.
+are documented separately. Paused shares now use the same verifier to export
+their known local source work. This does not reconcile all queues, find every
+orphaned cache, replace files or authorize restored synchronization.
