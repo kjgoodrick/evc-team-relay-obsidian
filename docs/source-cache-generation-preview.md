@@ -72,11 +72,15 @@ their own buffers and private inventories. Identity and catalog changes during
 capture require a retry.
 
 Remaining integration includes the reviewed activation decision and durable
-selection journal, automatic folder/document/buffer selection, native file
+selection-journal integration, automatic folder/document/buffer selection, native file
 replacement, and draining or isolating older workers
 that still know original vault paths. Cache names alone cannot stop an old
 window writing a native file. Production maintenance/admission/cutover, original-request
 reconciliation and desktop/mobile acceptance remain required.
+
+The [selection journal](source-selection-journal-preview.md) now provides atomic
+review/preparation/installation/commit states, exact retry and interruption
+handling. It remains an internal component awaiting the installer/startup wiring.
 
 The inventory increment passes 183 focused tests, the actual disposable HTTP
 restore fixture (four tests), and the full plugin regression (3,987 tests across
