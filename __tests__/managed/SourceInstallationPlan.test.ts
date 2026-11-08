@@ -4,11 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { runInNewContext } from "node:vm";
+import * as Y from "yjs";
 import { ItemKind } from "../../src/ItemKinds";
 import { prepareRecoveryBackup, type RecoveryIO } from "../../src/ManagedRecoveryBackup";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
 import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { RECOVERY_FOLDER } from "../../src/conflictCopyPath";
+import { buildInstallationInventory } from "../../src/SourceInstallationContent";
 import { encodeSourceInstallationPlan, parseSourceInstallationPlan, sourceInstallationArtifacts, sourceInstallationPath,
 	verifySourceInstallationPlan, type SourceInstallationPlan, type InstallationArtifact } from "../../src/SourceInstallationPlan";
 
@@ -34,7 +36,9 @@ async function fixture() {
 	await io.mkdir("Team"); await io.write("Team/Note.md", "Original native text");
 	const backup = await prepareRecoveryBackup(io, async () => ({ files: [{ path: "Team/Note.md", bytes: encode("Original native text") }],
 		documents: [], index: new Uint8Array([0, 0]) }), { review: id(2) });
-	const inventory = new Uint8Array([0, 0]).buffer, file = encode("Restored text"), source = new Uint8Array([0, 0]).buffer;
+	let inventory = new Uint8Array([0, 0]).buffer;
+	const file = encode("Restored text"), document = new Y.Doc(); document.getText("contents").insert(0, "Restored text");
+	const source = new Uint8Array(Y.encodeStateAsUpdate(document)).buffer; document.destroy();
 	const plan: SourceInstallationPlan = { format: "team-relay-source-installation", version: 1, id: id(1), reviewId: id(2),
 		source: { hostAppId: crypto.randomUUID(), serverId: "test", controlPlaneUrl: "https://fixture.test",
 			s3rn: ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", id(3))), restoreGeneration: id(4) },
@@ -43,6 +47,11 @@ async function fixture() {
 			{ path: "Notes/Note.md", record: { id: id(6), version: 0, type: ItemKind.Document }, file: descriptor(file), source: descriptor(source) },
 			{ path: "Picture.png", record: { id: id(7), version: 0, type: ItemKind.Image, hash: digest(file), synctime: 1, mimetype: "image/png" }, file: descriptor(file) }],
 	};
+	inventory = new Uint8Array(buildInstallationInventory(plan, {
+		records: Object.fromEntries(plan.entries.map(entry => [entry.path, entry.record])),
+		permissions: Object.fromEntries(plan.entries.map(entry => [entry.path, "read" as const])), activity: {}, owner: false,
+		restore_guard: true, restore_generation: plan.source.restoreGeneration,
+	})).buffer; plan.inventory = descriptor(inventory);
 	const encoded = await encodeSourceInstallationPlan(plan), directory = sourceInstallationPath(plan.id);
 	await io.mkdir(`${directory}/files`); await io.mkdir(`${directory}/sources`);
 	await io.writeBinary(`${directory}/plan.json`, encoded.bytes);
@@ -138,6 +147,23 @@ test("aggregate staged bytes are bounded before any artifact reads", async () =>
 	expect(() => parseSourceInstallationPlan(f.plan)).toThrow();
 });
 
+test("valid hashes cannot hide disagreement between editing history and the native text", async () => {
+	const f = await fixture(), doc = new Y.Doc(); doc.getText("contents").insert(0, "Different history");
+	const source = new Uint8Array(Y.encodeStateAsUpdate(doc)).buffer; doc.destroy();
+	f.plan.entries[1].source = descriptor(source); await io.writeBinary(`${f.directory}/sources/${id(6)}.yjs`, source);
+	const encoded = await encodeSourceInstallationPlan(f.plan); await io.writeBinary(`${f.directory}/plan.json`, encoded.bytes);
+	await expect(verifySourceInstallationPlan(io, encoded.reference, f.expected)).rejects.toThrow("disagrees with its native file");
+});
+
+test("valid hashes cannot carry an old pending inventory conflict into a selected source", async () => {
+	const f = await fixture(), doc = new Y.Doc(); Y.applyUpdate(doc, new Uint8Array(await io.readBinary(`${f.directory}/inventory.yjs`)));
+	doc.getMap("managed_conflicts_v1").set("old", { retained: true });
+	const inventory = new Uint8Array(Y.encodeStateAsUpdate(doc)).buffer; doc.destroy();
+	f.plan.inventory = descriptor(inventory); await io.writeBinary(`${f.directory}/inventory.yjs`, inventory);
+	const encoded = await encodeSourceInstallationPlan(f.plan); await io.writeBinary(`${f.directory}/plan.json`, encoded.bytes);
+	await expect(verifySourceInstallationPlan(io, encoded.reference, f.expected)).rejects.toThrow("retained or unsupported state");
+});
+
 test("oversized or growing staged files fail before hashing or continuing", async () => {
 	const f = await fixture(), stat = io.stat, read = jest.spyOn(io, "readBinary");
 	io.stat = name => name === `${f.directory}/inventory.yjs` ? Promise.resolve({ type: "file", size: 999999999 }) : stat(name);
@@ -174,7 +200,10 @@ test("a popout's buffers and empty visible inventory remain verifiable without t
 	io.readBinary = async name => { const bytes = await read(name); return runInNewContext("Uint8Array.from(data).buffer", { data: [...new Uint8Array(bytes)] }); };
 	await io.write(`${f.directory}/extra.txt`, "Never consumed");
 	expect((await verifySourceInstallationPlan(io, f.encoded.reference, f.expected)).artifactCount).toBe(4);
-	f.plan.entries = []; const empty = await encodeSourceInstallationPlan(f.plan); await io.writeBinary(`${f.directory}/plan.json`, empty.bytes);
+	f.plan.entries = [];
+	const inventory = new Uint8Array(buildInstallationInventory(f.plan, { records: {}, permissions: {}, activity: {}, owner: false, restore_guard: true, restore_generation: f.plan.source.restoreGeneration })).buffer;
+	f.plan.inventory = descriptor(inventory); await io.writeBinary(`${f.directory}/inventory.yjs`, inventory);
+	const empty = await encodeSourceInstallationPlan(f.plan); await io.writeBinary(`${f.directory}/plan.json`, empty.bytes);
 	expect((await verifySourceInstallationPlan(io, empty.reference, f.expected)).artifactCount).toBe(1);
 });
 

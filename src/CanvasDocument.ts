@@ -18,6 +18,7 @@ import type {
 	HostCanvasView,
 } from "./HostCanvasView";
 import { deepValueEquals } from "./deepValueEquals";
+import { canvasSourceData } from "./canvasSourceData";
 
 export function isCanvasDocument(file?: SyncableEntry): file is CanvasDocument {
 	return file instanceof CanvasDocument;
@@ -222,14 +223,7 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	}
 
 	static exportData(ydoc: Y.Doc): CanvasData {
-		const yedges = ydoc.getMap<CanvasEdgeData>("edges");
-		const ynodes = ydoc.getMap<CanvasNodeData>("nodes");
-		const edges = Array.from(yedges.values(), (yedge) => ({ ...yedge }));
-		const nodes = Array.from(ynodes.values(), (ynode) => {
-			const ytext = ydoc.getText(ynode.id);
-			return { ...ynode, text: ytext.toJSON() || ynode.text };
-		});
-		return { edges, nodes };
+		return canvasSourceData(ydoc);
 	}
 
 	async markServerAcked(): Promise<void> {

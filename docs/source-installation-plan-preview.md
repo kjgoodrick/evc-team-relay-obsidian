@@ -41,15 +41,32 @@ stat/size/digest sequentially, and checks the plan again at the end. Extra files
 are ignored. Storage/hash operations have a 30-second timeout (lowerable), caller
 context checks and cancellation; popout ArrayBuffers are supported.
 
-The verifier is read-only and returns data, not activation authority. It proves
-artifact integrity, not complete Yjs dependencies, agreement between native text
-and editing history, current server permission/generation, or stopped writers.
-Those semantic checks, exclusive staging publication, the native installer,
-resumable installation and user-facing activation still need connection. Every
-write must recheck the journal, destination isolation and bytes; an earlier
-verification cannot prevent later filesystem changes.
+The verifier also checks content semantics in isolated Yjs documents. Updates
+with missing insertion/deletion dependencies fail. A fresh inventory builder
+uses only the captured visible records, permissions, activity and explicit
+restore generation. It omits optional old deletion/Bases catalogs; ordinary sync
+fetches current catalogs again. Verification requires exact agreement among the
+file records, flat Markdown index, activity and stored server snapshot, and
+rejects unknown roots or pending restore/conflict state. Native Markdown bytes
+must match the staged editing history's exact UTF-8 projection. Canvas uses the
+same export helper as live saves and requires the same native bytes. It never
+merges retained local updates into the staged history.
 
-Verification: 119 focused installation-plan/archive/journal tests pass with real
+These documents have no providers, persistence, awareness or native writers and
+are destroyed after inspection. Applying a bounded Yjs update is synchronous;
+the 16 MiB limit is not a hard CPU/heap deadline. Worker isolation and physical
+mobile/resource measurements remain to be evaluated for larger histories.
+
+The verifier is read-only and returns data, not activation authority. It proves
+artifact integrity and internal content consistency, not current server
+permission/generation, trusted download provenance or stopped writers. Exclusive
+staging publication, the native installer, resumable installation and user-facing
+activation still need connection. Every write must recheck the journal,
+destination isolation and bytes; an earlier verification cannot prevent later
+filesystem changes.
+
+The artifact-format checkpoint passed 119 focused installation-plan/archive/
+journal tests with real
 temporary files and IndexedDB journal reopen. Cases include corrupt/missing/
 directory artifacts, changed associations, bad recovery archives, resource
 bounds, late completion after cancellation, stalled reads, changing context,
@@ -57,3 +74,14 @@ manifest replacement, popout buffers, empty inventories and preservation of the
 original native file. Main types, changed-source lint, build and the unchanged
 test-type ratchet pass (15 existing build warnings). Native desktop/mobile and
 full installer acceptance remain pending; no activation UI is enabled here.
+
+Content checks additionally cover malformed and incomplete updates, changed
+inventory maps, wrong/unsupported restore generations, missing or denied access,
+unknown activity, exclusion of old optional catalogs, exact Markdown/Canvas
+projection, and integrity-valid artifacts with inconsistent content. The tests
+exercise both the pure validators and restart verification through real files.
+
+The combined content-verification checkpoint passes the full plugin regression:
+**4,297 tests across 298 suites**, with 41 tests/27 opt-in suites skipped. Main
+types, changed-source lint, build and the unchanged test-type ratchet pass
+(205 errors/44 signatures against 207/46; 15 existing build warnings).

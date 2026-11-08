@@ -70,8 +70,8 @@ function record(value: unknown): ItemRecord {
 	return { ...input } as unknown as ItemRecord;
 }
 
-/** Metadata validation only. Hashes bind reviewed artifacts; they do not prove
- * current server authority, complete Yjs dependencies or native writer isolation. */
+/** Metadata validation only. Hashes bind reviewed artifacts; source-content
+ * consistency is checked separately before installation verification returns. */
 export function parseSourceInstallationPlan(value: unknown): SourceInstallationPlan {
 	exact(value, ["format", "version", "id", "reviewId", "source", "archive", "originalRoot", "destinationRoot", "mode", "inventory", "entries"]);
 	if (value.format !== "team-relay-source-installation" || value.version !== 1 || value.mode !== "new-folder"
@@ -138,7 +138,7 @@ export async function encodeSourceInstallationPlan(input: SourceInstallationPlan
 
 /** Reopen against the exact digest retained by the journal. Verification is
  * read-only and returns data, never permission to install or activate it. The
- * caller must still validate source semantics/freshness at its write boundary. */
+ * caller must still validate source freshness/isolation at its write boundary. */
 export async function verifySourceInstallationPlan(io: RecoveryArchiveReader, input: SourceInstallationReference,
 	expected: { source: SourceInventoryIdentity; reviewId: string; archive: RecoveryArchiveReference }, options: SourcePlanVerificationOptions = {}) {
 	const reference = Object.freeze({ id: uuid(input?.id), sha256: digest(input?.sha256) });
@@ -172,11 +172,22 @@ export async function verifySourceInstallationPlan(io: RecoveryArchiveReader, in
 	if (plan.id !== reference.id || plan.reviewId !== reviewId || sourceInventoryCacheSync(plan.source).identity !== scopeIdentity
 		|| plan.archive.path !== archiveReference.path || plan.archive.manifestSha256 !== archiveReference.manifestSha256) throw new Error("Installation plan belongs to another source review or recovery archive");
 	await verifyRecoveryArchive(io, archiveReference, { check, signal, timeoutMs: timeout });
+	// Load the content projector only for explicit recovery verification. Its
+	// public builders use the same plan parser; no startup source is activated.
+	const content = await bounded(() => import("./SourceInstallationContent"));
+	const sources = new Map(plan.entries.filter(entry => entry.source).map(entry => [`sources/${entry.record.id}.yjs`, entry]));
 	let totalBytes = 0;
 	const artifacts = sourceInstallationArtifacts(plan);
 	for (const { path: name, artifact: expectedArtifact } of artifacts) {
 		const bytes = await read(name, expectedArtifact.bytes, expectedArtifact.bytes);
 		if (await hash(bytes) !== expectedArtifact.sha256) throw new Error("Installation artifact digest mismatch: " + name);
+		if (name === "inventory.yjs") content.validateInstallationInventory(plan, new Uint8Array(bytes));
+		const entry = sources.get(name);
+		if (entry) {
+			const native = content.installationSourceBytes(entry.record.type as "markdown" | "canvas", new Uint8Array(bytes));
+			if (native.byteLength !== entry.file!.bytes || await hash(native) !== entry.file!.sha256) throw new Error("The staged editing history disagrees with its native file: " + entry.path);
+		}
+		check();
 		totalBytes += expectedArtifact.bytes;
 	}
 	if (await hash(await read("plan.json", MAX_PLAN, bytes.byteLength)) !== reference.sha256) throw new Error("Installation plan changed during verification");
