@@ -7,6 +7,7 @@ import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import { PermissionPolicyClient } from "../../src/collaboration/PermissionPolicy";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 
 const fixturePath = process.env.EVC_RESTORE_FIXTURE;
@@ -158,3 +159,35 @@ integration("restored sessions deliver queued inbox choices with immutable gener
 		expect((await transport.inbox()).items.find(row => row.thread_id === thread)?.unread).toBe(false);
 	} finally { await session.close(); }
 }, 15000);
+
+
+integration("restored permission forms require their original generation and recover lost saves through reads", async () => {
+	const f = JSON.parse(readFileSync(fixturePath!, "utf8")) as {
+		base: string; share: string; reviewer: string; owner: string; ownerToken: string; restoreGeneration: string;
+	};
+	if (new URL(f.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	let puts = 0;
+	const client = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.ownerToken, () => true, async (url, init) => {
+		if (init.method === "PUT") puts++;
+		return fetch(url, init);
+	});
+	const before = await client.read();
+	expect(before).toMatchObject({ restore_guard: true, restore_generation: f.restoreGeneration });
+	const old = { ...before, restore_generation: null };
+	await expect(client.save(old, old)).rejects.toMatchObject({ code: "restore_changed", status: 409 });
+	expect(await client.read()).toEqual(before);
+	const proposed = { file_rules: [...before.file_rules, { user_id: f.reviewer, path: "Hidden-fixture.md", recursive: false, permission: "none" as const }], comment_rules: before.comment_rules };
+	const unreliable = new PermissionPolicyClient(f.base, { shareId: f.share, actorId: f.owner }, () => f.ownerToken, () => true, async (url, init) => {
+		const response = await fetch(url, init);
+		if (init.method === "PUT") { puts++; expect(new Headers(init.headers).get("X-Relay-Restore-Generation")).toBe(f.restoreGeneration); }
+		if (response.ok && init.method === "PUT") { await response.text(); throw new Error("Synthetic lost permission response"); }
+		return response;
+	});
+	await expect(unreliable.save(before, proposed)).rejects.toMatchObject({ code: "unconfirmed" });
+	const observed = await client.read();
+	expect(observed.file_rules).toContainEqual(proposed.file_rules[proposed.file_rules.length - 1]);
+	expect(puts).toBe(2);
+	await expect(client.save(before, before)).rejects.toMatchObject({ code: "changed" });
+	await client.save(observed, before);
+	expect((await client.read()).file_rules).toEqual(before.file_rules);
+});

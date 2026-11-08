@@ -1,18 +1,20 @@
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { isId, isRecord, isSequence } from "./DiscussionProtocol";
+import { restoreContext } from "./RestoreGeneration";
 
 export type PermissionFileRule = { user_id: string; path: string; recursive: boolean; permission: "none" | "read" | "write" };
 export type PermissionCommentRule = { user_id: string; path: string; recursive: boolean; allowed: boolean };
 export type PermissionRules = { file_rules: PermissionFileRule[]; comment_rules: PermissionCommentRule[] };
 export type PermissionPolicy = PermissionRules & {
 	version: 1; share_id: string; actor_id: string; owner_id: string; revision: string; comment_revision: number;
+	restore_guard?: boolean; restore_generation?: string | null;
 	members: { user_id: string; email: string; active: boolean; administrator: boolean }[];
 };
 export type PermissionIdentity = { shareId: string; actorId: string };
 const responseLimit = 8 * 1024 * 1024;
 
 export class PermissionPolicyError extends Error {
-	constructor(readonly code: "account_changed" | "authentication_required" | "forbidden" | "unavailable" | "changed" | "member_changed" | "invalid" | "unconfirmed", readonly status = 0) {
+	constructor(readonly code: "account_changed" | "authentication_required" | "forbidden" | "unavailable" | "changed" | "restore_changed" | "member_changed" | "invalid" | "unconfirmed", readonly status = 0) {
 		super(code); this.name = "PermissionPolicyError";
 	}
 }
@@ -55,7 +57,11 @@ export function parsePermissionPolicy(value: unknown, identity: PermissionIdenti
 		return { user_id: member.user_id, email: member.email, active: member.active, administrator: member.administrator };
 	});
 	if (new Set(members.map(m => m.user_id)).size !== members.length) throw new PermissionPolicyError("invalid");
-	return { version: 1, share_id: identity.shareId, actor_id: identity.actorId, owner_id: value.owner_id, revision: value.revision, comment_revision: value.comment_revision, members, ...parsePermissionRules(value) };
+	let restore;
+	try { restore = restoreContext(value.restore_guard, value.restore_generation); } catch { throw new PermissionPolicyError("invalid"); }
+	if (restore?.generation !== null && restore?.generation !== undefined && !restore.supported) throw new PermissionPolicyError("invalid");
+	return { version: 1, share_id: identity.shareId, actor_id: identity.actorId, owner_id: value.owner_id, revision: value.revision, comment_revision: value.comment_revision, members, ...parsePermissionRules(value),
+		...(restore ? { restore_guard: restore.supported, restore_generation: restore.generation } : {}) };
 }
 
 /** Online-only administrative transport. A failed/expired request is never
@@ -72,9 +78,9 @@ export class PermissionPolicyClient {
 	read(): Promise<PermissionPolicy> { return this.request(); }
 	save(observed: PermissionPolicy, proposed: PermissionRules): Promise<PermissionPolicy> {
 		const snapshot = parsePermissionPolicy(observed, this.identity), rules = parsePermissionRules(proposed);
-		return this.request(JSON.stringify({ version: 1, actor_id: this.identity.actorId, expected_revision: snapshot.revision, ...rules }));
+		return this.request(JSON.stringify({ version: 1, actor_id: this.identity.actorId, expected_revision: snapshot.revision, ...rules }), snapshot.restore_generation ?? null, snapshot.restore_guard === true);
 	}
-	private async request(body?: string): Promise<PermissionPolicy> {
+	private async request(body?: string, restoreGeneration: string | null = null, guarded = false): Promise<PermissionPolicy> {
 		let expired = false, timer: number | undefined;
 		const controller = new AbortController();
 		const live = () => { if (expired) throw new PermissionPolicyError("unconfirmed"); if (!this.current()) throw new PermissionPolicyError("account_changed"); };
@@ -84,7 +90,8 @@ export class PermissionPolicyClient {
 			live(); if (!token) throw new PermissionPolicyError("authentication_required", 401);
 			let response: Response;
 			try { response = await this.fetcher(body === undefined ? this.endpoint + "?actor_id=" + this.identity.actorId : this.endpoint,
-				{ method: body === undefined ? "GET" : "PUT", sensitive: true, signal: controller.signal, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body }); }
+				{ method: body === undefined ? "GET" : "PUT", sensitive: true, signal: controller.signal, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json",
+					...(body !== undefined && restoreGeneration !== null ? { "X-Relay-Restore-Generation": restoreGeneration } : {}) }, body }); }
 			catch { live(); throw new PermissionPolicyError("unconfirmed"); }
 			live();
 			let raw: string;
@@ -102,11 +109,14 @@ export class PermissionPolicyClient {
 			try { value = JSON.parse(raw); } catch { if (response.ok) throw new PermissionPolicyError("invalid"); }
 			if (!response.ok) {
 				const message = isRecord(value) && isRecord(value.error) ? value.error.message : undefined;
+				if (response.status === 409 && isRecord(message) && message.code === "restore_generation_changed") throw new PermissionPolicyError("restore_changed", 409);
 				throw new PermissionPolicyError(response.status === 401 ? "authentication_required" : response.status === 403 ? (message === "permission_editor_account_changed" ? "account_changed" : "forbidden") :
 					response.status === 404 ? "unavailable" : response.status === 409 ? (message === "permission_member_changed" ? "member_changed" : "changed") :
 					response.status === 400 || response.status === 422 ? "invalid" : "unconfirmed", response.status);
 			}
-			return parsePermissionPolicy(value, this.identity);
+			const result = parsePermissionPolicy(value, this.identity);
+			if (body !== undefined && ((result.restore_generation ?? null) !== restoreGeneration || guarded && result.restore_guard !== true)) throw new PermissionPolicyError("unconfirmed");
+			return result;
 		};
 		try { return await Promise.race([attempt(), new Promise<never>((_, reject) => {
 			timer = window.setTimeout(() => { expired = true; reject(new PermissionPolicyError("unconfirmed")); }, 15_000);

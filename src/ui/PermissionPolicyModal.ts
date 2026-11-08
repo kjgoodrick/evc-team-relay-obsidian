@@ -69,6 +69,7 @@ export class PermissionPolicyModal extends Modal {
 		}
 		this.phase = "recover";
 		this.message = code === "changed" ? "Permissions changed since this form was loaded. Read the current policy before continuing." :
+			code === "restore_changed" ? "The share was restored after this form was loaded. Your proposal is preserved. Read the current permissions and review them before saving again." :
 			code === "member_changed" ? "A target member changed or is no longer eligible. Read the current policy and review the affected rules." :
 			code === "invalid" ? "The request or response could not be validated. Read the current policy before continuing; a save may already have completed." :
 			"The server response was not confirmed. If you were saving, the change may already have completed. Read the current policy before deciding what to do next.";

@@ -1,7 +1,7 @@
 # Restore-generation client foundation
 
 This is a tested discussion-command, picture-upload, group-capture, inbox and
-timeline-marker restore guard, not a complete restore workflow.
+timeline-marker and combined-permission restore guard, not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
@@ -149,3 +149,14 @@ generation even when its ORM identity was loaded earlier. The proof additionally
 represents old pending slots in the disposable store, confirms known receipts
 without rebinding/replay, and keeps unknown requests unchanged. PostgreSQL checks
 that receipt reads leave marker, revision and receipt counts unchanged.
+
+
+Combined permission editing reads `restore_guard`/`restore_generation` with the
+policy snapshot. The save freezes that binding before credential refresh and
+uses it only as a mutation header. The server validates it under the share lock
+before revision/no-op checks. A restore rejection retains the proposed rules and
+requires reading current policy, explicitly merging and reviewing, then saving
+against that new snapshot. New narrower exceptions remain in the merge. Reads
+carry no mutation header. Lost acknowledgments require read-only reconciliation;
+a mismatched generation or dropped guard in a success response remains
+unconfirmed. Legacy file-only/comment-rule endpoints remain a separate follow-up.

@@ -100,3 +100,20 @@ test("replacing narrower exceptions is explicit and the review lists each remova
 		f.click("Save permissions"); await flush(); expect(f.client.save.mock.calls[0][1].file_rules).toEqual([{ user_id: id(3), path: "", recursive: true, permission: "read" }]);
 	} finally { f.cleanup(); }
 });
+
+test("a restore preserves the proposal and requires a current read and explicit review before a new save", async () => {
+	const f = await fixture(); try {
+		f.change("Rule path", "Projects"); f.click("Add or update proposal"); f.click("Review changes");
+		f.client.save.mockRejectedValueOnce(new PermissionPolicyError("restore_changed", 409)); f.click("Save permissions"); await flush();
+		expect(f.modal.contentEl.textContent).toContain("share was restored"); expect(f.modal.contentEl.textContent).toContain("proposal is preserved");
+		expect(f.button("Save permissions")).toBeUndefined();
+		const restored = { ...base(), restore_guard: true, restore_generation: id(8), revision: "d".repeat(64) };
+		restored.file_rules.push({ user_id: id(3), path: "Projects/Secret.md", recursive: false, permission: "none" });
+		f.client.read.mockResolvedValue(restored); f.click("Read current permissions"); await flush();
+		expect(f.client.save).toHaveBeenCalledTimes(1); f.click("Review merged proposal");
+		expect(f.client.save).toHaveBeenCalledTimes(1); f.click("Review changes"); f.click("Save permissions"); await flush();
+		expect(f.client.save.mock.calls[1][0]).toMatchObject({ restore_generation: id(8), revision: restored.revision });
+		expect(f.client.save.mock.calls[1][1].file_rules).toContainEqual(restored.file_rules[1]);
+		expect(f.client.save.mock.calls[1][1].comment_rules).toContainEqual({ user_id: id(3), path: "Projects", recursive: true, allowed: true });
+	} finally { f.cleanup(); }
+});

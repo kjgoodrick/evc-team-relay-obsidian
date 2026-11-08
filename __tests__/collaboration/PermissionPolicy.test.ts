@@ -69,3 +69,34 @@ test("timeout aborts transport and cannot dispatch later credentials or automati
 		jest.advanceTimersByTime(15_000); await checked; expect(signal?.aborted).toBe(true);
 	} finally { jest.useRealTimers(); }
 });
+
+test("restore snapshots reject malformed or unsupported generations and retain legacy compatibility", () => {
+	for (const fields of [{ restore_guard: true }, { restore_generation: null }, { restore_guard: "yes", restore_generation: null },
+		{ restore_guard: true, restore_generation: "bad" }, { restore_guard: false, restore_generation: id(8) }]) {
+		expect(() => parsePermissionPolicy({ ...snapshot(), ...fields }, identity)).toThrow();
+	}
+	expect(parsePermissionPolicy({ ...snapshot(), restore_guard: true, restore_generation: id(8) }, identity)).toMatchObject({ restore_guard: true, restore_generation: id(8) });
+});
+
+test("save freezes its observed restore header before credentials and read never carries a mutation header", async () => {
+	let resume!: (token: string) => void;
+	const observed = { ...snapshot(), restore_guard: true, restore_generation: id(8) };
+	const fetcher = jest.fn(async (_url: string, _init: PlatformRequestInit) => reply({ ...snapshot(), restore_guard: true, restore_generation: id(8) }));
+	const client = new PermissionPolicyClient("https://relay.test", identity, () => new Promise<string>(resolve => { resume = resolve; }), () => true, fetcher);
+	const saving = client.save(observed, observed); observed.restore_generation = id(9); resume("synthetic"); await saving;
+	expect(new Headers(fetcher.mock.calls[0][1].headers).get("X-Relay-Restore-Generation")).toBe(id(8));
+	expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).not.toHaveProperty("restore_generation");
+	const reading = client.read(); resume("synthetic"); await reading;
+	expect(new Headers(fetcher.mock.calls[1][1].headers).has("X-Relay-Restore-Generation")).toBe(false);
+});
+
+test("restore rejection is explicit and a mismatched successful save stays unconfirmed without retry", async () => {
+	const observed = { ...snapshot(), restore_guard: true, restore_generation: id(8) };
+	for (const response of [reply({ error: { message: { code: "restore_generation_changed" } } }, 409),
+		reply({ ...observed, restore_generation: id(9) }), reply(snapshot())]) {
+		const fetcher = jest.fn(async () => response);
+		const client = new PermissionPolicyClient("https://relay.test", identity, () => "synthetic", () => true, fetcher);
+		await expect(client.save(observed, observed)).rejects.toMatchObject({ code: response.status === 409 ? "restore_changed" : "unconfirmed" });
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	}
+});
