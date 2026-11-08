@@ -29,7 +29,10 @@ can now reopen the saved archive against its recorded digest. A hash-bound
 [installation plan](source-installation-plan-preview.md) can also be reopened and
 checked against the journal's source/review/archive, including every staged byte,
 complete editing-history dependencies and agreement with native content.
-Exclusive staging, current server checks and the coordinator remain unfinished.
+A [preparation coordinator](source-installation-preparation-preview.md) now
+stages artifacts, rechecks current inventory and records the verified references
+with an expected journal revision. Production adapters, native writer isolation,
+installation and activation remain unfinished.
 A pending phase survives close/reopen, including a
 crash between native writes and the final journal commit; startup must resume
 recovery instead of treating that phase as permission to synchronize.

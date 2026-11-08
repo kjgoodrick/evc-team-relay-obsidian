@@ -56,11 +56,17 @@ export function buildInstallationInventory(input: SourceInstallationPlan, snapsh
 	} finally { doc.destroy(); }
 }
 
+/** Canonical metadata for a fresh visible-inventory comparison. Optional old
+ * server catalogs do not enter this selected source's local inventory. */
+export function installationManifest(input: SourceInstallationPlan, snapshot: ManagedManifest): ManagedManifest {
+	return manifestFor(parseSourceInstallationPlan(input), snapshot);
+}
+
 /** Check all visible inventory maps, not only plausible file names. Unknown
  * roots and restore/conflict state must never enter a fresh selected cache. */
-export function validateInstallationInventory(input: SourceInstallationPlan, update: Uint8Array): void {
+export function validateInstallationInventory(input: SourceInstallationPlan, update: Uint8Array): ManagedManifest {
 	const plan = parseSourceInstallationPlan(input);
-	isolated(update, doc => {
+	return isolated(update, doc => {
 		if ([...doc.share.keys()].some(key => !["filemeta_v0", "docs", "docactivity_v0", "managed_base_v1"].includes(key))) throw new Error("The staged inventory contains retained or unsupported state");
 		const base = doc.getMap("managed_base_v1"), snapshot = base.get("snapshot"), manifest = manifestFor(plan, snapshot);
 		const flat = Object.fromEntries(plan.entries.filter(entry => entry.record.type === "markdown").map(entry => [entry.path, entry.record.id]));
@@ -68,6 +74,7 @@ export function validateInstallationInventory(input: SourceInstallationPlan, upd
 			|| !same(doc.getMap("docs").toJSON(), flat) || !same(doc.getMap("docactivity_v0").toJSON(), manifest.activity)) {
 			throw new Error("The staged inventory contains pending or inconsistent changes");
 		}
+		return manifest;
 	});
 }
 

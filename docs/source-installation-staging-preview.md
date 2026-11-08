@@ -16,8 +16,9 @@ are staged, and the complete archive, manifest, artifact digests and content
 semantics are read back before a result is returned.
 
 The adapter contract requires read-only, generation-bound downloads and exclusive
-directory creation. Production host/transport adapters and the preparation
-coordinator are not connected yet; synthetic tests exercise this contract on a
+directory creation. A [preparation coordinator](source-installation-preparation-preview.md)
+now connects verified staging and a fresh inventory read to the journal.
+Production host/transport adapters are not connected yet; synthetic tests exercise this contract on a
 real temporary filesystem. The primitive does not select a source, advance the
 selection journal, create the proposed native destination, touch originals,
 import a source cache or replay saved work. A returned artifact still needs current

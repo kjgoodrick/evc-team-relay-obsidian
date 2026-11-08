@@ -176,12 +176,13 @@ export async function verifySourceInstallationPlan(io: RecoveryArchiveReader, in
 	// public builders use the same plan parser; no startup source is activated.
 	const content = await bounded(() => import("./SourceInstallationContent"));
 	const sources = new Map(plan.entries.filter(entry => entry.source).map(entry => [`sources/${entry.record.id}.yjs`, entry]));
+	let inventorySnapshot: ReturnType<typeof content.validateInstallationInventory> | undefined;
 	let totalBytes = 0;
 	const artifacts = sourceInstallationArtifacts(plan);
 	for (const { path: name, artifact: expectedArtifact } of artifacts) {
 		const bytes = await read(name, expectedArtifact.bytes, expectedArtifact.bytes);
 		if (await hash(bytes) !== expectedArtifact.sha256) throw new Error("Installation artifact digest mismatch: " + name);
-		if (name === "inventory.yjs") content.validateInstallationInventory(plan, new Uint8Array(bytes));
+		if (name === "inventory.yjs") inventorySnapshot = content.validateInstallationInventory(plan, new Uint8Array(bytes));
 		const entry = sources.get(name);
 		if (entry) {
 			const native = content.installationSourceBytes(entry.record.type as "markdown" | "canvas", new Uint8Array(bytes));
@@ -191,5 +192,6 @@ export async function verifySourceInstallationPlan(io: RecoveryArchiveReader, in
 		totalBytes += expectedArtifact.bytes;
 	}
 	if (await hash(await read("plan.json", MAX_PLAN, bytes.byteLength)) !== reference.sha256) throw new Error("Installation plan changed during verification");
-	check(); return { reference, plan, artifactCount: artifacts.length, totalBytes };
+	if (!inventorySnapshot) throw new Error("The installation inventory was not verified");
+	check(); return { reference, plan, inventorySnapshot, artifactCount: artifacts.length, totalBytes };
 }
