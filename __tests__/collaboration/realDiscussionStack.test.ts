@@ -111,6 +111,14 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		expect(await store.getOperation(denied.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden", payload: { body: body("Keep my draft") } });
 		const ambiguousRejected = (await store.getOperation(ambiguous.operationId))!;
 		expect(ambiguousRejected).toMatchObject({ state: "rejected", error: "comment_forbidden" });
+		// Read-only receipt reconciliation is still available with note read
+		// access. It cannot silently accept the local queue or resend unknown work.
+		expect((await transport.capabilities()).commandStatus).toBe(true);
+		expect(await transport.commandStatus(ambiguousRejected)).toMatchObject({ status: "accepted",
+			result: { operation_id: ambiguous.operationId, message_id: (ambiguous.payload as Record<string, Json>).message_id } });
+		expect(await transport.commandStatus(denied)).toEqual({ status: "unknown" });
+		expect(await store.getOperation(ambiguous.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden" });
+		expect(await store.getOperation(denied.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden" });
 		expect(await store.entity(fixture.entry, messageKey(thread, message))).toBeUndefined();
 		expect((await api(`${scopePath}/threads/${thread}`)).messages).toHaveLength(4);
 		const revokedRules = await api(`shares/${fixture.share}/comment-rules`, {}, true);

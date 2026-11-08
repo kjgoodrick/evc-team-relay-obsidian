@@ -99,6 +99,8 @@ export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
 
 export type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
 export type WithdrawalResult = { status: "withdrawn" } | { status: "accepted"; result: CommandResult };
+/** An absent receipt may have been lost in a restore. Never replay from unknown. */
+export type CommandStatus = WithdrawalResult | { status: "unknown" };
 
 function onlineEnvelope(shareId: string, operation: OnlineOperation): string {
 	const command = operation.payload;
@@ -164,6 +166,22 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body), op);
 	}
 
+	/** Read only: no outbox acceptance, withdrawal, replacement, or send. */
+	async commandStatus(operation: QueuedCommand, current?: () => boolean): Promise<CommandStatus> {
+		return this.readCommandStatus(operation, queuedEnvelope(this.identity.shareId, operation), current);
+	}
+	async onlineCommandStatus(operation: OnlineOperation, current?: () => boolean): Promise<CommandStatus> {
+		return this.readCommandStatus(operation, onlineEnvelope(this.identity.shareId, operation), current);
+	}
+	private async readCommandStatus(operation: OnlineOperation, body: string, current?: () => boolean): Promise<CommandStatus> {
+		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
+		const value = await this.request("/commands/status", body, { current });
+		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
+		if (!object(value) || !["withdrawn", "unknown"].includes(String(value.status)) || value.operation_id !== captured.operationId ||
+			value.entry_id !== parseDiscussionScope(captured.scopeId)?.entryId) throw new DiscussionFailure("pause", "invalid_command_status_response");
+		return { status: value.status as "withdrawn" | "unknown" };
+	}
+
 	/** Resolve acceptance or fence every late send before creating a replacement. */
 	async withdraw(operation: QueuedCommand, current?: () => boolean): Promise<WithdrawalResult> {
 		// A timeout never proves withdrawal; validate the exact operation/scope.
@@ -190,11 +208,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		let baseTargets: BaseTargetKind[] = [];
@@ -231,6 +249,7 @@ export class DiscussionTransport implements DiscussionSender {
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
+			...(value.features.discussion_command_status === undefined ? {} : { commandStatus: value.features.discussion_commands && value.features.discussion_command_status === true }),
 			...(formulaGroups === undefined ? {} : { baseFormulaGroups: formulaGroups === true && baseTargets.includes("group") }),
 			...(value.features.discussion_moderation_catalog === undefined ? {} : { moderationRecovery: value.features.discussion_commands && value.features.discussion_moderation_recovery === true && value.features.discussion_moderation_catalog === true }),
 			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
