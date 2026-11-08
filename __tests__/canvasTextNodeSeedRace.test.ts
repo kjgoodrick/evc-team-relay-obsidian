@@ -70,6 +70,28 @@ function makeCanvas(ydoc: Y.Doc, isLocallyPersisted: boolean): CanvasDocument {
 }
 
 describe("CanvasDocument node text-seed race — own not-yet-loaded persistence (, sibling of)", () => {
+	test.each([false, true])("a deliberately cleared card stays empty through export and editor access (reloaded: %s)", reloaded => {
+		const node = makeNode("cleared-card", "older metadata text"), original = new Y.Doc();
+		original.getMap("nodes").set(node.id, node);
+		const text = original.getText(node.id); text.insert(0, "newer text"); text.delete(0, text.length);
+		const doc = reloaded ? new Y.Doc() : original;
+		if (reloaded) Y.applyUpdate(doc, Y.encodeStateAsUpdate(original));
+		const before = Y.encodeStateAsUpdate(doc), canvas = makeCanvas(doc, true);
+		expect(CanvasDocument.exportData(doc).nodes[0].text).toBe("");
+		expect(canvas.nodeText(node).toString()).toBe("");
+		expect(canvas.textNodeSafe(node).toString()).toBe("");
+		expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+		doc.destroy(); if (doc !== original) original.destroy();
+	});
+
+	test("legacy metadata remains visible and initializes a card without text history", () => {
+		const node = makeNode("legacy-card", "legacy metadata text"), doc = new Y.Doc();
+		doc.getMap("nodes").set(node.id, node);
+		expect(CanvasDocument.exportData(doc).nodes[0].text).toBe(node.text);
+		expect(makeCanvas(doc, true).textNodeSafe(node).toString()).toBe(node.text);
+		expect(CanvasDocument.exportData(doc).nodes[0].text).toBe(node.text); doc.destroy();
+	});
+
 	test("BUG (unguarded nodeText(), demonstrates the underlying mechanism is real): seeding before persisted history applies duplicates the node's text", () => {
 		const nodeText = "content that already existed in a prior session";
 		const node = makeNode("node-1", nodeText);

@@ -198,3 +198,34 @@ pass; the existing 15 build warnings remain. The test-type ratchet stays at
 205 errors/44 signatures against the frozen 207/46 baseline. The failing
 pre-fix HTTP clear case and passing post-fix service proof were both observed
 in isolated fixtures; their processes and data were cleaned up.
+
+## Existing Canvas sync compatibility
+
+The HTTP/Rust restore fixture now includes an existing Canvas alongside the
+Markdown note. It verifies pre-restore Canvas history surviving the relay
+restart, authorized full-history download, native installation and selected
+cache reopening. Changes made after preparation include card movement, added
+text and an intentional clear. The ordinary selected provider merges them, and
+the real Canvas fetch/transfer path writes the current JSON into the temporary
+native file. A separate read-only peer sees the same state. The original
+generation's offline Canvas edits remain in its disconnected document.
+
+This exposed a second clear bug: Canvas export fell back to the node's older
+metadata whenever its text was empty, and editor initialization could reseed
+that text. Both now distinguish a card without any text history from a card
+whose retained items were deleted. Legacy metadata-only cards still export and
+initialize normally. Automated tests cover editor access, cache round trips,
+source installation and unchanged encoded history after inspection.
+
+The service proof passes with **34 focused Canvas/content tests**. Canvas JSON
+is compared structurally across Rust/JavaScript peers because object key order
+can change; installation still verifies exact captured artifact/native bytes.
+This does not add Canvas comments. It also does not establish native Canvas
+view acceptance, protection of concurrent native Canvas edits, or cross-process
+writer isolation; those remain distinct from the verified cache/provider path.
+
+The full regression passes **4,581 tests across 308 suites**, with 41 tests in
+27 opt-in suites skipped. Main types, changed-source lint, test-type ratchet
+(205/44 versus frozen 207/46) and the preview build pass; 15 existing build
+warnings remain. The extended Python fixture passes lint/format checks and the
+actual HTTP/Rust proof; owned processes and temporary stores are cleaned up.

@@ -98,6 +98,16 @@ test("Canvas verification shares the live save projection and does not mutate so
 	expect(bytes).toEqual(before);
 });
 
+test("Canvas installation preserves a cleared card instead of reviving its legacy metadata text", () => {
+	const bytes = update(doc => {
+		doc.getMap("nodes").set("card", { id: "card", type: "text", text: "older text", x: 1, y: 2, width: 3, height: 4 });
+		const text = doc.getText("card"); text.insert(0, "newer text"); text.delete(0, text.length);
+	});
+	const before = new Uint8Array(bytes);
+	const projected = JSON.parse(new TextDecoder().decode(installationSourceBytes("canvas", bytes)));
+	expect(projected.nodes[0].text).toBe(""); expect(bytes).toEqual(before);
+});
+
 test.each(["insertion", "deletion"])("an unresolved %s dependency cannot project apparently complete text", kind => {
 	const doc = new Y.Doc({ gc: false });
 	try {

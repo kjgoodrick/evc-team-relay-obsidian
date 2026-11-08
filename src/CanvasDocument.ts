@@ -179,7 +179,9 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 
 	public nodeText(node: CanvasNodeData): Y.Text {
 		const ytext = this.crdtDoc.getText(node.id);
-		if (ytext.toJSON() === "") {
+		// Deleted items remain in this root text's history. Never reseed a
+		// deliberately cleared card from its older metadata/view snapshot.
+		if (ytext._start === null) {
 			ytext.insert(0, node.text);
 		}
 		return ytext;
@@ -189,8 +191,8 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	 * Like nodeText(), but safe to call before this canvas's own persisted
 	 * history is known to have replayed (`isLocallyPersisted`).
 	 *
-	 * nodeText() decides "safe to seed from the local Obsidian view" purely
-	 * from `ytext.toJSON() === ""` -- but if this canvas's IndexedDB replay
+	 * nodeText() seeds legacy metadata only when no text history is present.
+	 * If this canvas's IndexedDB replay
 	 * hasn't completed yet, an empty read is a false negative for "genuinely
 	 * new node", not "not synced yet". Seeding on that false premise
 	 * duplicates/overwrites real content once the persisted history lands a

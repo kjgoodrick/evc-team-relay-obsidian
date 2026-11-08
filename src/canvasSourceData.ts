@@ -7,7 +7,10 @@ export function canvasSourceData(ydoc: Y.Doc): CanvasData {
 	const edges = Array.from(yedges.values(), edge => ({ ...edge }));
 	const nodes = Array.from(ynodes.values(), node => {
 		const text = ydoc.getText(node.id);
-		return { ...node, text: text.toJSON() || node.text };
+		// Legacy nodes may only have the metadata text. Once a Y.Text has
+		// held content, its tombstones distinguish an intentional clear from
+		// that legacy state, even after a cache/server round trip.
+		return { ...node, text: text._start === null ? node.text : text.toJSON() };
 	});
 	return { edges, nodes };
 }

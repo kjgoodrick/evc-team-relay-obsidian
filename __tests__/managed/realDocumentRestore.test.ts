@@ -6,7 +6,7 @@ import { YSweetProvider } from "../../src/client/provider";
 import { ProviderBacked } from "../../src/ProviderBacked";
 import { RelayCredentialCache } from "../../src/RelayCredentialCache";
 import { RelayOnPremTokenProvider } from "../../src/auth/RelayOnPremTokenProvider";
-import { RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddress";
+import { RemoteCanvasAddress, RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { SystemClock } from "../../src/Clock";
 import type { AuthSession } from "../../src/AuthSession";
 import type { IAuthProvider } from "../../src/auth/IAuthProvider";
@@ -17,6 +17,8 @@ import { proveSourceInstallation } from "../mocks/sourceInstallationHttpProof";
 import { RemoteFolderAddress } from "../../src/ResourceAddress";
 import { Document } from "../../src/Document";
 import { TransferQueue } from "../../src/TransferQueue";
+import { CanvasDocument } from "../../src/CanvasDocument";
+import type { CanvasNodeData } from "../../src/HostCanvasView";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/obsidian"), FileSystemAdapter: class {} }));
@@ -51,16 +53,16 @@ integration("managed document sockets reject original grants after generation ro
 		clients.push(backing); caches.push(cache);
 		return { backing, cache, requests, store, provider: backing._liveProvider, text: backing.crdtDoc.getText("contents") };
 	}
-	async function grant(mode: "read" | "write", generation?: string, expected = 200) {
+	async function grant(mode: "read" | "write", generation?: string, expected = 200, documentId = f.note) {
 		const response = await fetch(f.base + "/v1/tokens/relay", { method: "POST", headers: { Authorization: `Bearer ${f.ownerToken}`,
 			"Content-Type": "application/json", ...(generation ? { "X-Relay-Restore-Generation": generation } : {}) },
-			body: JSON.stringify({ share_id: f.share, doc_id: f.note, mode }) });
+			body: JSON.stringify({ share_id: f.share, doc_id: documentId, mode }) });
 		expect(response.status).toBe(expected);
 		return response.json() as Promise<{ token: string; relay_url: string; restore_generation: string | null }>;
 	}
-	async function peer(auth: { relay_url: string; token: string }) {
+	async function peer(auth: { relay_url: string; token: string }, documentId = f.note) {
 		const doc = new Y.Doc(); docs.push(doc);
-		const provider = new YSweetProvider(auth.relay_url, f.note, doc, { connect: false, disableBc: true, params: { token: auth.token } });
+		const provider = new YSweetProvider(auth.relay_url, documentId, doc, { connect: false, disableBc: true, params: { token: auth.token } });
 		providers.push(provider); provider.connect();
 		await until(() => provider.synced, "fresh document synchronization");
 		return { doc, provider, text: doc.getText("contents") };
@@ -75,10 +77,18 @@ integration("managed document sockets reject original grants after generation ro
 		const reader = await peer(await grant("read"));
 		writer.text.insert(0, "content before rotation\n");
 		await until(() => reader.text.toString() === writer.text.toString(), "original content");
+		const originalCanvas = await peer(await grant("write", undefined, 200, f.canvas), f.canvas);
+		originalCanvas.doc.getMap("nodes").set("card", { id: "card", type: "text", text: "legacy fallback", x: 10, y: 20, width: 200, height: 100 });
+		originalCanvas.doc.getText("card").insert(0, "Canvas before rotation\n");
+		const canvasReader = await peer(await grant("read", undefined, 200, f.canvas), f.canvas);
+		await until(() => canvasReader.doc.getText("card").toString() === "Canvas before rotation\n", "original Canvas content");
 		const generation = crypto.randomUUID();
 		fs.writeFileSync(path.join(f.restartDir, "rotate-request"), generation);
 		await until(() => fs.existsSync(path.join(f.restartDir, "rotate-done")), "fixture generation rotation");
 		await until(() => !writer.provider.wsconnected && !reader.provider.wsconnected, "active old sockets closed");
+		await until(() => !originalCanvas.provider.wsconnected && !canvasReader.provider.wsconnected, "original Canvas sockets closed");
+		originalCanvas.provider.disconnect(); canvasReader.provider.disconnect();
+		originalCanvas.doc.getText("card").insert(0, "OLD OFFLINE CANVAS EDIT\n");
 		await until(() => writer.backing.restoreReviewRequired, "active client pauses for review");
 		reader.provider.disconnect();
 		writer.text.insert(writer.text.length, "OLD OFFLINE EDIT MUST STAY LOCAL\n");
@@ -148,10 +158,17 @@ integration("managed document sockets reject original grants after generation ro
 		const folderAddress = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", f.share));
 		const inventoryGrant = await memberCache.requestInventoryInspectionToken(folderAddress, "fixture", { restoreGeneration: generation });
 		let preparedText = "content before rotation\nbound edit\n";
+		const canvasWriter = await peer(await grant("write", generation, 200, f.canvas), f.canvas);
+		await until(() => canvasWriter.doc.getText("card").toString() === "Canvas before rotation\n", "Canvas history survives relay restart");
 		for (const change of ["append", "clear"] as const) {
 			const newerText = change === "append" ? preparedText + "edit after source preparation\n" : "";
+			const preparedCanvas = CanvasDocument.exportData(canvasWriter.doc);
+			const canvasText = canvasWriter.doc.getText("card");
+			const newerCanvasText = change === "append" ? canvasText.toString() + "Canvas edit after preparation\n" : "";
+			const newerCanvasX = preparedCanvas.nodes[0].x + 40;
 			await proveSourceInstallation(memberCache, { ...f, generation }, inventoryGrant.grant.token, {
-				expectedFiles: { "Note.md": preparedText },
+				expectedFiles: { "Note.md": preparedText, "Board.canvas": JSON.stringify(preparedCanvas, null, 2) },
+				compareJsonFiles: ["Board.canvas"],
 				afterPreparation: async () => {
 					expect(await restoredRestart.backing.bringOnline()).toBe(true);
 					await until(() => restoredRestart.provider.synced, "writer reconnects after source preparation");
@@ -161,6 +178,13 @@ integration("managed document sockets reject original grants after generation ro
 					const observer = await peer(await grant("read", generation));
 					await until(() => observer.text.toString() === newerText, "server receives edit after source preparation");
 					observer.provider.disconnect(); restoredRestart.backing.goOffline();
+					if (change === "append") canvasText.insert(canvasText.length, "Canvas edit after preparation\n");
+					else canvasText.delete(0, canvasText.length);
+					canvasWriter.doc.getMap<CanvasNodeData>("nodes").set("card", { ...preparedCanvas.nodes[0], x: newerCanvasX });
+					const canvasObserver = await peer(await grant("read", generation, 200, f.canvas), f.canvas);
+					await until(() => canvasObserver.doc.getText("card").toString() === newerCanvasText
+						&& canvasObserver.doc.getMap<CanvasNodeData>("nodes").get("card")?.x === newerCanvasX, "server receives Canvas changes after preparation");
+					canvasObserver.provider.disconnect();
 				},
 				verifySelected: async (identity, selected, directory) => {
 					const backing = new StoredDocument(f.note, address, memberCache, session, "fixture", selected.binding, selected); clients.push(backing);
@@ -198,12 +222,42 @@ integration("managed document sockets reject original grants after generation ro
 					await until(() => observer.text.toString() === text.toString(), "installed source writes through ordinary provider");
 					expect(observer.text.toString()).not.toContain("OLD OFFLINE"); expect(observer.text.toString()).not.toContain("CACHED CLIENT");
 					backing.goOffline(); await store.close();
+					const canvasAddress = new RemoteCanvasAddress("relay-onprem", f.share, f.canvas);
+					const canvas = new StoredDocument(f.canvas, canvasAddress, memberCache, session, "fixture", selected.binding, selected); clients.push(canvas);
+					const canvasStore = await openSourceDocumentCache({ ...identity, s3rn: ResourceAddress.serialize(canvasAddress) }, canvas.crdtDoc); stores.push(canvasStore); canvas.attachStore(canvasStore);
+					expect(CanvasDocument.exportData(canvas.crdtDoc)).toEqual(preparedCanvas);
+					expect(JSON.parse(fs.readFileSync(path.join(directory, "Board.canvas"), "utf8"))).toEqual(preparedCanvas);
+					expect(await canvas.bringOnline()).toBe(true);
+					await until(() => canvas._liveProvider.synced && canvas.crdtDoc.getText("card").toString() === newerCanvasText, "installed Canvas merges newer editing history");
+					const canvasData = CanvasDocument.exportData(canvas.crdtDoc);
+					expect(canvasData.nodes[0]).toMatchObject({ text: newerCanvasText, x: newerCanvasX });
+					expect(canvas.crdtDoc.getText("card").toString()).not.toContain("OLD OFFLINE");
+					const canvasPath = path.join(directory, "Board.canvas"), nativeCanvas = Object.create(CanvasDocument.prototype) as CanvasDocument;
+					Object.defineProperties(nativeCanvas, {
+						entryPath: { value: "Board.canvas" }, entityGuid: { value: f.canvas }, crdtDoc: { value: canvas.crdtDoc },
+						editLock: { value: false }, isLocallyPersisted: { value: true }, awaitFirstSync: { value: async () => {} },
+						connectionIntent: { get: () => "connected" }, bringOnline: { value: () => canvas.bringOnline() },
+						restoreReviewRequired: { get: () => canvas.restoreReviewRequired }, _liveProvider: { get: () => canvas._liveProvider },
+						vaultShare: { value: { workspaceId: f.share, folderIndex: { tracks: () => true },
+							readContents: () => fs.promises.readFile(canvasPath, "utf8"),
+							writeContents: (_doc: CanvasDocument, value: string) => fs.promises.writeFile(canvasPath, value) } },
+					});
+					expect(nativeCanvas.textNodeSafe(preparedCanvas.nodes[0]).toString()).toBe(newerCanvasText);
+					const canvasQueue = new TransferQueue({} as never, new SystemClock(), {} as never);
+					try { await canvasQueue.fetchCanvas(nativeCanvas); } finally { canvasQueue.shutdown(); }
+					expect(JSON.parse(fs.readFileSync(canvasPath, "utf8"))).toEqual(canvasData);
+					const canvasObserver = await peer(await grant("read", generation, 200, f.canvas), f.canvas);
+					await until(() => canvasObserver.doc.getMap<CanvasNodeData>("nodes").get("card")?.x === newerCanvasX, "independent Canvas observer receives current structure");
+					expect(canvasObserver.doc.getText("card").toString()).toBe(newerCanvasText);
+					canvasObserver.provider.disconnect();
+					canvas.goOffline(); await canvasStore.close();
 				},
 			});
 			preparedText = newerText + "activated member edit\n";
 		}
 		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
 		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
+		expect(originalCanvas.doc.getText("card").toString()).toContain("OLD OFFLINE CANVAS EDIT");
 	} finally {
 		clients.forEach(client => client.dismantle());
 		await Promise.all(stores.map(store => store.close()));

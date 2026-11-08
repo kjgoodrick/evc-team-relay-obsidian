@@ -30,6 +30,8 @@ export async function proveAttachmentSourceInstallation(cache: RelayCredentialCa
 
 export async function proveSourceInstallation(cache: RelayCredentialCache, fixture: Record<string, string>, token: string, proof: {
 	expectedFiles: Record<string, string>;
+	/** Yrs may reorder object keys while preserving the Canvas JSON value. */
+	compareJsonFiles?: readonly string[];
 	afterPreparation?: () => Promise<void>;
 	verifySelected?: (identity: SourceInventoryIdentity, selected: SourceSelectionContext, directory: string) => Promise<void>;
 }) {
@@ -69,7 +71,11 @@ export async function proveSourceInstallation(cache: RelayCredentialCache, fixtu
 		const host = { settings: scope, app: { loadLocalStorage: () => null }, buffers: new UnsavedFileStore(), checkIsolation: () => {} };
 		const result = await activateSourceInstallation(journal, staging, native, request, host, downloads);
 		expect(result).toMatchObject({ destinationRoot: "Restored", selection: { pending: null, nativeRoot: "Restored", active: { kind: "source", restoreGeneration: fixture.generation } } });
-		for (const [name, expected] of Object.entries(proof.expectedFiles)) expect(await fs.readFile(path.join(directory, "Restored", name), "utf8")).toBe(expected);
+		for (const [name, expected] of Object.entries(proof.expectedFiles)) {
+			const actual = await fs.readFile(path.join(directory, "Restored", name), "utf8");
+			if (proof.compareJsonFiles?.includes(name)) expect(JSON.parse(actual)).toEqual(JSON.parse(expected));
+			else expect(actual).toBe(expected);
+		}
 		expect(await fs.readFile(path.join(directory, "Original", "Offline.md"), "utf8")).toBe("Retained original offline work");
 		expect((await scope.readPersistedValue())![0].path).toBe("Restored");
 		const admitted = await admitSourceStartup(vault, "Restored", identity, { check: () => {} });
