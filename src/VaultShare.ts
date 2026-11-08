@@ -504,7 +504,8 @@ export class VaultShare extends ProviderBacked {
 					if (!await this.vaultApi.adapter.exists(parent)) await this.vaultApi.createFolder(parent);
 				}
 			};
-			const backup = await prepareRecoveryBackup({ mkdir, write: (p, text) => this.vaultApi.adapter.write(p, text), writeBinary: (p, bytes) => this.vaultApi.adapter.writeBinary(p, bytes) }, capture,
+			const backup = await prepareRecoveryBackup({ mkdir, write: (p, text) => this.vaultApi.adapter.write(p, text),
+				writeBinary: (p, bytes) => this.vaultApi.adapter.writeBinary(p, bytes), readBinary: p => this.vaultApi.adapter.readBinary(p) }, capture,
 				{ shareId: this.entityGuid, sharePath: this.path, choice, conflict, server: select(server.records, conflict) });
 			backupPath = backup.path;
 			return async () => {

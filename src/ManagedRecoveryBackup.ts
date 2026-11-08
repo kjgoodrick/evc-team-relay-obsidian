@@ -1,4 +1,5 @@
 import { RECOVERY_FOLDER } from "./conflictCopyPath";
+import { sha256Hex } from "./contentDigest";
 
 export interface RecoveryFile { path: string; bytes: ArrayBuffer }
 export interface RecoveryDocument { id: string; update: Uint8Array; text: string; unsaved?: string | null }
@@ -7,6 +8,7 @@ export interface RecoveryIO {
 	mkdir(path: string): Promise<void>;
 	write(path: string, text: string): Promise<void>;
 	writeBinary(path: string, bytes: ArrayBuffer): Promise<void>;
+	readBinary(path: string): Promise<ArrayBuffer>;
 }
 const bytes = (value: Uint8Array): ArrayBuffer => new Uint8Array(value).buffer;
 const equal = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => {
@@ -19,29 +21,82 @@ export function sameCapture(a: RecoveryCapture, b: RecoveryCapture): boolean {
 		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.text === e.text && d.unsaved === e.unsaved && equal(d.update, e.update)));
 }
 
+function copyCapture(value: RecoveryCapture): RecoveryCapture {
+	return { files: value.files.map(file => ({ path: file.path, bytes: file.bytes.slice(0) })),
+		documents: value.documents.map(doc => ({ ...doc, update: new Uint8Array(doc.update) })), index: new Uint8Array(value.index) };
+}
+
+function safeRelativePath(path: string): void {
+	if (typeof path !== "string" || !path || /^[a-z]:/i.test(path) || path.includes("\\")
+		|| [...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+		|| path.split("/").some(part => !part || part === "." || part === "..")) throw new Error("Recovery file has an unsafe relative path");
+}
+
+interface SavedRecoveryFile { path: string; bytes: number; sha256: string }
+
 /** Originals are never removed by this module. A complete backup and a second
  * capture must succeed before the caller may move anything out of the way. */
 export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promise<RecoveryCapture>, metadata: unknown) {
 	const path = `${RECOVERY_FOLDER}/${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID()}`;
-	const first = await capture();
-	await io.mkdir(path);
+	// Freeze the review metadata and captured bytes before the first archive
+	// write. A caller reusing mutable buffers cannot change our comparison base.
+	const metadataText = JSON.stringify(metadata, null, 2);
+	if (metadataText === undefined) throw new Error("Recovery metadata is missing");
+	const first = copyCapture(await capture());
+	const artifacts: { path: string; bytes: ArrayBuffer; text?: string }[] = [];
+	const addText = (path: string, text: string) => artifacts.push({ path, text, bytes: new TextEncoder().encode(text).buffer });
 	for (const file of first.files) {
-		const target = `${path}/files/${file.path}`;
-		await io.mkdir(target.slice(0, target.lastIndexOf("/")));
-		await io.writeBinary(target, file.bytes);
+		safeRelativePath(file.path);
+		artifacts.push({ path: `files/${file.path}`, bytes: file.bytes });
 	}
-	await io.mkdir(`${path}/documents`);
 	for (const doc of first.documents) {
-		await io.writeBinary(`${path}/documents/${doc.id}.yjs`, bytes(doc.update));
-		await io.write(`${path}/documents/${doc.id}.txt`, doc.text);
-		if (doc.unsaved != null) await io.write(`${path}/documents/${doc.id}.unsaved.txt`, doc.unsaved);
+		if (typeof doc.id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(doc.id)) throw new Error("Recovery document has an unsafe identity");
+		artifacts.push({ path: `documents/${doc.id}.yjs`, bytes: bytes(doc.update) });
+		addText(`documents/${doc.id}.txt`, doc.text);
+		if (doc.unsaved != null) addText(`documents/${doc.id}.unsaved.txt`, doc.unsaved);
 	}
-	await io.writeBinary(`${path}/inventory.yjs`, bytes(first.index));
-	await io.write(`${path}/recovery.json`, JSON.stringify(metadata, null, 2));
+	artifacts.push({ path: "inventory.yjs", bytes: bytes(first.index) });
+	addText("recovery.json", metadataText);
+	const names = new Set<string>();
+	for (const artifact of artifacts) {
+		const key = artifact.path.normalize("NFC").toLowerCase();
+		if (names.has(key)) throw new Error("Recovery capture contains colliding paths or identities");
+		names.add(key);
+	}
+	for (const name of names) {
+		for (let slash = name.indexOf("/"); slash >= 0; slash = name.indexOf("/", slash + 1)) {
+			if (names.has(name.slice(0, slash))) throw new Error("Recovery capture contains a file/directory collision");
+		}
+	}
+	const saved: SavedRecoveryFile[] = [];
+	await io.mkdir(path);
+	for (const artifact of artifacts) {
+		const target = `${path}/${artifact.path}`, sha256 = await sha256Hex(artifact.bytes);
+		await io.mkdir(target.slice(0, target.lastIndexOf("/")));
+		if (artifact.text !== undefined) await io.write(target, artifact.text);
+		else await io.writeBinary(target, artifact.bytes.slice(0));
+		saved.push({ path: artifact.path, bytes: artifact.bytes.byteLength, sha256 });
+	}
+	const manifest = JSON.stringify({ format: "team-relay-local-recovery", version: 1, files: saved }, null, 2);
+	const manifestBytes = new TextEncoder().encode(manifest).buffer;
+	const manifestEntry = { path: "manifest.json", bytes: manifestBytes.byteLength, sha256: await sha256Hex(manifestBytes) };
+	await io.write(`${path}/manifest.json`, manifest);
+	const verifyFile = async (file: SavedRecoveryFile) => {
+		const actual = await io.readBinary(`${path}/${file.path}`);
+		if (actual.byteLength !== file.bytes || await sha256Hex(actual) !== file.sha256) throw new Error(`Recovery file verification failed: ${file.path}. Originals were retained.`);
+	};
+	const message = `Original file bytes, local editing history, and inventory saved and read back. This folder stays on this device.\nManifest SHA-256: ${manifestEntry.sha256}\nVerify manifest.json and every listed file before recovery.\n`;
+	const completionBytes = new TextEncoder().encode(message).buffer;
+	const completion = { path: "BACKUP-COMPLETE.txt", bytes: completionBytes.byteLength, sha256: await sha256Hex(completionBytes) };
+	let completed = false;
 	const verify = async () => {
+		for (const file of saved) await verifyFile(file);
+		await verifyFile(manifestEntry);
+		if (completed) await verifyFile(completion);
 		if (!sameCapture(first, await capture())) throw new Error("Local edits arrived while saving recovery files. Nothing was discarded; review and retry.");
 	};
 	await verify();
-	await io.write(`${path}/BACKUP-COMPLETE.txt`, "Original file bytes, local editing history, and inventory saved. This folder stays on this device.\n");
-	return { path, verify, initial: first };
+	await io.write(`${path}/${completion.path}`, message); await verifyFile(completion);
+	completed = true;
+	return { path, verify, initial: copyCapture(first) };
 }

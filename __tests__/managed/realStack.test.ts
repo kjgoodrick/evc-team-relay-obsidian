@@ -111,6 +111,7 @@ run("real relay: inventory filtering, concurrent editing, offline/restart, read-
 			mkdir: async p => { await fs.promises.mkdir(path.join(base, p), { recursive: true }); },
 			write: (p, text) => fs.promises.writeFile(path.join(base, p), text),
 			writeBinary: (p, bytes) => fs.promises.writeFile(path.join(base, p), new Uint8Array(bytes)),
+			readBinary: async p => new Uint8Array(await fs.promises.readFile(path.join(base, p))).buffer,
 		}, capture, conflict);
 		savedBackup = backup.path;
 		return backup.verify;

@@ -295,3 +295,9 @@ compare-and-write transaction across a native file and IndexedDB. A write alread
 handed to the host may still finish. Verified original-byte backups, protected
 source replacement, new cache namespaces and the full restore/review flow remain
 required before enabling restore as a supported user operation.
+
+The existing structural recovery archive now reads back and hashes every saved
+artifact, records a versioned checksum manifest and rechecks it before a layout
+decision moves originals. Its [format, verification and limits](managed-recovery-backup-preview.md)
+are documented separately. This strengthens source recovery; it does not yet
+export or reconcile an entire paused restored share.

@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { TFile, TFolder } from "obsidian";
 import { Document } from "../../src/Document";
@@ -25,6 +26,7 @@ const io = () => ({
 	mkdir: async (p: string) => { await fs.mkdir(path.join(root, p), { recursive: true }); },
 	write: (p: string, text: string) => fs.writeFile(path.join(root, p), text),
 	writeBinary: (p: string, bytes: ArrayBuffer) => fs.writeFile(path.join(root, p), new Uint8Array(bytes)),
+	readBinary: async (p: string) => new Uint8Array(await fs.readFile(path.join(root, p))).buffer,
 });
 const capture = (): RecoveryCapture => ({ files: [{ path: "Team/Local.md", bytes: new TextEncoder().encode("disk edit").buffer }], documents: [{ id: "a", update: new Uint8Array([0, 0]), text: "editor edit", unsaved: "unflushed buffer" }], index: new Uint8Array([0, 0]) });
 
@@ -40,6 +42,72 @@ test("backup preserves binary bytes, readable editor buffers, and independently 
 	expect(await fs.readFile(path.join(root, backup.path, "documents/a.unsaved.txt"), "utf8")).toBe("unflushed buffer");
 	expect(isConflictCopyPath(backup.path)).toBe(true);
 	expect(isConflictCopyPath(`${backup.path}/files/Team/Local.md`)).toBe(true);
+	const manifest = JSON.parse(await fs.readFile(path.join(root, backup.path, "manifest.json"), "utf8")) as { format: string; version: number; files: { path: string; bytes: number; sha256: string }[] };
+	expect(manifest.format).toBe("team-relay-local-recovery"); expect(manifest.version).toBe(1);
+	for (const file of manifest.files) {
+		const content = await fs.readFile(path.join(root, backup.path, file.path));
+		expect(content.length).toBe(file.bytes); expect(createHash("sha256").update(content).digest("hex")).toBe(file.sha256);
+	}
+	await backup.verify();
+});
+
+test.each(["files/Team/Local.md", "documents/a.txt", "recovery.json", "manifest.json"])("a silently corrupted %s write cannot authorize recovery", async target => {
+	const disk = io(), write = disk.write, writeBinary = disk.writeBinary;
+	disk.write = (p, text) => write(p, p.endsWith("/" + target) ? text + "corruption" : text);
+	disk.writeBinary = (p, bytes) => writeBinary(p, p.endsWith("/" + target) ? new Uint8Array([7]).buffer : bytes);
+	await expect(prepareRecoveryBackup(disk, async () => capture(), {})).rejects.toThrow("verification failed");
+	for (const entry of await fs.readdir(path.join(root, RECOVERY_FOLDER))) {
+		await expect(fs.access(path.join(root, RECOVERY_FOLDER, entry, "BACKUP-COMPLETE.txt"))).rejects.toThrow();
+	}
+});
+
+test("later verification detects changed archive bytes and does not trust the completion marker alone", async () => {
+	const backup = await prepareRecoveryBackup(io(), async () => capture(), {});
+	await fs.writeFile(path.join(root, backup.path, "inventory.yjs"), new Uint8Array([9, 9]));
+	await expect(backup.verify()).rejects.toThrow("verification failed");
+});
+
+test("completion itself must survive readback before a backup is returned", async () => {
+	const disk = io(), write = disk.write;
+	disk.write = (p, text) => write(p, p.endsWith("/BACKUP-COMPLETE.txt") ? text + "corruption" : text);
+	await expect(prepareRecoveryBackup(disk, async () => capture(), {})).rejects.toThrow("BACKUP-COMPLETE.txt");
+});
+
+test("an unreadable saved archive is not reported complete", async () => {
+	const disk = io(); disk.readBinary = async () => { throw new Error("temporary read failure"); };
+	await expect(prepareRecoveryBackup(disk, async () => capture(), {})).rejects.toThrow("temporary read failure");
+	for (const entry of await fs.readdir(path.join(root, RECOVERY_FOLDER))) {
+		await expect(fs.access(path.join(root, RECOVERY_FOLDER, entry, "BACKUP-COMPLETE.txt"))).rejects.toThrow();
+	}
+});
+
+test("changing caller buffers or the returned initial capture cannot rewrite the private comparison base", async () => {
+	const state = capture(), disk = io(), write = disk.writeBinary;
+	let mutated = false;
+	disk.writeBinary = async (p, data) => {
+		if (!mutated) { mutated = true; new Uint8Array(state.files[0].bytes)[0] = 7; }
+		await write(p, data);
+	};
+	await expect(prepareRecoveryBackup(disk, async () => state, {})).rejects.toThrow("Local edits arrived");
+	const newer = capture(), backup = await prepareRecoveryBackup(io(), async () => newer, {});
+	newer.documents[0].text = "later edit"; backup.initial.documents[0].text = "later edit";
+	await expect(backup.verify()).rejects.toThrow("Local edits arrived");
+});
+
+test.each(["../escape", "/absolute", "C:/absolute", "Team/../escape", "Team\\escape", "Team//empty"])("unsafe capture path %s is rejected before creating an archive", async unsafe => {
+	const state = capture(); state.files[0].path = unsafe;
+	await expect(prepareRecoveryBackup(io(), async () => state, {})).rejects.toThrow("unsafe relative path");
+	expect(await fs.readdir(root)).toEqual([]);
+});
+
+test.each(["identity", "file collision", "identity collision", "directory collision"])("invalid capture %s cannot overwrite another recovery item", async kind => {
+	const state = capture();
+	if (kind === "identity") state.documents[0].id = "../escape";
+	if (kind === "file collision") state.files.push({ ...state.files[0], path: "team/local.md" });
+	if (kind === "identity collision") state.documents.push({ ...state.documents[0], id: "A" });
+	if (kind === "directory collision") state.files.push({ ...state.files[0], path: "Team/Local.md/nested" }, { ...state.files[0], path: "Team/Local.md-other" });
+	await expect(prepareRecoveryBackup(io(), async () => state, {})).rejects.toThrow();
+	expect(await fs.readdir(root)).toEqual([]);
 });
 
 test.each(["file write", "editor edit", "binary edit", "unsaved edit"])("backup does not authorize recovery after %s", async failure => {
@@ -118,6 +186,18 @@ test("a disk-full failure leaves originals and the persisted conflict intact", a
 	const { share, transport, conflict, server, vault } = await shareFixture();
 	vault.adapter.writeBinary = async () => { throw Error("disk full"); };
 	await expect(share.resolveManagedConflict(conflict.id, "server", server.records)).rejects.toThrow("disk full");
+	expect(await fs.readFile(path.join(root, "Team/Local.md"), "utf8")).toBe("OFFLINE DISK EDIT");
+	expect(transport.conflicts).toHaveLength(1);
+});
+
+test("archive corruption after completion but before the structural decision leaves originals in place", async () => {
+	const { share, transport, conflict, server, vault } = await shareFixture();
+	const write = vault.adapter.write;
+	vault.adapter.write = async (p, text) => {
+		await write(p, text);
+		if (p.endsWith("/BACKUP-COMPLETE.txt")) await fs.writeFile(path.join(root, path.dirname(p), "files/Team/Local.md"), "CORRUPT COPY");
+	};
+	await expect(share.resolveManagedConflict(conflict.id, "server", server.records)).rejects.toThrow("verification failed");
 	expect(await fs.readFile(path.join(root, "Team/Local.md"), "utf8")).toBe("OFFLINE DISK EDIT");
 	expect(transport.conflicts).toHaveLength(1);
 });
