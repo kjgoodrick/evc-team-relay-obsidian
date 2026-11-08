@@ -56,6 +56,7 @@ export class TimelineMarkerManager extends Modal {
 	private positionButton?: HTMLButtonElement;
 	private validation?: HTMLElement;
 	private retryButton?: HTMLButtonElement;
+	private checkButton?: HTMLButtonElement;
 	private acknowledgeButton?: HTMLButtonElement;
 	private acknowledgeConfirmation?: HTMLInputElement;
 	constructor(app: App, private context: BaseCommentContext, private active: () => boolean, private closedCallback: () => void) { super(app); }
@@ -104,7 +105,7 @@ export class TimelineMarkerManager extends Modal {
 	}
 	private renderRecovery(): void {
 		const state = this.recovery, json = JSON.stringify(state ?? null); if (this.recoveryJson === json) return;
-		this.recoveryJson = json; this.recoveryEl.replaceChildren(); this.retryButton = undefined; this.acknowledgeButton = undefined; this.acknowledgeConfirmation = undefined;
+		this.recoveryJson = json; this.recoveryEl.replaceChildren(); this.retryButton = undefined; this.checkButton = undefined; this.acknowledgeButton = undefined; this.acknowledgeConfirmation = undefined;
 		if (!state) return;
 		const restored = state.status === "pending" && state.error === "restore_generation_changed";
 		const box = this.recoveryEl.createEl("section", { cls: "relay-timeline-marker-recovery", attr: { "aria-label": "Marker save result" } });
@@ -119,6 +120,7 @@ export class TimelineMarkerManager extends Modal {
 		if (state.status !== "accepted" && state.error) box.createEl("p", { text: "Result: " + state.error });
 		const details = box.createEl("details"); details.createEl("summary", { text: "Saved request and result — select to copy" });
 		const copy = details.createEl("textarea", { attr: { "aria-label": "Saved marker request and result", rows: "8", readonly: "" } }); copy.value = JSON.stringify(state, null, 2);
+		if (state.status === "pending") this.checkButton = this.button(box, "Check saved result", () => { void this.checkSavedResult(); });
 		if (state.status === "pending" && !restored) this.retryButton = this.button(box, "Retry original save", () => { void this.recover(false); });
 		else if (state.status !== "pending") {
 			if (state.status === "rejected") {
@@ -351,6 +353,16 @@ export class TimelineMarkerManager extends Modal {
 		finally { this.busy = false; await this.checkRecovery(); if (this.current()) this.updateControls(); }
 		if (cleared && this.current()) { this.dirty = false; this.detail = undefined; this.draft = undefined; await this.refresh(state.request.command.marker_id); }
 	}
+	private async checkSavedResult(): Promise<void> {
+		if (!this.current() || !this.recovery || this.recovery.status !== "pending" || this.busy || this.loading || !this.context.session.canCheckTimelineMarkerCommand) return;
+		this.busy = true; this.updateControls();
+		try {
+			const result = await this.context.session.markerManagement.check(this.context.entryId, this.current);
+			if (this.current()) this.status.textContent = result.status === "accepted" ? "The server retains an exact receipt for this saved request. No marker change was sent." :
+				"No receipt was found. The request may have succeeded before the restore, so its original values remain saved. No change was sent.";
+		} catch (error) { if (this.current()) this.status.textContent = this.error(error); }
+		finally { this.busy = false; await this.checkRecovery(); if (this.current()) this.updateControls(); }
+	}
 	private error(error: unknown): string { return error instanceof Error ? error.message : "The marker operation could not be completed. Saved requests and values are retained."; }
 	private updateControls(): void {
 		if (this.closed || this.position || !this.select) return;
@@ -377,6 +389,7 @@ export class TimelineMarkerManager extends Modal {
 		}
 		if (this.archiveButton) this.archiveButton.disabled = blocked || !this.canSave() || !this.archiveConfirmation?.checked || this.dirty;
 		if (this.retryButton) this.retryButton.disabled = this.busy || this.loading || !this.canEdit();
+		if (this.checkButton) this.checkButton.disabled = this.busy || this.loading || !this.context.session.canCheckTimelineMarkerCommand;
 		if (this.acknowledgeButton) this.acknowledgeButton.disabled = this.busy || this.loading || this.recovery?.status === "rejected" && !this.acknowledgeConfirmation?.checked;
 	}
 	validate(): void {

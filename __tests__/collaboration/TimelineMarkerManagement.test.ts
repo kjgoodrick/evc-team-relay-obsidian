@@ -5,7 +5,7 @@ import { DiscussionStore, type StoreIdentity } from "../../src/collaboration/sto
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 import { TimelineMarkerManagement } from "../../src/collaboration/TimelineMarkerManagement";
-import { parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMarkerReceipt, type TimelineMarkerCommand, type TimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol";
+import { parseTimelineMarkerCommandStatus, parseTimelineMarkerCommand, parseTimelineMarkerDetail, parseTimelineMarkerReceipt, type TimelineMarkerCommandStatus, type TimelineMarkerCommand, type TimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -30,11 +30,12 @@ async function client(factory = new IDBFactory(), account: StoreIdentity = ident
 	const access = { online: true, status: "ready", edit: true, read: true, enabled: true, restoreGeneration: null as string | null, guard: true };
 	const send = jest.fn<Promise<TimelineMarkerReceipt>, [string, TimelineMarkerCommand]>().mockImplementation(async (_, request) => receipt(request));
 	const changed = jest.fn();
+	const inspect = jest.fn<Promise<TimelineMarkerCommandStatus>, [string, TimelineMarkerCommand, (() => boolean)?]>().mockResolvedValue({ status: "unknown" });
 	const session = { store, get online() { return access.online; }, get status() { return access.status; },
-		get restoreBinding() { return access.restoreGeneration === null ? {} : { restoreGeneration: access.restoreGeneration }; }, get canManageTimelineMarkers() { return access.guard; },
+		get restoreBinding() { return access.restoreGeneration === null ? {} : { restoreGeneration: access.restoreGeneration }; }, get canManageTimelineMarkers() { return access.guard; }, get canCheckTimelineMarkerCommand() { return access.online && access.status === "ready"; },
 		permission: () => ({ read: access.read, edit: access.edit }), canAnchorBase: () => access.enabled,
-		trackLocal: <T>(promise: Promise<T>) => promise, transport: { manageTimelineMarker: send } } as unknown as DiscussionSession;
-	return { store, access, send, changed, manager: new TimelineMarkerManagement(session, changed) };
+		trackLocal: <T>(promise: Promise<T>) => promise, transport: { manageTimelineMarker: send, timelineMarkerCommandStatus: inspect } } as unknown as DiscussionSession;
+	return { store, access, send, inspect, changed, manager: new TimelineMarkerManagement(session, changed) };
 }
 function deferred<T>() {
 	let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
@@ -250,4 +251,59 @@ test("a marker save retains its caller's pre-validation binding and requires adv
 	expect(await c.manager.state(scope)).toBeUndefined(); expect(c.send).not.toHaveBeenCalled();
 	c.access.guard = false;
 	expect(() => c.manager.save(scope, command())).toThrow(); expect(c.send).not.toHaveBeenCalled();
+});
+
+
+test("marker status parsing requires exact request and scope identity", () => {
+	const input = command();
+	expect(parseTimelineMarkerCommandStatus({ status: "accepted", result: receipt() }, id(1), input)).toEqual({ status: "accepted", result: receipt() });
+	expect(parseTimelineMarkerCommandStatus({ status: "unknown", entry_id: id(1), operation_id: input.operation_id }, id(1), input)).toEqual({ status: "unknown" });
+	for (const value of [{ status: "unknown" }, { status: "unknown", entry_id: id(99), operation_id: input.operation_id },
+		{ status: "unknown", entry_id: id(1), operation_id: id(99) }, { status: "accepted", result: { ...receipt(), operation_id: id(99) } },
+		{ status: "accepted", result: receipt(), extra: true }]) expect(() => parseTimelineMarkerCommandStatus(value, id(1), input)).toThrow();
+});
+
+test("read-only marker receipt transport never sends a mutation generation or command", async () => {
+	const fetcher = jest.fn().mockResolvedValue(new Response(JSON.stringify({ status: "accepted", result: receipt() })));
+	const transport = new DiscussionTransport(identity, async () => ({ accountId: identity.accountId, accessToken: "synthetic" }), fetcher);
+	expect((await transport.timelineMarkerCommandStatus(scope, command())).status).toBe("accepted");
+	expect(fetcher.mock.calls[0][0]).toContain("/timeline-markers/commands/status");
+	expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual(command());
+	expect(new Headers(fetcher.mock.calls[0][1].headers).has("X-Relay-Restore-Generation")).toBe(false);
+});
+
+async function oldPendingMarker() {
+	const c = await client(); c.send.mockRejectedValueOnce(new Error("Lost response"));
+	await expect(c.manager.save(scope, command())).rejects.toThrow("Lost response");
+	await c.store.observeRestoreContext({ supported: true, generation: id(90) }, 0); c.access.restoreGeneration = id(90); c.access.edit = false;
+	c.send.mockClear(); return c;
+}
+
+test("an old marker's exact receipt can be checked read-only without rebinding or replay", async () => {
+	const c = await oldPendingMarker(); c.inspect.mockResolvedValue({ status: "accepted", result: receipt() });
+	expect(await c.manager.check(scope)).toEqual({ status: "accepted", result: receipt() });
+	expect(c.send).not.toHaveBeenCalled(); expect(c.inspect).toHaveBeenCalledTimes(1);
+	const saved = await c.manager.state(scope); expect(saved).toMatchObject({ status: "accepted", request: command(), receipt: receipt() });
+	expect(saved).not.toHaveProperty("restoreGeneration");
+	expect(await c.manager.acknowledge(scope, command().operation_id)).toBe(true);
+	expect(await c.manager.state(scope)).toBeUndefined(); expect(c.send).not.toHaveBeenCalled();
+});
+
+test("an unknown old marker receipt retains the original pending slot and forbids automatic replacement", async () => {
+	const c = await oldPendingMarker(), before = await c.store.preference("timelineMarkerCommand:" + id(1));
+	expect(await c.manager.check(scope)).toEqual({ status: "unknown" });
+	expect(await c.store.preference("timelineMarkerCommand:" + id(1))).toEqual(before);
+	expect(await c.manager.acknowledge(scope, command().operation_id)).toBe(false); expect(c.send).not.toHaveBeenCalled();
+});
+
+test("a second restore fences a late marker status result before local acceptance", async () => {
+	const c = await oldPendingMarker(), result = deferred<TimelineMarkerCommandStatus>(); c.inspect.mockReturnValue(result.promise);
+	const checking = c.manager.check(scope), rejected = expect(checking).rejects.toMatchObject({ code: "restore_generation_changed" });
+	for (let i = 0; i < 100 && !c.inspect.mock.calls.length; i++) await new Promise(resolve => setTimeout(resolve, 1));
+	expect(c.inspect).toHaveBeenCalledTimes(1);
+	// Simulate another window's observation before this session gets its broadcast.
+	await c.store.observeRestoreContext({ supported: true, generation: id(91) }, (await c.store.restoreCheckpoint()).revision);
+	result.resolve({ status: "accepted", result: receipt() }); await rejected;
+	expect(await c.manager.state(scope)).toMatchObject({ status: "pending", error: "restore_generation_changed" });
+	expect(c.send).not.toHaveBeenCalled();
 });

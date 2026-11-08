@@ -3,7 +3,7 @@ import { restoreGeneration, restoreMetadata, type RestoreBinding } from "./Resto
 import { DiscussionFailure } from "./DiscussionTransport";
 import { isRecord, protocolJson } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
-import { parseTimelineMarkerCommand, parseTimelineMarkerReceipt, type TimelineMarkerCommand, type TimelineMarkerReceipt } from "./TimelineMarkerManagementProtocol";
+import { parseTimelineMarkerCommand, parseTimelineMarkerReceipt, type TimelineMarkerCommand, type TimelineMarkerCommandStatus, type TimelineMarkerReceipt } from "./TimelineMarkerManagementProtocol";
 
 // These conflicts cannot become valid later in the same generation: the
 // compared revisions only advance, and an operation ID cannot change intent.
@@ -111,6 +111,29 @@ export class TimelineMarkerManagement {
 			if (await this.session.store.comparePreference(key, raw, protocolJson(next), undefined, original)) { this.changed(next.scope_id, next.status); return next; }
 		}
 		throw new Error("Another window updated marker recovery. Refresh its status.");
+	}
+	/** Receipt inspection does not replay the saved request or adopt a new binding. */
+	check(scopeId: string, visible: () => boolean = () => true): Promise<TimelineMarkerCommandStatus> {
+		const binding = restoreMetadata(this.session.restoreBinding), { key, entryId } = keyFor(scopeId);
+		const current = () => visible() && this.session.canCheckTimelineMarkerCommand && this.session.permission(scopeId)?.read === true &&
+			restoreGeneration(this.session.restoreBinding.restoreGeneration) === restoreGeneration(binding.restoreGeneration);
+		return this.session.trackLocal((async () => {
+			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
+			const raw = await this.session.store.preference(key), state = parseState(raw, entryId);
+			if (!state) throw new Error("There is no saved marker request to inspect.");
+			await this.session.store.requireRestoreBinding(binding);
+			const result = await this.session.transport.timelineMarkerCommandStatus(scopeId, state.request, current);
+			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
+			await this.session.store.requireRestoreBinding(binding);
+			if (result.status === "accepted") {
+				const next: TimelineMarkerManagementState = { ...restoreMetadata(state), version: 1, scope_id: state.scope_id, request: state.request,
+					status: "accepted", receipt: parseTimelineMarkerReceipt(result.result, entryId, state.request) };
+				if (!await this.session.store.comparePreference(key, raw, protocolJson(next), current, binding)) throw new Error("The saved marker request changed. Review its current result.");
+				this.changed(scopeId, "accepted");
+			} else if (JSON.stringify(await this.session.store.preference(key)) !== JSON.stringify(raw)) throw new Error("The saved marker request changed. Review it again.");
+			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");
+			return result;
+		})());
 	}
 	acknowledge(scopeId: string, operationId: string): Promise<boolean> {
 		if (this.session.status === "closed") return Promise.reject(new Error("This discussion account is closed."));

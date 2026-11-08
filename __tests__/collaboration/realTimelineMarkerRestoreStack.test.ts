@@ -8,6 +8,7 @@ import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { parseTimelineMarkerCommand } from "../../src/collaboration/TimelineMarkerManagementProtocol";
+import { protocolJson } from "../../src/collaboration/DiscussionProtocol";
 
 Object.assign(globalThis, { IDBKeyRange });
 const fixturePath = process.env.EVC_BASE_CONTENT_FIXTURE;
@@ -55,5 +56,20 @@ run("a restored marker session retains the original request across lost HTTP res
 		await expect(transport.manageTimelineMarker(scope, command)).rejects.toMatchObject({ code: "restore_generation_changed" });
 		expect((await transport.timelineMarker(scope, command.command.marker_id)).marker.revision).toBe(1);
 		expect(await transport.manageTimelineMarker(scope, command, session.restoreBinding)).toEqual(receipt);
+		// Represent an older device's pending slot in this disposable store. Its
+		// original NULL binding must survive receipt inspection on the restored server.
+		const key = "timelineMarkerCommand:" + f.markersEntry;
+		await store.setPreference(key, protocolJson({ version: 1, scope_id: scope, request: command, status: "pending" }));
+		const sent = requests.length;
+		expect(await session.markerManagement.state(scope)).toMatchObject({ status: "pending", error: "restore_generation_changed" });
+		expect(await session.markerManagement.check(scope)).toEqual({ status: "accepted", result: receipt });
+		expect(requests).toHaveLength(sent);
+		expect(await session.markerManagement.state(scope)).not.toHaveProperty("restoreGeneration");
+		expect(await session.markerManagement.acknowledge(scope, command.operation_id)).toBe(true);
+		const unknown = { ...command, operation_id: randomUUID() };
+		const pending = protocolJson({ version: 1, scope_id: scope, request: unknown, status: "pending" });
+		await store.setPreference(key, pending);
+		expect(await session.markerManagement.check(scope)).toEqual({ status: "unknown" });
+		expect(await store.preference(key)).toEqual(pending); expect(requests).toHaveLength(sent);
 	} finally { await session.close(); }
 }, 15000);

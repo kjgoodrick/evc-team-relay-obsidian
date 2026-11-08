@@ -96,8 +96,18 @@ current acceptance. The server checks under its share lock before marker receipt
 or revision lookup. `discussion_timeline_marker_restore_guard` is advertised
 independently of new-marker authoring so accepted-receipt retries remain possible
 when that feature is disabled. Old pending marker requests remain inspectable;
-the dialog explains the restore and offers no ordinary retry/discard. Read-only
-receipt reconciliation for these old marker requests remains unfinished.
+the dialog explains the restore and offers no ordinary retry/discard.
+
+`discussion_timeline_marker_command_status` enables **Check saved result**. This
+read-only POST verifies the current actor's exact request hash and present read
+access to the base; edit permission and a mutation-generation header are not
+required. The response is either the matching accepted receipt or `unknown`.
+Unknown is never proof of nonacceptance and does not change the retained slot.
+An accepted receipt can complete the local review while preserving its original
+binding, followed by explicit acknowledgement to load current marker state. No
+marker mutation is sent. Another restore, request replacement or closed review
+fences a delayed response. Original requests with missing restored receipts still
+need explicit reconciliation; no automatic replacement or replay is provided.
 
 Validation includes fake-IndexedDB multiwindow, rollback, unseen-scope response,
 dependency, picture preservation, inbox and online-draft tests. The real HTTP
@@ -135,4 +145,7 @@ Marker-specific HTTP proof:
 It loses an accepted marker response, reopens the ordinary session, recovers the
 same request with the same binding, and rejects a legacy retry. PostgreSQL also
 checks that a marker save blocked on the share lock sees a concurrently rotated
-generation even when its ORM identity was loaded earlier.
+generation even when its ORM identity was loaded earlier. The proof additionally
+represents old pending slots in the disposable store, confirms known receipts
+without rebinding/replay, and keeps unknown requests unchanged. PostgreSQL checks
+that receipt reads leave marker, revision and receipt counts unchanged.

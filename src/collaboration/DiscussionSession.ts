@@ -89,6 +89,7 @@ export class DiscussionSession {
 	private picturesEnabled = false;
 	private baseGroupRestoreGuard = false;
 	private timelineMarkerRestoreGuard = false;
+	private timelineMarkerStatusEnabled = false;
 	private recoveryEnabled = false;
 	private commandStatusEnabled = false;
 	private moderationRecoveryEnabled = false;
@@ -235,6 +236,7 @@ export class DiscussionSession {
 	}
 	get status(): SessionStatus { return this.statusValue; }
 	get restoreBinding(): RestoreBinding { return this.restoreLineage === null ? {} : { restoreGeneration: this.restoreLineage }; }
+	get canCheckTimelineMarkerCommand(): boolean { return this.online && this.timelineMarkerStatusEnabled; }
 	get canManageTimelineMarkers(): boolean { return this.restoreLineage === null || this.timelineMarkerRestoreGuard; }
 	get canQueue(): boolean { return !this.closed && !this.restoreReconciling && this.enabled && !["unavailable", "authentication_required", "error"].includes(this.statusValue); }
 	get online(): boolean { return !this.closed && !this.restoreReconciling && this.foreground && this.statusValue === "ready"; }
@@ -438,6 +440,7 @@ export class DiscussionSession {
 			this.picturesEnabled = capability.pictures === true && (this.restoreLineage === null || capability.pictureRestoreGuard === true);
 			this.baseGroupRestoreGuard = capability.baseGroupRestoreGuard === true;
 			this.timelineMarkerRestoreGuard = capability.timelineMarkerRestoreGuard === true;
+			this.timelineMarkerStatusEnabled = capability.timelineMarkerCommandStatus === true;
 			this.recoveryEnabled = capability.recovery === true;
 			this.commandStatusEnabled = capability.commandStatus === true;
 			this.moderationRecoveryEnabled = capability.moderationRecovery === true;

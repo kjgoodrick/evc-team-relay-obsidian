@@ -6,7 +6,7 @@ import type { BaseCommentContext } from "../../src/collaboration/BaseCommentCont
 import type { TimelineAxisContext } from "../../src/collaboration/TimelineRangeProtocol";
 import type { TimelineMarkerCatalog } from "../../src/collaboration/TimelineMarkerProtocol";
 import type { TimelineMarkerManagementState } from "../../src/collaboration/TimelineMarkerManagement";
-import type { TimelineMarkerCommand, TimelineMarkerDetail, TimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol";
+import type { TimelineMarkerCommandStatus, TimelineMarkerCommand, TimelineMarkerDetail, TimelineMarkerReceipt } from "../../src/collaboration/TimelineMarkerManagementProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import type { NativeTimelineSelection } from "../../src/bases/NativeBasesSurface";
 import type { NativeLocalMarker } from "../../src/bases/TimelineLocalMarkerBridge";
@@ -59,6 +59,7 @@ function fixture() {
 	const save = jest.fn(async (_scope: string, request: TimelineMarkerCommand, _binding?: RestoreBinding) => { const receipt = accepted(request); recovery = { version: 1, scope_id: scope, request, status: "accepted", receipt }; return receipt; });
 	const retry = jest.fn(async () => { if (!recovery) throw new Error("Missing intent"); const receipt = accepted(recovery.request); recovery = { version: 1, scope_id: scope, request: recovery.request, status: "accepted", receipt }; return receipt; });
 	const acknowledge = jest.fn(async () => { recovery = undefined; return true; });
+	const check = jest.fn<Promise<TimelineMarkerCommandStatus>, [string, (() => boolean)?]>().mockResolvedValue({ status: "unknown" });
 	const readAxis = jest.fn(async () => proof), readCatalog = jest.fn(async () => catalog), readDetail = jest.fn(async () => detail), closed = jest.fn();
 	const readPlacementAxis = jest.fn(async () => ({ ...proof, view_id: id(40), axis: { ...proof.axis, id: id(41) } }));
 	const listeners = new Set<() => void>();
@@ -69,14 +70,14 @@ function fixture() {
 		binding: { name: "Planning", type: "sabidurian-timeline", viewId: id(3), snapshot: { definition_id: id(2), generation: id(4), revision: 2,
 			views: [{ id: id(3), name: "Planning", type: "sabidurian-timeline" }, { id: id(30), name: "Roadmap", type: "sabidurian-timeline" },
 				{ id: id(40), name: "Schedule", type: "sabidurian-timeline" }, { id: null, name: "Unmatched", type: "sabidurian-timeline" }, { id: id(50), name: "Table", type: "table" }] } },
-		session: { get restoreBinding() { return { restoreGeneration: access.restoreGeneration }; }, trackLocal: <T>(promise: Promise<T>) => promise, store: { preference: readPreference, comparePreference }, get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
+		session: { get canCheckTimelineMarkerCommand() { return access.online && access.read; }, get restoreBinding() { return { restoreGeneration: access.restoreGeneration }; }, trackLocal: <T>(promise: Promise<T>) => promise, store: { preference: readPreference, comparePreference }, get online() { return access.online; }, get status() { return access.status; }, knownDocumentGeneration: () => access.generation,
 			onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
 			permission: () => ({ read: access.read, edit: access.edit, comment: true }), canAnchorBase: () => access.enabled, readTimelineAxis: readAxis,
-			readTimelineMarkerInventory: readCatalog, readTimelineMarkerDetail: readDetail, readTimelineMarkerPlacementAxis: readPlacementAxis, markerManagement: { state, save, retry, acknowledge } },
+			readTimelineMarkerInventory: readCatalog, readTimelineMarkerDetail: readDetail, readTimelineMarkerPlacementAxis: readPlacementAxis, markerManagement: { state, save, retry, acknowledge, check } },
 		surface: { localMarkers: () => [local], rangeContext: () => native, beginRange: jest.fn((_kind, _precision, callback, end) => { select = callback; stopped = end; return stop; }) },
 	} as unknown as BaseCommentContext;
 	const manager = new TimelineMarkerManager({} as App, context, () => true, closed);
-	return { access, native, proof, catalog, detail, state, save, retry, acknowledge, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners, local, readPreference, comparePreference,
+	return { access, native, proof, catalog, detail, state, save, retry, acknowledge, check, readAxis, readCatalog, readDetail, readPlacementAxis, manager, closed, stop, context, listeners, local, readPreference, comparePreference,
 		setRecovery: (value: TimelineMarkerManagementState | undefined) => { recovery = value; },
 		pick: (point = false) => { stopped?.(); select?.({ context: native as NativeTimelineSelection["context"], draft: { ...range, end: point ? range.start : "2026-11-09" }, current: () => access.current }); } };
 }
@@ -333,4 +334,19 @@ test("an old-generation pending marker stays inspectable without offering retry 
 	expect(button("Retry original save")).toBeUndefined(); expect(button("Acknowledge and reload")).toBeUndefined();
 	expect(document.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain("Launch");
 	expect(button("New shared marker").disabled).toBe(true); f.manager.close();
+});
+
+
+test("read-only restored marker review can inspect unknown receipts without replay", async () => {
+	const f = await loaded();
+	f.save.mockImplementationOnce(async (_scope, request) => {
+		f.setRecovery({ version: 1, scope_id: scope, request, status: "pending", error: "restore_generation_changed" });
+		throw new Error("Restored service");
+	});
+	button("Save marker").click(); await flush(); f.access.edit = false; f.manager.validate(); await flush();
+	expect(button("Check saved result").disabled).toBe(false); button("Check saved result").click(); await flush();
+	expect(f.check).toHaveBeenCalledWith(scope, expect.any(Function)); expect(f.retry).not.toHaveBeenCalled(); expect(f.acknowledge).not.toHaveBeenCalled();
+	expect(document.body.textContent).toContain("No receipt was found"); expect(document.body.textContent).toContain("original values remain saved");
+	expect(document.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain("Launch");
+	expect(button("Retry original save")).toBeUndefined(); f.manager.close();
 });

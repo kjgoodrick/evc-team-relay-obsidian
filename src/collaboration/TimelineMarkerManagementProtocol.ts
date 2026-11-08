@@ -10,6 +10,7 @@ export type TimelineMarkerCommand = { operation_id: string; definition_id: strin
 export type TimelineMarkerDetail = { protocol_version: 1; entry_id: string; definition_id: string; generation: string; registry_revision: number;
 	catalog_revision: number; marker: { id: string; revision: number; active: boolean; content: TimelineMarkerContent; placements: TimelineMarkerPlacement[] } };
 export type TimelineMarkerReceipt = TimelineMarkerDetail & { operation_id: string };
+export type TimelineMarkerCommandStatus = { status: "unknown" } | { status: "accepted"; result: TimelineMarkerReceipt };
 /** Base-wide list omits placements; fetch one selected marker's full details. */
 export type TimelineMarkerInventory = Omit<TimelineMarkerDetail, "marker"> & {
 	markers: Omit<TimelineMarkerDetail["marker"], "placements">[];
@@ -20,6 +21,17 @@ function check(value: unknown): asserts value { if (!value) throw new Error("Inv
 function fields(value: Record<string, unknown>, keys: string[]): void { check(Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key))); }
 function id(value: unknown): string { check(isId(value)); return value.toLowerCase(); }
 function nextRevision(value: unknown): value is number { return isSequence(value) && value < Number.MAX_SAFE_INTEGER; }
+
+export function parseTimelineMarkerCommandStatus(value: unknown, entryId: string, request: TimelineMarkerCommand): TimelineMarkerCommandStatus {
+	check(isRecord(value));
+	if (value.status === "accepted") {
+		fields(value, ["status", "result"]);
+		return { status: "accepted", result: parseTimelineMarkerReceipt(value.result, entryId, request) };
+	}
+	fields(value, ["status", "operation_id", "entry_id"]);
+	check(value.status === "unknown" && value.operation_id === request.operation_id && value.entry_id === entryId);
+	return { status: "unknown" };
+}
 
 export function parseTimelineMarkerInventoryPage(value: unknown, entryId: string, after?: string): TimelineMarkerInventoryPage {
 	check(isRecord(value)); fields(value, ["protocol_version", "entry_id", "definition_id", "generation", "registry_revision", "catalog_revision", "markers", "has_more", "next_after"]);
