@@ -1,4 +1,4 @@
-import { restoreGeneration, type RestoreBinding } from "./RestoreGeneration";
+import { restoreGeneration, restoreMetadata, type RestoreBinding } from "./RestoreGeneration";
 import { saveDiscussionExport, saveDiscussionCollection } from "./DiscussionExport";
 import { parseTimelineAxisContext, type TimelineAxisContext } from "./TimelineRangeProtocol";
 import { baseRecordIds, parseBaseRecordContexts, type BaseRecordContexts } from "./BaseRecordContexts";
@@ -87,6 +87,7 @@ export class DiscussionSession {
 	private imagesEnabled = false;
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
+	private baseGroupRestoreGuard = false;
 	private recoveryEnabled = false;
 	private commandStatusEnabled = false;
 	private moderationRecoveryEnabled = false;
@@ -114,7 +115,7 @@ export class DiscussionSession {
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
 		this.reattachments = new DiscussionReattachment(store, transport);
 		this.inbox = new DiscussionInbox(store, transport, broadcast => { if (broadcast) this.channel?.postMessage("inbox"); this.notify(); });
-		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled), uuid(), status => {
+		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled, () => this.restoreLineage === null || this.baseGroupRestoreGuard), uuid(), status => {
 			if (this.closed) return;
 			if (status === "authentication_required") { this.requireAuthentication(); return; }
 			if (this.statusValue === "authentication_required") return;
@@ -405,6 +406,7 @@ export class DiscussionSession {
 			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
 			this.imageFilesEnabled = await this.store.preference("imageFilesEnabled") === true;
 			this.picturesEnabled = await this.store.preference("picturesEnabled") === true;
+			this.baseGroupRestoreGuard = await this.store.preference("baseGroupRestoreGuard") === true;
 			this.inboxEnabled = await this.store.preference("inboxEnabled") === true;
 			const baseKinds = await this.store.preference("baseTargetKinds");
 			this.baseKinds = Array.isArray(baseKinds) ? BASE_TARGET_KINDS.filter(kind => baseKinds.includes(kind)) : [];
@@ -431,7 +433,8 @@ export class DiscussionSession {
 			this.blocksEnabled = capability.blockAnchors === true;
 			this.imagesEnabled = capability.imageOccurrences === true;
 			this.imageFilesEnabled = capability.imageFiles === true;
-			this.picturesEnabled = capability.pictures === true;
+			this.picturesEnabled = capability.pictures === true && (this.restoreLineage === null || capability.pictureRestoreGuard === true);
+			this.baseGroupRestoreGuard = capability.baseGroupRestoreGuard === true;
 			this.recoveryEnabled = capability.recovery === true;
 			this.commandStatusEnabled = capability.commandStatus === true;
 			this.moderationRecoveryEnabled = capability.moderationRecovery === true;
@@ -440,7 +443,7 @@ export class DiscussionSession {
 			this.exportEnabled = capability.export === true;
 			this.exportCatalogEnabled = capability.exportCatalog === true;
 			this.reattachEnabled = capability.reattach === true;
-			this.baseKinds = capability.baseTargets ?? [];
+			this.baseKinds = (capability.baseTargets ?? []).filter(kind => this.restoreLineage === null || this.baseGroupRestoreGuard || !["group", "group_summary"].includes(kind));
 			this.baseRecordTypes = capability.baseRecordTypes ?? ["markdown"];
 			this.baseFileGroupProperties = capability.baseFileGroupProperties ?? [];
 			this.baseFormulaGroups = capability.baseFormulaGroups === true;
@@ -450,6 +453,7 @@ export class DiscussionSession {
 			await this.store.setPreference("imageOccurrencesEnabled", this.imagesEnabled);
 			await this.store.setPreference("imageFilesEnabled", this.imageFilesEnabled);
 			await this.store.setPreference("picturesEnabled", this.picturesEnabled);
+			await this.store.setPreference("baseGroupRestoreGuard", this.baseGroupRestoreGuard);
 			await this.store.setPreference("inboxEnabled", this.inboxEnabled);
 			await this.store.setPreference("baseTargetKinds", protocolJson(this.baseKinds));
 			await this.store.setPreference("baseRecordTypes", protocolJson(this.baseRecordTypes));
@@ -1309,7 +1313,8 @@ export class DiscussionSession {
 			if (local.type === "base_group_pending") {
 				const scope = parseDiscussionScope(scopeId);
 				if (scope?.entryId !== local.entry_id || scope.viewId !== local.capture.view_id) throw new Error("Choose a target in the same saved view.");
-				const verified = await this.transport.captureBaseGroup(scopeId, local.capture);
+				if (this.restoreLineage !== null && !this.baseGroupRestoreGuard) throw new DiscussionFailure("pause", "restore_guard_unavailable");
+				const verified = await this.transport.captureBaseGroup(scopeId, local.capture, binding, current);
 				if (!current() || verified.target.type !== "group" || verified.target.property.source !== local.property.source || verified.target.property.name !== local.property.name) throw new Error("The group selection changed. Select it again.");
 				anchor = resolvePendingBaseGroupAnchor(local, verified);
 			} else anchor = local;
@@ -1502,7 +1507,7 @@ export class DiscussionSession {
 					const source = await this.store.pictureSource(pictureId, operation.scopeId);
 					if (!source) continue; // Existing published picture; the server checks scope/access.
 					if (!current() || !this.canAttachPictures || !this.permission(operation.scopeId)?.comment) throw new Error("Reconnect and check picture permission before sending.");
-					await this.transport.uploadPicture(operation.scopeId, { type: "picture.upload", picture_id: pictureId, sha256: source.sha256, size: source.size }, source.bytes);
+					await this.transport.uploadPicture(operation.scopeId, { type: "picture.upload", picture_id: pictureId, sha256: source.sha256, size: source.size }, source.bytes, restoreMetadata(operation), current);
 				}
 			}
 			if (!current()) throw new DiscussionFailure("pause", "action_context_changed");

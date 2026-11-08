@@ -1,3 +1,4 @@
+import { restoreMetadata } from "./RestoreGeneration";
 import { DiscussionFailure, type DiscussionSender, type DiscussionTransport } from "./DiscussionTransport";
 import { parsePictureUpload } from "./PictureProtocol";
 import { parsePendingBaseGroupCommand, prepareBaseGroupCommand } from "./LocalDiscussionAnchor";
@@ -9,7 +10,7 @@ import type { DiscussionStore, OutboxOperation, QueuedCommand } from "./storage/
  */
 export class DiscussionDelivery implements DiscussionSender {
 	readonly identity;
-	constructor(private store: DiscussionStore, private transport: DiscussionTransport, private canUpload: () => boolean = () => true) { this.identity = transport.identity; }
+	constructor(private store: DiscussionStore, private transport: DiscussionTransport, private canUpload: () => boolean = () => true, private canCaptureGroup: () => boolean = () => true) { this.identity = transport.identity; }
 	async send(operation: QueuedCommand | OutboxOperation, current: () => boolean = () => true) {
 		if (operation.type === "base.group.create") {
 			if (!("lease" in operation) || !operation.lease) throw new DiscussionFailure("pause", "group_capture_lease_required");
@@ -19,8 +20,9 @@ export class DiscussionDelivery implements DiscussionSender {
 			if (!saved) throw new DiscussionFailure("retry", "local_operation_changed");
 			active();
 			if (saved.preparedAnchor === undefined) {
+				if (!this.canCaptureGroup()) throw new DiscussionFailure("pause", "restore_guard_unavailable");
 				const pending = parsePendingBaseGroupCommand(saved);
-				const anchor = await this.transport.captureBaseGroup(saved.scopeId, pending.anchor.capture);
+				const anchor = await this.transport.captureBaseGroup(saved.scopeId, pending.anchor.capture, restoreMetadata(saved), current);
 				active();
 				saved = await this.store.prepareBaseGroup(saved.operationId, operation.lease, protocolJson(anchor));
 				if (!saved) throw new DiscussionFailure("retry", "local_operation_changed");
@@ -36,6 +38,7 @@ export class DiscussionDelivery implements DiscussionSender {
 		const source = await this.store.pictureSource(upload.picture_id, operation.scopeId);
 		if (!source) throw new DiscussionFailure("reject", "picture_source_unavailable");
 		if (source.sha256 !== upload.sha256 || source.size !== upload.size) throw new DiscussionFailure("reject", "picture_digest_mismatch");
-		return this.transport.uploadPicture(operation.scopeId, upload, source.bytes);
+		await this.store.requireRestoreBinding(operation);
+		return this.transport.uploadPicture(operation.scopeId, upload, source.bytes, restoreMetadata(operation), current);
 	}
 }

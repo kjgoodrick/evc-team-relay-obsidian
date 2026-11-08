@@ -165,8 +165,8 @@ test("lost capture reply retries the original evidence, without prematurely send
 	await store.fail(op.operationId, op.lease!, "offline", 0);
 	store.close(); store = await DiscussionStore.open(identity, factory);
 	await delivery(transport).send((await claim("b"))!);
-	expect(transport.captureBaseGroup.mock.calls[0]).toEqual(transport.captureBaseGroup.mock.calls[1]);
-	expect(transport.captureBaseGroup.mock.calls[1]).toEqual([scope, target().capture]);
+	expect(transport.captureBaseGroup.mock.calls[0].slice(0, 3)).toEqual(transport.captureBaseGroup.mock.calls[1].slice(0, 3));
+	expect(transport.captureBaseGroup.mock.calls[1]).toEqual([scope, target().capture, {}, expect.any(Function)]);
 });
 
 test("capture proof must be saved before any thread request, including storage failures", async () => {

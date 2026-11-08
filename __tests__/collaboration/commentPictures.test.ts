@@ -40,6 +40,26 @@ function worker(fetcher: jest.Mock): DiscussionOutbox {
 }
 async function saved(picture = source, selected = draft()): Promise<void> { await store.saveDraft(selected, null, [picture]); }
 
+test("picture stage and content retain one generation captured before hashing and credential refresh", async () => {
+	const fetcher = jest.fn().mockResolvedValueOnce(response(metadata(source, "staged"))).mockResolvedValueOnce(response(metadata(source)));
+	const transport = new DiscussionTransport(identity, credentials, fetcher), binding = { restoreGeneration: id(90) };
+	const upload = { type: "picture.upload" as const, picture_id: pid, sha256: source.sha256, size: source.size };
+	const uploading = transport.uploadPicture(entry, upload, source.bytes, binding);
+	binding.restoreGeneration = id(91); await uploading;
+	expect(fetcher).toHaveBeenCalledTimes(2);
+	for (const call of fetcher.mock.calls) expect(call[1].headers["X-Relay-Restore-Generation"]).toBe(id(90));
+	expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ picture_id: pid, sha256: source.sha256, size: source.size });
+});
+
+test("a picture staged after its active context changed cannot proceed to content upload", async () => {
+	let current = true;
+	const fetcher = jest.fn(async () => { current = false; return response(metadata(source, "staged")); });
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	await expect(transport.uploadPicture(entry, { type: "picture.upload", picture_id: pid, sha256: source.sha256, size: source.size },
+		source.bytes, { restoreGeneration: id(90) }, () => current)).rejects.toMatchObject({ code: "action_context_changed" });
+	expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
 test("picture-only drafts retain references and bounded metadata never retains storage keys or URLs", () => {
 	expect(commentDraftBody(readCommentDraft(draft().body))).toEqual({ version: 1, blocks: [block()] });
 	expect(() => readCommentDraft({ text: "Do not silently drop", mentions: [], pictures: [{ type: "picture", picture_id: "broken" }] })).toThrow();

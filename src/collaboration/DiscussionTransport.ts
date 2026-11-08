@@ -173,11 +173,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current, restoreGeneration: restoreGeneration(captured.restoreGeneration) }), captured);
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_picture_restore_guard", "discussion_base_group_restore_guard", "discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		const restore = restoreContext(value.features.discussion_command_restore_guard, value.restore_generation);
@@ -211,7 +211,9 @@ export class DiscussionTransport implements DiscussionSender {
 				baseRecordTypes = BASE_RECORD_TYPES.filter(kind => records.includes(kind));
 			}
 		}
-		return { ...(restore ? { restoreContext: restore } : {}), discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
+		return { ...(restore ? { restoreContext: restore } : {}),
+			...(value.features.discussion_picture_restore_guard === undefined ? {} : { pictureRestoreGuard: value.features.discussion_picture_restore_guard === true }),
+			...(value.features.discussion_base_group_restore_guard === undefined ? {} : { baseGroupRestoreGuard: value.features.discussion_base_group_restore_guard === true }), discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
@@ -274,7 +276,8 @@ export class DiscussionTransport implements DiscussionSender {
 		if (!isId(pictureId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(entryId) + "/pictures/" + pictureId), value => parsePictureMetadata(value, pictureId));
 	}
-	async uploadPicture(entryId: string, upload: PictureUpload, bytes: ArrayBuffer): Promise<PictureMetadata> {
+	async uploadPicture(entryId: string, upload: PictureUpload, bytes: ArrayBuffer, binding: RestoreBinding = {}, current?: () => boolean): Promise<PictureMetadata> {
+		const generation = restoreGeneration(binding.restoreGeneration);
 		try { upload = parsePictureUpload(upload); } catch { throw new DiscussionFailure("reject", "invalid_local_picture"); }
 		bytes = bytes.slice(0);
 		if (bytes.byteLength !== upload.size || await pictureHash(bytes) !== upload.sha256) throw new DiscussionFailure("reject", "picture_digest_mismatch");
@@ -284,9 +287,11 @@ export class DiscussionTransport implements DiscussionSender {
 			if (metadata.source_sha256 !== upload.sha256 || metadata.source_size !== upload.size) throw new DiscussionFailure("pause", "invalid_picture_response");
 			return metadata;
 		};
-		const staged = validated(await this.request(path, JSON.stringify({ picture_id: upload.picture_id, sha256: upload.sha256, size: upload.size })));
+		const staged = validated(await this.request(path, JSON.stringify({ picture_id: upload.picture_id, sha256: upload.sha256, size: upload.size }), { restoreGeneration: generation, current }));
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
 		if (staged.state !== "staged") return staged;
-		const verified = validated(await this.request(path + "/" + upload.picture_id + "/content", bytes, { method: "PUT" }));
+		const verified = validated(await this.request(path + "/" + upload.picture_id + "/content", bytes, { method: "PUT", restoreGeneration: generation, current }));
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
 		if (verified.state === "staged") throw new DiscussionFailure("pause", "invalid_picture_response");
 		return verified;
 	}
@@ -389,14 +394,16 @@ export class DiscussionTransport implements DiscussionSender {
 		const value = await this.request(this.scopePath(scopeId) + "/bases/timeline-markers/commands", body, { responseLimit: 256 * 1024 });
 		return this.parse(value, data => parseTimelineMarkerReceipt(data, parseDiscussionScope(scopeId)!.entryId, command));
 	}
-	async captureBaseGroup(entryId: string, request: BaseGroupCapture) {
+	async captureBaseGroup(entryId: string, request: BaseGroupCapture, binding: RestoreBinding = {}, current?: () => boolean) {
+		const generation = restoreGeneration(binding.restoreGeneration);
 		let copy: BaseGroupCapture;
 		try { copy = copyBaseGroupCapture(request); } catch { throw new DiscussionFailure("reject", "invalid_local_target"); }
 		this.scopeView(entryId, copy.view_id);
 		const body = JSON.stringify(copy);
 		if (new TextEncoder().encode(body).byteLength > 256 * 1024) throw new DiscussionFailure("reject", "command_too_large");
-		return this.parse(await this.request(this.scopePath(entryId) + "/bases/group-targets", body, { responseLimit: 256 * 1024 }),
-			value => parseBaseGroupCaptureResult(value, parseDiscussionScope(entryId)!.entryId, copy));
+		const value = await this.request(this.scopePath(entryId) + "/bases/group-targets", body, { responseLimit: 256 * 1024, restoreGeneration: generation, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, data => parseBaseGroupCaptureResult(data, parseDiscussionScope(entryId)!.entryId, copy));
 	}
 
 	async permissions(entryId: string): Promise<DiscussionPermissions> {

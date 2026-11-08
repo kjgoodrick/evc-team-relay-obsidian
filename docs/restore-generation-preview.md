@@ -1,6 +1,7 @@
 # Restore-generation client foundation
 
-This is a tested discussion-command restore guard, not a complete restore workflow.
+This is a tested discussion-command, picture-upload and group-capture restore
+guard, not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
 coherent PostgreSQL/CRDT/private-picture backup and restore procedure remain.
@@ -59,6 +60,20 @@ inspection, without presenting ordinary retry/replacement controls. Selecting
 and copying the saved text remains available. Reconciliation of original
 requests and their dependents into the restored service remains unfinished.
 
+Picture staging, upload admission and final metadata commit retain the original
+generation. The server upload ticket binds it across body receipt and object
+storage; rotation during either interval prevents metadata publication. Immutable
+objects written before a rejected final commit remain unreferenced cleanup
+inputs. Bases group capture checks the generation before receipt lookup and again
+after source validation. Retries preserve both the binding and canonical capture
+body. Queued group creation, target moves and online picture replies carry it.
+
+On a restored share, picture upload and group capture require the separate
+`discussion_picture_restore_guard` and `discussion_base_group_restore_guard`
+capabilities. Missing guards disable those authoring paths. Cached capability
+decisions survive offline startup; an older queued request cannot gain a new
+binding when these features become available.
+
 Validation includes fake-IndexedDB multiwindow, rollback, unseen-scope response,
 dependency, picture preservation, inbox and online-draft tests. The real HTTP
 proof runs an isolated loopback control plane with a synthetic nonnull generation:
@@ -73,5 +88,11 @@ That proof verifies old writes/withdrawals are rejected, old queued content stay
 local, explicitly bound new commands work, accepted retries stay idempotent, and
 receipt reads remain available. It also exercises the ordinary session against
 HTTP: startup quarantine, new delivery, online resolve, offline queue capture and
-reconnect delivery. It does not restore database/object/CRDT backups or supply
+reconnect delivery. Adding `--pictures-endpoint 127.0.0.1:PORT` with an owned
+disposable MinIO fixture also exercises ordinary-session picture upload,
+attachment, stale retry rejection and local-original reclamation. PostgreSQL
+group capture tests rotate the generation during private source observation and
+verify that no value, witness or receipt is committed.
+
+These proofs do not restore database/object/CRDT backups or supply
 native Obsidian/mobile acceptance evidence.

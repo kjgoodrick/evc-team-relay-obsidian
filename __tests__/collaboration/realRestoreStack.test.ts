@@ -6,9 +6,12 @@ import { DiscussionOutbox } from "../../src/collaboration/DiscussionOutbox";
 import { DiscussionTransport } from "../../src/collaboration/DiscussionTransport";
 import { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionProtocol";
+import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
+import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 
 const fixturePath = process.env.EVC_RESTORE_FIXTURE;
 const integration = fixturePath ? test : test.skip;
+const pictureIntegration = fixturePath && JSON.parse(readFileSync(fixturePath, "utf8")).picturePath ? test : test.skip;
 Object.assign(globalThis, { IDBKeyRange });
 
 integration("a real restored server fences legacy work while explicit new-lineage commands and read-only receipts work", async () => {
@@ -89,5 +92,35 @@ integration("the ordinary session reconciles restore before delivery and preserv
 		expect((await store.getOperation(reply.operationId))?.state).toBe("accepted");
 		expect((await transport.thread(fixture.entry, thread)).messages).toHaveLength(2);
 		expect((await store.getOperation(legacy.operationId))?.state).toBe("rejected");
+	} finally { await session.close(); }
+});
+
+pictureIntegration("a restored session uploads and attaches pictures through actual HTTP and MinIO using one generation", async () => {
+	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as {
+		base: string; share: string; entry: string; reviewer: string; token: string; restoreGeneration: string; picturePath: string;
+	};
+	if (new URL(fixture.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const identity = { serverId: fixture.base, accountId: fixture.reviewer, shareId: fixture.share, vaultId: "synthetic-restore-pictures" };
+	const store = await DiscussionStore.open(identity, new IDBFactory());
+	const transport = new DiscussionTransport(identity, async () => ({ accountId: fixture.reviewer, accessToken: fixture.token }), fetch);
+	const session = new DiscussionSession(store, transport), thread = randomUUID(), operationId = randomUUID();
+	try {
+		await session.start(); session.watch(fixture.entry, () => {}); await session.refresh();
+		expect(session.canAttachPictures).toBe(true);
+		const source = await prepareLocalPicture(randomUUID(), fixture.entry, new Uint8Array(readFileSync(fixture.picturePath)).buffer);
+		const body = { version: 1 as const, blocks: [{ type: "picture" as const, picture_id: source.id, alt: "Restore fixture" }] };
+		const draft = { id: "picture", scopeId: fixture.entry, revision: 0, body: protocolJson(editableCommentDraft(body, () => "Member")) };
+		await store.saveDraft(draft, null, [source]);
+		await session.queue({ operationId, scopeId: fixture.entry, type: "thread.create", dependsOn: [], ...session.restoreBinding,
+			payload: protocolJson({ type: "thread.create", thread_id: thread, message_id: randomUUID(), anchor: { version: 1, type: "note" }, body }) }, draft);
+		await session.outbox.settled();
+		expect(await store.getOperation(source.id)).toMatchObject({ state: "accepted", restoreGeneration: fixture.restoreGeneration });
+		expect((await store.getOperation(operationId))?.state).toBe("accepted");
+		expect((await transport.picture(fixture.entry, source.id)).state).toBe("attached");
+		expect((await transport.thread(fixture.entry, thread)).messages[0].body).toEqual(body);
+		const upload = { type: "picture.upload" as const, picture_id: source.id, sha256: source.sha256, size: source.size };
+		await expect(transport.uploadPicture(fixture.entry, upload, source.bytes)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect((await transport.uploadPicture(fixture.entry, upload, source.bytes, session.restoreBinding)).state).toBe("attached");
+		expect(await store.pictureSource(source.id, fixture.entry)).toBeUndefined();
 	} finally { await session.close(); }
 });

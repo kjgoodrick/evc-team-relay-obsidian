@@ -114,3 +114,17 @@ test("a server downgrade cannot silently turn a bound session into a legacy send
 		expect(f.transport.send).not.toHaveBeenCalled();
 	} finally { await f.close(); }
 });
+
+test("restored sessions require advertised picture and group guards before enabling those writes", async () => {
+	const f = await fixture(id(90));
+	try {
+		const capability = { ...caps(id(90)), pictures: true, baseTargets: ["group", "group_summary", "view"] };
+		f.transport.capabilities.mockResolvedValue(capability); await f.ready();
+		expect(f.session.canAttachPictures).toBe(false); expect(f.session.canAnchorBase("group")).toBe(false);
+		expect(f.session.canAnchorBase("view")).toBe(true);
+		f.transport.capabilities.mockResolvedValue({ ...capability, pictureRestoreGuard: true, baseGroupRestoreGuard: true });
+		await f.session.refresh();
+		expect(f.session.canAttachPictures).toBe(true); expect(f.session.canAnchorBase("group")).toBe(true);
+		expect(await f.store.preference("baseGroupRestoreGuard")).toBe(true);
+	} finally { await f.close(); }
+});

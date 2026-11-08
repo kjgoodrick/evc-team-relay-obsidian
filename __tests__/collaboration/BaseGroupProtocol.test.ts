@@ -94,10 +94,13 @@ test("capture freezes its request before credential refresh and validates the sa
 	const credential = new Promise<{ accountId: string; accessToken: string }>(resolve => { ready = resolve; });
 	const fetcher = jest.fn().mockImplementation(async () => reply(result()));
 	const transport = new DiscussionTransport(identity, () => credential, fetcher), mutable = request();
-	const pending = transport.captureBaseGroup(baseDiscussionScope(id(12), id(5)), mutable);
+	const binding = { restoreGeneration: id(90) };
+	const pending = transport.captureBaseGroup(baseDiscussionScope(id(12), id(5)), mutable, binding);
+	binding.restoreGeneration = id(91);
 	mutable.value = { type: "text", value: "Changed" }; mutable.operation_id = id(19);
 	ready({ accountId: id(1), accessToken: "synthetic" });
 	expect(await pending).toEqual(anchor());
+	expect(fetcher.mock.calls[0][1].headers["X-Relay-Restore-Generation"]).toBe(id(90));
 	expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual(request());
 	await expect(transport.captureBaseGroup(baseDiscussionScope(id(12), id(19)), request())).rejects.toMatchObject({ action: "reject" });
 	expect(fetcher).toHaveBeenCalledTimes(1);
