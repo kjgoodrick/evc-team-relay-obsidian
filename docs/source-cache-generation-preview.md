@@ -38,9 +38,12 @@ provider and credential cache. That source synchronizes, writes and reconnects
 after reopening its cache while original offline edits remain local. This is
 generation-rotation evidence, not a full backup/restore of server bytes.
 
+Paused-share recovery now discovers and exports matching source namespaces as
+[separate generation histories](managed-recovery-backup-preview.md), including
+their own buffers. Identity and catalog changes during capture require a retry.
+
 Remaining integration includes the reviewed activation decision, separate folder
-inventory and source-buffer selection, recovery discovery/export of all new
-namespaces, native file replacement, and draining or isolating older workers
+inventory and automatic source-buffer selection, native file replacement, and draining or isolating older workers
 that still know original vault paths. Cache names alone cannot stop an old
 window writing a native file. Coherent service backup/restore, original-request
 reconciliation and desktop/mobile acceptance remain required.

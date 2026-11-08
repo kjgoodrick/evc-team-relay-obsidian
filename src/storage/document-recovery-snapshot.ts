@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { SOURCE_CACHE_IDENTITY } from "./document-cache-binding";
 
 export interface DocumentRecoverySnapshot {
 	exists: boolean;
@@ -38,6 +39,22 @@ function updateBytes(value: unknown): Uint8Array {
 }
 
 export interface DocumentRecoveryIdentity { exists: boolean; appId?: unknown; s3rn?: unknown }
+
+/** Namespace discovery reads identity only, never comparison text or updates. */
+export async function readSourceDocumentRecoveryIdentity(name: string): Promise<{ exists: boolean; identity?: unknown }> {
+	if (!/^relay-source-v1-[a-f0-9]{64}$/.test(name)) throw new Error("Invalid source cache name");
+	const db = await openExisting(name);
+	if (!db) return { exists: false };
+	db.onversionchange = () => db.close();
+	try {
+		return await new Promise((resolve, reject) => {
+			const tx = db.transaction("custom", "readonly"), identity = tx.objectStore("custom").get(SOURCE_CACHE_IDENTITY);
+			tx.oncomplete = () => resolve({ exists: true, identity: identity.result });
+			tx.onabort = () => reject(tx.error ?? new Error("Unable to read source cache identity"));
+			tx.onerror = () => { /* onabort reports failure */ };
+		});
+	} finally { db.close(); }
+}
 
 /** Read only association fields while looking for histories absent from the
  * inventory. Do not load another share's update log or comparison text. */

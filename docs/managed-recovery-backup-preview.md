@@ -86,6 +86,23 @@ Discovery describes the catalog observed at the start, not caches created later.
 Legacy metadata has no independent server ID; this evidence is for a local copy
 only and cannot authorize uploading or resuming a cache on a server.
 
+Separately bound source caches use their full durable identity: vault/app ID,
+configured server, normalized endpoint, canonical share/document address, kind
+and restore generation. Discovery reads only their identity metadata and verifies
+it against the hashed cache name before reading any update log. Every matching
+generation is retained independently, including closed histories absent from the
+inventory. `sourceCacheDiscovery` records this catalog and coverage separately
+from legacy discovery. The selected source context is captured and checked across
+asynchronous work; missing server configuration records limited coverage.
+
+These histories are saved under `documents/<document-id>/<cache-name>.*`, with
+their own update, readable text, source metadata and namespaced unsaved buffer.
+The original legacy `documents/<document-id>.*` layout remains intact. Histories
+from different generations are never merged. Repeated captures recheck the
+matching source-cache catalog and each identity, so a newly created, removed or
+reassociated source cache makes the copy retryable; changed buffers and updates
+also fail verification. Unrelated caches are excluded without reading content.
+
 Coverage is explicit in `recovery.json`: unassociated/other-device caches,
 discussion drafts/outbox and Bases request queues/registry are not included.
 Their separate recovery exports remain necessary. This is a verified source copy,
@@ -97,6 +114,9 @@ offline export, known closed/live/missing caches, metadata, untracked/conflict
 files, closed inventory-orphan discovery, scope exclusions, concurrent source/
 association/context changes, unavailable catalogs, disk failures and
 retry. Dialog tests cover progress, success, errors and closing during a save.
+Multi-generation tests recover the Yjs histories independently, preserve separate
+buffers for the same document ID, and reject changed source catalogs, identities,
+editing histories, contexts and colliding/unsafe archive paths.
 
 Native/mobile filesystem acceptance remains pending. Capture still keeps the
 affected source data in memory; streaming and larger resumable archives remain

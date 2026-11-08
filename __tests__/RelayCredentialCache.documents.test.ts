@@ -44,6 +44,18 @@ test("loaded source identity must still match the selected server, endpoint, doc
 	expect(() => s.cache.assertDocumentSourceCache(descriptor.identity, address, "a", selected)).toThrow("unavailable");
 });
 
+test.each(["session", "endpoint", "clear", "default", "removal"])("source recovery context is invalidated by %s changes", change => {
+	const s = setup(), context = s.cache.captureDocumentSourceContext();
+	expect(context).toMatchObject({ serverId: "a", controlPlaneUrl: "https://a.test" }); expect(() => context!.check()).not.toThrow();
+	if (change === "session") s.state.token = jwt("replacement");
+	if (change === "endpoint") s.a.updateControlPlaneUrl("https://replacement.test");
+	if (change === "clear") s.cache.clear();
+	if (change === "default") s.cache.setDefaultRelayOnPremServerId("b");
+	if (change === "removal") s.cache.removeRelayOnPremProvider("a");
+	expect(() => context!.check()).toThrow("changed");
+	if (change === "removal") expect(s.cache.captureDocumentSourceContext("a")).toBeUndefined();
+});
+
 test("identical document IDs on two servers have independent requests, grants and callbacks", async () => {
 	const { cache } = setup(), callbackA = jest.fn(), callbackB = jest.fn();
 	const [a, b] = await Promise.all([cache.getToken(address, "Team/Note.md", callbackA, "a"), cache.getToken(address, "Team/Note.md", callbackB, "b")]);

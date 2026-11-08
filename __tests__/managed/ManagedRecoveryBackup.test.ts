@@ -17,6 +17,8 @@ import { platformFetch } from "../../src/platformFetch";
 import { ItemKind, type ItemRecord } from "../../src/ItemKinds";
 import { RemoteFolderAddress, RemoteDocumentAddress, ResourceAddress } from "../../src/ResourceAddress";
 import type { ManagedRestoreReview } from "../../src/client/ManagedIndexTransport";
+import { openSourceDocumentCache, sourceDocumentCache } from "../../src/storage/source-document-cache";
+import { SOURCE_CACHE_IDENTITY } from "../../src/storage/document-cache-binding";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 const fetchMock = platformFetch as jest.Mock;
@@ -112,12 +114,16 @@ test.each(["../escape", "/absolute", "C:/absolute", "Team/../escape", "Team\\esc
 	expect(await fs.readdir(root)).toEqual([]);
 });
 
-test.each(["identity", "file collision", "identity collision", "directory collision"])("invalid capture %s cannot overwrite another recovery item", async kind => {
+test.each(["identity", "file collision", "identity collision", "directory collision", "source cache key", "source collision"])("invalid capture %s cannot overwrite another recovery item", async kind => {
 	const state = capture();
 	if (kind === "identity") state.documents[0].id = "../escape";
 	if (kind === "file collision") state.files.push({ ...state.files[0], path: "team/local.md" });
 	if (kind === "identity collision") state.documents.push({ ...state.documents[0], id: "A" });
 	if (kind === "directory collision") state.files.push({ ...state.files[0], path: "Team/Local.md/nested" }, { ...state.files[0], path: "Team/Local.md-other" });
+	if (kind === "source cache key") state.documents[0].cacheKey = "../escape";
+	if (kind === "source collision") {
+		state.documents[0].cacheKey = "relay-source-v1-" + "a".repeat(64); state.documents.push({ ...state.documents[0] });
+	}
 	await expect(prepareRecoveryBackup(io(), async () => state, {})).rejects.toThrow();
 	expect(await fs.readdir(root)).toEqual([]);
 });
@@ -191,6 +197,59 @@ async function restoreFixture() {
 	fetchMock.mockImplementation(() => { throw new Error("Recovery must work offline"); });
 	return { ...state, review };
 }
+
+test("paused-share archive preserves original and multiple restored histories without merging their bytes or buffers", async () => {
+	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress;
+	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: "test-server", controlPlaneUrl: "https://fixture.test", check: s.checkAuth });
+	const descriptors = [];
+	for (const label of ["first restored generation", "second restored generation"]) {
+		const identity = { hostAppId: s.host, serverId: "test-server", controlPlaneUrl: "https://fixture.test",
+			s3rn: ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, address.folderGuid, s.note.id)), restoreGeneration: crypto.randomUUID() };
+		const doc = new Y.Doc(), store = await openSourceDocumentCache(identity, doc), descriptor = await sourceDocumentCache(identity);
+		doc.getText("contents").insert(0, label); await store.close(); doc.destroy();
+		await s.share.unsavedStore.persistUnsaved(descriptor.bufferKey, label + " unsaved");
+		descriptors.push({ ...descriptor, label });
+	}
+	const folder = await s.share.saveManagedRestoreRecoveryCopy();
+	expect(await fs.readFile(path.join(root, folder, `documents/${s.note.id}.txt`), "utf8")).toBe("OFFLINE EDIT IN INDEXEDDB");
+	for (const descriptor of descriptors) {
+		const prefix = path.join(root, folder, `documents/${s.note.id}/${descriptor.name}`);
+		expect(await fs.readFile(prefix + ".txt", "utf8")).toBe(descriptor.label);
+		expect(await fs.readFile(prefix + ".unsaved.txt", "utf8")).toBe(descriptor.label + " unsaved");
+		const recovered = new Y.Doc(); Y.applyUpdate(recovered, await fs.readFile(prefix + ".yjs"));
+		expect(recovered.getText("contents").toString()).toBe(descriptor.label); recovered.destroy();
+	}
+	const metadata = JSON.parse(await fs.readFile(path.join(root, folder, "recovery.json"), "utf8"));
+	expect(metadata.sourceCacheDiscovery.documents).toHaveLength(2); expect(fetchMock).not.toHaveBeenCalled();
+	expect(s.transport.restoreReview).toEqual(s.review);
+});
+
+test.each(["identity", "edit", "context", "new cache"])("a source %s changing during archive leaves review retryable", async change => {
+	const s = await restoreFixture(), address = s.share.resourceAddress as RemoteFolderAddress;
+	let invalidated = false;
+	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: "test-server", controlPlaneUrl: "https://fixture.test", check: () => { if (invalidated) throw new Error("Source context changed"); } });
+	const identity = { hostAppId: s.host, serverId: "test-server", controlPlaneUrl: "https://fixture.test",
+		s3rn: ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, address.folderGuid, s.note.id)), restoreGeneration: crypto.randomUUID() };
+	const doc = new Y.Doc(), store = await openSourceDocumentCache(identity, doc); cleanup.push(async () => { await store.close(); doc.destroy(); });
+	doc.getText("contents").insert(0, "retained source"); await store.set("path", "Note.md");
+	const write = s.vault.adapter.writeBinary; let changed = false;
+	s.vault.adapter.writeBinary = async (p, bytes) => {
+		await write(p, bytes); if (changed) return; changed = true;
+		if (change === "context") { invalidated = true; return; }
+		if (change === "edit") { doc.getText("contents").insert(0, "later "); await store.set("path", "Note.md"); return; }
+		if (change === "new cache") {
+			const newer = new Y.Doc(), created = await openSourceDocumentCache({ ...identity, restoreGeneration: crypto.randomUUID() }, newer);
+			newer.getText("contents").insert(0, "new retained generation"); await created.close(); newer.destroy(); return;
+		}
+		await new Promise<void>((resolve, reject) => {
+			const tx = store.db!.transaction("custom", "readwrite"); tx.objectStore("custom").put("reassociated", SOURCE_CACHE_IDENTITY);
+			tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+		});
+	};
+	await expect(s.share.saveManagedRestoreRecoveryCopy()).rejects.toThrow();
+	expect(s.transport.restoreReview).toEqual(s.review); expect(doc.getText("contents").toString()).toContain("retained source");
+	for (const entry of await fs.readdir(path.join(root, RECOVERY_FOLDER))) await expect(fs.access(path.join(root, RECOVERY_FOLDER, entry, "BACKUP-COMPLETE.txt"))).rejects.toThrow();
+});
 
 test("paused-share copy includes retained source work and metadata without moving originals or networking", async () => {
 	const s = await restoreFixture();

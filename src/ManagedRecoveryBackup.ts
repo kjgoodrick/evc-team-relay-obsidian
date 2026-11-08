@@ -2,7 +2,7 @@ import { RECOVERY_FOLDER } from "./conflictCopyPath";
 import { sha256Hex } from "./contentDigest";
 
 export interface RecoveryFile { path: string; bytes: ArrayBuffer }
-export interface RecoveryDocument { id: string; update: Uint8Array; text: string; unsaved?: string | null; cacheMetadata?: string }
+export interface RecoveryDocument { id: string; cacheKey?: string; update: Uint8Array; text: string; unsaved?: string | null; cacheMetadata?: string }
 export interface RecoveryCapture { files: RecoveryFile[]; documents: RecoveryDocument[]; index: Uint8Array }
 export interface RecoveryIO {
 	mkdir(path: string): Promise<void>;
@@ -18,7 +18,7 @@ const equal = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => {
 export function sameCapture(a: RecoveryCapture, b: RecoveryCapture): boolean {
 	return equal(a.index, b.index) && a.files.length === b.files.length && a.documents.length === b.documents.length
 		&& a.files.every(f => b.files.some(g => f.path === g.path && equal(f.bytes, g.bytes)))
-		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.text === e.text && d.unsaved === e.unsaved && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)));
+		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.cacheKey === e.cacheKey && d.text === e.text && d.unsaved === e.unsaved && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)));
 }
 
 function copyCapture(value: RecoveryCapture): RecoveryCapture {
@@ -51,10 +51,12 @@ export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promi
 	}
 	for (const doc of first.documents) {
 		if (typeof doc.id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(doc.id)) throw new Error("Recovery document has an unsafe identity");
-		artifacts.push({ path: `documents/${doc.id}.yjs`, bytes: bytes(doc.update) });
-		addText(`documents/${doc.id}.txt`, doc.text);
-		if (doc.unsaved != null) addText(`documents/${doc.id}.unsaved.txt`, doc.unsaved);
-		if (doc.cacheMetadata !== undefined) addText(`documents/${doc.id}.cache.json`, doc.cacheMetadata);
+		if (doc.cacheKey !== undefined && (typeof doc.cacheKey !== "string" || !/^relay-source-v1-[a-f0-9]{64}$/.test(doc.cacheKey))) throw new Error("Recovery document has an unsafe cache key");
+		const prefix = `documents/${doc.id}${doc.cacheKey ? "/" + doc.cacheKey : ""}`;
+		artifacts.push({ path: `${prefix}.yjs`, bytes: bytes(doc.update) });
+		addText(`${prefix}.txt`, doc.text);
+		if (doc.unsaved != null) addText(`${prefix}.unsaved.txt`, doc.unsaved);
+		if (doc.cacheMetadata !== undefined) addText(`${prefix}.cache.json`, doc.cacheMetadata);
 	}
 	artifacts.push({ path: "inventory.yjs", bytes: bytes(first.index) });
 	addText("recovery.json", metadataText);

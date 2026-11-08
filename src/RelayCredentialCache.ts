@@ -92,6 +92,17 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		if (this.fileCacheDestroyed || !this.isRelayOnPremMode || !selected || !provider) throw new Error("The source cache server is unavailable. Local history is retained.");
 		assertSourceCacheBinding(metadata, documentId, selected, provider.controlPlaneEndpoint, binding);
 	}
+	captureDocumentSourceContext(serverId?: string): { serverId: string; controlPlaneUrl: string; check: () => void } | undefined {
+		const selected = this.documentServer(serverId), provider = selected ? this.relayOnPremProviders.get(selected) : undefined;
+		if (this.fileCacheDestroyed || !this.isRelayOnPremMode || !selected || !provider) return;
+		const identity = provider.getFileCredentialContext(), epoch = this.fileCacheGeneration, selection = this.documentDefaultGeneration;
+		return { serverId: selected, controlPlaneUrl: provider.controlPlaneEndpoint, check: () => {
+			if (this.fileCacheDestroyed || !this.isRelayOnPremMode || epoch !== this.fileCacheGeneration || this.relayOnPremProviders.get(selected) !== provider
+				|| provider.getFileCredentialContext() !== identity || serverId === undefined && selection !== this.documentDefaultGeneration) {
+				throw new Error("Source cache account or server changed. Local history is retained.");
+			}
+		} };
+	}
 	private restoreKey(documentId: string, serverId?: string, binding: RestoreBinding = {}): string {
 		return JSON.stringify([this.documentServer(serverId) ?? "legacy", documentId, restoreMetadata(binding).restoreGeneration ?? null]);
 	}

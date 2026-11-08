@@ -27,6 +27,8 @@ import { LocalDocumentStore } from "./storage/local-document-store";
 import { readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
+import { discoverSourceRecovery, type SourceRecoveryDiscovery } from "./storage/discover-source-recovery";
+import { SOURCE_CACHE_IDENTITY } from "./storage/document-cache-binding";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
 import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { SingleFlight, LazyValue, warnIfSlow } from "./asyncCache";
@@ -531,6 +533,7 @@ export class VaultShare extends ProviderBacked {
 		const server = this.config.onpremServerId, provider = this._liveProvider, host = this.hostAppId;
 		const address = ResourceAddress.serialize(this.resourceAddress), credentials = this.credentialCache, vault = this.vaultApi;
 		const checkAuth = credentials.captureFileContext(address, server);
+		const sourceContext = credentials.captureDocumentSourceContext?.(server);
 		const staging = () => JSON.stringify({ writes: [...(this.folderIndex.stagedWrites ?? [])], deletes: [...(this.folderIndex.stagedDeletes ?? [])],
 			aliases: [...(this.folderIndex.aliases ?? [])], claims: [...(this.uploadClaims ?? [])] });
 		const stagedText = staging();
@@ -542,12 +545,23 @@ export class VaultShare extends ProviderBacked {
 				throw new Error("The shared folder changed while saving recovery files. Local work is retained; review and retry.");
 			}
 			checkAuth();
+			sourceContext?.check();
 		};
 		check(); this.savingRestoreCopy = true;
 		try {
 			const discovery = await discoverDocumentRecovery(host, this.resourceAddress, check); check();
+			const sourceDiscovery: SourceRecoveryDiscovery = sourceContext
+				? await discoverSourceRecovery({ hostAppId: host, share: this.resourceAddress, ...sourceContext }, check)
+				: { status: "unavailable", documents: [], unassociated: 0, unreadable: 0 };
+			check();
 			const capture = async (): Promise<RecoveryCapture> => {
 				check();
+				if (sourceContext) {
+					const current = await discoverSourceRecovery({ hostAppId: host, share: this.resourceAddress, ...sourceContext }, check); check();
+					if (current.status !== sourceDiscovery.status || JSON.stringify(current.documents) !== JSON.stringify(sourceDiscovery.documents)) {
+						throw new Error("The retained source cache inventory changed during recovery capture. Local history is retained; review and retry.");
+					}
+				}
 				const files: RecoveryCapture["files"] = [];
 				for (const file of this.vaultApi.getAllLoadedFiles()) {
 					if (!(file instanceof TFile) || !this.containsPath(file.path) || file.path.split("/").includes(RECOVERY_FOLDER)) continue;
@@ -567,13 +581,27 @@ export class VaultShare extends ProviderBacked {
 				const known = new Set(records.map(record => record.id));
 				for (const id of crdt.getMap<string>("docs").values()) if (!known.has(id)) records.push({ id, type: ItemKind.Document });
 				const documents = await this.captureRecoveryDocuments(records, check, discovery.documents); check();
+				for (const source of sourceDiscovery.documents) {
+					const stored = await readDocumentRecoverySnapshot(source.cacheName); check();
+					if (!stored.exists || stored.custom.find(item => item.key === SOURCE_CACHE_IDENTITY)?.value !== source.sourceIdentity) {
+						throw new Error("A source cache association changed during recovery capture. Local history is retained; review and retry.");
+					}
+					const doc = new Y.Doc({ gc: false });
+					try {
+						Y.applyUpdate(doc, stored.update);
+						const unsaved = await this.unsavedStore.readUnsaved(source.cacheName); check();
+						documents.push({ id: source.id, cacheKey: source.cacheName, update: stored.update, unsaved,
+							cacheMetadata: encodeDocumentRecoveryMetadata(source.cacheName, stored),
+							text: source.type === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
+					} finally { doc.destroy(); }
+				}
 				return { files, documents, index: Y.encodeStateAsUpdate(crdt) };
 			};
 			const backup = await prepareRecoveryBackup(this.recoveryIO(check), capture, {
 				kind: "managed-restore-source-copy", version: 1, shareId, sharePath, serverId: server ?? null, hostAppId: host,
-				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText), cacheDiscovery: discovery,
+				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText), cacheDiscovery: discovery, sourceCacheDiscovery: sourceDiscovery,
 				coverage: { nativeFiles: "loaded files within the shared folder, excluding recovery directories",
-					documentCaches: "retained inventories, conflicts, staged writes, legacy index, live documents and caches with matching host/share/document metadata",
+					documentCaches: "known legacy histories plus separately retained source generations with matching vault/server/endpoint/share/document identity",
 					excluded: ["unassociated or other-device caches", "discussion drafts and outbox", "Bases request queues and registry", "previous recovery directories"],
 					authorizesResume: false },
 			});
