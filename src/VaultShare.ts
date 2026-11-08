@@ -594,8 +594,8 @@ export class VaultShare extends ProviderBacked {
 		for (const [id, kind] of kinds) {
 			check();
 			const active = this.trackedEntries.get(id), selected = this.retainedSourceCache(id, kind);
-			if ((isDocument(active) || isCanvasDocument(active)) && active.recoverySourceCache
-				&& (active.vaultShare !== this || active.recoverySourceCache.identity !== selected?.identity)) throw new Error("The live source history has a different association. Review and retry recovery.");
+			if ((isDocument(active) || isCanvasDocument(active)) && (selected || active.recoverySourceCache)
+				&& (active.vaultShare !== this || active.recoverySourceCache?.identity !== selected?.identity)) throw new Error("The live source history has a different association. Review and retry recovery.");
 			const doc = new Y.Doc({ gc: false });
 			try {
 				const cacheName = `${this.hostAppId}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${id}`;
@@ -651,6 +651,7 @@ export class VaultShare extends ProviderBacked {
 			const result = await trackNativeSourceMutation(vault, [path], () => { checkExport(); return action(); }); checkExport(); return result;
 		};
 		return {
+			stat: async path => { check(); const stat = await this.vaultApi.adapter.stat(path); check(); return stat; },
 			mkdir: async path => {
 				let parent = "";
 				for (const part of path.split("/")) {
@@ -821,6 +822,9 @@ export class VaultShare extends ProviderBacked {
 					for (const saved of after.documents) {
 						const live = this.trackedEntries.get(saved.id);
 						if (!isDocument(live) && !isCanvasDocument(live)) continue;
+						const selected = this.retainedSourceCache(saved.id, isCanvasDocument(live) ? ItemKind.Canvas : ItemKind.Document);
+						if ((selected || live.recoverySourceCache) && (live.vaultShare !== this || live.recoverySourceCache?.identity !== selected?.identity)) throw new Error("The live source history changed during recovery. Originals and editing histories are retained; review and retry.");
+						if (saved.cacheKey !== live.recoverySourceCache?.name) continue;
 						const merged = new Y.Doc({ gc: false });
 						Y.applyUpdate(merged, saved.update); Y.applyUpdate(merged, Y.encodeStateAsUpdate(live.crdtDoc));
 						saved.update = Y.encodeStateAsUpdate(merged);

@@ -35,6 +35,7 @@ const cleanup: (() => void | Promise<void>)[] = [];
 beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "relay-recovery-test-")); fetchMock.mockReset(); sourceMock.mockReset(); });
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); await fs.rm(root, { recursive: true, force: true }); });
 const io = () => ({
+	stat: async (p: string) => { const info = await fs.stat(path.join(root, p)); return { type: info.isFile() ? "file" as const : "folder" as const, size: info.size }; },
 	mkdir: async (p: string) => { await fs.mkdir(path.join(root, p), { recursive: true }); },
 	write: (p: string, text: string) => fs.writeFile(path.join(root, p), text),
 	writeBinary: (p: string, bytes: ArrayBuffer) => fs.writeFile(path.join(root, p), new Uint8Array(bytes)),
@@ -279,6 +280,24 @@ test("structural recovery capture also retains the selected source without relyi
 		expect.objectContaining({ id: s.note.id, text: "OFFLINE EDIT IN INDEXEDDB", unsaved: "UNSAVED EDITOR BUFFER" }),
 		expect.objectContaining({ id: s.note.id, cacheKey: s.descriptor.name, text: "SELECTED CACHE + LIVE", unsaved: "LIVE SELECTED BUFFER", persistedUnsaved: "SAVED SELECTED BUFFER" }),
 	]));
+});
+
+test.each([false, true])("selected structural recovery keeps its final live recheck within one history (late edit: %s)", async lateEdit => {
+	const s = await selectedTextFixture();
+	s.share.crdtDoc.getMap("managed_base_v1").delete("restoreReview");
+	fetchMock.mockImplementation(async () => ({ ok: true, status: 200, text: async () => JSON.stringify(s.server) }));
+	Object.assign(s.live, { entryPath: "Local.md", dismantle: jest.fn(), goOffline: jest.fn(), scheduleSave: { cancel: jest.fn() } });
+	if (lateEdit) {
+		const rename = s.vault.rename;
+		s.vault.rename = async (file, target) => { await rename(file, target); s.live.crdtDoc.getText("contents").insert(0, "LATE SELECTED EDIT "); };
+		await expect(s.share.resolveManagedConflict(s.conflict.id, "server", s.server.records)).rejects.toThrow("Editing continued");
+		expect(s.live.dismantle).not.toHaveBeenCalled(); expect(s.transport.conflicts).toHaveLength(1);
+	} else {
+		const folder = await s.share.resolveManagedConflict(s.conflict.id, "server", s.server.records);
+		expect(await fs.readFile(path.join(root, folder, `documents/${s.note.id}.txt`), "utf8")).toBe("OFFLINE EDIT IN INDEXEDDB");
+		expect(await fs.readFile(path.join(root, folder, `documents/${s.note.id}/${s.descriptor.name}.txt`), "utf8")).toBe("SELECTED CACHE + LIVE");
+		expect(s.live.dismantle).toHaveBeenCalledTimes(1); expect(s.transport.conflicts).toHaveLength(0);
+	}
 });
 
 test("selected text comparison refuses a changed cache identity before contacting the server", async () => {

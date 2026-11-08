@@ -24,7 +24,9 @@ imports, removes or relabels an existing source cache.
 Preparation stores an archive path/manifest hash and installation-plan ID/hash.
 Recording these references does **not** verify their files or quiesce native
 writers. The installation coordinator must perform those checks before the
-corresponding transitions. A pending phase survives close/reopen, including a
+corresponding transitions. The [archive verifier](recovery-archive-verification-preview.md)
+can now reopen the saved archive against its recorded digest; installation plans
+and the coordinator are still unfinished. A pending phase survives close/reopen, including a
 crash between native writes and the final journal commit; startup must resume
 recovery instead of treating that phase as permission to synchronize.
 

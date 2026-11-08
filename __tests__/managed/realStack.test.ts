@@ -108,6 +108,7 @@ run("real relay: inventory filtering, concurrent editing, offline/restart, read-
 			documents: [{ id: fixture.note, update: Y.encodeStateAsUpdate(offlineRestored.doc), text: offlineRestored.text.toString() }], index: Y.encodeStateAsUpdate(rootDoc) });
 		const base = fixture.restartDir;
 		const backup = await prepareRecoveryBackup({
+			stat: async p => { const info = await fs.promises.stat(path.join(base, p)); return { type: info.isFile() ? "file" : "folder", size: info.size }; },
 			mkdir: async p => { await fs.promises.mkdir(path.join(base, p), { recursive: true }); },
 			write: (p, text) => fs.promises.writeFile(path.join(base, p), text),
 			writeBinary: (p, bytes) => fs.promises.writeFile(path.join(base, p), new Uint8Array(bytes)),

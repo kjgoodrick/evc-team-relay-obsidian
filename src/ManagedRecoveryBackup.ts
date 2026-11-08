@@ -1,15 +1,15 @@
 import { RECOVERY_FOLDER } from "./conflictCopyPath";
 import { sha256Hex } from "./contentDigest";
+import { requireRecoveryRelativePath, recoveryCompletionText, verifyRecoveryArchive, type RecoveryArchiveReader } from "./ManagedRecoveryArchive";
 
 export interface RecoveryFile { path: string; bytes: ArrayBuffer }
 export interface RecoveryDocument { id: string; cacheKey?: string; update: Uint8Array; text: string; unsaved?: string | null; persistedUnsaved?: string | null; cacheMetadata?: string }
 export interface RecoveryInventory { cacheKey: string; update: Uint8Array; cacheMetadata: string }
 export interface RecoveryCapture { files: RecoveryFile[]; documents: RecoveryDocument[]; index: Uint8Array; inventories?: RecoveryInventory[] }
-export interface RecoveryIO {
+export interface RecoveryIO extends RecoveryArchiveReader {
 	mkdir(path: string): Promise<void>;
 	write(path: string, text: string): Promise<void>;
 	writeBinary(path: string, bytes: ArrayBuffer): Promise<void>;
-	readBinary(path: string): Promise<ArrayBuffer>;
 }
 const bytes = (value: Uint8Array): ArrayBuffer => new Uint8Array(value).buffer;
 const equal = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => {
@@ -30,12 +30,6 @@ function copyCapture(value: RecoveryCapture): RecoveryCapture {
 		documents: value.documents.map(doc => ({ ...doc, update: new Uint8Array(doc.update) })), index: new Uint8Array(value.index) };
 }
 
-function safeRelativePath(path: string): void {
-	if (typeof path !== "string" || !path || /^[a-z]:/i.test(path) || path.includes("\\")
-		|| [...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
-		|| path.split("/").some(part => !part || part === "." || part === "..")) throw new Error("Recovery file has an unsafe relative path");
-}
-
 interface SavedRecoveryFile { path: string; bytes: number; sha256: string }
 
 /** Originals are never removed by this module. A complete backup and a second
@@ -50,7 +44,7 @@ export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promi
 	const artifacts: { path: string; bytes: ArrayBuffer; text?: string }[] = [];
 	const addText = (path: string, text: string) => artifacts.push({ path, text, bytes: new TextEncoder().encode(text).buffer });
 	for (const file of first.files) {
-		safeRelativePath(file.path);
+		requireRecoveryRelativePath(file.path);
 		artifacts.push({ path: `files/${file.path}`, bytes: file.bytes });
 	}
 	for (const doc of first.documents) {
@@ -99,18 +93,18 @@ export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promi
 		const actual = await io.readBinary(`${path}/${file.path}`);
 		if (actual.byteLength !== file.bytes || await sha256Hex(actual) !== file.sha256) throw new Error(`Recovery file verification failed: ${file.path}. Originals were retained.`);
 	};
-	const message = `Original file bytes, local editing history, and inventory saved and read back. This folder stays on this device.\nManifest SHA-256: ${manifestEntry.sha256}\nVerify manifest.json and every listed file before recovery.\n`;
+	const reference = Object.freeze({ path, manifestSha256: manifestEntry.sha256 });
+	const message = recoveryCompletionText(reference.manifestSha256);
 	const completionBytes = new TextEncoder().encode(message).buffer;
 	const completion = { path: "BACKUP-COMPLETE.txt", bytes: completionBytes.byteLength, sha256: await sha256Hex(completionBytes) };
 	let completed = false;
 	const verify = async () => {
-		for (const file of saved) await verifyFile(file);
-		await verifyFile(manifestEntry);
-		if (completed) await verifyFile(completion);
+		if (completed) await verifyRecoveryArchive(io, reference);
+		else { for (const file of saved) await verifyFile(file); await verifyFile(manifestEntry); }
 		if (!sameCapture(first, await capture())) throw new Error("Local edits arrived while saving recovery files. Nothing was discarded; review and retry.");
 	};
 	await verify();
 	await io.write(`${path}/${completion.path}`, message); await verifyFile(completion);
 	completed = true;
-	return { path, verify, initial: copyCapture(first) };
+	return { path, reference, verify, initial: copyCapture(first) };
 }
