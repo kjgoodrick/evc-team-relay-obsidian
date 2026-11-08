@@ -52,6 +52,37 @@ async function ready(f: ReturnType<typeof fixture>, expiresIn = 3600) {
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
 
+test("rapid pane transitions withdraw immediately and subscribe only to the settled scopes", async () => {
+	const f = fixture(true, true, true, true, true, true, true, true);
+	try {
+		const socket = await ready(f);
+		f.channel.watchEmbeds(note()); f.channel.observe([note(20)]);
+		await jest.advanceTimersByTimeAsync(120);
+		const previous = socket.frames.filter(frame => ["watch_embeds", "observe"].includes(String(frame.type)));
+		const before = socket.frames.length, resets = f.observation.mock.calls.length;
+		for (let i = 0; i < 100; i++) {
+			f.channel.watchEmbeds(null); f.channel.observe([]);
+			f.channel.watchEmbeds(note(i + 30)); f.channel.observe([note(i + 200)]);
+		}
+		expect(socket.frames.slice(before).map(frame => frame.type)).toEqual(["unwatch", "unobserve"]);
+		expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
+		expect(f.observation.mock.calls.length).toBeGreaterThan(resets);
+		const calls = f.imageEmbeds.mock.calls.length;
+		socket.message({ type: "image_embeds", subscription_id: previous[0].subscription_id, status: "available", peers: [] });
+		expect(f.imageEmbeds).toHaveBeenCalledTimes(calls);
+		await jest.advanceTimersByTimeAsync(120);
+		expect(socket.frames.slice(before + 2)).toMatchObject([
+			{ type: "watch_embeds", location: note(129) },
+			{ type: "observe", location: { ...note(299), surface: "reading" } },
+		]);
+		f.channel.watchEmbeds(note(300)); f.channel.observe([note(301)]);
+		const stoppedAt = socket.frames.length; f.channel.stop();
+		await jest.advanceTimersByTimeAsync(120);
+		expect(socket.frames).toHaveLength(stoppedAt);
+	} finally { f.channel.stop(); }
+	expect(jest.getTimerCount()).toBe(0);
+});
+
 test("image movement coalesces, follows the visible publication and is not replayed after reconnect", async () => {
 	const f = fixture(true, true, true);
 	try {
@@ -73,13 +104,13 @@ test("image movement coalesces, follows the visible publication and is not repla
 test("image snapshots are separate from rosters, clear on scope change, and ignore stale subscriptions", async () => {
 	const f = fixture(true, true, true), state = { pointer: { x: 0.1, y: 0.5 }, viewport: null };
 	try {
-		const socket = await ready(f); f.channel.watch(picture()); const watch = socket.frames.at(-1)!;
+		const socket = await ready(f); f.channel.watch(picture()); await jest.advanceTimersByTimeAsync(120); const watch = socket.frames.at(-1)!;
 		expect(watch).toMatchObject({ type: "watch", image_states: true });
 		const frame = { type: "image_states", subscription_id: watch.subscription_id, status: "available", peers: [{ target, state }] };
 		const rosterCalls = f.roster.mock.calls.length; socket.message(frame);
 		expect(f.imageStates).toHaveBeenLastCalledWith({ scope: picture(), status: "available", peers: [{ target, state }] });
 		expect(f.roster.mock.calls).toHaveLength(rosterCalls);
-		f.channel.watch(base()); expect(socket.frames.at(-1)).not.toHaveProperty("image_states");
+		f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120); expect(socket.frames.at(-1)).not.toHaveProperty("image_states");
 		expect(f.imageStates).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
 		const count = f.imageStates.mock.calls.length; socket.message(frame); expect(f.imageStates.mock.calls).toHaveLength(count);
 	} finally { f.channel.stop(); }
@@ -336,7 +367,7 @@ test("older servers retain note navigation while non-note publication and observ
 
 test("hidden observation accepts a bounded large roster and clears immediately on scope change or unwatch", async () => {
 	const f = fixture(true), scope = picture();
-	f.channel.watch(scope); f.channel.start(id(5), null); await flush();
+	f.channel.watch(scope); await jest.advanceTimersByTimeAsync(120); f.channel.start(id(5), null); await flush();
 	const socket = f.sockets[0]; socket.open(); socket.ready(3600, 2);
 	try {
 		expect(socket.frames.filter(frame => frame.type === "presence")).toEqual([{ type: "presence", location: null }]);
@@ -346,13 +377,13 @@ test("hidden observation accepts a bounded large roster and clears immediately o
 		socket.message({ type: "roster", subscription_id: request.subscription_id, status: "available", peers });
 		expect(f.roster).toHaveBeenLastCalledWith({ scope, status: "available", peers });
 		expect(f.channel.ready).toBe(true);
-		f.channel.watch(base());
+		f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120);
 		expect(f.roster).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
 		expect(socket.frames.slice(-2)).toEqual([{ type: "unwatch", subscription_id: request.subscription_id }, { type: "watch", subscription_id: expect.any(String), location: base() }]);
 		const calls = f.roster.mock.calls.length;
 		socket.message({ type: "roster", subscription_id: request.subscription_id, status: "available", peers });
 		expect(f.roster).toHaveBeenCalledTimes(calls);
-		f.channel.watch(null); expect(socket.frames.at(-1)?.type).toBe("unwatch");
+		f.channel.watch(null); await jest.advanceTimersByTimeAsync(120); expect(socket.frames.at(-1)?.type).toBe("unwatch");
 	} finally { f.channel.stop(); }
 	expect(jest.getTimerCount()).toBe(0);
 });
@@ -360,7 +391,7 @@ test("hidden observation accepts a bounded large roster and clears immediately o
 test("reconnect clears peers, renews the observed room and never replays Follow", async () => {
 	const f = fixture(true), first = await ready(f);
 	try {
-		f.channel.watch(base()); const request = first.frames.at(-1)!;
+		f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120); const request = first.frames.at(-1)!;
 		f.channel.follow(target, note());
 		first.message({ type: "roster", subscription_id: request.subscription_id, status: "available", peers: [{ target, name: "Member" }] });
 		first.disconnect();
@@ -377,10 +408,10 @@ test("reconnect clears peers, renews the observed room and never replays Follow"
 test("unavailable observation stays ended until explicit retry, with a new subscription", async () => {
 	const f = fixture(true), socket = await ready(f);
 	try {
-		f.channel.watch(base()); const request = socket.frames.at(-1)!;
+		f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120); const request = socket.frames.at(-1)!;
 		socket.message({ type: "roster", subscription_id: request.subscription_id, status: "unavailable" });
 		expect(f.roster).toHaveBeenLastCalledWith({ scope: base(), status: "unavailable", peers: [] });
-		f.channel.watch(base()); expect(socket.frames.at(-1)).toBe(request);
+		f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120); expect(socket.frames.at(-1)).toBe(request);
 		f.channel.retry(); expect(socket.frames.at(-1)?.type).toBe("watch");
 		expect(socket.frames.at(-1)?.subscription_id).not.toBe(request.subscription_id);
 	} finally { f.channel.stop(); }
@@ -392,7 +423,7 @@ test.each([
 	Array.from({ length: 128 }, (_, i) => ({ target: { ...target, instance_id: id(i + 100) }, name: "Member" })),
 ].map(peers => ({ peers })))("rejects malformed or over-limit rosters without retaining participants: %#", async ({ peers }) => {
 	const f = fixture(true), socket = await ready(f);
-	f.channel.watch(picture()); const request = socket.frames.at(-1)!;
+	f.channel.watch(picture()); await jest.advanceTimersByTimeAsync(120); const request = socket.frames.at(-1)!;
 	socket.message({ type: "roster", subscription_id: request.subscription_id, status: "available", peers });
 	expect(f.channel.status).toBe("unavailable");
 	expect(f.roster).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] }); f.channel.stop();
@@ -436,17 +467,17 @@ test("embed publication coalesces, clears on hide and never replays after reconn
 test("embed observation is independent of publishing, changes scopes and ignores stale delivery", async () => {
     const f = fixture(true, true, true, true);
     try {
-        const socket = await ready(f); f.channel.publish(null); f.channel.watchEmbeds(note());
+        const socket = await ready(f); f.channel.publish(null); f.channel.watchEmbeds(note()); await jest.advanceTimersByTimeAsync(120);
         const watch = socket.frames.at(-1)!;
         expect(watch).toMatchObject({ type: "watch_embeds", location: note() });
         const frame = { type: "image_embeds", subscription_id: watch.subscription_id, status: "available", peers: [{ target, embed: embedded() }] };
         const rosterCalls = f.roster.mock.calls.length; socket.message(frame);
         expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: note(), status: "available", peers: frame.peers });
         expect(f.roster.mock.calls).toHaveLength(rosterCalls);
-        f.channel.watch(picture()); expect(socket.frames.slice(-2)).toMatchObject([{ type: "unwatch", subscription_id: watch.subscription_id }, { type: "watch", image_states: true }]);
+        f.channel.watch(picture()); await jest.advanceTimersByTimeAsync(120); expect(socket.frames.slice(-2)).toMatchObject([{ type: "unwatch", subscription_id: watch.subscription_id }, { type: "watch", image_states: true }]);
         expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
         const count = f.imageEmbeds.mock.calls.length; socket.message(frame); expect(f.imageEmbeds.mock.calls).toHaveLength(count);
-        f.channel.watchEmbeds(note(99)); const current = socket.frames.at(-1)!;
+        f.channel.watchEmbeds(note(99)); await jest.advanceTimersByTimeAsync(120); const current = socket.frames.at(-1)!;
         socket.message({ type: "image_embeds", subscription_id: current.subscription_id, status: "unavailable" });
         expect(f.imageEmbeds).toHaveBeenLastCalledWith({ scope: note(99), status: "unavailable", peers: [] });
         socket.message({ ...frame, subscription_id: current.subscription_id });
@@ -457,7 +488,7 @@ test("embed observation is independent of publishing, changes scopes and ignores
 test.each([false, true])("embed capability is required, including on extended servers: %s", async server => {
     const f = fixture(true, server);
     try {
-        const socket = await ready(f); f.channel.watchEmbeds(note()); f.channel.publishEmbeddedImage(embedded()); await jest.advanceTimersByTimeAsync(125);
+        const socket = await ready(f); f.channel.watchEmbeds(note()); await jest.advanceTimersByTimeAsync(120); f.channel.publishEmbeddedImage(embedded()); await jest.advanceTimersByTimeAsync(125);
         expect(f.channel.supportsEmbeddedImages).toBe(false);
         expect(socket.frames.some(frame => frame.type === "watch_embeds" || frame.type === "image_embed")).toBe(false);
     } finally { f.channel.stop(); }
@@ -487,12 +518,12 @@ test("Bases movement coalesces, clears on privacy/surface changes and never repl
 test("Bases positions have an independent callback, keep roster controls stable and ignore old saved-view subscriptions", async () => {
 	const f = fixture(true, true, false, false, true, true);
 	try {
-		const socket = await ready(f); f.channel.watch(base()); const watch = socket.frames.at(-1)!;
+		const socket = await ready(f); f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120); const watch = socket.frames.at(-1)!;
 		expect(watch).toMatchObject({ type: "watch", base_states: true }); expect(watch).not.toHaveProperty("image_states");
 		const frame = { type: "base_states", subscription_id: watch.subscription_id, status: "available", peers: [{ target, state: baseState() }] };
 		const count = f.roster.mock.calls.length; socket.message(frame);
 		expect(f.baseStates).toHaveBeenLastCalledWith({ scope: base(), status: "available", peers: frame.peers }); expect(f.roster.mock.calls).toHaveLength(count);
-		f.channel.watch(base(13)); expect(f.baseStates).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
+		f.channel.watch(base(13)); await jest.advanceTimersByTimeAsync(120); expect(f.baseStates).toHaveBeenLastCalledWith({ scope: null, status: "unavailable", peers: [] });
 		const calls = f.baseStates.mock.calls.length; socket.message(frame); expect(f.baseStates.mock.calls).toHaveLength(calls);
 		const current = socket.frames.at(-1)!; socket.message({ type: "base_states", subscription_id: current.subscription_id, status: "unavailable" });
 		expect(f.roster).toHaveBeenLastCalledWith({ scope: base(13), status: "unavailable", peers: [] });
@@ -502,7 +533,7 @@ test("Bases positions have an independent callback, keep roster controls stable 
 test.each([false, true])("Bases record lookup and movement require negotiation (extended %s)", async extended => {
 	const f = fixture(true, extended);
 	try {
-		const socket = await ready(f); f.channel.publish(base()); f.channel.publishBaseState(baseState()); f.channel.watch(base());
+		const socket = await ready(f); f.channel.publish(base()); f.channel.publishBaseState(baseState()); f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120);
 		await jest.advanceTimersByTimeAsync(125); expect(socket.frames.some(value => value.type === "base_state" || value.base_states)).toBe(false);
 		await expect(f.channel.readBaseRecordContext(id(5), id(40))).rejects.toThrow(); expect(f.fetcher).toHaveBeenCalledTimes(2);
 	} finally { f.channel.stop(); }
@@ -523,7 +554,7 @@ test("Bases record lineage lookup uses session credentials and fences delayed re
 test.each(["unsolicited", "wrong-surface", "duplicate", "values", "extra"])("rejects invalid Bases frames: %s", async failure => {
 	const f = fixture(true, true, false, false, true, failure !== "unsolicited");
 	try {
-		const socket = await ready(f); f.channel.watch(failure === "wrong-surface" ? picture() : base());
+		const socket = await ready(f); f.channel.watch(failure === "wrong-surface" ? picture() : base()); await jest.advanceTimersByTimeAsync(120);
 		const watch = socket.frames.at(-1)!, peer = { target, state: baseState() };
 		const peers = failure === "duplicate" ? [peer, peer] : failure === "values" ? [{ ...peer, state: { ...baseState(), value: "private" } }] : [peer];
 		socket.message({ type: "base_states", subscription_id: watch.subscription_id, status: "available", peers, ...(failure === "extra" ? { path: "private" } : {}) });
@@ -535,7 +566,7 @@ test.each([false, true])("extended Bases targets negotiate independently and dow
 	const f = fixture(true, true, false, false, true, true, enabled);
 	const state: BasePresenceState = { version: 2, pointer: { target: { type: "group", record_id: id(15), record_generation: id(16), property: { source: "note", name: "status" }, value_sha256: "a".repeat(64), references: [] }, offset: { x: 0.2, y: 0.5 } }, viewport: { target: { type: "property", property: { source: "note", name: "status" } }, offset: { x: 0, y: 0 } } };
 	try {
-		const socket = await ready(f); f.channel.publish(base()); f.channel.watch(base());
+		const socket = await ready(f); f.channel.publish(base()); f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120);
 		expect(f.channel.supportsBaseTargetsV2).toBe(enabled);
 		const watch = socket.frames.at(-1)!;
 		if (enabled) expect(watch.base_target_version).toBe(2); else expect(watch).not.toHaveProperty("base_target_version");
@@ -554,9 +585,9 @@ test.each([false, true])("extended Bases targets negotiate independently and dow
 test("passive observations deduplicate, isolate callbacks, retain foreground and fence removal", async () => {
 	const f = fixture(true, true, true, true, true, true, true, true);
 	try {
-		const socket = await ready(f); f.channel.watch(base());
+		const socket = await ready(f); f.channel.watch(base()); await jest.advanceTimersByTimeAsync(120);
 		const foreground = socket.frames.at(-1)!;
-		f.channel.observe([picture(), note(), { ...note(), surface: "reading" }]);
+		f.channel.observe([picture(), note(), { ...note(), surface: "reading" }]); await jest.advanceTimersByTimeAsync(120);
 		const watches = socket.frames.filter(frame => frame.type === "observe"); expect(watches).toHaveLength(2);
 		const image = watches.find(frame => (frame.location as ImageLocation).kind === "image")!, embed = watches.find(frame => (frame.location as NoteLocation).kind === "note")!;
 		expect(image).toMatchObject({ location: picture(), image_states: true });
@@ -571,7 +602,7 @@ test("passive observations deduplicate, isolate callbacks, retain foreground and
 		const count = socket.frames.length;
 		for (let i = 0; i < 100; i++) f.channel.observe([note(), picture()]);
 		expect(socket.frames).toHaveLength(count); expect(f.sockets).toHaveLength(1);
-		f.channel.observe([note()]); expect(socket.frames.at(-1)).toEqual({ type: "unobserve", subscription_id: image.subscription_id });
+		f.channel.observe([note()]); await jest.advanceTimersByTimeAsync(120); expect(socket.frames.at(-1)).toEqual({ type: "unobserve", subscription_id: image.subscription_id });
 		expect(f.observation).toHaveBeenLastCalledWith({ type: "reset", scope: picture() });
 		const emitted = f.observation.mock.calls.length;
 		socket.message({ type: "roster", subscription_id: image.subscription_id, status: "available", peers: [] });
@@ -583,11 +614,11 @@ test("passive observations deduplicate, isolate callbacks, retain foreground and
 test("passive denial requires retry, preserves other scopes and reconnect uses new subscription identities", async () => {
 	const f = fixture(true, true, true, true, true, true, true, true);
 	try {
-		const socket = await ready(f); f.channel.observe([picture(), base()]);
+		const socket = await ready(f); f.channel.observe([picture(), base()]); await jest.advanceTimersByTimeAsync(120);
 		const first = socket.frames.filter(frame => frame.type === "observe")[0];
 		socket.message({ type: "roster", subscription_id: first.subscription_id, status: "unavailable" });
 		expect(f.observation).toHaveBeenLastCalledWith({ type: "roster", scope: picture(), status: "unavailable", peers: [] });
-		f.channel.observe([picture(), base()]); expect(socket.frames.filter(frame => frame.type === "observe")).toHaveLength(2);
+		f.channel.observe([picture(), base()]); await jest.advanceTimersByTimeAsync(120); expect(socket.frames.filter(frame => frame.type === "observe")).toHaveLength(2);
 		f.channel.retry(); const retry = socket.frames.at(-1)!; expect(retry).toMatchObject({ type: "observe", location: picture() }); expect(retry.subscription_id).not.toBe(first.subscription_id);
 		socket.message({ type: "roster", subscription_id: first.subscription_id, status: "available", peers: [] });
 		expect(f.observation.mock.calls.at(-1)![0].status).toBe("unavailable");
@@ -604,7 +635,7 @@ test.each([false, true])("multiple observation capability is explicit and bounde
 	const f = fixture(true, true, true, true, true, true, true, supported);
 	try {
 		const socket = await ready(f), scopes = Array.from({ length: 8 }, (_, i) => note(i + 50));
-		f.channel.observe(scopes); expect(f.channel.supportsMultiWatch).toBe(supported);
+		f.channel.observe(scopes); await jest.advanceTimersByTimeAsync(120); expect(f.channel.supportsMultiWatch).toBe(supported);
 		expect(socket.frames.filter(frame => frame.type === "observe")).toHaveLength(supported ? 8 : 0);
 		expect(() => f.channel.observe([...scopes, note(99)])).toThrow("Too many");
 		expect(socket.frames.filter(frame => frame.type === "unobserve")).toHaveLength(0);
@@ -614,7 +645,7 @@ test.each([false, true])("multiple observation capability is explicit and bounde
 test("passive Bases events keep version negotiation and reject a mismatched surface", async () => {
 	const f = fixture(true, true, true, true, true, true, true, true);
 	try {
-		const socket = await ready(f); f.channel.observe([base()]); const request = socket.frames.at(-1)!;
+		const socket = await ready(f); f.channel.observe([base()]); await jest.advanceTimersByTimeAsync(120); const request = socket.frames.at(-1)!;
 		expect(request).toMatchObject({ type: "observe", base_states: true, base_target_version: 2 });
 		socket.message({ type: "base_states", subscription_id: request.subscription_id, status: "available", peers: [{ target, state: baseState() }] });
 		expect(f.observation).toHaveBeenLastCalledWith({ type: "base_states", scope: base(), status: "available", peers: [{ target, state: baseState() }] });

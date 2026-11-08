@@ -9,7 +9,7 @@ import { ImagePresenceSurface } from "./ImagePresenceSurface";
 import { BasePresenceSurface } from "./BasePresenceSurface";
 import { NativeBasesSurface } from "../../bases/NativeBasesSurface";
 import { TimelineBridgeClient } from "../../bases/TimelineBridgeClient";
-import { LocationChannel, type LocationChannelStatus, type LocationIdentity } from "./LocationChannel";
+import { LocationChannel, type LocationChannelStatus, type LocationIdentity, type ObservationEvent } from "./LocationChannel";
 import { locationId, type BaseLocation, type LocationEvent, type NoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
 import type { ActivePresencePeer, SurfacePresencePeer } from "./PresencePeers";
 import type { ImagePresenceState, ImageStatesEvent } from "./LocationProtocol";
@@ -18,15 +18,17 @@ import { EmbeddedImageSurface } from "./EmbeddedImageSurface";
 import type { EmbeddedImagesEvent } from "./EmbeddedImageProtocol";
 import type { ImageOccurrence } from "../anchors/images";
 import type { RenderedImageTarget } from "../anchors/renderedImages";
-import type { PresencePeer } from "./PresencePeers";
+import { presencePeers, type PresencePeer } from "./PresencePeers";
+import type { YSweetProvider } from "../../client/provider";
 import type { BaseStatesEvent } from "./BasePositionProtocol";
 import type { BaseLocalRecord } from "./BasePresenceRecords";
 
 type Context = { key: string; serverId: string; identity: LocationIdentity; file: TFile; folder: VaultShare; id: string; kind: "note" | "image" | "base"; location?: NoteLocation };
 type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void; interacted?: () => void; positions?: () => void };
-export type NoteImageObserver = { view: MarkdownView; text: Y.Text; current: () => boolean;
+export type NoteImageObserver = { view: MarkdownView; text: Y.Text; provider: YSweetProvider; current: () => boolean;
 	targets: (images: ImageOccurrence[]) => RenderedImageTarget[] };
-type EmbeddedObserver = { surface: EmbeddedImageSurface; mode: string; scope: NoteImageObserver };
+type EmbeddedObserver = { surface: EmbeddedImageSurface; mode: string; scope: NoteImageObserver; context: Context; stop: () => void };
+const noteScopeKey = (scope: Pick<NoteLocation, "share_id" | "entry_id">) => JSON.stringify([scope.share_id, scope.entry_id]);
 
 /** One foreground connection across notes, image files and saved Bases views. Inventory and local
  * rendering are verified independently of discussions and comment permission. */
@@ -43,6 +45,8 @@ export class LocationHost extends Component {
 	private baseStates?: BaseStatesEvent;
 	private embedded?: EmbeddedImageSurface;
 	private embedObservers = new Map<MarkdownView, EmbeddedObserver>();
+	private observerEmbeds = new Map<string, EmbeddedImagesEvent>();
+	private observerDenied = new Set<string>();
 	private embeds?: EmbeddedImagesEvent;
 	private embedMode?: string;
 	private embedDenied = false;
@@ -67,7 +71,7 @@ export class LocationHost extends Component {
 	get ready(): boolean { return this.channel?.ready === true; }
 	get supportsImages(): boolean { return this.channel?.supportsImageContext === true && this.channel.supportsSurfaceRoster; }
 	get supportsBases(): boolean { return this.channel?.supportsBaseContext === true && this.channel.supportsSurfaceRoster; }
-	get embeddedUnavailable(): boolean { return this.embedDenied || this.embedded?.unavailable === true || [...this.embedObservers.values()].some(({ surface }) => surface.unavailable); }
+	get embeddedUnavailable(): boolean { return this.embedDenied || this.observerDenied.size > 0 || this.embedded?.unavailable === true || [...this.embedObservers.values()].some(({ surface }) => surface.unavailable); }
 	get imageActive(): boolean { return this.context?.kind === "image"; }
 	get baseActive(): boolean { return this.context?.kind === "base"; }
 	get surfaceActive(): boolean { return this.imageActive || this.baseActive; }
@@ -86,7 +90,7 @@ export class LocationHost extends Component {
 			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: scope.kind, location: scope, imageState: positions?.get(JSON.stringify(peer.target)), baseState: basePositions?.get(JSON.stringify(peer.target)) }))
 			.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 	}
-	retry(): void { this.embedDenied = false; this.channel?.retry(); this.image?.retry(); this.base?.retry(); this.embedded?.retry(); for (const { surface } of this.embedObservers.values()) surface.retry(); for (const surface of this.imageObservers.values()) surface.retry(); }
+	retry(): void { this.embedDenied = false; this.observerDenied.clear(); this.channel?.retry(); this.image?.retry(); this.base?.retry(); this.embedded?.retry(); for (const { surface } of this.embedObservers.values()) surface.retry(); for (const surface of this.imageObservers.values()) surface.retry(); }
 	unfollow(): void { this.channel?.unfollow(); this.base?.cancelNavigation(); }
 	cancelSurfaceNavigation(): void { this.base?.cancelNavigation(); }
 	follow(peer: ActivePresencePeer): string | undefined {
@@ -110,38 +114,83 @@ export class LocationHost extends Component {
 		const embeds = scope?.kind === "note" && event?.status === "available" &&
 			event.scope?.share_id === scope.share_id && event.scope.entry_id === scope.entry_id ? event.peers : [];
 		this.embedded?.setPeers(embeds, peers);
-		for (const { surface } of this.embedObservers.values()) surface.setPeers(embeds, peers);
+		for (const observer of this.embedObservers.values()) this.paintNoteObserver(observer);
 	}
-	/** Reuse the foreground note subscription for other visible panes of that
-	 * exact note/account. Observers never publish, follow or open a socket. */
+	private foregroundNote(context: Context): boolean {
+		return this.context?.kind === "note" && context.key === this.context.key && context.folder === this.context.folder && context.id === this.context.id;
+	}
+	private paintNoteObserver(observer: EmbeddedObserver): void {
+		const foreground = this.foregroundNote(observer.context), key = noteScopeKey(observer.context.location!);
+		const event = foreground ? this.embeds : this.observerEmbeds.get(key);
+		const embeds = event?.status === "available" && event.scope && noteScopeKey(event.scope) === key ? event.peers : [];
+		observer.surface.setPeers(embeds, foreground ? this.notePeers : observer.scope.current() ? presencePeers(observer.scope.provider.awareness) : []);
+	}
+	private syncNoteObservations(): void {
+		const wanted = new Map<string, NoteLocation>();
+		for (const observer of this.embedObservers.values()) if (!this.foregroundNote(observer.context)) {
+			const location = observer.context.location!;
+			wanted.set(noteScopeKey(location), location);
+		}
+		for (const key of this.observerEmbeds.keys()) if (!wanted.has(key)) this.observerEmbeds.delete(key);
+		for (const key of this.observerDenied) if (!wanted.has(key)) this.observerDenied.delete(key);
+		this.channel?.observe([...wanted.values()]);
+	}
+	private observation(event: ObservationEvent): void {
+		if (event.type === "reset") {
+			if (!event.scope) { this.observerEmbeds.clear(); this.observerDenied.clear(); }
+			else if (event.scope.kind === "note") { this.observerEmbeds.delete(noteScopeKey(event.scope)); this.observerDenied.delete(noteScopeKey(event.scope)); }
+		} else if (event.type === "image_embeds" && event.scope) {
+			const key = noteScopeKey(event.scope);
+			if (![...this.embedObservers.values()].some(observer => !this.foregroundNote(observer.context) && noteScopeKey(observer.context.location!) === key)) return;
+			this.observerEmbeds.set(key, event);
+			if (event.status === "unavailable") this.observerDenied.add(key);
+		} else return;
+		for (const observer of this.embedObservers.values()) this.paintNoteObserver(observer);
+		if (event.type !== "reset" && event.status === "unavailable") this.callbacks.changed();
+	}
+	/** Visible note panes reuse their existing shared binding and account.
+	 * Same-note copies share the foreground watch; other notes use bounded
+	 * passive subscriptions when supported. None publishes or opens a socket. */
 	setNoteObservers(scopes: readonly NoteImageObserver[]): void {
 		const context = this.context;
 		const eligible = (scope: NoteImageObserver) => {
-			if (!context || context.kind !== "note" || !this.embedded || this.embedDenied || !this.channel?.supportsEmbeddedImages ||
-				this.closed || this.context?.key !== context.key || this.context.id !== context.id || this.context.folder !== context.folder ||
+			if (!context || !this.channel?.supportsEmbeddedImages || this.closed || this.context?.key !== context.key ||
 				scope.view === this.view || !scope.current() || !scope.view.contentEl.getClientRects().length) return false;
 			const identity = this.identify(scope.view);
-			return identity?.key === context.key && identity.folder === context.folder && identity.id === context.id;
+			if (!identity || identity.kind !== "note" || identity.key !== context.key) return false;
+			return this.foregroundNote(identity) ? !!this.embedded && !this.embedDenied : this.channel.supportsMultiWatch;
 		};
 		const wanted = new Map(scopes.filter(eligible).slice(0, 8).map(scope => [scope.view, scope]));
 		for (const [view, observer] of this.embedObservers) {
-			const scope = wanted.get(view);
-			if (!scope || observer.surface.text !== scope.text || observer.mode !== view.getMode()) { observer.surface.close(); this.embedObservers.delete(view); }
-			else observer.scope = scope;
+			const scope = wanted.get(view), identity = scope && this.identify(view);
+			if (!scope || observer.surface.text !== scope.text || observer.mode !== view.getMode() || observer.scope.provider !== scope.provider ||
+				identity?.key !== observer.context.key || identity.folder !== observer.context.folder || identity.id !== observer.context.id) {
+				observer.stop(); observer.surface.close(); this.embedObservers.delete(view);
+			} else observer.scope = scope;
 		}
 		for (const [view, scope] of wanted) {
 			if (this.embedObservers.has(view)) continue;
-			const mode = view.getMode();
-			const observer: EmbeddedObserver = { mode, scope, surface: new EmbeddedImageSurface(view, scope.text, this.assets, {
-				current: () => eligible(observer.scope) && view.getMode() === mode,
+			const mode = view.getMode(), identity = this.identify(view)!;
+			const observer: EmbeddedObserver = { mode, scope, context: identity, stop: () => {}, surface: new EmbeddedImageSurface(view, scope.text, this.assets, {
+				current: () => eligible(observer.scope) && view.getMode() === mode && !this.observerDenied.has(noteScopeKey(identity.location!)),
 				publishing: () => false, publish: () => {}, targets: images => observer.scope.targets(images),
-				read: entryId => this.channel!.readImageLocation(context!.folder.entityGuid, entryId), changed: this.callbacks.changed,
+				read: entryId => this.channel!.readImageLocation(identity.folder.entityGuid, entryId), changed: this.callbacks.changed,
 			}) };
+			const peersChanged = () => this.paintNoteObserver(observer), statusChanged = this.callbacks.changed;
+			scope.provider.awareness.on("change", peersChanged);
+			for (const event of ["status", "sync", "presence-status"] as const) scope.provider.on(event, statusChanged);
+			observer.stop = () => {
+				scope.provider.awareness.off("change", peersChanged);
+				for (const event of ["status", "sync", "presence-status"] as const) scope.provider.off(event, statusChanged);
+			};
 			this.embedObservers.set(view, observer);
 		}
-		this.setNotePeers(this.notePeers);
+		this.syncNoteObservations(); this.setNotePeers(this.notePeers);
 	}
-	private closeNoteObservers(): void { for (const { surface } of this.embedObservers.values()) surface.close(); this.embedObservers.clear(); }
+	private closeNoteObservers(): void {
+		for (const { surface, stop } of this.embedObservers.values()) { stop(); surface.close(); }
+		this.embedObservers.clear(); this.observerEmbeds.clear(); this.observerDenied.clear(); this.channel?.observe([]);
+	}
 	/** Direct-image split panes reuse the foreground version proof and roster.
 	 * Every pane still verifies its own native image and local bytes. */
 	setImageObservers(views: readonly FileView[]): void {
@@ -263,7 +312,7 @@ export class LocationHost extends Component {
 		if (!this.channel) {
 			try {
 				this.channel = this.createChannel(context.identity, {
-					surfaceLocations: true,
+					surfaceLocations: true, observation: event => { if (!this.closed && this.context?.key === context.key) this.observation(event); },
 					credential: async () => {
 						if (!current()) return;
 						const accessToken = await this.auth.getAuthProviderForServer(context.serverId)?.getValidToken();

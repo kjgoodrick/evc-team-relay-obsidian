@@ -47,11 +47,11 @@ guard.
 
 ## Remaining scope
 
-This checkpoint shares the foreground note's existing subscription. Simultaneous
-observation of different notes, other surface kinds,
-physical mobile/touch, two native clients and broader performance/accessibility
-acceptance remain. Different-note observation needs a bounded multi-subscription
-protocol rather than one extra connection per pane. No production deployment or
+This original checkpoint shares the foreground note's existing subscription.
+Different-note Reading/Live Preview observation now has a separate
+[transport and native-host checkpoint](multiple-presence-observations-preview.md).
+Other surface kinds, physical mobile/touch, two native clients and broader
+performance/accessibility acceptance remain. No production deployment or
 live-vault plugin installation is included.
 
 Same-file direct-image split panes are now covered by the

@@ -77,6 +77,7 @@ export class LocationChannel {
 	private refreshTimer?: number;
 	private deadline?: number;
 	private publishTimer?: number;
+	private watchTimer?: number;
 	private requests = new Set<() => void>();
 	private attempts = 0;
 	private lastReceived = 0;
@@ -206,7 +207,16 @@ export class LocationChannel {
 			this.emitObservation({ type: "reset", scope: observation.scope });
 		}
 		for (const [key, scope] of wanted) if (!this.observations.has(key)) this.observations.set(key, { scope, denied: false });
-		this.flushObservations();
+		this.scheduleWatches();
+	}
+	/** Pane and mode transitions can synchronously replace several scopes.
+	 * Withdraw obsolete subscriptions immediately, but subscribe only to the
+	 * settled desired set so transient views do not exhaust the server budget. */
+	private scheduleWatches(): void {
+		if (!this.ready || this.watchTimer !== undefined) return;
+		this.watchTimer = window.setTimeout(() => {
+			this.watchTimer = undefined; this.flushWatch(); this.flushObservations();
+		}, 120);
 	}
 	private emitObservation(event: ObservationEvent): void {
 		try { this.options.observation?.(event); } catch { /* Isolate UI. */ }
@@ -230,7 +240,7 @@ export class LocationChannel {
 		this.emitRoster(null, "unavailable");
 		if (previous && this.ready) this.send({ type: "unwatch", subscription_id: previous.id });
 		this.sentWatch = undefined;
-		this.flushWatch();
+		this.scheduleWatches();
 	}
 	unfollow(): void {
 		const id = this.subscription; this.subscription = undefined;
@@ -261,10 +271,10 @@ export class LocationChannel {
 	}
 	private current(version: number): boolean { return this.active && version === this.version; }
 	private drop(): void {
-		for (const timer of [this.retryTimer, this.heartbeat, this.refreshTimer, this.deadline, this.publishTimer, this.imageTimer]) if (timer !== undefined) window.clearTimeout(timer);
+		for (const timer of [this.retryTimer, this.heartbeat, this.refreshTimer, this.deadline, this.publishTimer, this.imageTimer, this.watchTimer]) if (timer !== undefined) window.clearTimeout(timer);
 		this.imageTimer = undefined; this.desiredImageState = null; this.desiredEmbed = null; this.sentImageState = undefined; this.imageStatesSupported = false; this.embedsSupported = false; this.lastImageSent = 0;
 		this.desiredBaseState = null; this.baseStatesSupported = false; this.baseTargetsV2Supported = false;
-		this.retryTimer = this.heartbeat = this.refreshTimer = this.deadline = this.publishTimer = undefined;
+		this.retryTimer = this.heartbeat = this.refreshTimer = this.deadline = this.publishTimer = this.watchTimer = undefined;
 		for (const cancel of this.requests) cancel(); this.requests.clear();
 		// Native HTTP may finish independently; generation checks fence every late
 		// credential, response and callback. Do not retain timers or a live socket.

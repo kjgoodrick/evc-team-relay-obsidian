@@ -300,7 +300,7 @@ test("status and explicit retry reflect the active provider; unload removes stat
 	} finally { f.close(); }
 });
 
-function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>, embeds = false, baseContext?: () => unknown | Promise<unknown>, baseRecordContext?: (entry: string) => unknown | Promise<unknown>) {
+function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<unknown>, embeds = false, baseContext?: () => unknown | Promise<unknown>, baseRecordContext?: (entry: string) => unknown | Promise<unknown>, multiWatch = false) {
 	const sockets: ReturnType<typeof makeSocket>[] = [];
 	function makeSocket() {
 		const socket = { readyState: 0, bufferedAmount: 0, onopen: null as WebSocket["onopen"], onmessage: null as WebSocket["onmessage"],
@@ -325,7 +325,7 @@ function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<u
 		return socket;
 	}
 	jest.mocked(platformFetch).mockImplementation(async url => ({ status: 200, ok: true, text: async () => JSON.stringify(String(url).includes("/capabilities?") ?
-		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true, presence_embedded_images_preview: embeds, presence_base_context_preview: !!baseContext, presence_base_states_preview: !!baseRecordContext, presence_base_targets_v2_preview: !!baseRecordContext } : {}) } } :
+		{ protocol_version: 1, features: { presence_locations_preview: true, ...(surfaces ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: true, presence_embedded_images_preview: embeds, presence_multi_watch_preview: multiWatch, presence_base_context_preview: !!baseContext, presence_base_states_preview: !!baseRecordContext, presence_base_targets_v2_preview: !!baseRecordContext } : {}) } } :
 		String(url).includes("/base-record-context?") ? await baseRecordContext?.(new URL(String(url)).searchParams.get("entry_id")!) : String(url).includes("/base-context?") ? await baseContext?.() : String(url).includes("/image-location?") ? { protocol_version: 1, location: await imageContext?.() } : { protocol_version: 1, ticket: "t".repeat(32), expires_in: 30, socket_path: "/v1/collaboration/events" }) }) as Response);
 	const mock = jest.spyOn(window, "WebSocket").mockImplementation(url => {
 		expect(String(url)).toBe("wss://relay.example/v1/collaboration/events");
@@ -335,7 +335,8 @@ function crossNetwork(surfaces = false, imageContext?: () => unknown | Promise<u
 }
 async function until(check: () => boolean) {
 	const deadline = Date.now() + 3000;
-	while (!check()) { if (Date.now() > deadline) throw new Error("Presence condition not reached"); await new Promise(resolve => window.setTimeout(resolve, 20)); }
+	const failure = new Error("Presence condition not reached");
+	while (!check()) { if (Date.now() > deadline) throw failure; await new Promise(resolve => window.setTimeout(resolve, 20)); }
 }
 
 test("cross-note follow survives old-room departure, opens the authorized entry and resumes semantic following", async () => {
@@ -570,7 +571,8 @@ test.each(["revoked", "local-bytes", "server-version"])("image presence withdraw
 		// Repairing bytes also changes the file revision; verification correctly
 		// keeps the digest of unchanged bytes instead of re-reading on every retry.
 		if (failure === "local-bytes") f.image.file.stat.mtime++;
-		f.controller.retry(); await until(() => f.controller.status === "ready"); socket.roster();
+		const watchesBeforeRetry = socket.frames.filter(frame => frame.type === "watch").length;
+		f.controller.retry(); await until(() => f.controller.status === "ready" && socket.frames.filter(frame => frame.type === "watch").length > watchesBeforeRetry); socket.roster();
 		expect(f.controller.peers).toHaveLength(1);
 	} finally { f.close(); network.close(); }
 });
@@ -630,6 +632,7 @@ test.each(["denial", "bytes", "blur", "logout"] as const)("direct-image split pa
 		root.getClientRects = () => (shown ? [root.getBoundingClientRect()] : []) as unknown as DOMRectList;
 		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(f.image.view);
 		await until(() => socket.frames.some(frame => frame.type === "watch")); socket.roster(); socket.imageState();
+		const deniedSubscriptions = new Set<unknown>();
 		const painted = async () => {
 			await until(() => [root, f.image.view.contentEl].every(element => element.querySelector(".relay-image-presence")));
 			for (const element of [root, f.image.view.contentEl]) box(element.querySelector<HTMLElement>(".relay-image-presence")!);
@@ -949,13 +952,14 @@ test.each([['sabidurian-timeline', false], ['sabidurian-timeline', true], ['sabi
 	} finally { m.close(); expect(changed).toBeUndefined(); }
 });
 
-test.each(["reading", "live-preview"] as const)("same-note %s split panes share one embed watch without passive publication", async mode => {
-	const network = crossNetwork(true, () => f.image.location, true), f = fixture(true, true), [first, second] = f.notes;
-	const stops: (() => void)[] = [], anchors = new EmbeddedImageAnchors(first.text);
+test.each([["reading", false], ["live-preview", false], ["reading", true], ["live-preview", true]] as const)("%s split panes (different notes=%s) share one connection without passive publication", async (mode, different) => {
+	const network = crossNetwork(true, () => f.image.location, true, undefined, undefined, different), f = fixture(true, true), [first, second] = f.notes;
+	const stops: (() => void)[] = [], anchors = new EmbeddedImageAnchors(first.text), secondAnchors = new EmbeddedImageAnchors(second.text);
 	const oldRects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects"), oldBounds = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
 	Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [] });
 	Object.defineProperty(Range.prototype, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 0, 8, 14) });
-	let remote: ReturnType<typeof remotePeer> | undefined, shown = true;
+	let remote: ReturnType<typeof remotePeer> | undefined, passiveRemote: ReturnType<typeof remotePeer> | undefined, shown = true;
+	let bindPassive: (() => void) | undefined;
 	const box = (element: HTMLElement, height = 250) => {
 		Object.defineProperties(element, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: height }, clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: height } });
 		element.getBoundingClientRect = () => new DOMRect(0, 0, 400, height);
@@ -963,48 +967,90 @@ test.each(["reading", "live-preview"] as const)("same-note %s split panes share 
 	};
 	try {
 		first.text.delete(0, first.text.length); first.text.insert(0, "![[Picture.png]]");
-		second.view.file = first.view.file; second.binding.boundDocument = first.binding.boundDocument;
-		second.view.getViewData = () => first.text.toString();
+		if (different) { second.text.delete(0, second.text.length); second.text.insert(0, "![[Picture.png]]"); }
+		else { second.view.file = first.view.file; second.binding.boundDocument = first.binding.boundDocument; second.view.getViewData = () => first.text.toString(); }
 		const images = [first, second].map(note => {
+			const text = different ? note.text : first.text, documentId = different ? note.doc.entityGuid : first.doc.entityGuid;
 			if (note === second && mode === "live-preview") {
 				note.mode("source"); f.editors[1].stop();
 				const editor = f.editors[1].editor, image = document.createElement("img"); image.src = "app://local/Picture.png";
 				Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
-				editor.setState(EditorState.create({ doc: first.text.toString(), extensions: [editorInfoField.init(() => ({ file: first.view.file, editor: second.view.editor } as never)), ...f.extensions,
-					EditorView.decorations.of(Decoration.set([Decoration.replace({ widget: new class extends WidgetType { toDOM() { return image; } }() }).range(0, first.text.length)]))] }));
-				stops.push(bindCommentEditor(editor, () => ({ documentId: first.doc.entityGuid, text: first.text })));
+				editor.setState(EditorState.create({ doc: text.toString(), extensions: [editorInfoField.init(() => ({ file: note.view.file, editor: second.view.editor } as never)), ...f.extensions,
+					EditorView.decorations.of(Decoration.set([Decoration.replace({ widget: new class extends WidgetType { toDOM() { return image; } }() }).range(0, text.length)]))] }));
+				bindPassive = () => stops.push(bindCommentEditor(editor, () => ({ documentId, text })));
 				for (let element: HTMLElement | null = image; element && note.view.contentEl.contains(element); element = element.parentElement) box(element);
 				return image;
 			}
-			note.mode("preview"); stops.push(bindReadingComments(note.view, () => ({ documentId: first.doc.entityGuid, text: first.text })));
+			note.mode("preview"); stops.push(bindReadingComments(note.view, () => ({ documentId, text })));
 			box(note.view.contentEl, 600);
 			const section = note.view.contentEl.appendChild(document.createElement("div")); box(section);
 			const image = section.appendChild(document.createElement("img")); image.src = "app://local/Picture.png"; box(image);
 			Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 800 }, naturalHeight: { value: 500 } });
-			const context = { sourcePath: first.view.file!.path, getSectionInfo: () => ({ text: first.text.toString(), lineStart: 0, lineEnd: 0 }),
+			const context = { sourcePath: note.view.file!.path, getSectionInfo: () => ({ text: text.toString(), lineStart: 0, lineEnd: 0 }),
 				addChild: (child: { onload(): void; unload(): void }) => { child.onload(); stops.push(() => child.unload()); } } as unknown as MarkdownPostProcessorContext;
 			f.processors.forEach(processor => processor(section, context)); return image;
 		});
 		second.view.contentEl.getClientRects = () => (shown ? [second.view.contentEl.getBoundingClientRect()] : []) as unknown as DOMRectList;
-		remote = remotePeer(f); f.controller.refresh();
+		remote = remotePeer(f); if (different) passiveRemote = remotePeer(f, 1); f.controller.refresh();
 		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready();
 		await until(() => socket.frames.some(frame => frame.type === "watch_embeds"));
-		const embed = (await anchors.capture(anchors.images[0], { kind: "managed", entry_id: f.image.location.entry_id, generation: f.image.location.generation, sha256: f.image.location.content_sha256 },
-			{ width: 800, height: 500, orientation: "display" }, { pointer: { x: 0.5, y: 0.5 }, viewport: null }))!;
-		const send = () => socket.message({ type: "image_embeds", subscription_id: socket.frames.filter(frame => frame.type === "watch_embeds").at(-1)!.subscription_id, status: "available",
-			peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, embed }] });
+		const captures = await Promise.all((different ? [anchors, secondAnchors] : [anchors]).map(anchor => anchor.capture(anchor.images[0],
+			{ kind: "managed", entry_id: f.image.location.entry_id, generation: f.image.location.generation, sha256: f.image.location.content_sha256 },
+			{ width: 800, height: 500, orientation: "display" }, { pointer: { x: 0.5, y: 0.5 }, viewport: null })));
+		const send = () => {
+			for (const [index, note] of (different ? [first, second] : [first]).entries()) {
+				const request = socket.frames.filter(frame => ["watch_embeds", "observe"].includes(String(frame.type)) && (frame.location as { entry_id: string }).entry_id === note.doc.entityGuid).at(-1);
+				if (request) socket.message({ type: "image_embeds", subscription_id: request.subscription_id, status: "available",
+					peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, embed: captures[index] }] });
+			}
+		};
+		const deniedSubscriptions = new Set<unknown>();
 		const painted = async () => {
+			await until(() => (different ? [first, second] : [first]).every(note => socket.frames.some(frame =>
+				["watch_embeds", "observe"].includes(String(frame.type)) && (frame.location as { entry_id: string }).entry_id === note.doc.entityGuid && !deniedSubscriptions.has(frame.subscription_id) &&
+				!socket.frames.some(other => ["unwatch", "unobserve"].includes(String(other.type)) && other.subscription_id === frame.subscription_id))));
+			send();
 			await until(() => [first, second].every(note => note.view.contentEl.querySelector(".relay-image-presence")));
 			for (const note of [first, second]) note.view.contentEl.querySelectorAll<HTMLElement>(".relay-image-presence").forEach(layer => box(layer, 600));
 			window.dispatchEvent(new Event("resize"));
 			await until(() => [first, second].every(note => note.view.contentEl.querySelector(".relay-image-presence-pointer")?.textContent === "Peer"));
 		};
-		send(); await painted(); expect(socket.frames.filter(frame => frame.type === "watch_embeds")).toHaveLength(1);
+		send();
+		if (bindPassive) {
+			// The Live Preview editor may finish binding after the pane switch,
+			// without another layout/selection event or remote message.
+			await new Promise(resolve => setTimeout(resolve, 350));
+			expect(second.view.contentEl.querySelector(".relay-image-presence")).toBeNull();
+			bindPassive();
+			await until(() => !!second.view.contentEl.querySelector(".relay-image-presence"));
+		}
+		await painted(); expect(socket.frames.filter(frame => frame.type === "watch_embeds")).toHaveLength(1);
+		expect(socket.frames.filter(frame => frame.type === "observe")).toHaveLength(different ? 1 : 0);
 		const reads = f.vault.readBinary.mock.calls.length;
 		for (let i = 0; i < 10; i++) { f.controller.refresh(); send(); }
 		images[1].dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 125 }));
 		await settled(); expect(socket.frames.some(frame => frame.type === "image_embed" && frame.embed)).toBe(false);
 		expect(f.vault.readBinary).toHaveBeenCalledTimes(reads); expect(network.sockets).toHaveLength(1);
+		if (different) {
+			passiveRemote!.send();
+			await until(() => !second.view.contentEl.querySelector(".relay-image-presence-pointer"));
+			expect(first.view.contentEl.querySelector(".relay-image-presence-pointer")).not.toBeNull();
+			passiveRemote!.send(6); await painted();
+			const request = socket.frames.filter(frame => frame.type === "observe").at(-1)!;
+			// Identical image syntax in a different Y.Text is not an anchor match.
+			socket.message({ type: "image_embeds", subscription_id: request.subscription_id, status: "available",
+				peers: [{ target: { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" }, embed: captures[0] }] });
+			await until(() => !second.view.contentEl.querySelector(".relay-image-presence-pointer"));
+			await painted();
+			deniedSubscriptions.add(request.subscription_id);
+			socket.message({ type: "image_embeds", subscription_id: request.subscription_id, status: "unavailable" });
+			await until(() => !second.view.contentEl.querySelector(".relay-image-presence-pointer"));
+			expect(first.view.contentEl.querySelector(".relay-image-presence-pointer")).not.toBeNull(); expect(f.controller.canRetry).toBe(true);
+			const count = socket.frames.filter(frame => frame.type === "observe").length;
+			for (let i = 0; i < 10; i++) f.controller.refresh();
+			expect(socket.frames.filter(frame => frame.type === "observe")).toHaveLength(count);
+			f.controller.retry(); await painted();
+		}
 		await f.controller.setVisible(false); expect(second.view.contentEl.querySelector(".relay-image-presence-pointer")).not.toBeNull();
 		shown = false; f.controller.refresh(); expect(second.view.contentEl.querySelector(".relay-image-presence")).toBeNull();
 		shown = true; f.controller.refresh(); await painted();
@@ -1014,9 +1060,10 @@ test.each(["reading", "live-preview"] as const)("same-note %s split panes share 
 		// leave the old pane's delayed verification attached to the wrong owner.
 		await f.controller.setVisible(true); f.select(second.view); send(); await painted();
 		expect(network.sockets).toHaveLength(1);
+		if (different) { f.select(f.image.view); await painted(); expect(network.sockets).toHaveLength(1); }
 		f.logout(); expect(first.view.contentEl.querySelector(".relay-image-presence")).toBeNull(); expect(second.view.contentEl.querySelector(".relay-image-presence")).toBeNull();
 	} finally {
-		stops.forEach(stop => stop()); anchors.close(); remote?.close(); f.close(); network.close();
+		stops.forEach(stop => stop()); anchors.close(); secondAnchors.close(); remote?.close(); passiveRemote?.close(); f.close(); network.close();
 		if (oldRects) Object.defineProperty(Range.prototype, "getClientRects", oldRects); else Reflect.deleteProperty(Range.prototype, "getClientRects");
 		if (oldBounds) Object.defineProperty(Range.prototype, "getBoundingClientRect", oldBounds); else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
 	}

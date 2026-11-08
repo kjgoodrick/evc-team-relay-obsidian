@@ -10,6 +10,7 @@ import { DocumentViewBinding, type ViewBindingRegistry } from "../../ViewBinding
 import type { SettingsScope } from "../../SettingsPersistence";
 import type { YSweetProvider } from "../../client/provider";
 import { readingCommentBinding, onReadingBindingChange } from "../ReadingTextBinding";
+import { onEditorBindingChange } from "../EditorTextBinding";
 import type { NotePresenceSurface, PresenceSettings } from "./PresenceSettings";
 import { NotePresenceSurfaces } from "./NotePresenceSurfaces";
 import { isNotePeer, peerLocation, presencePeers, type ActivePresencePeer, type PresenceLocation, type PresencePeer, type SurfacePresencePeer } from "./PresencePeers";
@@ -91,6 +92,9 @@ export class PresenceController extends Component {
 		this.register(this.auth.on(() => this.refresh()));
 		this.register(this.auth.onTokenRefreshed(() => this.refresh()));
 		this.register(onReadingBindingChange(() => this.refresh()));
+		// Live Preview can bind after focus has already moved to another pane.
+		// Reconcile its passive overlays even when no new pointer event arrives.
+		this.register(onEditorBindingChange(() => { this.refresh(); this.locations?.refreshEmbeds(); }));
 		this.register(this.settings.subscribe(value => { this.visible = value?.visible !== false; this.refresh(); }));
 		this.registerEvent(workspace.on("active-leaf-change", () => this.refresh()));
 		this.registerEvent(workspace.on("file-open", () => this.refresh()));
@@ -261,7 +265,7 @@ export class PresenceController extends Component {
 			if (permitted()) {
 				const current = () => permitted() && provider.wsconnected;
 				if (mode === "preview") scopes.push({ view, text, id: doc.entityGuid, provider, current });
-				images.push({ view, text, current, targets: occurrences => this.surfaces.imageTargetsFor(view, text, doc.entityGuid, occurrences) });
+				images.push({ view, text, provider, current, targets: occurrences => this.surfaces.imageTargetsFor(view, text, doc.entityGuid, occurrences) });
 			}
 		}
 		this.surfaces.setReaders(scopes);
