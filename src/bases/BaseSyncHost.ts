@@ -74,6 +74,7 @@ export class BaseSyncHost extends Component {
 		this.registerDomEvent(window, "online", () => this.wake());
 		this.registerEvent(this.plugin.app.vault.on("modify", file => this.changed(file.path)));
 		this.registerEvent(this.plugin.app.vault.on("create", file => this.changed(file.path)));
+		this.registerEvent(this.plugin.app.vault.on("delete", file => { this.changed(file.path); this.notify(); }));
 		this.registerEvent(this.plugin.app.vault.on("rename", (file, old) => { this.changed(old); this.changed(file.path); }));
 		this.registerEvent(this.plugin.app.workspace.on("file-menu", (menu, file) => {
 			const folder = this.shares.shareFor(file.path);
@@ -370,6 +371,7 @@ export class BaseSyncHost extends Component {
 				message: record.restore ? record.restore.state === "created" ? `Local copy created at ${record.restore.path}. Check that file’s sync status; originals remain retained.` : `Restoration to ${record.restore.path} needs a delivery check. Retained copies are safe.` :
 					record.retirement ? record.retirement.move?.state === "complete" ? `Removed from sync. Local recovery: ${record.retirement.move.path}` : "Removed on the server. Review the local file and retain it outside sync." :
 					!this.enabled(slot) ? "Bases sync is paused. Saved edits are retained." : slot.retirementRuns.get(record.entryId)?.message || slot.entries.get(record.entryId)?.message ||
+					(!file ? "File unavailable on this device. Saved copies are retained. Check shared folder sync for removal or access changes." : undefined) ||
 					(record.pending ? "A saved edit is awaiting confirmed delivery." : record.conflict || record.reviewRequired ? "Both copies are retained for review." : record.baseline ? "Up to date" : "Waiting for first Bases sync") };
 		});
 	}

@@ -260,6 +260,21 @@ test("native creation refuses to overwrite a file that appeared after the missin
 	s.setFile(null); await expect(s.adapter.replace(before, bytes("remote"))).resolves.toBe(true); expect(s.data()).toBe("remote");
 });
 
+test.each(["deleted", "renamed", "replaced", "account"])("native creation does not acknowledge a %s result", async change => {
+	const s = nativeFixture("new file"); s.setFile(null); const before = await s.adapter.read();
+	s.vault.create.mockImplementationOnce(async () => {
+		s.setFile(s.file);
+		if (change === "deleted") s.setFile(null);
+		if (change === "renamed") { s.file.path = "Moved.base"; s.setFile(null); }
+		if (change === "replaced") s.setFile(Object.assign(Object.create(TFile.prototype) as TFile, { path }));
+		if (change === "account") s.setCurrent(false);
+		return s.file;
+	});
+	if (change === "account") await expect(s.adapter.replace(before, bytes("remote"))).rejects.toThrow("base_context_changed");
+	else await expect(s.adapter.replace(before, bytes("remote"))).resolves.toBe(false);
+	expect(s.vault.create).toHaveBeenCalledTimes(1);
+});
+
 test("Web Locks use the same disk scope for different accounts, and unsupported hosts retain work", async () => {
 	const names: string[] = [], locks = { request: jest.fn(async (name: string, _options: unknown, action: (lock: object) => Promise<unknown>) => { names.push(name); return action({}); }) };
 	await nativeBaseLock(identity, locks as unknown as LockManager)(entryId, async () => "one");

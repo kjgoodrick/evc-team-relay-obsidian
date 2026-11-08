@@ -63,6 +63,25 @@ test("interruption after native create recovers the exact local result after res
 	} finally { s.close(); }
 });
 
+test.each(["intent-save", "permission-read", "native-create"])("a replaced parent during %s retains the restore intent without claiming completion", async stage => {
+	const s = await fixture(); try {
+		const replaceParent = () => s.nodes.set("Team", Object.assign(Object.create(TFolder.prototype) as TFolder, { path: "Team" }));
+		if (stage === "intent-save") {
+			const save = s.store.prepareRestore.bind(s.store);
+			jest.spyOn(s.store, "prepareRestore").mockImplementationOnce(async (...args) => { const result = await save(...args); replaceParent(); return result; });
+		} else if (stage === "permission-read") s.access.destination.mockImplementationOnce(async () => {}).mockImplementationOnce(async () => { replaceParent(); });
+		else s.afterCreate(() => { replaceParent(); });
+		await expect(s.controller.restore(entryId, (await s.controller.review(entryId))!, "file", destination)).rejects.toThrow("base_context_changed");
+		expect((await s.store.get(entryId)).restore?.state).toBe("prepared");
+		expect(s.vault.create).toHaveBeenCalledTimes(stage === "native-create" ? 1 : 0);
+		if (stage === "native-create") {
+			expect(text(s.contents.get("Team/" + destination))).toBe("local");
+			await s.restart(); expect(await s.controller.resume(entryId)).toBe("Team/" + destination);
+			expect(s.vault.create).toHaveBeenCalledTimes(1);
+		}
+	} finally { s.close(); }
+});
+
 test("an occupied destination is never overwritten, including creation racing the final check", async () => {
 	const s = await fixture(); try {
 		const review = (await s.controller.review(entryId))!;

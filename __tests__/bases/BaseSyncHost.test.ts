@@ -118,6 +118,16 @@ test("editing a native Bases file publishes conditional content and acknowledges
 	} finally { s.close(); }
 });
 
+test("a cached file removed from local tracking is not reported as up to date or automatically restored", async () => {
+	const s = await fixture(); try {
+		await s.file.runSync(); s.folder.trackedEntries.delete(entryId); fetchMock.mockClear();
+		const row = (await s.host.rows(s.folder)).find(row => row.entryId === entryId)!;
+		expect(row.file).toBeUndefined(); expect(row.message).toContain("File unavailable on this device");
+		expect(row.record.baseline?.bytes).toEqual(bytes(s.disk()));
+		expect(fetchMock).not.toHaveBeenCalled(); expect(s.vault.create).not.toHaveBeenCalled();
+	} finally { s.close(); }
+});
+
 test("synchronized Bases allow read-only view inspection and export without modifying native bytes", async () => {
 	const s = await fixture(); try {
 		await s.file.runSync(); s.manifest.owner = false; s.manifest.permissions[path] = "read";

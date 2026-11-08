@@ -34,8 +34,14 @@ export class NativeBaseFile {
 		const file = this.vault.getAbstractFileByPath(this.path);
 		if (before.bytes === null) {
 			if (file) return false;
-			try { await this.vault.create(this.path, text); return true; }
+			let created: TFile;
+			try { created = await this.vault.create(this.path, text); }
 			catch (error) { this.check(); if (this.vault.getAbstractFileByPath(this.path)) return false; throw error; }
+			// Native creation has no synchronous transaction callback. A delete,
+			// rename or account change can arrive while it is in flight. Preserve
+			// the durable intent instead of acknowledging an unrelated/moved file.
+			this.check();
+			return created.path === this.path && this.vault.getAbstractFileByPath(this.path) === created;
 		}
 		if (!(file instanceof TFile) || file !== before.identity) return false;
 		// Validate the original encoding too, including the BOM. A different

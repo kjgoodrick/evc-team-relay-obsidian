@@ -63,10 +63,10 @@ export class BaseRestorationController {
 			// destination is checked again at the actual creation boundary.
 			baseText(fresh.bytes); this.validatePath(path, record);
 			await this.access.destination(path); this.check(record);
-			this.parent(path);
+			const parent = this.parent(path);
 			if (this.vault.getAbstractFileByPath(this.access.absolute(path))) throw new Error("That destination already exists. Choose another name.");
 			const intent = await this.store.prepareRestore(entryId, record.revision, path, fresh.bytes, fresh.label);
-			return this.create(record, intent, false);
+			return this.create(record, intent, false, parent);
 		});
 	}
 	private validatePath(path: string, record: BaseSyncRecord): void {
@@ -78,10 +78,11 @@ export class BaseRestorationController {
 		if (!(parent instanceof TFolder)) throw new Error("Choose an existing destination folder.");
 		return parent;
 	}
-	private async create(record: BaseSyncRecord, intent: BaseRestore, resume: boolean): Promise<string> {
+	private async create(record: BaseSyncRecord, intent: BaseRestore, resume: boolean, parent = this.parent(intent.path)): Promise<string> {
 		this.check(record); this.validatePath(intent.path, record);
+		if (this.parent(intent.path) !== parent) throw new BaseContentFailure("pause", "base_context_changed");
 		const absolute = this.access.absolute(intent.path), native = new NativeBaseFile(this.vault, absolute, () => {
-			try { this.check(record); return this.access.absolute(intent.path) === absolute; } catch { return false; }
+			try { this.check(record); return this.access.absolute(intent.path) === absolute && this.parent(intent.path) === parent; } catch { return false; }
 		});
 		const local = await native.read();
 		if (local.bytes !== null) {
@@ -90,7 +91,6 @@ export class BaseRestorationController {
 			if (!resume || !sameBaseBytes(local.bytes, intent.bytes)) throw new Error("The restore destination is occupied or changed. Keep it and stop this restore before choosing another name.");
 			await this.store.completeRestore(record.entryId, intent.id); return absolute;
 		}
-		const parent = this.parent(intent.path);
 		await this.access.destination(intent.path); this.check(record);
 		if (this.parent(intent.path) !== parent || this.access.absolute(intent.path) !== absolute) throw new BaseContentFailure("pause", "base_context_changed");
 		if (!await native.replace({ bytes: null, identity: null }, intent.bytes)) throw new Error("The restore destination now exists. Check restoration to verify the saved copy before continuing.");
