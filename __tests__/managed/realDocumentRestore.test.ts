@@ -15,6 +15,8 @@ import { openSourceDocumentCache, type SourceDocumentIdentity } from "../../src/
 import { readManagedSource } from "../../src/client/readManagedSource";
 import { proveSourceInstallation } from "../mocks/sourceInstallationHttpProof";
 import { RemoteFolderAddress } from "../../src/ResourceAddress";
+import { Document } from "../../src/Document";
+import { TransferQueue } from "../../src/TransferQueue";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: (...args: Parameters<typeof fetch>) => fetch(...args) }));
 jest.mock("obsidian", () => ({ ...jest.requireActual("../mocks/obsidian"), FileSystemAdapter: class {} }));
@@ -145,23 +147,61 @@ integration("managed document sockets reject original grants after generation ro
 			new Map([["fixture", new RelayOnPremTokenProvider({ controlPlaneUrl: f.base, authProvider: memberAuth })]])); caches.push(memberCache);
 		const folderAddress = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", f.share));
 		const inventoryGrant = await memberCache.requestInventoryInspectionToken(folderAddress, "fixture", { restoreGeneration: generation });
-		await proveSourceInstallation(memberCache, { ...f, generation }, inventoryGrant.grant.token, {
-			expectedFiles: { "Note.md": "content before rotation\nbound edit\n" },
-			verifySelected: async (identity, selected, directory) => {
-				const backing = new StoredDocument(f.note, address, memberCache, session, "fixture", selected.binding, selected); clients.push(backing);
-				const store = await openSourceDocumentCache({ ...identity, s3rn: ResourceAddress.serialize(address) }, backing.crdtDoc); stores.push(store); backing.attachStore(store);
-				const text = backing.crdtDoc.getText("contents");
-				expect(text.toString()).toBe(fs.readFileSync(path.join(directory, "Note.md"), "utf8"));
-				expect(fs.existsSync(path.join(directory, "Budget.md"))).toBe(false);
-				expect(await backing.bringOnline()).toBe(true); await until(() => backing._liveProvider.synced, "installed source provider admission");
-				expect(text.toString()).toBe("content before rotation\nbound edit\n");
-				text.insert(text.length, "activated member edit\n");
-				const observer = await peer(await grant("read", generation));
-				await until(() => observer.text.toString() === text.toString(), "installed source writes through ordinary provider");
-				expect(observer.text.toString()).not.toContain("OLD OFFLINE"); expect(observer.text.toString()).not.toContain("CACHED CLIENT");
-				backing.goOffline(); await store.close();
-			},
-		});
+		let preparedText = "content before rotation\nbound edit\n";
+		for (const change of ["append", "clear"] as const) {
+			const newerText = change === "append" ? preparedText + "edit after source preparation\n" : "";
+			await proveSourceInstallation(memberCache, { ...f, generation }, inventoryGrant.grant.token, {
+				expectedFiles: { "Note.md": preparedText },
+				afterPreparation: async () => {
+					expect(await restoredRestart.backing.bringOnline()).toBe(true);
+					await until(() => restoredRestart.provider.synced, "writer reconnects after source preparation");
+					await until(() => restoredRestart.text.toString() === preparedText, "writer has the current document before changing it");
+					if (change === "append") restoredRestart.text.insert(restoredRestart.text.length, "edit after source preparation\n");
+					else restoredRestart.text.delete(0, restoredRestart.text.length);
+					const observer = await peer(await grant("read", generation));
+					await until(() => observer.text.toString() === newerText, "server receives edit after source preparation");
+					observer.provider.disconnect(); restoredRestart.backing.goOffline();
+				},
+				verifySelected: async (identity, selected, directory) => {
+					const backing = new StoredDocument(f.note, address, memberCache, session, "fixture", selected.binding, selected); clients.push(backing);
+					const store = await openSourceDocumentCache({ ...identity, s3rn: ResourceAddress.serialize(address) }, backing.crdtDoc); stores.push(store); backing.attachStore(store);
+					const text = backing.crdtDoc.getText("contents");
+					expect(text.toString()).toBe(fs.readFileSync(path.join(directory, "Note.md"), "utf8"));
+					expect(text.toString()).toBe(preparedText); expect(await store.loadSyncBase()).toBe(preparedText);
+					expect(fs.existsSync(path.join(directory, "Budget.md"))).toBe(false);
+					expect(await backing.bringOnline()).toBe(true); await until(() => backing._liveProvider.synced, "installed source provider admission");
+					await until(() => text.toString() === newerText, "installed source merges the newer server edit");
+					// Exercise actual transfer reconciliation with the seeded cache's
+					// persistent sync base and real native bytes. Only the Obsidian
+					// document host is narrowed; provider/CRDT/store/queue are real.
+					const nativePath = path.join(directory, "Note.md"), nativeDoc = Object.create(Document.prototype) as Document;
+					const conflictCopy = jest.fn(async () => { throw new Error("An unchanged installed file must not need a conflict copy"); });
+					Object.defineProperties(nativeDoc, {
+						path: { value: nativePath }, entryPath: { value: "Note.md" }, entityGuid: { value: f.note },
+						crdtDoc: { value: backing.crdtDoc }, editLock: { value: false },
+						content: { get: () => text.toString() }, restoreReviewRequired: { get: () => backing.restoreReviewRequired },
+						awaitFirstSync: { value: async () => {} }, connectionIntent: { get: () => "connected" },
+						bringOnline: { value: () => backing.bringOnline() }, _liveProvider: { get: () => backing._liveProvider },
+						getSyncBase: { value: () => store.loadSyncBase() }, setSyncBase: { value: (value: string) => store.rememberSyncBase(value) },
+						vaultShare: { value: { workspaceId: f.share, isDeletePending: () => false, writeConflictCopy: conflictCopy,
+							readContents: () => fs.promises.readFile(nativePath, "utf8"),
+							writeContents: (_doc: Document, value: string) => fs.promises.writeFile(nativePath, value) } },
+					});
+					const queue = new TransferQueue({} as never, new SystemClock(), {} as never);
+					try { expect(await queue.uploadDocumentViaSocket(nativeDoc)).toBe(true); }
+					finally { queue.shutdown(); }
+					expect(fs.readFileSync(nativePath, "utf8")).toBe(newerText);
+					expect(await store.loadSyncBase()).toBe(newerText); expect(text.toString()).toBe(newerText);
+					expect(conflictCopy).not.toHaveBeenCalled();
+					text.insert(text.length, "activated member edit\n");
+					const observer = await peer(await grant("read", generation));
+					await until(() => observer.text.toString() === text.toString(), "installed source writes through ordinary provider");
+					expect(observer.text.toString()).not.toContain("OLD OFFLINE"); expect(observer.text.toString()).not.toContain("CACHED CLIENT");
+					backing.goOffline(); await store.close();
+				},
+			});
+			preparedText = newerText + "activated member edit\n";
+		}
 		expect(writer.text.toString()).toContain("OLD OFFLINE EDIT MUST STAY LOCAL");
 		expect(cached.text.toString()).toBe("CACHED CLIENT EDIT MUST STAY LOCAL\n");
 	} finally {

@@ -1267,8 +1267,10 @@ export class TransferQueue extends Loggable {
 	 * or it changed while this ran) and the latest file text is returned for
 	 * the caller to reconcile.
 	 *
-	 * An empty relay text is not delivered: it is also what a room that has
-	 * not loaded yet reads as, so it keeps the reconcile path it had before.
+	 * Empty text is delivered only when retained text history proves that it
+	 * was previously initialized. A new/unloaded room also reads empty, but
+	 * has no text items or initialization marker. The caller already excludes
+	 * incomplete history, including missing deletes and text updates.
 	 * The re-read and the write leave the same small window as
 	 * pullIfUnchanged()'s flush; the adapter offers no compare-and-write.
 	 */
@@ -1277,7 +1279,7 @@ export class TransferQueue extends Loggable {
 		if (doc.editLock) return undefined;
 		if (base === undefined || !sameTextContent(vaultContents, base)) return vaultContents;
 		const remoteText = doc.content;
-		if (!hasPreservableContent(remoteText)) return vaultContents;
+		if (remoteText === "" && neverHeldText(doc.crdtDoc, doc.crdtDoc.getText("contents"))) return vaultContents;
 		// The read above can be stale by now: never overwrite an edit made meanwhile.
 		const current = await this.readVaultContents(doc);
 		if (doc.editLock) return undefined;

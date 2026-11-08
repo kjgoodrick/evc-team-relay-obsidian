@@ -164,3 +164,37 @@ acceptance. Canvas and multi-process installation remain unverified.
 Both actual service fixtures pass after sharing the installation harness. The
 test-type ratchet stays at 205 errors/44 signatures versus 207/46. Production
 implementation is unchanged from the 4,574-test regression checkpoint above.
+
+## Edits arriving after preparation
+
+The actual HTTP/Rust fixture now changes the server document after preparation
+has captured its complete editing history, while inventory metadata remains
+unchanged. It covers both appended text and a deliberate clear. Activation
+installs the captured native bytes and sync base; the ordinary selected provider
+then merges the newer changes. The real transfer queue, backed by the selected
+cache and temporary native files, delivers the updated text without a conflict
+copy or replaying the captured text to other users. An independent peer also
+observes a subsequent edit from the installed member.
+
+The clear case exposed an existing upload-path bug: an empty but previously
+initialized document could be treated as a new empty document and reseeded from
+the unchanged native file. The upload path now uses retained text items or the
+initialization marker to distinguish a deliberate clear from a never-initialized
+document, after the existing incomplete-history guard. A matching native sync
+base permits delivery of the clear. A local edit during the final native read
+remains local work and is reconciled rather than overwritten. Regression tests
+also cover reloaded deletion history.
+
+The actual service proof and **113 focused synchronization tests** pass. This is
+evidence for same-generation Markdown updates; it does not remove the current
+host isolation requirement. Concurrent inventory changes, Canvas behavior,
+cross-process native admission and the integrated recovery UI still require
+their own acceptance. Server backup/restore maintenance remains a separate
+operation from restoring one client into a new folder.
+
+The full regression passes **4,577 tests across 308 suites**, with 41 tests in
+27 opt-in suites skipped. Main types, changed-source lint and the preview build
+pass; the existing 15 build warnings remain. The test-type ratchet stays at
+205 errors/44 signatures against the frozen 207/46 baseline. The failing
+pre-fix HTTP clear case and passing post-fix service proof were both observed
+in isolated fixtures; their processes and data were cleaned up.

@@ -243,6 +243,36 @@ describe("uploadDocumentViaSocket — sync-base gates the conflict-copy preserve
 });
 
 describe("uploadDocumentViaSocket — relay moved, file still holds the agreed text", () => {
+	test.each([false, true])("a peer clear reaches an unchanged native file (reloaded history: %s)", async reloaded => {
+		const { fakeDoc, ydoc, writeConflictCopy, writeContents, getBase } = makeFakeDoc({
+			syncedText: "", vaultContents: "last agreed text", initialBase: "last agreed text",
+		});
+		const history = reloaded ? new Y.Doc() : ydoc;
+		history.getText("contents").insert(0, "last agreed text");
+		history.getText("contents").delete(0, "last agreed text".length);
+		if (reloaded) { Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(history)); history.destroy(); }
+		const queue = makeQueue();
+		try { expect(await queue.uploadDocumentViaSocket(fakeDoc)).toBe(true); }
+		finally { queue.shutdown(); }
+		expect(fakeDoc.content).toBe(""); expect(getBase()).toBe("");
+		expect(writeContents).toHaveBeenCalledWith(fakeDoc, "");
+		expect(writeConflictCopy).not.toHaveBeenCalled(); ydoc.destroy();
+	});
+
+	test("a local edit arriving during a peer clear is retained", async () => {
+		const { fakeDoc, ydoc, writeContents, getBase } = makeFakeDoc({
+			syncedText: "", vaultContents: "last agreed text", initialBase: "last agreed text",
+			laterVaultReads: ["last agreed text", "new local edit"],
+		});
+		ydoc.getText("contents").insert(0, "last agreed text");
+		ydoc.getText("contents").delete(0, "last agreed text".length);
+		const queue = makeQueue();
+		try { expect(await queue.uploadDocumentViaSocket(fakeDoc)).toBe(true); }
+		finally { queue.shutdown(); }
+		expect(fakeDoc.content).toBe("new local edit"); expect(getBase()).toBe("new local edit");
+		expect(writeContents).not.toHaveBeenCalled(); ydoc.destroy();
+	});
+
 	test("delivers the relay's text to disk instead of reverting the peer's edit", async () => {
 		// The receiver's echo upload of its own delivered write: the file
 		// holds the last agreed text, a peer's edit arrived while connecting.

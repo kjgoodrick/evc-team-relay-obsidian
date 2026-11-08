@@ -30,6 +30,7 @@ export async function proveAttachmentSourceInstallation(cache: RelayCredentialCa
 
 export async function proveSourceInstallation(cache: RelayCredentialCache, fixture: Record<string, string>, token: string, proof: {
 	expectedFiles: Record<string, string>;
+	afterPreparation?: () => Promise<void>;
 	verifySelected?: (identity: SourceInventoryIdentity, selected: SourceSelectionContext, directory: string) => Promise<void>;
 }) {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "relay-http-installation-"));
@@ -62,6 +63,7 @@ export async function proveSourceInstallation(cache: RelayCredentialCache, fixtu
 		const downloads = createSourceInstallationDownloads(cache, identity, snapshot);
 		const prepared = await prepareSourceInstallation(journal, staging, { source: identity, reviewId, reviewRevision: review.revision!, operationId: crypto.randomUUID(),
 			archive: backup.reference, originalRoot: "Original", destinationRoot: "Restored", snapshot }, downloads);
+		await proof.afterPreparation?.();
 		const request = await sourceActivationRequest(journal, { source: identity, reviewId, revision: prepared.selection.revision! });
 		const native = createDesktopSourceMaterializationIO(vault, prepared.staged.plan);
 		const host = { settings: scope, app: { loadLocalStorage: () => null }, buffers: new UnsavedFileStore(), checkIsolation: () => {} };
