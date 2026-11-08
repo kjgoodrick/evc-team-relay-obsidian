@@ -6,7 +6,7 @@ import { intersectBox } from "../anchors/renderedImages";
 import { baseScreenPoint, baseTargetGeometry, revealBasePoint } from "./BasePresenceGeometry";
 import { BasePresenceRecords, type BaseLocalRecord } from "./BasePresenceRecords";
 import { BasePresenceGroups, type BaseGroupFrame, type BaseGroupSources } from "./BasePresenceGroups";
-import { parseBaseState, type BasePosition, type BasePresenceState, type BasePresenceTarget, type BaseRecordContext } from "./BasePositionProtocol";
+import { formulaGroupTarget, parseBaseState, type BasePosition, type BasePresenceState, type BasePresenceTarget, type BaseRecordContext } from "./BasePositionProtocol";
 import type { BasePresenceRange } from "./BaseExtendedTargets";
 import type { BaseLocation } from "./LocationProtocol";
 import type { SurfacePresencePeer } from "./PresencePeers";
@@ -185,7 +185,8 @@ export class BasePresenceMotion {
 			}
 		}
 		if (pointer && !pointerPosition && (!hit || hit.target.type === "view")) pointerPosition = this.rangePosition(surface, groups, pointer);
-		try { this.options.publish(parseBaseState({ version: [pointerPosition, viewport].some(position => position && ["group", "timeline_range"].includes(position.target.type)) ? 2 : 1, pointer: pointerPosition, viewport })); }
+		try { this.options.publish(parseBaseState({ version: [pointerPosition, viewport].some(position => position && formulaGroupTarget(position.target)) ? 3 :
+			[pointerPosition, viewport].some(position => position && ["group", "timeline_range"].includes(position.target.type)) ? 2 : 1, pointer: pointerPosition, viewport })); }
 		catch { this.options.publish(null); }
 	}
 	private nativeTarget(target: BasePresenceTarget, files: readonly TFile[]): NativeBaseTarget | undefined {

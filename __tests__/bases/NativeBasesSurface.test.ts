@@ -637,3 +637,23 @@ describe("group summary cells", () => {
 		expect(f.cell.el.scrollIntoView).not.toHaveBeenCalled(); expect(f.heading.scrollIntoView).not.toHaveBeenCalled();
 	});
 });
+
+describe("native static formula inputs", () => {
+	test.each(["table", "cards", "list"] as const)("%s reads only bounded input properties without evaluating a formula", type => {
+		const f = groupedFixture(type), read = jest.fn(function(this: unknown, name: string) { expect(this).toBe(f.entries[0]); return new StringValue(name); });
+		Object.assign(f.entries[0], { getValue: read });
+		expect(f.surface.groupInputValues(f.a, [{ source: "note", name: "status" }, { source: "file", name: "basename" }], () => null)).toEqual([
+			{ type: "text", value: "note.status" }, { type: "text", value: "file.basename" },
+		]);
+		expect(read.mock.calls.map(call => call[0])).toEqual(["note.status", "file.basename"]);
+		expect(f.surface.groupInputValues(f.a, [{ source: "formula", name: "bucket" }], () => null)).toBeUndefined();
+		expect(f.surface.groupInputValues(f.a, [{ source: "file", name: "path" }], () => null)).toBeUndefined();
+		expect(f.surface.groupInputValues(f.a, Array(33).fill({ source: "note", name: "status" }), () => null)).toBeUndefined();
+	});
+	test("missing, duplicate and stale native members cannot supply inputs", () => {
+		const f = groupedFixture(), properties = [{ source: "note" as const, name: "status" }];
+		f.group.entries.push({ ...f.entries[0] }); expect(f.surface.groupInputValues(f.a, properties, () => null)).toBeUndefined();
+		f.group.entries.splice(0); expect(f.surface.groupInputValues(f.a, properties, () => null)).toBeUndefined();
+		f.host.dirty = true; expect(f.surface.groupInputValues(f.b, [], () => null)).toBeUndefined();
+	});
+});

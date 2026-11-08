@@ -8,9 +8,11 @@ import { parseBaseState, type BaseRecordContext } from "./BasePositionProtocol";
 import type { BasePresenceGroup, BasePresenceReference } from "./BaseExtendedTargets";
 import type { BasePresenceRecords, BaseLocalRecord } from "./BasePresenceRecords";
 import type { BaseLocation } from "./LocationProtocol";
+import type { BasePresenceFormulaGroup } from "./BasePresenceProtocol";
 
 export interface BaseGroupSources {
 	supported(): boolean; resolve: NativeGroupLinkResolver; fileAtPath(path: string): TFile | null;
+	formulaSupported?(): boolean; formulaInputs?(): readonly BasePresenceFormulaGroup[] | undefined;
 }
 type Options = BaseGroupSources & {
 	current(): boolean; location(): BaseLocation | undefined; local(file: TFile): BaseLocalRecord | undefined;
@@ -22,7 +24,7 @@ type Entry = { key: string; valid(): boolean; build(): Promise<BasePresenceGroup
 	started: boolean; promise: Promise<void>; finish(): void };
 export type BaseGroupMatch = { handle: NativeBaseGroupHandle; current(): boolean };
 const inventory = new Set(["name", "basename", "fullname", "ext", "path", "folder", "file"]);
-const supported = (handle: NativeBaseGroupHandle) => handle.target.property.source === "note" ||
+const ordinary = (handle: NativeBaseGroupHandle) => handle.target.property.source === "note" ||
 	handle.target.property.source === "file" && inventory.has(handle.target.property.name.toLowerCase());
 const key = (handle: NativeBaseGroupHandle) => JSON.stringify([handle.target.property, nativeBaseGroupValueKey(handle.target.value)]);
 const reference = (record: BaseRecordContext): BasePresenceReference => ({ record_id: record.entry_id, record_generation: record.generation });
@@ -38,11 +40,17 @@ export class BasePresenceGroups {
 	private running = 0;
 	private closed = false;
 	constructor(private options: Options) {}
+	private plan(handle: NativeBaseGroupHandle): BasePresenceFormulaGroup | undefined {
+		if (handle.target.property.source !== "formula" || !this.options.formulaSupported?.()) return;
+		const view = this.options.location()?.view_id;
+		return this.options.formulaInputs?.()?.find(plan => plan.view_id === view && plan.property.source === "formula" && plan.property.name === handle.target.property.name);
+	}
+	private supported(handle: NativeBaseGroupHandle): boolean { return ordinary(handle) || !!this.plan(handle); }
 	frame(surface: NativeBasesSurface): BaseGroupFrame {
 		const handles = !this.closed && this.options.current() && this.options.supported() ? surface.groupHandles(this.options.resolve) : [];
 		const counts = new Map<string, number>();
 		for (const handle of handles) counts.set(key(handle), (counts.get(key(handle)) ?? 0) + 1);
-		return { surface, handles: handles.filter(handle => !handle.ambiguous && supported(handle) && counts.get(key(handle)) === 1 && handle.current()), members: new Map() };
+		return { surface, handles: handles.filter(handle => !handle.ambiguous && this.supported(handle) && counts.get(key(handle)) === 1 && handle.current()), members: new Map() };
 	}
 	private members(frame: BaseGroupFrame, handle: NativeBaseGroupHandle): TFile[] {
 		let members = frame.members.get(handle); if (!members) { members = handle.members(); frame.members.set(handle, members); } return members;
@@ -52,10 +60,16 @@ export class BasePresenceGroups {
 			proofs.every(proof => { const local = this.options.local(proof.file); return proof.file.path === proof.path && local?.id === proof.local.id &&
 				local.type === proof.local.type && local.path === proof.local.path && this.options.records.get(proof.file, proof.record.generation) === proof.record; });
 	}
-	private prepare(handle: NativeBaseGroupHandle, member: TFile): Entry | undefined {
+	private prepare(surface: NativeBasesSurface, handle: NativeBaseGroupHandle, member: TFile): Entry | undefined {
 		try {
-			const currentLocation = this.options.location(); if (!currentLocation || !supported(handle)) return;
+			const currentLocation = this.options.location(); if (!currentLocation || !this.supported(handle)) return;
 			const location = { ...currentLocation };
+			const plan = this.plan(handle);
+			const inputs = plan ? surface.groupInputValues(member, plan.inputs, this.options.resolve) : [];
+			if (!inputs) return;
+			const inputKey = baseConfigurationKey(inputs.map(nativeBaseGroupValueKey)); if (!inputKey) return;
+			const currentInputs = () => !plan || this.plan(handle) === plan && surface.current() &&
+				baseConfigurationKey(surface.groupInputValues(member, plan.inputs, this.options.resolve)?.map(nativeBaseGroupValueKey)) === inputKey;
 			// Copy the complete bounded native tree before any asynchronous work.
 			const files = new Set<TFile>([member]); let nodes = 256, characters = 0;
 			const text = (value: string) => { characters += value.length; if (characters > 8192) throw new Error("Group text exceeds budget"); return value; };
@@ -67,7 +81,7 @@ export class BasePresenceGroups {
 				const result = parseBaseGroupValue(value); if ("value" in result && typeof result.value === "string") text(result.value);
 				return result as NativeBaseGroupValue;
 			};
-			let value = copy(handle.target.value); if (files.size > 9) return;
+			let value = copy(handle.target.value); for (const input of inputs) copy(input); if (files.size > 9) return;
 			const proofs: Proof[] = [], ids = new Set<string>(); let ready = true;
 			for (const file of files) {
 				const local = this.options.local(file); if (!local || ids.has(local.id)) return; ids.add(local.id);
@@ -76,7 +90,7 @@ export class BasePresenceGroups {
 			}
 			if (!ready) return;
 			const selected = proofs.find(proof => proof.file === member)!;
-			if (handle.target.property.source === "note" && selected.record.type !== "markdown") return;
+			if (["note", "formula"].includes(handle.target.property.source) && selected.record.type !== "markdown") return;
 			if (handle.target.property.source === "file") {
 				const shared = selected.local.path; if (shared === undefined) return;
 				const property = handle.target.property.name.toLowerCase(), localPath = selected.path;
@@ -92,14 +106,14 @@ export class BasePresenceGroups {
 			}
 			const property = { ...handle.target.property }, scope = [1, location.share_id, location.entry_id, location.generation, location.definition_id,
 				location.view_id, location.registry_revision, property.source, property.name];
-			const cacheKey = baseConfigurationKey([scope, nativeBaseGroupValueKey(value), proofs.map(proof => [proof.path, proof.local.path ?? null, proof.record.entry_id, proof.record.generation])]);
+			const cacheKey = baseConfigurationKey([scope, nativeBaseGroupValueKey(value), inputKey, proofs.map(proof => [proof.path, proof.local.path ?? null, proof.record.entry_id, proof.record.generation])]);
 			if (!cacheKey || !this.live(proofs, location)) return;
 			const cached = this.entries.get(cacheKey); if (cached?.valid()) return cached;
 			if (cached) { cached.finish(); this.entries.delete(cacheKey); }
 			while (this.entries.size >= 128) { const first = this.entries.keys().next().value!; this.entries.get(first)!.finish(); this.entries.delete(first); }
 			let finish!: () => void; const promise = new Promise<void>(resolve => { finish = resolve; });
 			const proofFor = (file: TFile, path: string) => { const proof = proofs.find(proof => proof.file === file && proof.path === path); if (!proof || !this.live(proofs, location)) throw new Error("Group input changed"); return proof; };
-			const entry: Entry = { key: cacheKey, valid: () => this.entries.get(cacheKey) === entry && this.live(proofs, location), started: false, promise, finish,
+			const entry: Entry = { key: cacheKey, valid: () => this.entries.get(cacheKey) === entry && this.live(proofs, location) && currentInputs(), started: false, promise, finish,
 				build: async () => {
 					const encoded = await captureBaseGroupValue(value, {
 						file: async (file, path) => reference(proofFor(file, path).record),
@@ -109,7 +123,7 @@ export class BasePresenceGroups {
 					const canonical = baseConfigurationKey([...scope, encoded]); if (!canonical) throw new Error("Group exceeds budget");
 					const target = { type: "group", ...reference(selected.record), property, value_sha256: await digest(canonical),
 						references: proofs.filter(proof => proof !== selected).map(proof => reference(proof.record)).sort((a, b) => a.record_id.localeCompare(b.record_id)) };
-					return parseBaseState({ version: 2, pointer: { target, offset: { x: 0, y: 0 } }, viewport: null }).pointer!.target as BasePresenceGroup;
+					return parseBaseState({ version: property.source === "formula" ? 3 : 2, pointer: { target, offset: { x: 0, y: 0 } }, viewport: null }).pointer!.target as BasePresenceGroup;
 				} };
 			this.entries.set(cacheKey, entry); this.pump(); return entry;
 		} catch { return; }
@@ -131,7 +145,7 @@ export class BasePresenceGroups {
 		const members = this.members(frame, handle), candidates = members.map(file => ({ file, local: this.options.local(file) })).filter(item => !!item.local);
 		const counts = new Map<string, number>(); for (const item of candidates) counts.set(item.local!.id, (counts.get(item.local!.id) ?? 0) + 1);
 		for (const { file } of candidates.filter(item => counts.get(item.local!.id) === 1).sort((a, b) => a.local!.id.localeCompare(b.local!.id)).slice(0, 8)) {
-			const entry = this.prepare(handle, file); if (entry?.valid() && entry.value) return entry.value;
+			const entry = this.prepare(frame.surface, handle, file); if (entry?.valid() && entry.value) return entry.value;
 		}
 	}
 	project(frame: BaseGroupFrame, target: BasePresenceGroup): BaseGroupMatch | undefined {
@@ -143,7 +157,7 @@ export class BasePresenceGroups {
 			const file = ref.record_id === target.record_id ? files[0] : this.options.file(ref.record_id);
 			if (!file || !this.options.records.get(file, ref.record_generation)) return;
 		}
-		const entry = this.prepare(handle, files[0]); if (!entry?.value || !sameGroup(entry.value, target)) return;
+		const entry = this.prepare(frame.surface, handle, files[0]); if (!entry?.value || !sameGroup(entry.value, target)) return;
 		return { handle, current: () => frame.surface.current() && handle.current() && handle.members().includes(files[0]) && entry.valid() };
 	}
 	async wait(surface: NativeBasesSurface, target: BasePresenceGroup, current: () => boolean): Promise<BaseGroupMatch | undefined> {
@@ -153,7 +167,7 @@ export class BasePresenceGroups {
 		if (!current() || records.some(record => !record)) return;
 		const frame = this.frame(surface), handles = frame.handles.filter(handle => JSON.stringify(handle.target.property) === JSON.stringify(target.property) && this.members(frame, handle).includes(files[0].file!));
 		if (handles.length !== 1) return;
-		const entry = this.prepare(handles[0], files[0].file!); if (!entry) return;
+		const entry = this.prepare(surface, handles[0], files[0].file!); if (!entry) return;
 		await entry.promise;
 		return current() ? this.project(this.frame(surface), target) : undefined;
 	}

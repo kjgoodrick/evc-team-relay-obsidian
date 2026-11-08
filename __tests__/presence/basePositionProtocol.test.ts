@@ -23,7 +23,7 @@ test("supports record, property header and formula-cell identities without value
 });
 
 test.each([
-	{ version: true }, { version: 3 }, { path: "private" }, { pointer: {} }, { viewport: undefined },
+	{ version: true }, { version: 4 }, { path: "private" }, { pointer: {} }, { viewport: undefined },
 	...[{ x: -1, y: 0 }, { x: 1.1, y: 0 }, { x: true, y: 0 }, { x: "0", y: 0 }, { x: NaN, y: 0 }, { x: Infinity, y: 0 }, { x: 0, y: 0, extra: 1 }].map(offset => ({ pointer: { ...position(), offset } })),
 	...["", "x".repeat(129), "😀".repeat(65), "bad\nname", "\ud800"].map(name => ({ pointer: { ...position(), target: { ...position().target, property: { source: "note", name } } } })),
 	...[{ record_id: "bad" }, { record_generation: "bad" }, { value: "private" }, { type: "range" }, { property: { source: "unknown", name: "name" } }].map(patch => ({ pointer: { ...position(), target: { ...position().target, ...patch } } })),
@@ -84,4 +84,16 @@ test("bounds expanded states below ingress and negotiated snapshot budgets", () 
 	expect(bytes).toBeGreaterThan(192 * 1024); expect(bytes).toBeLessThan(512 * 1024);
 	const heavy = { ...range(), lane: target, axis: { ...range().axis, start_property: target.property, end_property: target.property } };
 	expect(() => parseBaseState({ version: 2, pointer: { target: heavy, offset: { x: 0, y: 0 } }, viewport: { target: heavy, offset: { x: 0, y: 0 } } })).toThrow();
+});
+
+test.each([false, true])("formula groups require version three and downgrade safely, including lanes (%s)", lane => {
+	const formula = { ...group(), property: { source: "formula", name: "bucket" } };
+	const target = lane ? { ...range(), lane: formula } : formula;
+	const value = parseBaseState({ ...extended(target), version: 3 });
+	for (const version of [1, 2] as const) {
+		expect(() => parseBaseState({ ...extended(target), version })).toThrow();
+		expect(baseStateForVersion(value, version)).toEqual({ version, pointer: null, viewport: position() });
+	}
+	expect(baseStateForVersion(value, 3)).toBe(value);
+	expect(() => parseBaseState({ ...extended(target), version: 4 })).toThrow();
 });

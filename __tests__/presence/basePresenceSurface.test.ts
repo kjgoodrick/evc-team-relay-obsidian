@@ -58,6 +58,21 @@ test("a denied or rejected lookup does not poll on repaint and explicit retry ob
 	} finally { f.close(); }
 });
 
+test.each(["lookup", "revocation"])("native result repaint preserves Retry after %s without polling", async failure => {
+	const f = fixture();
+	try {
+		if (failure === "lookup") f.read.mockRejectedValueOnce(new Error("Unavailable"));
+		f.surface.refresh(); await until(() => f.surface.state === (failure === "lookup" ? "unavailable" : "ready"));
+		if (failure === "revocation") f.surface.deny();
+		for (let i = 0; i < 100; i++) {
+			f.renderers[0].data = { ...f.renderers[0].data }; f.surface.refresh();
+			expect(f.surface.state).toBe("unavailable"); expect(f.surface.location).toBeUndefined();
+		}
+		await settle(); expect(f.read).toHaveBeenCalledTimes(1);
+		f.surface.retry(); await until(() => f.surface.state === "ready"); expect(f.read).toHaveBeenCalledTimes(2);
+	} finally { f.close(); }
+});
+
 test.each(["access", "file", "hash", "close", "disconnect"])("late metadata/source verification cannot restore a stale %s context", async loss => {
 	const f = fixture(); let finish!: (value: typeof f.context) => void;
 	try {

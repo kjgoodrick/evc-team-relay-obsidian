@@ -6,6 +6,8 @@ import type { BaseRecordContext } from "../../src/collaboration/presence/BasePos
 import type { NativeBaseGroupHandle, NativeBasesSurface } from "../../src/bases/NativeBasesSurface";
 import type { BaseLocation } from "../../src/collaboration/presence/LocationProtocol";
 import { sha256Hex } from "../../src/contentDigest";
+import type { BasePresenceFormulaGroup } from "../../src/collaboration/presence/BasePresenceProtocol";
+import type { NativeBaseGroupValue } from "../../src/bases/NativeBaseGroupValue";
 
 jest.mock("../../src/contentDigest", () => ({ sha256Hex: jest.fn(async (bytes: ArrayBuffer) => createHash("sha256").update(new Uint8Array(bytes)).digest("hex")) }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -19,12 +21,15 @@ function fixture() {
 	const current = () => active;
 	const records = new BasePresenceRecords({ current, local, read, changed: jest.fn() });
 	const handle: NativeBaseGroupHandle = { target: { type: "group", property: { source: "note", name: "status" }, value: { type: "text", value: "Done" } }, element: {} as HTMLElement, ambiguous: false, current, members: () => members };
-	let handles = [handle]; const surface = { current, groupHandles: () => handles } as unknown as NativeBasesSurface;
+	let plans: BasePresenceFormulaGroup[] = [], formulaSupported = true, inputs: NativeBaseGroupValue[] | undefined = [];
+	let handles = [handle]; const surface = { current, groupHandles: () => handles, groupInputValues: () => inputs } as unknown as NativeBasesSurface;
 	const changed = jest.fn(), groups = new BasePresenceGroups({ current, supported: () => supported, location: () => location, local,
-		file: record => files.find(file => local(file)?.id === record), fileAtPath: path => files.find(file => file.path === path) ?? null, resolve: () => null, records, changed });
+		file: record => files.find(file => local(file)?.id === record), fileAtPath: path => files.find(file => file.path === path) ?? null, resolve: () => null, records, changed,
+		formulaSupported: () => formulaSupported, formulaInputs: () => plans });
 	const capture = () => groups.capture(groups.frame(surface), handle);
 	const target = async () => { let value = capture(); for (let n = 0; !value && n < 10; n++) { await flush(); value = capture(); } if (!value) throw new Error("No captured group"); return value; };
 	return { files, location, denied, local, read, records, handle, surface, changed, groups, capture, target,
+		plans: (value: BasePresenceFormulaGroup[]) => { plans = value; }, inputs: (value: NativeBaseGroupValue[] | undefined) => { inputs = value; }, formulaSupported: (value: boolean) => { formulaSupported = value; },
 		members: (value: TFile[]) => { members = value; }, handles: (value: NativeBaseGroupHandle[]) => { handles = value; },
 		scope: (view: string) => { location = { ...location, view_id: view }; },
 		active: (value: boolean) => { active = value; }, supported: (value: boolean) => { supported = value; }, close: () => { groups.close(); records.close(); } };
@@ -129,4 +134,48 @@ test("target mismatch, generation refresh and a delayed hash cannot authorize st
 		f.read.mockImplementation(async entry => ({ protocol_version: 1, share_id: id(10), entry_id: entry, generation: id(90), type: "markdown" }));
 		f.records.reset(); expect(await f.groups.wait(f.surface, target, () => true)).toBeUndefined();
 	} finally { hash.mockImplementation(original); f.close(); }
+});
+
+function formulaFixture() {
+	const f = fixture(); f.handle.target.property = { source: "formula", name: "bucket" }; f.members([f.files[0]]);
+	const plan: BasePresenceFormulaGroup = { view_id: f.location.view_id, property: f.handle.target.property, inputs: [{ source: "note", name: "linked" }] };
+	f.plans([plan]); return { ...f, plan };
+}
+
+test("formula groups include linked inputs even when the output is primitive and refuse a missing input", async () => {
+	const f = formulaFixture();
+	try {
+		f.inputs([{ type: "link", file: f.files[2], subpath: "#Private branch" }]);
+		const target = await f.target();
+		expect(target.references).toEqual([{ record_id: id(3), record_generation: id(23) }]);
+		expect(JSON.stringify(target)).not.toMatch(/Private|Done|Team|linked/);
+		const match = f.groups.project(f.groups.frame(f.surface), target)!; expect(match.current()).toBe(true);
+		f.denied.add(f.files[2]); expect(match.current()).toBe(false); expect(f.capture()).toBeUndefined();
+		f.denied.clear(); f.inputs(undefined); expect(f.capture()).toBeUndefined();
+		expect(await f.groups.wait(f.surface, target, () => true)).toBeUndefined();
+	} finally { f.close(); }
+});
+
+test("unchanged formula results cannot reuse a fingerprint with stale linked inputs or a different view plan", async () => {
+	const f = formulaFixture();
+	try {
+		f.inputs([{ type: "file", file: f.files[2] }]); const before = await f.target();
+		const match = f.groups.project(f.groups.frame(f.surface), before)!;
+		f.inputs([{ type: "file", file: f.files[1] }]); expect(match.current()).toBe(false);
+		const after = await f.target(); expect(after.value_sha256).toBe(before.value_sha256); expect(after.references).not.toEqual(before.references);
+		expect(f.groups.project(f.groups.frame(f.surface), before)).toBeUndefined();
+		f.plans([{ ...f.plan, view_id: id(80) }]); expect(f.capture()).toBeUndefined();
+		f.plans([f.plan]); f.formulaSupported(false); expect(f.capture()).toBeUndefined();
+	} finally { f.close(); }
+});
+
+test("formula movement reuses metadata and hashes while input authorization stays live", async () => {
+	const f = formulaFixture(), hash = jest.mocked(sha256Hex);
+	try {
+		f.inputs([{ type: "text", value: "Ready" }]); const target = await f.target();
+		const reads = f.read.mock.calls.length, hashes = hash.mock.calls.length;
+		for (let n = 0; n < 1000; n++) expect(f.capture()).toEqual(target);
+		expect(hash.mock.calls).toHaveLength(hashes); expect(f.read.mock.calls).toHaveLength(reads);
+		f.inputs([{ type: "text", value: "Changed" }]); expect(f.capture()).toBeUndefined(); await f.target();
+	} finally { f.close(); }
 });

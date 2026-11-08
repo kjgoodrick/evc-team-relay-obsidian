@@ -19,7 +19,7 @@ export function parsePresenceGroup(value: unknown, property: PropertyParser): Ba
 		value.type === "group" && locationId(value.record_id) && locationId(value.record_generation) && typeof value.value_sha256 === "string" &&
 		/^[0-9a-f]{64}$/.test(value.value_sha256) && Array.isArray(value.references) && value.references.length <= 8);
 	const prop = property(value.property), ids = new Set([value.record_id]);
-	requireValue(prop.source === "note" || prop.source === "file" && inventory.has(prop.name.toLowerCase()));
+	requireValue(prop.source === "note" || prop.source === "formula" || prop.source === "file" && inventory.has(prop.name.toLowerCase()));
 	const references = value.references.map(ref => {
 		requireValue(isRecord(ref) && exactFields(ref, ["record_id", "record_generation"]) && locationId(ref.record_id) && locationId(ref.record_generation) && !ids.has(ref.record_id));
 		ids.add(ref.record_id); return Object.freeze({ record_id: ref.record_id, record_generation: ref.record_generation });

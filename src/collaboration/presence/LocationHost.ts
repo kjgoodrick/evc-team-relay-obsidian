@@ -372,7 +372,7 @@ export class LocationHost extends Component {
 				current: () => current() && this.channel?.supportsBaseStates === true,
 				publishing: () => !passive && this.visible, local: file => this.baseRecord(context, file), file: id => this.baseRecordFile(context, id),
 				read: id => this.channel!.readBaseRecordContext(context.folder.entityGuid, id), publish: state => { if (!passive) this.channel?.publishBaseState(this.visible ? state : null); },
-				groups: { supported: () => this.channel?.supportsBaseTargetsV2 === true,
+				groups: { supported: () => this.channel?.supportsBaseTargetsV2 === true, formulaSupported: () => this.channel?.supportsBaseTargetsV3 === true,
 					resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
 					fileAtPath: path => this.plugin.app.vault.getFileByPath(path) },
 			},

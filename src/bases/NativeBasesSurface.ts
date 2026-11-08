@@ -609,6 +609,22 @@ export class NativeBasesSurface {
 		}
 		return entries;
 	}
+	/** Read only static same-record inputs for a server-validated formula plan.
+	 * No formula is evaluated here, and missing/duplicate members fail closed. */
+	groupInputValues(file: TFile, properties: readonly BaseDefinitionProperty[], resolve: NativeGroupLinkResolver): NativeBaseGroupValue[] | undefined {
+		try {
+			if (!this.current() || properties.length > 32) return;
+			const entries = [...(this.entries() ?? [])].filter(entry => object(entry) && entry.file === file);
+			if (entries.length !== 1 || !object(entries[0]) || !callable(entries[0].getValue)) return;
+			const entry = entries[0], budget = nativeGroupValueBudget(), result: NativeBaseGroupValue[] = [];
+			for (const property of properties) {
+				if (!isBaseDefinitionProperty(property) || property.source === "formula" || property.source === "file" && !["name", "basename", "fullname", "ext"].includes(property.name.toLowerCase())) return;
+				const value = nativeBaseGroupValue((entry.getValue as (key: string) => unknown)(property.source + "." + property.name), resolve, budget);
+				if (!value) return; result.push(value);
+			}
+			return this.current() ? result : undefined;
+		} catch { return; }
+	}
 	private propertyDisplayed(property: BaseDefinitionProperty): boolean {
 		const data = this.renderer.data, properties = this.type === "list" ? this.renderer.order : object(data) ? data.properties : undefined;
 		return list(properties, 256)?.includes(property.source + "." + property.name) === true;

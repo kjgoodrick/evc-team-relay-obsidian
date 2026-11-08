@@ -30,12 +30,12 @@ class Socket {
 	ready(expiresIn = 3600, protocolVersion = 1) { this.message({ type: "ready", protocol_version: protocolVersion, session_id: "b".repeat(32), instance_id: id(3), expires_at: Math.floor(Date.now() / 1000) + expiresIn }); }
 	disconnect(code = 1006) { this.readyState = 3; this.onclose?.call(this as unknown as WebSocket, { code } as CloseEvent); }
 }
-function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false, bases = serverSupports, baseMovement = false, baseTargets = false, multiWatch = false) {
+function fixture(surfaceLocations = false, serverSupports = surfaceLocations, movement = false, embeds = false, bases = serverSupports, baseMovement = false, baseTargets = false, multiWatch = false, formulaTargets = false) {
 	const sockets: Socket[] = [], status = jest.fn(), location = jest.fn(), followStopped = jest.fn(), roster = jest.fn();
 	const imageStates = jest.fn(), imageEmbeds = jest.fn(), baseStates = jest.fn(), observation = jest.fn();
 	let counter = 0;
 	const fetcher = jest.fn(async (url: string) => url.includes("/capabilities?") ? response({ protocol_version: 1, features: { presence_locations_preview: true,
-		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds, presence_base_context_preview: bases, presence_base_states_preview: baseMovement, presence_base_targets_v2_preview: baseTargets, presence_multi_watch_preview: multiWatch } : {}) } }) :
+		...(serverSupports ? { presence_surface_locations_preview: true, presence_surface_roster_preview: true, presence_image_context_preview: true, presence_image_states_preview: movement, presence_embedded_images_preview: embeds, presence_base_context_preview: bases, presence_base_states_preview: baseMovement, presence_base_targets_v2_preview: baseTargets, presence_base_targets_v3_preview: formulaTargets, presence_multi_watch_preview: multiWatch } : {}) } }) :
 		response({ protocol_version: 1, ticket: "ticket_" + String(++counter).padStart(32, "0"), expires_in: 30, socket_path: "/v1/collaboration/events" }));
 	const options = { credential: jest.fn(credentials), fetcher, status, location, followStopped, roster, surfaceLocations, random: () => 0.5,
 		imageStates: movement ? imageStates : undefined, imageEmbeds: embeds ? imageEmbeds : undefined,
@@ -652,4 +652,26 @@ test("passive Bases events keep version negotiation and reject a mismatched surf
 		socket.message({ type: "image_states", subscription_id: request.subscription_id, status: "available", peers: [] });
 		expect(f.channel.status).toBe("unavailable"); expect(f.observation).toHaveBeenLastCalledWith({ type: "reset", scope: null });
 	} finally { f.channel.stop(); }
+});
+
+test.each([false, true])("formula targets negotiate foreground/passive states and context metadata: %s", enabled => {
+	return (async () => {
+		const f = fixture(true, true, false, false, true, true, true, true, enabled);
+		const state: BasePresenceState = { version: 3, pointer: { target: { type: "group", record_id: id(15), record_generation: id(16), property: { source: "formula", name: "bucket" }, value_sha256: "a".repeat(64), references: [] }, offset: { x: 0.2, y: 0.5 } }, viewport: null };
+		try {
+			const socket = await ready(f); f.channel.publish(base()); f.channel.watch(base()); f.channel.observe([base(13)]); await jest.advanceTimersByTimeAsync(120);
+			expect(f.channel.supportsBaseTargetsV3).toBe(enabled);
+			const requests = socket.frames.filter(frame => ["watch", "observe"].includes(String(frame.type)));
+			expect(requests).toHaveLength(2); expect(requests.every(frame => frame.base_target_version === (enabled ? 3 : 2))).toBe(true);
+			f.channel.publishBaseState(state); await jest.advanceTimersByTimeAsync(125);
+			expect(socket.frames.at(-1)).toMatchObject({ type: "base_state", state: enabled ? state : { version: 2, pointer: null, viewport: null } });
+			f.fetcher.mockResolvedValueOnce(response({ ...baseContext(), ...(enabled ? { formula_groups: [] } : {}) }));
+			await f.channel.readBaseContext(id(5), id(10));
+			expect(f.fetcher.mock.calls.at(-1)![0].endsWith("&base_target_version=3")).toBe(enabled);
+			const request = requests.find(frame => frame.type === "observe")!;
+			socket.message({ type: "base_states", subscription_id: request.subscription_id, status: "available", peers: [{ target, state }] });
+			if (enabled) expect(f.observation).toHaveBeenLastCalledWith({ type: "base_states", scope: base(13), status: "available", peers: [{ target, state }] });
+			else expect(f.channel.status).toBe("unavailable");
+		} finally { f.channel.stop(); }
+	})();
 });

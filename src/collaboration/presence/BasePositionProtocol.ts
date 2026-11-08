@@ -7,13 +7,13 @@ export type BasePresenceTarget = Readonly<{ type: "item"; record_id: string; rec
 	Readonly<{ type: "cell"; record_id: string; record_generation: string; property: BasePresenceProperty }> |
 	Readonly<{ type: "property"; property: BasePresenceProperty }> | BasePresenceGroup | BasePresenceRange;
 export type BasePosition = Readonly<{ target: BasePresenceTarget; offset: ImagePoint }>;
-export type BasePresenceState = Readonly<{ version: 1 | 2; pointer: BasePosition | null; viewport: BasePosition | null }>;
+export type BasePresenceState = Readonly<{ version: 1 | 2 | 3; pointer: BasePosition | null; viewport: BasePosition | null }>;
 export type BasePeerState = Readonly<{ target: LocationTarget; state: BasePresenceState }>;
 export type BaseStatesEvent = Readonly<{ scope: BaseLocation | null; status: "available" | "unavailable"; peers: readonly BasePeerState[] }>;
 export type BaseRecordContext = Readonly<{ protocol_version: 1; share_id: string; entry_id: string; generation: string; type: "markdown" | "image" | "file" }>;
 
 function requireValue(value: unknown): asserts value { if (!value) throw new Error("Invalid Bases position"); }
-function property(value: unknown): BasePresenceProperty {
+export function parseBasePresenceProperty(value: unknown): BasePresenceProperty {
 	requireValue(isRecord(value) && exactFields(value, ["source", "name"]) && (value.source === "note" || value.source === "file" || value.source === "formula") &&
 		typeof value.name === "string" && value.name.length > 0 && value.name.length <= 256);
 	const points = [...value.name];
@@ -21,6 +21,11 @@ function property(value: unknown): BasePresenceProperty {
 		const point = char.codePointAt(0)!; return point >= 32 && (point < 0xd800 || point > 0xdfff);
 	}));
 	return Object.freeze({ source: value.source, name: value.name });
+}
+const property = parseBasePresenceProperty;
+export function formulaGroupTarget(target: BasePresenceTarget): boolean {
+	const group = target.type === "timeline_range" ? target.lane : target;
+	return group?.type === "group" && group.property.source === "formula";
 }
 function target(value: unknown): BasePresenceTarget {
 	requireValue(isRecord(value));
@@ -44,18 +49,21 @@ function position(value: unknown): BasePosition | null {
 }
 /** Cell values, paths, selection contents and client identity are never accepted. */
 export function parseBaseState(value: unknown): BasePresenceState {
-	requireValue(isRecord(value) && exactFields(value, ["version", "pointer", "viewport"]) && (value.version === 1 || value.version === 2));
+	requireValue(isRecord(value) && exactFields(value, ["version", "pointer", "viewport"]) && (value.version === 1 || value.version === 2 || value.version === 3));
 	const result = Object.freeze({ version: value.version, pointer: position(value.pointer), viewport: position(value.viewport) });
-	requireValue((result.version === 2 || [result.pointer, result.viewport].every(item => !item || !["group", "timeline_range"].includes(item.target.type))) &&
+	requireValue((result.version >= 2 || [result.pointer, result.viewport].every(item => !item || !["group", "timeline_range"].includes(item.target.type))) &&
+		(result.version >= 3 || [result.pointer, result.viewport].every(item => !item || !formulaGroupTarget(item.target))) &&
 		new TextEncoder().encode(JSON.stringify(result)).length <= 3072);
 	return result;
 }
 /** Older receivers retain supported positions; an unknown target never becomes
  * an approximate record position or breaks their entire presence connection. */
-export function baseStateForVersion(state: BasePresenceState, version: 1 | 2): BasePresenceState {
-	if (version === 2) return state;
-	const supported = (position: BasePosition | null) => position && !["group", "timeline_range"].includes(position.target.type) ? position : null;
-	return Object.freeze({ version: 1, pointer: supported(state.pointer), viewport: supported(state.viewport) });
+export function baseStateForVersion(state: BasePresenceState, version: 1 | 2 | 3): BasePresenceState {
+	if (version >= state.version) return state;
+	const supported = (position: BasePosition | null) => position &&
+		(version >= 2 || !["group", "timeline_range"].includes(position.target.type)) &&
+		(version >= 3 || !formulaGroupTarget(position.target)) ? position : null;
+	return Object.freeze({ version, pointer: supported(state.pointer), viewport: supported(state.viewport) });
 }
 export function parseBasePeers(value: unknown): readonly BasePeerState[] {
 	requireValue(Array.isArray(value) && value.length <= 127);

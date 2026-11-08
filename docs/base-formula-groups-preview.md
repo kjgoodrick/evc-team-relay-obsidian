@@ -62,6 +62,6 @@ timeline formula groupings, lost responses, cache reopening, source access,
 retained-source loading, group summaries/ranges and relay restart.
 
 This is an opt-in preview. General computed-result/aggregate authorization,
-unsupported formula families, formula-group presence, wider native group-summary
+unsupported formula families, broader [formula-group presence acceptance](base-formula-presence-preview.md), wider native group-summary
 and lane-range checks, two-client/version/mobile/accessibility and resource
 acceptance remain. The table/picker success does not claim those checks passed.

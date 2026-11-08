@@ -29,3 +29,19 @@ test("accepts bounded Unicode view names at the complete 64-view limit", () => {
 	const input = context(), views = Array.from({ length: 64 }, (_, slot) => ({ id: id(100 + slot), slot, name: "😀".repeat(254) + String(slot).padStart(2, "0"), type: "😀".repeat(256) }));
 	expect(parseBasePresenceContext({ ...input, views }, id(1), id(2)).views).toHaveLength(64);
 });
+
+const formulaPlan = () => ({ view_id: id(5), property: { source: "formula", name: "bucket" }, inputs: [{ source: "note", name: "status" }, { source: "file", name: "basename" }] });
+test("bounded formula input plans are optional, deeply frozen and limited to active views", () => {
+	const plan = formulaPlan(), parsed = parseBasePresenceContext({ ...context(), formula_groups: [plan] }, id(1), id(2));
+	expect(parsed.formula_groups).toEqual([plan]); plan.inputs[0].name = "changed";
+	expect(parsed.formula_groups![0].inputs[0].name).toBe("status");
+	for (const value of [parsed.formula_groups, parsed.formula_groups![0], parsed.formula_groups![0].property, parsed.formula_groups![0].inputs, parsed.formula_groups![0].inputs[0]]) expect(Object.isFrozen(value)).toBe(true);
+});
+test.each([
+	[formulaPlan(), formulaPlan()], [{ ...formulaPlan(), view_id: id(90) }], [{ ...formulaPlan(), property: { source: "note", name: "status" } }],
+	[{ ...formulaPlan(), inputs: [{ source: "formula", name: "other" }] }], [{ ...formulaPlan(), inputs: [{ source: "file", name: "path" }] }],
+	[{ ...formulaPlan(), inputs: Array(33).fill({ source: "note", name: "status" }) }], [{ ...formulaPlan(), inputs: [{ source: "note", name: "status" }, { source: "note", name: "status" }] }],
+	[{ ...formulaPlan(), expression: "private source" }],
+].map(plans => [plans]))("rejects ambiguous or unsupported formula-input metadata %j", plans => {
+	expect(() => parseBasePresenceContext({ ...context(), formula_groups: plans }, id(1), id(2))).toThrow();
+});

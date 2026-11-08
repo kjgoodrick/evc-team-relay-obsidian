@@ -47,7 +47,8 @@ export class BasePresenceSurface {
 			if (!(event.target as Element | null)?.closest?.(".relay-presence-action,.relay-presence-follow")) this.options.interacted();
 		};
 		for (const event of ["pointerdown", "wheel", "keydown"]) { root.addEventListener(event, interacted, { passive: true }); this.stops.push(() => root.removeEventListener(event, interacted)); }
-		if (options.motion) this.motion = new BasePresenceMotion(root, { ...options.motion, surface: () => this.surface, location: () => this.location });
+		if (options.motion) this.motion = new BasePresenceMotion(root, { ...options.motion, surface: () => this.surface, location: () => this.location,
+			groups: options.motion.groups && { ...options.motion.groups, formulaInputs: () => this.binding?.context.formula_groups } });
 	}
 	get location(): BaseLocation | undefined {
 		return !this.closed && this.options.current() && this.options.supported() && this.binding?.current() && this.binding.context.content_sha256 === this.options.hash() ?
@@ -59,6 +60,7 @@ export class BasePresenceSurface {
 		if (changed && !this.closed) this.options.changed();
 	}
 	private attemptKey(surface: NativeBasesSurface): string { return JSON.stringify([this.key, surface.slot, surface.name, surface.type]); }
+	private failed(surface: NativeBasesSurface): boolean { return this.attempted?.scope === this.attemptKey(surface) && this.attempted.source === surface.source; }
 	refresh(): void {
 		if (this.closed) return;
 		const file = this.view.file, hash = this.options.hash();
@@ -72,13 +74,16 @@ export class BasePresenceSurface {
 		const surface = this.surface?.current() ? this.surface : this.options.inspect();
 		if (surface !== this.surface) {
 			if (surface?.slot !== this.surface?.slot || surface?.name !== this.surface?.name || surface?.type !== this.surface?.type) this.selection = undefined;
-			this.version++; this.surface = surface; this.clear("waiting");
+			this.version++; this.surface = surface;
+			// A result repaint is not a new authorization attempt. Keep Retry
+			// available after a failed lookup instead of leaving a false wait.
+			this.clear(surface && this.failed(surface) ? "unavailable" : "waiting");
 		}
 		if (!surface) { this.clear("unavailable"); return; }
 		if (this.location) return;
 		if (this.binding) this.clear("waiting");
 		const attempt = this.attemptKey(surface);
-		if (this.pending || this.attempted?.scope === attempt && this.attempted.source === surface.source) return;
+		if (this.pending || this.failed(surface)) return;
 		const version = this.version;
 		const current = () => !this.closed && this.version === version && this.options.current() && this.options.supported() && this.view.file === file && file.path === path && file.stat.mtime === mtime && file.stat.size === size && this.options.hash() === hash && this.surface === surface;
 		this.pending = true;
