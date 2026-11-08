@@ -30,15 +30,29 @@ text copied/exported, before closing Obsidian. These changes do not implement a
 multi-version buffer conflict UI or make external editors part of admission.
 Existing source recovery capture can include live and stored buffer evidence.
 
+Restore comparisons now read the selected source namespace and verify its stored
+identity before combining it with live changes. Recovery exports retain legacy,
+selected and older source generations separately. They include live changes not
+yet flushed to IndexedDB and save a different committed buffer separately as
+`.stored-unsaved.txt`. Structural conflict backups include the selected history
+even when database enumeration is unavailable. Missing or mismatched selected
+cache associations refuse a supposedly complete export.
+
+A closed source session can still save retained evidence beneath the local
+recovery directory. That exception grants no writes to original files, respects
+native write holds, and stops if the share is torn down or its location changes.
+Archive verification still checks all artifacts and compares a second capture.
+
 Automated coverage includes actual Document/Canvas constructors, immediate
 invalidation of both children, listener teardown, save/clear failure and retry,
 stale review actions, competing store transactions, late transaction rollback,
 read/save races, partial edits and unresolved-review closure. Native/mobile
 merge acceptance remains pending.
 
-Verification: the full regression passes **4,127 tests across 294 suites**
-(40 tests/26 suites skipped). After the final malformed-record guard, the focused
-source/buffer/merge/provider/recovery selection passes **148 tests**. Main types,
+Verification: the latest full regression passes **4,133 tests across 294 suites**
+(40 tests/26 suites skipped). The focused recovery/source selection passes
+**152 tests**, including closed-session export, separate live/saved buffers,
+selected-history capture and tampered source identity. Main types,
 changed-source lint and the preview build pass (15 existing build warnings).
 The unchanged test-type ratchet remains 205 errors/44 signatures against its
 207/46 baseline. Malformed stored text is retained and rejected rather than

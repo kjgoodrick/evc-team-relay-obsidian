@@ -62,6 +62,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 	_teardownCallbacks: Unsubscriber[] = [];
 	queuedTextOps: ((data: string) => string)[] = [];
 	private readonly sourceCache?: Readonly<SourceCacheDescriptor & { bufferKey: string }>;
+	get recoverySourceCache(): Readonly<SourceCacheDescriptor> | undefined { return this.sourceCache; }
 	private readonly selectedRestoreGeneration: string | null = null;
 	private get bufferKey(): string { return this.sourceCache?.bufferKey ?? this.entityGuid; }
 

@@ -55,7 +55,8 @@ The native installer, cross-window writer coordination,
 selection-journal recovery export and user-facing recovery flow remain to be
 connected. A separate [native source write hold](native-source-write-hold-preview.md)
 now fences and drains registered text/attachment writes in one host realm;
-remaining native mutations and the installer are not yet connected. The journal
+structural, attachment, Bases and inbound mutations also use that admission.
+The installer is not yet connected. The journal
 is not a filesystem lock and cannot stop another process,
 older plugin binary or external editor from writing a vault path.
 

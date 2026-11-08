@@ -37,13 +37,15 @@ function openExisting(name: string, signal?: AbortSignal): Promise<IDBDatabase |
 }
 
 export interface DocumentComparisonSnapshot extends DocumentRecoveryIdentity { update: Uint8Array; updateCount: number }
-export interface DocumentComparisonOptions { check?: () => void; signal?: AbortSignal; maxBytes?: number; maxRecords?: number; timeoutMs?: number }
+export interface DocumentComparisonOptions { check?: () => void; signal?: AbortSignal; maxBytes?: number; maxRecords?: number; timeoutMs?: number; sourceIdentity?: string }
 
 /** Bounded inline review, distinct from a lossless recovery export. Reads only
  * association metadata and update rows in one readonly transaction. Unrelated
  * custom metadata is neither enumerated nor loaded for a text comparison. */
 export async function readDocumentComparisonSnapshot(name: string, options: DocumentComparisonOptions = {}): Promise<DocumentComparisonSnapshot> {
 	const maxBytes = options.maxBytes ?? 16 * 1024 * 1024, maxRecords = options.maxRecords ?? 50_000, timeoutMs = options.timeoutMs ?? 5_000;
+	const sourceIdentity = options.sourceIdentity;
+	if (sourceIdentity !== undefined && (typeof sourceIdentity !== "string" || !sourceIdentity || sourceIdentity.length > 8192)) throw new Error("Invalid source comparison identity");
 	if (typeof name !== "string" || !name || name.length > 1024 || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 16 * 1024 * 1024
 		|| !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 50_000 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new Error("Invalid source comparison cache limits");
 	const check = () => { if (options.signal?.aborted) throw Object.assign(new Error("Source comparison was cancelled"), { name: "AbortError" }); options.check?.(); };
@@ -65,6 +67,10 @@ export async function readDocumentComparisonSnapshot(name: string, options: Docu
 			options.signal?.addEventListener("abort", abort, { once: true });
 			db.onversionchange = () => { finish(new Error("The source comparison cache changed")); db.close(); };
 			const custom = tx.objectStore("custom"), appId = custom.get("appId"), s3rn = custom.get("s3rn");
+			if (sourceIdentity !== undefined) {
+				const identity = custom.get(SOURCE_CACHE_IDENTITY);
+				identity.onsuccess = () => { if (identity.result !== sourceIdentity) finish(new Error("The retained source cache has a different identity. Save a recovery copy before continuing.")); };
+			}
 			for (const request of [appId, s3rn]) request.onsuccess = () => {
 				if (request.result !== undefined && (typeof request.result !== "string" || request.result.length > 2048)) finish(new Error("The source comparison cache association is invalid"));
 			};

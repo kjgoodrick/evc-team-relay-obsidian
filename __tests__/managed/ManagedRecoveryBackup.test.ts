@@ -23,6 +23,8 @@ import { readManagedSource } from "../../src/client/readManagedSource";
 import type { ManagedRestoreInspection } from "../../src/client/ManagedIndexTransport";
 import { readDocumentRecoverySnapshot } from "../../src/storage/document-recovery-snapshot";
 import * as nativeWrites from "../../src/storage/native-document-writes";
+import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
+import { SourceSelectionContext } from "../../src/storage/source-selection-context";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 jest.mock("../../src/client/readManagedSource", () => ({ readManagedSource: jest.fn() }));
@@ -139,7 +141,7 @@ test.each(["identity", "file collision", "identity collision", "directory collis
 	expect(await fs.readdir(root)).toEqual([]);
 });
 
-test.each(["file write", "editor edit", "binary edit", "unsaved edit"])("backup does not authorize recovery after %s", async failure => {
+test.each(["file write", "editor edit", "binary edit", "unsaved edit", "saved buffer edit"])("backup does not authorize recovery after %s", async failure => {
 	const state = capture(); let calls = 0;
 	const disk = io();
 	if (failure === "file write") disk.writeBinary = async () => { throw Error("disk full"); };
@@ -150,6 +152,7 @@ test.each(["file write", "editor edit", "binary edit", "unsaved edit"])("backup 
 			if (failure === "editor edit") changed.documents[0].text += "new edit";
 			if (failure === "binary edit") changed.files[0].bytes = new Uint8Array([3]).buffer;
 			if (failure === "unsaved edit") changed.documents[0].unsaved += "new edit";
+			if (failure === "saved buffer edit") changed.documents[0].persistedUnsaved = "different saved buffer";
 			return changed;
 		}
 		return state;
@@ -220,6 +223,73 @@ async function sourceTextFixture() {
 	});
 	return { ...state, inspection, update, name: `${state.host}-relay-doc-${state.note.id}` };
 }
+
+async function selectedTextFixture() {
+	const s = await sourceTextFixture(), scope = { hostAppId: s.host, serverId: "test-server", controlPlaneUrl: "https://fixture.test", s3rn: ResourceAddress.serialize(s.share.resourceAddress) };
+	const journal = await SourceSelectionJournal.open(scope), generation = crypto.randomUUID(); cleanup.push(() => journal.close());
+	let state = await journal.apply({ type: "begin", operationId: crypto.randomUUID(), expectedRevision: null, reviewId: crypto.randomUUID(), restoreGeneration: generation });
+	const command = () => ({ operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId });
+	state = await journal.apply({ ...command(), type: "prepare", preparation: { archive: { path: `${RECOVERY_FOLDER}/fixture`, manifestSha256: "a".repeat(64) }, plan: { id: crypto.randomUUID(), sha256: "b".repeat(64) } } });
+	state = await journal.apply({ ...command(), type: "start" }); await journal.apply({ ...command(), type: "commit" });
+	const context = await SourceSelectionContext.open(scope); cleanup.push(() => context.close()); Object.assign(s.share, { sourceSelection: context });
+	s.share.credentialCache.captureDocumentSourceContext = () => ({ serverId: scope.serverId, controlPlaneUrl: scope.controlPlaneUrl, check: s.checkAuth });
+	const address = s.share.resourceAddress as RemoteFolderAddress, identity = { ...scope, restoreGeneration: generation,
+		s3rn: ResourceAddress.serialize(new RemoteDocumentAddress(address.relayGuid, address.folderGuid, s.note.id)) };
+	const descriptor = await sourceDocumentCache(identity), doc = new Y.Doc(), store = await openSourceDocumentCache(identity, doc);
+	doc.getText("contents").insert(0, "SELECTED CACHE"); await store.close(); doc.getText("contents").insert(doc.getText("contents").length, " + LIVE"); cleanup.push(() => doc.destroy());
+	await s.share.unsavedStore.persistUnsaved(descriptor.bufferKey, "SAVED SELECTED BUFFER");
+	const live = Object.create(Document.prototype) as Document;
+	Object.assign(live, { _parent: s.share, entityGuid: s.note.id, crdtDoc: doc, sourceCache: descriptor, _unsavedFile: { unsavedText: "LIVE SELECTED BUFFER" } });
+	s.share.trackedEntries.set(s.note.id, live);
+	return { ...s, context, descriptor, live };
+}
+
+test("selected comparison reads only its own history and keeps differing live and saved buffers visible after closure", async () => {
+	const s = await selectedTextFixture(); s.context.close();
+	const result = await s.share.inspectManagedRestoreText(s.inspection, s.note.id);
+	expect(result.local).toEqual([
+		{ label: "Local editing history", text: "SELECTED CACHE + LIVE" },
+		{ label: "Local unsaved buffer", text: "LIVE SELECTED BUFFER" },
+		{ label: "Saved local buffer", text: "SAVED SELECTED BUFFER" },
+		{ label: "Local file on disk", text: "OFFLINE DISK EDIT" },
+	]);
+});
+
+test("selected recovery exports legacy, selected, live and saved evidence separately while originals stay held", async () => {
+	const s = await selectedTextFixture(); s.context.close();
+	const hold = nativeWrites.holdNativeSourceWrites(s.vault, "Team");
+	try {
+		const folder = await s.share.saveManagedRestoreRecoveryCopy(), prefix = path.join(root, folder, `documents/${s.note.id}`);
+		expect(await fs.readFile(prefix + ".txt", "utf8")).toBe("OFFLINE EDIT IN INDEXEDDB");
+		expect(await fs.readFile(prefix + ".unsaved.txt", "utf8")).toBe("UNSAVED EDITOR BUFFER");
+		const selected = path.join(prefix, s.descriptor.name);
+		expect(await fs.readFile(selected + ".txt", "utf8")).toBe("SELECTED CACHE + LIVE");
+		expect(await fs.readFile(selected + ".unsaved.txt", "utf8")).toBe("LIVE SELECTED BUFFER");
+		expect(await fs.readFile(selected + ".stored-unsaved.txt", "utf8")).toBe("SAVED SELECTED BUFFER");
+		const replay = new Y.Doc(); Y.applyUpdate(replay, await fs.readFile(selected + ".yjs")); expect(replay.getText("contents").toString()).toBe("SELECTED CACHE + LIVE"); replay.destroy();
+		await expect(nativeWrites.trackNativeDocumentWrite(s.vault, "Team/Local.md", async () => {})).rejects.toThrow("paused");
+		expect(await fs.readFile(path.join(root, "Team/Local.md"), "utf8")).toBe("OFFLINE DISK EDIT");
+	} finally { hold.release(); }
+});
+
+test("structural recovery capture also retains the selected source without relying on catalog discovery", async () => {
+	const s = await selectedTextFixture();
+	const documents = await (s.share as unknown as { captureRecoveryDocuments(records: ItemRecord[]): Promise<RecoveryCapture["documents"]> }).captureRecoveryDocuments([s.note]);
+	expect(documents).toEqual(expect.arrayContaining([
+		expect.objectContaining({ id: s.note.id, text: "OFFLINE EDIT IN INDEXEDDB", unsaved: "UNSAVED EDITOR BUFFER" }),
+		expect.objectContaining({ id: s.note.id, cacheKey: s.descriptor.name, text: "SELECTED CACHE + LIVE", unsaved: "LIVE SELECTED BUFFER", persistedUnsaved: "SAVED SELECTED BUFFER" }),
+	]));
+});
+
+test("selected text comparison refuses a changed cache identity before contacting the server", async () => {
+	const s = await selectedTextFixture();
+	const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open(s.descriptor.name); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+	try {
+		await new Promise<void>((resolve, reject) => { const tx = db.transaction("custom", "readwrite"); tx.objectStore("custom").put("different source", SOURCE_CACHE_IDENTITY); tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); });
+	} finally { db.close(); }
+	await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id)).rejects.toThrow("different identity"); expect(sourceMock).not.toHaveBeenCalled();
+	await expect(s.share.saveManagedRestoreRecoveryCopy()).rejects.toThrow("association"); expect(await fs.readdir(root)).toEqual(["Team"]);
+});
 
 test("source comparison keeps local history, buffer, disk and restored text distinct without writing", async () => {
 	const s = await sourceTextFixture(), before = await readDocumentRecoverySnapshot(s.name), index = Y.encodeStateAsUpdate(s.share.crdtDoc);

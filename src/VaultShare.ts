@@ -28,11 +28,12 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
 import type { SourceSelectionContext } from "./storage/source-selection-context";
+import { sourceDocumentCacheSync } from "./storage/source-document-cache";
 import { trackNativeSourceMutation, waitForNativeDocumentWrites } from "./storage/native-document-writes";
 import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
-import { discoverSourceRecovery, type SourceRecoveryDiscovery } from "./storage/discover-source-recovery";
+import { discoverSourceRecovery, type SourceRecoveryDiscovery, type DiscoveredSourceRecovery } from "./storage/discover-source-recovery";
 import { SOURCE_CACHE_IDENTITY } from "./storage/document-cache-binding";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
 import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
@@ -526,8 +527,9 @@ export class VaultShare extends ProviderBacked {
 		};
 		check(); const local: RestoreLocalText[] = [];
 		if (localEntries.length) {
-			const cacheName = `${host}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${entryId}`;
-			const stored = await readDocumentComparisonSnapshot(cacheName, { check, signal }); check();
+			const selectedCache = this.retainedSourceCache(entryId, kind);
+			const cacheName = selectedCache?.name ?? `${host}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${entryId}`;
+			const stored = await readDocumentComparisonSnapshot(cacheName, { check, signal, sourceIdentity: selectedCache?.identity }); check();
 			const { appId, s3rn } = stored;
 			if (stored.exists && (appId !== undefined && appId !== host || s3rn !== undefined && s3rn !== address)) {
 				throw new Error("The retained history has a different association. Save a recovery copy before continuing.");
@@ -537,12 +539,15 @@ export class VaultShare extends ProviderBacked {
 				Y.applyUpdate(retained, stored.update);
 				if (isDocument(live) || isCanvasDocument(live)) {
 					if (live.vaultShare !== this || live.entityGuid !== entryId || (isCanvasDocument(live) ? ItemKind.Canvas : ItemKind.Document) !== kind) throw new Error("The local document association changed");
+					if (live.recoverySourceCache?.identity !== selectedCache?.identity) throw new Error("The live document belongs to another source history. Save a recovery copy before continuing.");
 					Y.applyUpdate(retained, Y.encodeStateAsUpdate(live.crdtDoc));
 				} else if (live) throw new Error("The local entry changed type");
 				assertCompleteComparisonSource(retained, "The retained editing history");
 				if (stored.exists || live) local.push({ label: "Local editing history", text: kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(retained), null, 2) : retained.getText("contents").toString() });
-				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(entryId); check();
+				const persistedUnsaved = await this.unsavedStore.readUnsaved(selectedCache?.bufferKey ?? entryId); check();
+				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : persistedUnsaved;
 				if (unsaved !== null && unsaved !== undefined) local.push({ label: "Local unsaved buffer", text: unsaved });
+				if (persistedUnsaved !== null && persistedUnsaved !== unsaved) local.push({ label: "Saved local buffer", text: persistedUnsaved });
 			} finally { retained.destroy(); }
 			const path = sharePath ? `${sharePath}/${localEntries[0][0]}` : localEntries[0][0];
 			await waitForNativeDocumentWrites(this.vaultApi, path, { check, signal }); check();
@@ -567,6 +572,16 @@ export class VaultShare extends ProviderBacked {
 		} finally { doc.destroy(); }
 	}
 
+	/** Derive only a retained namespace; read-only recovery must still work
+	 * after its session closes. This does not grant active source admission. */
+	private retainedSourceCache(id: string, kind: ItemKind) {
+		const selection = this.sourceSelection;
+		if (!selection?.binding) return;
+		if (selection.scope.hostAppId !== this.hostAppId || selection.scope.serverId !== this.config.onpremServerId
+			|| selection.scope.s3rn !== ResourceAddress.serialize(this.resourceAddress)) throw new Error("The retained source belongs to another shared folder.");
+		return sourceDocumentCacheSync({ ...selection.scope, ...selection.binding, s3rn: `${selection.scope.s3rn}:${kind === ItemKind.Canvas ? "canvas" : "doc"}:${id}` });
+	}
+
 	private async captureRecoveryDocuments(records: Pick<ItemRecord, "id" | "type">[], check = () => {}, discovered: DiscoveredRecoveryDocument[] = []): Promise<RecoveryCapture["documents"]> {
 		const documents: RecoveryCapture["documents"] = [], kinds = new Map<string, ItemKind>();
 		const associations = new Map(discovered.map(record => [record.id, record]));
@@ -578,6 +593,9 @@ export class VaultShare extends ProviderBacked {
 		}
 		for (const [id, kind] of kinds) {
 			check();
+			const active = this.trackedEntries.get(id), selected = this.retainedSourceCache(id, kind);
+			if ((isDocument(active) || isCanvasDocument(active)) && active.recoverySourceCache
+				&& (active.vaultShare !== this || active.recoverySourceCache.identity !== selected?.identity)) throw new Error("The live source history has a different association. Review and retry recovery.");
 			const doc = new Y.Doc({ gc: false });
 			try {
 				const cacheName = `${this.hostAppId}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${id}`;
@@ -589,28 +607,60 @@ export class VaultShare extends ProviderBacked {
 					throw new Error("A document cache association changed during recovery capture. Local work is retained; review and retry.");
 				}
 				Y.applyUpdate(doc, stored.update);
-				const live = this.trackedEntries.get(id);
+				const candidate = this.trackedEntries.get(id);
+				const live = (isDocument(candidate) || isCanvasDocument(candidate)) && !candidate.recoverySourceCache ? candidate : undefined;
 				if (isDocument(live) || isCanvasDocument(live)) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
-				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(id); check();
-				documents.push({ id, unsaved, cacheMetadata: encodeDocumentRecoveryMetadata(cacheName, stored), update: Y.encodeStateAsUpdate(doc),
+				const persisted = await this.unsavedStore.readUnsaved(id); check();
+				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : persisted;
+				documents.push({ id, unsaved, persistedUnsaved: persisted !== unsaved ? persisted : undefined, cacheMetadata: encodeDocumentRecoveryMetadata(cacheName, stored), update: Y.encodeStateAsUpdate(doc),
 					text: kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
 			} finally { doc.destroy(); }
+			if (selected) {
+				const stored = await readDocumentRecoverySnapshot(selected.name); check();
+				const candidate = this.trackedEntries.get(id);
+				const live = (isDocument(candidate) || isCanvasDocument(candidate)) && candidate.recoverySourceCache?.identity === selected.identity ? candidate : undefined;
+				const persisted = await this.unsavedStore.readUnsaved(selected.bufferKey); check();
+				if (!stored.exists && !live && persisted === null) continue;
+				if (!stored.exists || stored.custom.find(item => item.key === SOURCE_CACHE_IDENTITY)?.value !== selected.identity) throw new Error("The selected source cache association is unavailable. Retain local work and retry recovery.");
+				const source = new Y.Doc({ gc: false });
+				try {
+					Y.applyUpdate(source, stored.update);
+					if (live) Y.applyUpdate(source, Y.encodeStateAsUpdate(live.crdtDoc));
+					const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : persisted;
+					documents.push({ id, cacheKey: selected.name, unsaved, persistedUnsaved: persisted !== unsaved ? persisted : undefined,
+						cacheMetadata: encodeDocumentRecoveryMetadata(selected.name, stored), update: Y.encodeStateAsUpdate(source),
+						text: kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(source), null, 2) : source.getText("contents").toString() });
+				} finally { source.destroy(); }
+			}
 		}
 		return documents;
 	}
 
-	private recoveryIO(check = () => {}): RecoveryIO {
+	private recoveryIO(check = () => {}, retainedSource = false): RecoveryIO {
+		const vault = this.vaultApi, sharePath = this.path;
+		const mutate = async <T>(path: string, action: () => Promise<T>): Promise<T> => {
+			if (!retainedSource) return this.mutateNativeSource([path], action);
+			// A closed source may export retained evidence without regaining
+			// authority over originals. Native holds still apply to the archive.
+			requireRestoreRelativePath(path);
+			if (path !== RECOVERY_FOLDER && !path.startsWith(RECOVERY_FOLDER + "/")) throw new Error("Recovery export is outside its local archive directory.");
+			const checkExport = () => {
+				if (this.isTornDown || this.vaultApi !== vault || this.path !== sharePath) throw new Error("The recovery source changed. Review and retry.");
+				check();
+			};
+			const result = await trackNativeSourceMutation(vault, [path], () => { checkExport(); return action(); }); checkExport(); return result;
+		};
 		return {
 			mkdir: async path => {
 				let parent = "";
 				for (const part of path.split("/")) {
 					parent = parent ? `${parent}/${part}` : part; check();
 					const exists = await this.vaultApi.adapter.exists(parent); check();
-					if (!exists) { await this.mutateNativeSource([parent], () => this.vaultApi.createFolder(parent)); check(); }
+					if (!exists) { await mutate(parent, () => this.vaultApi.createFolder(parent)); check(); }
 				}
 			},
-			write: async (path, text) => { check(); await this.mutateNativeSource([path], () => this.vaultApi.adapter.write(path, text)); check(); },
-			writeBinary: async (path, bytes) => { check(); await this.mutateNativeSource([path], () => this.vaultApi.adapter.writeBinary(path, bytes)); check(); },
+			write: async (path, text) => { check(); await mutate(path, () => this.vaultApi.adapter.write(path, text)); check(); },
+			writeBinary: async (path, bytes) => { check(); await mutate(path, () => this.vaultApi.adapter.writeBinary(path, bytes)); check(); },
 			readBinary: async path => { check(); const bytes = await this.vaultApi.adapter.readBinary(path); check(); return bytes; },
 		};
 	}
@@ -675,7 +725,15 @@ export class VaultShare extends ProviderBacked {
 				const known = new Set(records.map(record => record.id));
 				for (const id of crdt.getMap<string>("docs").values()) if (!known.has(id)) records.push({ id, type: ItemKind.Document });
 				const documents = await this.captureRecoveryDocuments(records, check, discovery.documents); check();
-				for (const source of sourceDiscovery.documents) {
+				const sourceEntries = new Map<string, DiscoveredSourceRecovery>(sourceDiscovery.documents.map(source => [source.cacheName, source]));
+				for (const live of this.trackedEntries.values()) {
+					if (!(isDocument(live) || isCanvasDocument(live)) || !live.recoverySourceCache) continue;
+					const type = isCanvasDocument(live) ? ItemKind.Canvas : ItemKind.Document, expected = this.retainedSourceCache(live.entityGuid, type);
+					if (live.vaultShare !== this || live.recoverySourceCache.identity !== expected?.identity) throw new Error("The live source history has a different association. Review and retry recovery.");
+					sourceEntries.set(expected.name, { id: live.entityGuid, type, cacheName: expected.name, sourceIdentity: expected.identity });
+				}
+				for (const source of sourceEntries.values()) {
+					if (documents.some(document => document.cacheKey === source.cacheName)) continue;
 					const stored = await readDocumentRecoverySnapshot(source.cacheName); check();
 					if (!stored.exists || stored.custom.find(item => item.key === SOURCE_CACHE_IDENTITY)?.value !== source.sourceIdentity) {
 						throw new Error("A source cache association changed during recovery capture. Local history is retained; review and retry.");
@@ -683,8 +741,12 @@ export class VaultShare extends ProviderBacked {
 					const doc = new Y.Doc({ gc: false });
 					try {
 						Y.applyUpdate(doc, stored.update);
-						const unsaved = await this.unsavedStore.readUnsaved(source.cacheName); check();
-						documents.push({ id: source.id, cacheKey: source.cacheName, update: stored.update, unsaved,
+						const candidate = this.trackedEntries.get(source.id);
+						const live = (isDocument(candidate) || isCanvasDocument(candidate)) && candidate.recoverySourceCache?.identity === source.sourceIdentity ? candidate : undefined;
+						if (live) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
+						const persisted = await this.unsavedStore.readUnsaved(source.cacheName); check();
+						const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : persisted;
+						documents.push({ id: source.id, cacheKey: source.cacheName, update: Y.encodeStateAsUpdate(doc), unsaved, persistedUnsaved: persisted !== unsaved ? persisted : undefined,
 							cacheMetadata: encodeDocumentRecoveryMetadata(source.cacheName, stored),
 							text: source.type === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
 					} finally { doc.destroy(); }
@@ -699,7 +761,7 @@ export class VaultShare extends ProviderBacked {
 				}
 				return { files, documents, inventories, index: Y.encodeStateAsUpdate(crdt) };
 			};
-			const backup = await prepareRecoveryBackup(this.recoveryIO(check), capture, {
+			const backup = await prepareRecoveryBackup(this.recoveryIO(check, true), capture, {
 				kind: "managed-restore-source-copy", version: 1, shareId, sharePath, serverId: server ?? null, hostAppId: host,
 				review: JSON.parse(reviewText), stagedInventory: JSON.parse(stagedText), cacheDiscovery: discovery, sourceCacheDiscovery: sourceDiscovery,
 				coverage: { nativeFiles: "loaded files within the shared folder, excluding recovery directories",

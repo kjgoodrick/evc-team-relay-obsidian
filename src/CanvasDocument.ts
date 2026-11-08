@@ -77,6 +77,7 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 	private _hasPendingCrdtUpdate: boolean = false;
 	private _hostCanvasRef: unknown;
 	private readonly sourceCache?: Readonly<SourceCacheDescriptor>;
+	get recoverySourceCache(): Readonly<SourceCacheDescriptor> | undefined { return this.sourceCache; }
 	private readonly selectedRestoreGeneration: string | null = null;
 
 	constructor(

@@ -2,7 +2,7 @@ import { RECOVERY_FOLDER } from "./conflictCopyPath";
 import { sha256Hex } from "./contentDigest";
 
 export interface RecoveryFile { path: string; bytes: ArrayBuffer }
-export interface RecoveryDocument { id: string; cacheKey?: string; update: Uint8Array; text: string; unsaved?: string | null; cacheMetadata?: string }
+export interface RecoveryDocument { id: string; cacheKey?: string; update: Uint8Array; text: string; unsaved?: string | null; persistedUnsaved?: string | null; cacheMetadata?: string }
 export interface RecoveryInventory { cacheKey: string; update: Uint8Array; cacheMetadata: string }
 export interface RecoveryCapture { files: RecoveryFile[]; documents: RecoveryDocument[]; index: Uint8Array; inventories?: RecoveryInventory[] }
 export interface RecoveryIO {
@@ -21,7 +21,7 @@ export function sameCapture(a: RecoveryCapture, b: RecoveryCapture): boolean {
 		&& (a.inventories?.length ?? 0) === (b.inventories?.length ?? 0)
 		&& (a.inventories ?? []).every(d => (b.inventories ?? []).some(e => d.cacheKey === e.cacheKey && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)))
 		&& a.files.every(f => b.files.some(g => f.path === g.path && equal(f.bytes, g.bytes)))
-		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.cacheKey === e.cacheKey && d.text === e.text && d.unsaved === e.unsaved && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)));
+		&& a.documents.every(d => b.documents.some(e => d.id === e.id && d.cacheKey === e.cacheKey && d.text === e.text && d.unsaved === e.unsaved && d.persistedUnsaved === e.persistedUnsaved && d.cacheMetadata === e.cacheMetadata && equal(d.update, e.update)));
 }
 
 function copyCapture(value: RecoveryCapture): RecoveryCapture {
@@ -60,6 +60,7 @@ export async function prepareRecoveryBackup(io: RecoveryIO, capture: () => Promi
 		artifacts.push({ path: `${prefix}.yjs`, bytes: bytes(doc.update) });
 		addText(`${prefix}.txt`, doc.text);
 		if (doc.unsaved != null) addText(`${prefix}.unsaved.txt`, doc.unsaved);
+		if (doc.persistedUnsaved != null) addText(`${prefix}.stored-unsaved.txt`, doc.persistedUnsaved);
 		if (doc.cacheMetadata !== undefined) addText(`${prefix}.cache.json`, doc.cacheMetadata);
 	}
 	for (const inventory of first.inventories ?? []) {
