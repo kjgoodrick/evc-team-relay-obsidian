@@ -1,4 +1,6 @@
 /** Durable, account-isolated local state. No network or Obsidian imports. */
+import { restoreGeneration, restoreMetadata, type RestoreBinding, type RestoreContext } from "../RestoreGeneration";
+import { RESTORE_STORES, bindingMatches, cacheGeneration, observeRestoreContext, readRestoreCheckpoint, requireRestoreBinding, type RestoreCheckpoint } from "./RestoreRecords";
 import { pictureIds, prepareLocalPicture, parsePictureRendition, pictureHash, type CachedPicture, type PictureRendition, type PictureVariant, type LocalPicture, type PictureUpload } from "../PictureProtocol";
 import { PICTURE_STORES, commandPictures, putPictureSources, setPictureReferences } from "./PictureRecords";
 import { isId, isRecord, parseBody, protocolJson, sourceAnchor } from "../DiscussionProtocol";
@@ -12,7 +14,7 @@ import { commitDraftImport, importOrigin, type ImportedDraftOrigin } from "./Imp
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
-export interface QueuedCommand {
+export interface QueuedCommand extends RestoreBinding {
 	operationId: string;
 	scopeId: string;
 	type: "thread.create" | "reply.create" | "message.edit" | "reaction.set" | "picture.upload" | "base.group.create";
@@ -94,9 +96,9 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 25 adds formula-group snapshot selections that older workers reject.
+		// Version 26 fences workers that do not preserve restore-generation bindings.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 25);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 26);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -142,6 +144,16 @@ export class DiscussionStore {
 	}
 
 	close(): void { this.db.close(); }
+
+	async restoreCheckpoint(): Promise<RestoreCheckpoint> {
+		return this.transaction(["preferences"], "readonly", readRestoreCheckpoint);
+	}
+	async observeRestoreContext(context: RestoreContext | undefined, expectedRevision: number, current: () => boolean = () => true) {
+		return this.transaction(RESTORE_STORES, "readwrite", tx => observeRestoreContext(tx, context, expectedRevision, current));
+	}
+	async requireRestoreBinding(operation: RestoreBinding): Promise<void> {
+		await this.transaction(["preferences"], "readonly", tx => requireRestoreBinding(tx, operation));
+	}
 
 	async captureLocalWork(id: string, now = Date.now()): Promise<LocalWorkSnapshot> {
 		if (!isId(id) || !Number.isSafeInteger(now) || now < 0) throw new Error("Invalid recovery capture identity");
@@ -332,7 +344,7 @@ export class DiscussionStore {
 		const safe = parsePictureRendition(rendition, variant === "thumbnail"), copy = bytes.slice(0);
 		if (copy.byteLength !== safe.size || await pictureHash(copy) !== safe.sha256) throw new Error("Invalid cached picture");
 		return this.transaction(["pictureCache", "preferences", "generations"], "readwrite", async tx => {
-			if ((await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== generation) return false;
+			if ((await cacheGeneration(tx, scopeId)) !== generation) return false;
 			const cache = tx.objectStore("pictureCache"), preferences = tx.objectStore("preferences"), key = [scopeId, id, variant];
 			if ((await request(preferences.get("pictureCacheEpoch")) ?? 0) !== cacheEpoch) return false;
 			const limit = pictureCacheLimit(await request(preferences.get("pictureCacheLimit")));
@@ -359,7 +371,7 @@ export class DiscussionStore {
 			}
 			await request(preferences.put(total, "pictureCacheBytes"));
 			const generations = tx.objectStore("generations");
-			await request(generations.put((await request(generations.get(scopeId)) ?? 0) + 1, scopeId));
+			await request(generations.put((await cacheGeneration(tx, scopeId)) + 1, scopeId));
 		});
 	}
 
@@ -409,7 +421,7 @@ export class DiscussionStore {
 		return this.transaction(["preferences", "generations"], "readwrite", async tx => {
 			const preferences = tx.objectStore("preferences");
 			const previous: Json | undefined = await request(preferences.get(key));
-			const generation: number = await request(tx.objectStore("generations").get(scopeId)) ?? 0;
+			const generation: number = await cacheGeneration(tx, scopeId);
 			await request(preferences.put(token, "verification:" + key));
 			return { token, generation, previous };
 		});
@@ -420,7 +432,7 @@ export class DiscussionStore {
 			if (!current()) return false;
 			const preferences = tx.objectStore("preferences");
 			if (await request(preferences.get("verification:" + key)) !== proof.token ||
-				(await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== proof.generation) return false;
+				(await cacheGeneration(tx, scopeId)) !== proof.generation) return false;
 			if (!current()) return false;
 			await request(preferences.put(value, key));
 			if (!current()) throw new Error("Target verification access changed");
@@ -458,7 +470,7 @@ export class DiscussionStore {
 	/** A manual online action receipt is not an outbox item: no worker submits it.
 	 * Retain its exact identity until response acceptance and draft removal commit.
 	 */
-	async prepareOnlineDraft(draftId: string, revision: number, operation: { operationId: string; scopeId: string; payload: Json }): Promise<{ operationId: string; scopeId: string; payload: Json }> {
+	async prepareOnlineDraft(draftId: string, revision: number, operation: RestoreBinding & { operationId: string; scopeId: string; payload: Json }): Promise<RestoreBinding & { operationId: string; scopeId: string; payload: Json }> {
 		const saved = JSON.parse(boundedJson(operation as unknown as Json)) as typeof operation;
 		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {
 			const draft: Draft | undefined = await request(tx.objectStore("drafts").get(draftId));
@@ -469,16 +481,19 @@ export class DiscussionStore {
 				if (existing.revision !== revision || existing.operation.scopeId !== saved.scopeId || canonical(existing.operation.payload) !== canonical(saved.payload)) {
 					throw new Error("Review the unconfirmed online action before changing this draft");
 				}
+				await requireRestoreBinding(tx, existing.operation);
 				return existing.operation;
 			}
+			await requireRestoreBinding(tx, saved);
 			await request(preferences.put({ operation: saved, revision }, key)); return saved;
 		});
 	}
 	async completeOnlineDraft(draftId: string, revision: number, operationId: string): Promise<void> {
 		await this.transaction(["drafts", ...PICTURE_STORES], "readwrite", async tx => {
 			const preferences = tx.objectStore("preferences"), key = "online:" + draftId;
-			const existing = await request(preferences.get(key)) as { operation: { operationId: string }; revision: number } | undefined;
+			const existing = await request(preferences.get(key)) as { operation: RestoreBinding & { operationId: string }; revision: number } | undefined;
 			if (existing?.operation.operationId !== operationId || existing.revision !== revision) throw new Error("Online action changed");
+			await requireRestoreBinding(tx, existing.operation);
 			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(draftId));
 			if (draft?.revision !== revision) throw new Error("Draft changed in another view");
 			await request(drafts.delete(draftId)); await request(preferences.delete(key));
@@ -489,12 +504,13 @@ export class DiscussionStore {
 	/** Only after authenticated withdrawal: invalidate every stale send/editor
 	 * before unlocking the unchanged draft. Never enqueue the online action.
 	 */
-	async withdrawOnlineDraft(draftId: string, revision: number, operation: { operationId: string; scopeId: string; payload: Json }): Promise<Draft> {
+	async withdrawOnlineDraft(draftId: string, revision: number, operation: RestoreBinding & { operationId: string; scopeId: string; payload: Json }): Promise<Draft> {
 		const expected = boundedJson(operation as unknown as Json);
 		return this.transaction(["drafts", "preferences"], "readwrite", async tx => {
 			const preferences = tx.objectStore("preferences"), key = "online:" + draftId;
 			const existing = await request(preferences.get(key)) as { operation: typeof operation; revision: number } | undefined;
 			if (!existing || existing.revision !== revision || canonical(existing.operation as unknown as Json) !== expected) throw new Error("Online action changed in another view");
+			await requireRestoreBinding(tx, existing.operation);
 			const drafts = tx.objectStore("drafts"), draft: Draft | undefined = await request(drafts.get(draftId));
 			if (!draft || draft.scopeId !== operation.scopeId || draft.revision !== revision || !Number.isSafeInteger(revision + 1)) throw new Error("Draft changed in another view");
 			draft.revision++;
@@ -556,6 +572,7 @@ export class DiscussionStore {
 		command = JSON.parse(boundedJson(command as unknown as Json)) as QueuedCommand;
 		if (command.type === "base.group.create") parsePendingBaseGroupCommand(command);
 		return this.transaction(["outbox", "drafts", ...PICTURE_STORES], "readwrite", async tx => {
+			await requireRestoreBinding(tx, command);
 			const recoveryId = draft ? await request(tx.objectStore("preferences").get("recovery:" + draft.id)) : undefined;
 			let original: OutboxOperation | undefined;
 			if (recoveryId !== undefined) {
@@ -566,12 +583,14 @@ export class DiscussionStore {
 					(command.type !== original.type && !(["thread.create", "base.group.create"].includes(command.type) && ["thread.create", "base.group.create"].includes(original.type)))) {
 					throw new Error("Recovered command changed identity or scope");
 				}
+				await requireRestoreBinding(tx, original);
 				if (command.dependsOn.some(id => !original!.dependsOn.includes(id) && !commandPictures(command.payload).includes(id))) throw new Error("Recovered command introduced an unrelated dependency");
 				// Keep ordering against non-picture predecessors. Pictures removed or
 				// refreshed in the review draft must not retain a failed old upload.
 				for (const id of original.dependsOn) {
 					const dependency: OutboxOperation | undefined = await request(tx.objectStore("outbox").get(id));
 					if (!dependency || dependency.scopeId !== command.scopeId) throw new Error("Missing or cross-scope dependency");
+					await requireRestoreBinding(tx, dependency);
 					if (dependency.type !== "picture.upload") command.dependsOn = [...new Set([...command.dependsOn, id])];
 				}
 			}
@@ -582,18 +601,19 @@ export class DiscussionStore {
 				if (source && source.scopeId !== command.scopeId || upload && (upload.type !== "picture.upload" || upload.scopeId !== command.scopeId)) throw new Error("Picture dependency changed scope or identity");
 				if (source && !upload) {
 					const payload: PictureUpload = { type: "picture.upload", picture_id: id, sha256: source.sha256, size: source.size };
-					await request(uploads.add({ operationId: id, scopeId: command.scopeId, type: "picture.upload", payload, dependsOn: [],
+					await request(uploads.add({ ...restoreMetadata(command), operationId: id, scopeId: command.scopeId, type: "picture.upload", payload, dependsOn: [],
 						state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now } satisfies OutboxOperation));
 					await setPictureReferences(tx, "outbox", id, command.scopeId, [id]);
 				}
+				if (upload) await requireRestoreBinding(tx, upload);
 				if (source || upload) command.dependsOn = [...new Set([...command.dependsOn, id])];
 			}
 			if (command.dependsOn.includes(command.operationId) || command.dependsOn.length > 100) throw new Error("Invalid picture dependency");
-			const identity = boundedJson(command as unknown as Json);
+			const identity = boundedJson({ ...command, restoreGeneration: restoreGeneration(command.restoreGeneration) });
 			const store = tx.objectStore("outbox"), previous: OutboxOperation | undefined = await request(store.get(command.operationId));
 			if (previous) {
 				const { operationId, scopeId, type, payload, dependsOn } = previous;
-				if (identity !== canonical({ operationId, scopeId, type, payload, dependsOn })) throw new Error("Operation ID was already used for another command");
+				if (identity !== canonical({ operationId, scopeId, type, payload, dependsOn, restoreGeneration: restoreGeneration(previous.restoreGeneration) })) throw new Error("Operation ID was already used for another command");
 				return previous;
 			}
 			await setPictureReferences(tx, "outbox", command.operationId, command.scopeId, ids);
@@ -607,6 +627,7 @@ export class DiscussionStore {
 			for (const id of command.dependsOn) {
 				const dependency: OutboxOperation | undefined = await request(store.get(id));
 				if (!dependency || dependency.scopeId !== command.scopeId) throw new Error("Missing or cross-scope dependency");
+				await requireRestoreBinding(tx, dependency);
 			}
 			const op: OutboxOperation = { ...command, state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now };
 			await request(store.add(op));
@@ -763,6 +784,7 @@ export class DiscussionStore {
 			const outbox = tx.objectStore("outbox"), drafts = tx.objectStore("drafts"), preferences = tx.objectStore("preferences");
 			const current: OutboxOperation | undefined = await request(outbox.get(original.operationId));
 			if (!current || current.scopeId !== original.scopeId || current.type !== original.type || canonical(current.payload) !== canonical(original.payload)) throw new Error("Saved command changed during recovery");
+			await requireRestoreBinding(tx, current);
 			if (current.state === "review" && current.reviewDraftId === draftId) {
 				const saved: Draft | undefined = await request(drafts.get(draftId));
 				if (!saved || saved.scopeId !== current.scopeId || await request(preferences.get("recovery:" + draftId)) !== current.operationId) throw new Error("Recovered draft is unavailable");
@@ -827,6 +849,7 @@ export class DiscussionStore {
 			const outbox = tx.objectStore("outbox"), sources = tx.objectStore("pictureSources");
 			const previous: OutboxOperation | undefined = await request(outbox.get(original.operationId));
 			if (!previous || previous.scopeId !== original.scopeId || previous.type !== original.type || canonical(previous.payload) !== canonical(original.payload)) throw new Error("Saved command changed during recovery");
+			await requireRestoreBinding(tx, previous);
 			if (previous.state === "withdrawn" && previous.replacementId) return previous.replacementId;
 			if (previous.state === "accepted" || previous.state === "withdrawn" || previous.state === "review") throw new Error("Saved command was already completed or is being reviewed");
 			// An unprepared local group intent cannot have sent a thread. Fence it
@@ -847,7 +870,7 @@ export class DiscussionStore {
 			const payload = { ...original.payload as Record<string, Json>, body: protocolJson({ ...body, blocks: body.blocks.map(block =>
 				block.type === "picture" && map.has(block.picture_id) ? { ...block, picture_id: map.get(block.picture_id)! } : block) }) };
 			const nextIds = commandPictures(payload);
-			const next: OutboxOperation = { operationId: replacementId, scopeId: original.scopeId, type: original.type,
+			const next: OutboxOperation = { ...restoreMetadata(previous), operationId: replacementId, scopeId: original.scopeId, type: original.type,
 				payload, dependsOn: [...new Set([...previous.dependsOn.map(id => map.get(id) ?? id), ...map.values()])],
 				state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now };
 			if (next.dependsOn.length > 100 || next.dependsOn.includes(replacementId)) throw new Error("Invalid replacement dependency");
@@ -876,7 +899,7 @@ export class DiscussionStore {
 				transferring = transferring.filter(id => id !== oldId);
 				await setPictureReferences(tx, "outbox", replacementId, original.scopeId, transferring);
 				await putPictureSources(tx, [source], original.scopeId, nextIds);
-				const upload: OutboxOperation = { operationId: source.id, scopeId: original.scopeId, type: "picture.upload",
+				const upload: OutboxOperation = { ...restoreMetadata(previous), operationId: source.id, scopeId: original.scopeId, type: "picture.upload",
 					payload: { type: "picture.upload", picture_id: source.id, sha256: source.sha256, size: source.size }, dependsOn: [],
 					state: "queued", createdAt: now, attempt: 0, nextAttemptAt: now };
 				await request(outbox.add(upload)); await setPictureReferences(tx, "outbox", source.id, original.scopeId, [source.id]);
@@ -889,9 +912,10 @@ export class DiscussionStore {
 	async retryRejected(operationId: string, scopeId: string, attempt: number, now = Date.now()): Promise<boolean> {
 		requiredId(operationId); requiredId(scopeId);
 		if (!Number.isSafeInteger(attempt) || attempt < 1 || !Number.isFinite(now)) throw new Error("Invalid retry");
-		return this.transaction(["outbox"], "readwrite", async tx => {
+		return this.transaction(["outbox", "preferences"], "readwrite", async tx => {
 			const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
 			if (!op || op.scopeId !== scopeId || op.state !== "rejected" || op.attempt !== attempt) return false;
+			await requireRestoreBinding(tx, op);
 			op.state = "queued"; op.nextAttemptAt = now; delete op.error; delete op.lease;
 			await request(store.put(op)); return true;
 		});
@@ -913,15 +937,16 @@ export class DiscussionStore {
 	/** Earliest runnable retry/lease; rejected dependencies do not cause polling. */
 	async nextWakeAt(picturesNotBefore = 0): Promise<number | undefined> {
 		if (!Number.isFinite(picturesNotBefore) || picturesNotBefore < 0) throw new Error("Invalid picture retry time");
-		return this.transaction(["outbox"], "readonly", async tx => {
-			const store = tx.objectStore("outbox"), states = store.index("state");
+		return this.transaction(["outbox", "preferences"], "readonly", async tx => {
+			const store = tx.objectStore("outbox"), states = store.index("state"), context = (await readRestoreCheckpoint(tx)).context;
 			const ops: OutboxOperation[] = [...await request(states.getAll("queued")), ...await request(states.getAll("sending"))];
 			let earliest: number | undefined;
 			for (const op of ops) {
+				if (!bindingMatches(context, op)) continue;
 				let ready = true;
 				for (const id of op.dependsOn) {
 					const dependency: OutboxOperation | undefined = await request(store.get(id));
-					if (dependency?.state !== "accepted") { ready = false; break; }
+					if (dependency?.state !== "accepted" || !bindingMatches(context, dependency)) { ready = false; break; }
 				}
 				if (!ready) continue;
 				let due = op.state === "sending" ? op.lease?.expiresAt : op.nextAttemptAt;
@@ -936,7 +961,7 @@ export class DiscussionStore {
 	async clearRemoteScope(scopeId: string, expected?: ScopeCheckpoint): Promise<boolean> {
 		return this.transaction(["entities", "cursors", "generations", "preferences", "pictureCache"], "readwrite", async tx => {
 			const generations = tx.objectStore("generations");
-			const generation: number = await request(generations.get(scopeId)) ?? 0;
+			const generation: number = await cacheGeneration(tx, scopeId);
 			if (expected && (generation !== expected.generation ||
 				await request(tx.objectStore("cursors").get(scopeId)) !== expected.cursor)) return false;
 			const store = tx.objectStore("entities");
@@ -980,8 +1005,8 @@ export class DiscussionStore {
 	async claimNext(owner: string, now = Date.now(), leaseMs = 30_000, picturesNotBefore = 0): Promise<OutboxOperation | undefined> {
 		requiredId(owner);
 		if (!Number.isFinite(now) || !Number.isFinite(leaseMs) || leaseMs < 1 || leaseMs > 300_000 || !Number.isFinite(picturesNotBefore) || picturesNotBefore < 0) throw new Error("Invalid lease");
-		return this.transaction(["outbox"], "readwrite", async tx => {
-			const store = tx.objectStore("outbox"), states = store.index("state");
+		return this.transaction(["outbox", "preferences"], "readwrite", async tx => {
+			const store = tx.objectStore("outbox"), states = store.index("state"), context = (await readRestoreCheckpoint(tx)).context;
 			const queued: OutboxOperation[] = await request(states.getAll("queued"));
 			const sending: OutboxOperation[] = await request(states.getAll("sending"));
 			const eligible = [...queued.filter(op => op.nextAttemptAt <= now),
@@ -989,10 +1014,11 @@ export class DiscussionStore {
 				.filter(op => op.type !== "picture.upload" || now >= picturesNotBefore)
 				.sort((a, b) => Number(a.type === "picture.upload") - Number(b.type === "picture.upload") || a.createdAt - b.createdAt || a.operationId.localeCompare(b.operationId));
 			for (const op of eligible) {
+				if (!bindingMatches(context, op)) continue;
 				let ready = true;
 				for (const id of op.dependsOn) {
 					const dependency: OutboxOperation | undefined = await request(store.get(id));
-					if (!dependency || dependency.state !== "accepted") { ready = false; break; }
+					if (!dependency || dependency.state !== "accepted" || !bindingMatches(context, dependency)) { ready = false; break; }
 				}
 				if (!ready) continue;
 				op.attempt++; op.state = "sending";
@@ -1010,10 +1036,11 @@ export class DiscussionStore {
 		now = Date.now()): Promise<OutboxOperation | undefined> {
 		if (anchor !== undefined) anchor = JSON.parse(boundedJson(anchor)) as Json;
 		if (!Number.isFinite(now)) throw new Error("Invalid capture time");
-		return this.transaction(["outbox"], "readwrite", async tx => {
+		return this.transaction(["outbox", "preferences"], "readwrite", async tx => {
 			const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
 			if (!op || op.type !== "base.group.create" || op.state !== "sending" || op.lease?.owner !== lease.owner ||
 				op.lease.attempt !== lease.attempt || op.lease.expiresAt <= now) return undefined;
+			await requireRestoreBinding(tx, op);
 			parsePendingBaseGroupCommand(op);
 			if (op.preparedAnchor !== undefined) {
 				prepareBaseGroupCommand(op, op.preparedAnchor);
@@ -1034,7 +1061,7 @@ export class DiscussionStore {
 
 	private async acceptInTransaction(tx: IDBTransaction, operationId: string, result: Json): Promise<void> {
 		const store = tx.objectStore("outbox"), op: OutboxOperation | undefined = await request(store.get(operationId));
-		if (!op || op.state === "accepted" || op.state === "withdrawn" || op.state === "review") return;
+		if (!op || op.state === "accepted" || op.state === "withdrawn" || op.state === "review" || !bindingMatches((await readRestoreCheckpoint(tx)).context, op)) return;
 		op.state = "accepted"; op.result = result; delete op.lease; delete op.error;
 		await request(store.put(op));
 		await setPictureReferences(tx, "outbox", operationId, op.scopeId, []);
@@ -1060,7 +1087,7 @@ export class DiscussionStore {
 	async checkpoint(scopeId: string): Promise<ScopeCheckpoint> {
 		return this.transaction(["cursors", "generations"], "readonly", async tx => ({
 			cursor: await request(tx.objectStore("cursors").get(scopeId)),
-			generation: await request(tx.objectStore("generations").get(scopeId)) ?? 0,
+			generation: await cacheGeneration(tx, scopeId),
 		}));
 	}
 
@@ -1077,7 +1104,7 @@ export class DiscussionStore {
 			return { ...row, value: JSON.parse(boundedJson(row.value)) as Json };
 		});
 		return this.transaction(["entities", "generations"], "readwrite", async tx => {
-			if ((await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== generation) return false;
+			if ((await cacheGeneration(tx, scopeId)) !== generation) return false;
 			const entities = tx.objectStore("entities");
 			for (const row of copies) {
 				const old: CachedEntity | undefined = await request(entities.get([scopeId, row.id]));
@@ -1118,7 +1145,7 @@ export class DiscussionStore {
 		return this.transaction(["entities", "cursors", "outbox", "generations", ...PICTURE_STORES], "readwrite", async tx => {
 			const cursors = tx.objectStore("cursors"), store = tx.objectStore("entities");
 			if (await request(cursors.get(scopeId)) !== expectedCursor) return false;
-			if (expectedGeneration !== undefined && (await request(tx.objectStore("generations").get(scopeId)) ?? 0) !== expectedGeneration) return false;
+			if (expectedGeneration !== undefined && (await cacheGeneration(tx, scopeId)) !== expectedGeneration) return false;
 			for (const entity of entities) {
 				const old: CachedEntity | undefined = await request(store.get([scopeId, entity.id]));
 				if (!old || old.revision < entity.revision) await request(store.put({ ...entity, ...ordered(entity), scopeId }));

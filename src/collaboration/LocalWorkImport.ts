@@ -87,11 +87,12 @@ function snapshot(value: unknown): InspectedLocalWork["snapshot"] {
 		requireValue(text(row.id) && parseDiscussionScope(row.scopeId) && isSequence(row.revision)); draftIds.push(row.id);
 	}
 	for (const row of operations) {
-		requireValue(isRecord(row)); keys(row, ["operationId", "scopeId", "type", "payload", "dependsOn", "state", "createdAt", "attempt", "nextAttemptAt"], ["replacementId", "reviewDraftId", "preparedAnchor", "error"]);
+		requireValue(isRecord(row)); keys(row, ["operationId", "scopeId", "type", "payload", "dependsOn", "state", "createdAt", "attempt", "nextAttemptAt"], ["replacementId", "reviewDraftId", "preparedAnchor", "error", "restoreGeneration"]);
 		requireValue(isId(row.operationId) && parseDiscussionScope(row.scopeId) && typeof row.type === "string" && ["thread.create", "reply.create", "message.edit", "reaction.set", "picture.upload", "base.group.create"].includes(row.type) &&
 			typeof row.state === "string" && ["queued", "sending", "rejected", "review"].includes(row.state) && isSequence(row.createdAt) && isSequence(row.attempt) && isSequence(row.nextAttemptAt));
 		requireValue(Array.isArray(row.dependsOn) && row.dependsOn.length <= LOCAL_WORK_MAX_RECORDS && row.dependsOn.every(isId)); unique(row.dependsOn as string[], true);
 		requireValue(row.replacementId === undefined || isId(row.replacementId)); requireValue(row.reviewDraftId === undefined || text(row.reviewDraftId));
+		requireValue(row.restoreGeneration === undefined || row.restoreGeneration === null || isId(row.restoreGeneration));
 		requireValue(row.error === undefined || text(row.error, 512)); operationIds.push(row.operationId);
 	}
 	for (const row of dependencies) {

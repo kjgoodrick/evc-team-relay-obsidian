@@ -1,3 +1,4 @@
+import { restoreMetadata } from "./RestoreGeneration";
 import { copyBaseGroupCapture, parseBaseGroupCaptureResult, type BaseGroupCapture } from "./BaseGroupProtocol";
 import { isBaseDefinitionProperty, isId, isRecord, parseAnchor, parseBody, protocolJson,
 	type BaseAnchor, type BaseDefinitionProperty, type BaseSummaryTarget, type BaseTimelineRangeTarget, type DiscussionAnchor, type MessageBody } from "./DiscussionProtocol";
@@ -63,7 +64,7 @@ export function parsePendingBaseGroupCommand(operation: QueuedCommand): PendingB
 export function prepareBaseGroupCommand(operation: QueuedCommand, value: unknown): QueuedCommand {
 	const pending = parsePendingBaseGroupCommand(operation);
 	const anchor = resolvePendingBaseGroupAnchor(pending.anchor, value);
-	return { operationId: operation.operationId, scopeId: operation.scopeId, type: "thread.create", dependsOn: [...operation.dependsOn],
+	return { ...restoreMetadata(operation), operationId: operation.operationId, scopeId: operation.scopeId, type: "thread.create", dependsOn: [...operation.dependsOn],
 		payload: protocolJson({ type: "thread.create", thread_id: pending.thread_id, message_id: pending.message_id, body: pending.body, anchor }) };
 }
 

@@ -71,6 +71,15 @@ test("pending lane ranges preserve exact coordinates while only a verified recei
 	}
 });
 
+test("group preparation and archived request review preserve immutable restore metadata", () => {
+	const operation = { ...command(), restoreGeneration: id(90) };
+	const prepared = prepareBaseGroupCommand(operation, anchor());
+	expect(prepared.restoreGeneration).toBe(id(90));
+	expect(savedCommandReview({ ...operation, preparedAnchor: protocolJson(anchor()) }, identity.shareId).operation.restoreGeneration).toBe(id(90));
+	expect(JSON.parse(queuedEnvelope(identity.shareId, prepared))).not.toHaveProperty("restoreGeneration");
+	expect(JSON.parse(queuedEnvelope(identity.shareId, prepared)).command).not.toHaveProperty("restoreGeneration");
+});
+
 test.each(["group", "range", "summary"])("receipt review preserves the previously prepared %s target and cannot create one", kind => {
 	const operation = kind === "range" ? rangeCommand() : kind === "summary" ? summaryCommand() : command();
 	expect(() => savedCommandReview(operation, identity.shareId)).toThrow("no saved final target");

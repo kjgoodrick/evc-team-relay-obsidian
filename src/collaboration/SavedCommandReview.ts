@@ -1,3 +1,4 @@
+import { restoreMetadata } from "./RestoreGeneration";
 import { isRecord, parseAnchor, parseBody, REACTIONS, type DiscussionAnchor, type MessageBody } from "./DiscussionProtocol";
 import { prepareBaseGroupCommand } from "./LocalDiscussionAnchor";
 import type { InspectedLocalWork } from "./LocalWorkImport";
@@ -17,7 +18,7 @@ export function savedCommandReview(operation: QueuedCommand & { preparedAnchor?:
 	}
 	const payload = (JSON.parse(queuedEnvelope(shareId, operation)) as { command: Json }).command;
 	if (!isRecord(payload)) throw new Error("This saved request is invalid.");
-	const captured: QueuedCommand = { operationId: operation.operationId, scopeId: operation.scopeId, type: operation.type, payload, dependsOn: [...operation.dependsOn] };
+	const captured: QueuedCommand = { ...restoreMetadata(operation), operationId: operation.operationId, scopeId: operation.scopeId, type: operation.type, payload, dependsOn: [...operation.dependsOn] };
 	const labels = { "thread.create": "New discussion", "reply.create": "Reply", "message.edit": "Comment edit", "reaction.set": "Reaction" };
 	const label = labels[operation.type as keyof typeof labels];
 	if (!label) throw new Error("This request cannot be checked here yet.");

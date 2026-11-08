@@ -54,6 +54,17 @@ test("reads an actual completed export without changing saved work and freezes r
 	} finally { f.close(); }
 });
 
+test.each([null, id(90)])("preserves optional restore-generation metadata during archive inspection: %s", async generation => {
+	const f = await fixture();
+	try {
+		await f.rewrite(value => { value.operations[0].restoreGeneration = generation; });
+		expect((await inspectLocalWorkRecovery(f.io, f.path, () => true)).snapshot.operations[0].restoreGeneration).toBe(generation);
+		await f.rewrite(value => { value.operations[0].restoreGeneration = "invalid"; });
+		await expect(inspectLocalWorkRecovery(f.io, f.path, () => true)).rejects.toThrow("invalid");
+		expect((await f.store.getOperation(id(4)))?.restoreGeneration).toBeUndefined();
+	} finally { f.close(); }
+});
+
 test.each(["missing_marker", "manifest_hash", "picture_hash", "snapshot_id", "version", "traversal", "duplicate_picture", "duplicate_operation", "missing_dependency", "credentials", "active_lease", "accepted_state", "record_limit"])("rejects %s without activating anything", async change => {
 	const f = await fixture();
 	try {

@@ -1,3 +1,4 @@
+import { restoreContext, restoreGeneration, type RestoreBinding, type RestoreContext } from "./RestoreGeneration";
 import { queuedEnvelope } from "./QueuedDiscussionCommand";
 export { queuedEnvelope } from "./QueuedDiscussionCommand";
 import { DISCUSSION_EXPORT_MAX_BYTES, DISCUSSION_EXPORT_CATALOG_MAX_BYTES, parseDiscussionExport, parseExportCatalog } from "./DiscussionExportProtocol";
@@ -38,7 +39,7 @@ export interface DiscussionSender {
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operation_id_conflict", "operation_withdrawn", "identifier_unavailable",
 	"stale_message_revision", "stale_thread_revision", "author_required", "moderation_required", "mention_unavailable",
-	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required"]);
+	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required", "restore_generation_changed"]);
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
 for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query", "discussion_export_disabled", "discussion_export_limit"]) errorCodes.add(code);
 for (const code of ["reattach_disabled", "stale_anchor_revision", "reattach_scope_changed", "reattach_readers_changed", "reattach_target_unanchored"]) errorCodes.add(code);
@@ -59,7 +60,7 @@ function object(value: unknown): value is Record<string, unknown> {
 function positive(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }
 
 
-export type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
+export type OnlineOperation = RestoreBinding & { operationId: string; scopeId: string; payload: Json };
 export type WithdrawalResult = { status: "withdrawn" } | { status: "accepted"; result: CommandResult };
 /** An absent receipt may have been lost in a restore. Never replay from unknown. */
 export type CommandStatus = WithdrawalResult | { status: "unknown" };
@@ -120,12 +121,12 @@ export class DiscussionTransport implements DiscussionSender {
 		this.identity = Object.freeze({ ...identity, serverId });
 	}
 
-	async send(operation: QueuedCommand): Promise<CommandResult> {
+	async send(operation: QueuedCommand, current?: () => boolean): Promise<CommandResult> {
 		// Capture the exact request before awaiting token refresh.
 		const body = queuedEnvelope(this.identity.shareId, operation);
 		const immutable = JSON.parse(body) as { command: Json };
 		const op = { ...operation, payload: immutable.command };
-		return accepted(await this.request("/commands", body), op);
+		return accepted(await this.request("/commands", body, { current, restoreGeneration: restoreGeneration(op.restoreGeneration) }), op);
 	}
 
 	/** Read only: no outbox acceptance, withdrawal, replacement, or send. */
@@ -156,7 +157,7 @@ export class DiscussionTransport implements DiscussionSender {
 	}
 	private async withdrawEnvelope(operation: OnlineOperation, body: string, current?: () => boolean): Promise<WithdrawalResult> {
 		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
-		const value = await this.request("/commands/withdraw", body, { current });
+		const value = await this.request("/commands/withdraw", body, { current, restoreGeneration: restoreGeneration(captured.restoreGeneration) });
 		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
 		if (!object(value) || value.status !== "withdrawn" || value.operation_id !== captured.operationId || value.entry_id !== parseDiscussionScope(captured.scopeId)?.entryId) {
 			throw new DiscussionFailure("pause", "invalid_withdrawal_response");
@@ -168,16 +169,18 @@ export class DiscussionTransport implements DiscussionSender {
 	async sendOnline(operation: OnlineOperation, current?: () => boolean): Promise<CommandResult> {
 		const body = onlineEnvelope(this.identity.shareId, operation);
 		const immutable = JSON.parse(body) as { command: Json };
-		return accepted(await this.request("/commands", body, { current }), { ...operation, payload: immutable.command });
+		const captured = { ...operation, payload: immutable.command };
+		return accepted(await this.request("/commands", body, { current, restoreGeneration: restoreGeneration(captured.restoreGeneration) }), captured);
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
+		const restore = restoreContext(value.features.discussion_command_restore_guard, value.restore_generation);
 		let baseTargets: BaseTargetKind[] = [];
 		let baseRecordTypes: BaseRecordType[] = [];
 		const definitionCatalog = value.features.discussion_base_definition_catalog === true;
@@ -208,7 +211,7 @@ export class DiscussionTransport implements DiscussionSender {
 				baseRecordTypes = BASE_RECORD_TYPES.filter(kind => records.includes(kind));
 			}
 		}
-		return { discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
+		return { ...(restore ? { restoreContext: restore } : {}), discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
@@ -523,7 +526,7 @@ export class DiscussionTransport implements DiscussionSender {
 			v => parseChanges(v, viewId, parseDiscussionScope(entryId)!.entryId));
 	}
 
-	private async request(path: string, body?: string | ArrayBuffer, options: { method?: "PUT"; binary?: PictureRendition; responseLimit?: number; boundedText?: boolean; audited?: boolean; current?: () => boolean } = {}): Promise<unknown> {
+	private async request(path: string, body?: string | ArrayBuffer, options: { restoreGeneration?: string | null; method?: "PUT"; binary?: PictureRendition; responseLimit?: number; boundedText?: boolean; audited?: boolean; current?: () => boolean } = {}): Promise<unknown> {
 		let timer: number | undefined;
 		let ended = false;
 		const attempt = async () => {
@@ -539,7 +542,7 @@ export class DiscussionTransport implements DiscussionSender {
 			let response: Response;
 			try {
 				response = await this.fetcher(this.identity.serverId + "/v1/collaboration" + path, { method: options.method ?? (body === undefined ? "GET" : "POST"), sensitive: true, ...(options.audited ? { cache: "no-store" as const } : {}),
-					headers: { Authorization: `Bearer ${credential.accessToken}`, "Content-Type": typeof body === "object" ? "application/octet-stream" : "application/json" }, body });
+					headers: { ...(options.restoreGeneration ? { "X-Relay-Restore-Generation": options.restoreGeneration } : {}), Authorization: `Bearer ${credential.accessToken}`, "Content-Type": typeof body === "object" ? "application/octet-stream" : "application/json" }, body });
 			} catch (error) {
 				if (error instanceof RelayHttpError) throw new DiscussionFailure("retry", "server_unavailable", error.status, error.retryAfterMs);
 				throw new DiscussionFailure("retry", "network_unavailable");
@@ -603,7 +606,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const message = object(value) && object(value.error) ? value.error.message : object(value) ? value.detail : undefined;
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
-				if (response.status === 409 && ["text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "base_formula_groups_disabled", "base_group_summaries_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
+				if (response.status === 409 && ["restore_generation_changed", "text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "base_formula_groups_disabled", "base_group_summaries_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
 				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}
