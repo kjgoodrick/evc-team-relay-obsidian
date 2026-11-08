@@ -51,7 +51,10 @@ Input objects and returned snapshots cannot mutate stored state by reference.
 
 The native installer, startup admission, cross-window writer coordination,
 selection-journal recovery export and user-facing recovery flow remain to be
-connected. The journal is not a filesystem lock and cannot stop another process,
+connected. A separate [native source write hold](native-source-write-hold-preview.md)
+now fences and drains registered text/attachment writes in one host realm;
+remaining native mutations and the installer are not yet connected. The journal
+is not a filesystem lock and cannot stop another process,
 older plugin binary or external editor from writing a vault path.
 
 Verification: 26 journal tests and 209 focused source/inventory/recovery tests

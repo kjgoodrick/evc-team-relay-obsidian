@@ -419,7 +419,7 @@ export class VaultShare extends ProviderBacked {
 		const path = file.entryPath, id = file.entityGuid, server = this.config.onpremServerId;
 		const sharePath = this.path, shareId = this.entityGuid;
 		const check = () => {
-			if (this._liveProvider !== provider || this._liveProvider?.managedIndex !== index || this.path !== sharePath || this.entityGuid !== shareId
+			if (this.isTornDown || this._liveProvider !== provider || this._liveProvider?.managedIndex !== index || this.path !== sharePath || this.entityGuid !== shareId
 				|| file.vaultShare !== this || file.entryPath !== path
 				|| file.entityGuid !== id || this.config.onpremServerId !== server || this.isRecoveringStructure
 				|| this.deletedEntries.has(file) || this.isDeletePending(path)) throw new Error("Attachment context changed. Local content is retained.");

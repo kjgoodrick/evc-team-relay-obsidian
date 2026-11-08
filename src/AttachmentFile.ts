@@ -15,6 +15,7 @@ import { sha256Hex } from "./contentDigest";
 import type { MimeTyped, SyncableEntry } from "./SyncableEntry";
 import { mimeTypeForPath } from "./mimeLookup";
 import { currentToggles } from "./featureToggleState";
+import { trackNativeDocumentWrite } from "./storage/native-document-writes";
 
 export function isAttachmentFile(file: SyncableEntry | undefined): file is AttachmentFile {
 	return !!file && file instanceof AttachmentFile;
@@ -527,7 +528,8 @@ export class AttachmentFile
 			if (hash !== this.syncMeta?.hash || before?.mtime !== after?.mtime || before?.ctime !== after?.ctime || before?.size !== after?.size) {
 				throw new Error("Attachment changed during download. Local content is retained.");
 			}
-			await this.vault.adapter.writeBinary(diskPath, content);
+			await trackNativeDocumentWrite(this.vault, diskPath, () => this.vault.adapter.writeBinary(diskPath, content));
+			context.check();
 			await this.contentAddressedCache.resolveHash();
 		} catch (e: unknown) {
 			this.log(e);
@@ -588,12 +590,16 @@ export class AttachmentFile
 	}
 
 	public async writeContent(content: string): Promise<void> {
-		void this.vault.adapter.write(this.obsidianFile.path, content);
+		const context = this.vaultShare.captureAttachmentContext(this), file = this.obsidianFile;
+		await trackNativeDocumentWrite(this.vault, file.path, () => this.vault.adapter.write(file.path, content));
+		context.check();
 		await this.contentAddressedCache.resolveHash();
 	}
 
 	public async appendContent(content: string): Promise<void> {
-		void this.vault.append(this.obsidianFile, content);
+		const context = this.vaultShare.captureAttachmentContext(this), file = this.obsidianFile;
+		await trackNativeDocumentWrite(this.vault, file.path, () => this.vault.append(file, content));
+		context.check();
 		await this.contentAddressedCache.resolveHash();
 	}
 
