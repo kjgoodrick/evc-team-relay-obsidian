@@ -232,3 +232,18 @@ an in-flight old upload from replacing the bytes selected by restored inventory.
 Actual TypeScript/HTTP/MinIO and PostgreSQL race tests cover these boundaries.
 It does not provide atomic filesystem replacement, a pre-write source-byte
 backup, native/mobile acceptance, full restore reconciliation or safe resume.
+
+## Document socket admission test
+
+The paired server now binds managed document grants to the request's original
+restore generation and checks it on admission and active socket traffic. The
+`realDocumentRestore` fixture verifies the actual low-level provider against
+FastAPI/Rust: old reader/writer connections close, old queued edits remain local,
+and explicitly bound fresh clients can read/write the current generation.
+
+The automatic ProviderBacked/document-cache path is not yet bound to durable
+restore metadata. It must retain old work for review and stop retrying, rather
+than adopt the generation returned by token minting. Safe resumed cache namespaces
+and verified source replacement are still required; the legacy cache's versionless
+IndexedDB open means a version bump alone cannot exclude older workers. No native
+restore workflow or coordinator is claimed by this server admission test.
