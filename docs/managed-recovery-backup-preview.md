@@ -39,6 +39,19 @@ edits during structural recovery. The disposable FastAPI/Rust integration also
 performs a verified backup before resolving a competing move and confirms that
 offline edits survive.
 
+Document capture now opens the existing cache for a single readonly transaction.
+It reads the encoded update log and raw custom metadata together, without
+subscribing to a live document, appending merged editor updates or compacting the
+source. Missing caches remain absent. Blocked opens time out; a late open cannot
+create a cache after that failure. Unsupported schemas, record types and malformed
+updates fail without changing the source. Encoded updates retain missing
+dependencies, and the temporary recovery document disables garbage collection to
+preserve deleted content still present in the source. Tests cover later recovery
+of missing dependencies, retained deleted content and cache immutability.
+
+The snapshot reader exposes raw metadata for the forthcoming retained-work export;
+the current structural archive does not yet serialize every custom metadata value.
+
 Native/mobile filesystem acceptance remains pending. Capture still keeps the
 affected source data in memory; streaming and larger resumable archives remain
 separate work. This does not provide safe restored-cache resumption, automatic

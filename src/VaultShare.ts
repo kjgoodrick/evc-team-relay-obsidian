@@ -23,6 +23,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
+import { readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { ProviderBacked, type ConnectionIntent } from "./ProviderBacked";
 import { RelayRestoreRequiredError } from "./auth/RelayOnPremTokenProvider";
 import { SingleFlight, LazyValue, warnIfSlow } from "./asyncCache";
@@ -485,15 +486,15 @@ export class VaultShare extends ProviderBacked {
 				for (const record of records) {
 					if (seen.has(record.id) || (record.type !== "markdown" && record.type !== "canvas")) continue;
 					seen.add(record.id);
-					const doc = new Y.Doc();
-					const store = new LocalDocumentStore(`${this.hostAppId}-relay-${record.type === "canvas" ? "canvas" : "doc"}-${record.id}`, doc);
+					const doc = new Y.Doc({ gc: false });
 					try {
-						await store._dbref; // Includes replay and rejects on database-open failure.
+						const stored = await readDocumentRecoverySnapshot(`${this.hostAppId}-relay-${record.type === "canvas" ? "canvas" : "doc"}-${record.id}`);
+						Y.applyUpdate(doc, stored.update);
 						const live = this.trackedEntries.get(record.id);
 						if (isDocument(live) || isCanvasDocument(live)) Y.applyUpdate(doc, Y.encodeStateAsUpdate(live.crdtDoc));
 						const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(record.id);
 						documents.push({ id: record.id, unsaved, update: Y.encodeStateAsUpdate(doc), text: record.type === "canvas" ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString() });
-					} finally { await store.close(); doc.destroy(); }
+					} finally { doc.destroy(); }
 				}
 				return { files, documents, index: Y.encodeStateAsUpdate(this.crdtDoc) };
 			};
@@ -533,7 +534,7 @@ export class VaultShare extends ProviderBacked {
 					for (const saved of after.documents) {
 						const live = this.trackedEntries.get(saved.id);
 						if (!isDocument(live) && !isCanvasDocument(live)) continue;
-						const merged = new Y.Doc();
+						const merged = new Y.Doc({ gc: false });
 						Y.applyUpdate(merged, saved.update); Y.applyUpdate(merged, Y.encodeStateAsUpdate(live.crdtDoc));
 						saved.update = Y.encodeStateAsUpdate(merged);
 						if (isDocument(live) && live._unsavedFile) saved.unsaved = live._unsavedFile.unsavedText;
