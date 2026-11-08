@@ -18,9 +18,40 @@ a separate recovery operation.
 This is a partial import feature. Waiting commands, unconfirmed online actions
 and server-cancellation recovery drafts are not applied by this panel. They may
 already have reached the server and need exact receipt/withdrawal reconciliation.
-No import read or write contacts the server, resumes delivery, populates shared
-caches or claims that a saved request has not already been accepted. Native
+Ordinary draft import reads/writes remain local. A separate, explicit request
+receipt check can contact the server as described below; it never resumes delivery,
+populates shared caches or claims that a missing receipt proves a request was
+never accepted. Native
 desktop/mobile import acceptance is still pending.
+
+## Reviewing waiting requests
+
+After local archive inspection, **Review waiting requests** pages ten saved
+requests at a time, showing rich bodies, captured targets and dependency counts.
+Opening the page performs no network request. **Check server receipt** is enabled
+only while connected to a server advertising receipt inspection. It submits the
+exact saved request to the read-only status API for the matching server/account/
+shared folder. A different source vault is allowed; a foreign account/share/server
+cannot be checked through the selected identity.
+
+Accepted, cancelled and unknown results appear in the selected card. They do not
+modify the archive, copy requests into the destination, acknowledge an outbox
+operation, cancel a command, create a draft, fetch picture bytes or wake delivery.
+An inaccessible target or failed read remains an error; missing receipts are
+unknown and never trigger replay. Current server read authorization applies even
+if the original note is not available locally or comment permission was revoked.
+Closing the review, changing accounts or losing its active context discards late
+results. Status is transient, not stored as durable acceptance evidence.
+
+Ordinary creation, reply, edit and reaction requests can be checked. A saved
+Bases group request can be checked only when its exact prepared target is already
+in the archive; inspection never acquires a fresh target. Supported lane ranges
+and group summaries preserve that evidence. Picture uploads and unprepared group
+requests show an explanation. Separate saved online actions, reattachments and
+marker changes are not yet included. Original-request import, explicit
+withdrawal/replacement, dependent recovery and restore-epoch fencing remain
+unfinished. Checking the frozen reviewed payload requires no file mutation;
+ordinary draft restoration still revalidates the archive before copying bytes.
 
 ## Applying an ordinary draft
 
@@ -87,9 +118,14 @@ any future sending workflow.
 
 ## Verification
 
-The final plugin regression passes **3,509 tests across 262 suites** (29 tests in
-20 opt-in suites skipped). The focused destination-copy/session/import/UI group
-passes **142 tests**; the earlier import/export/storage checkpoint passed 98.
+The latest plugin regression passes **3,536 tests across 264 suites** (29 tests in
+20 opt-in suites skipped). The request-review/session/group/transport checks pass
+**114 tests**; an additional focused storage/import/transport run passes **66**
+overlapping tests after removing a network-layer import from the local review
+model. Actual HTTP checks verify session-level receipt reads after comment
+revocation and unchanged local rejected requests. Late responses after a review
+context change are discarded. The earlier destination-copy/session/import/UI
+group passed 142 tests; the import/export/storage checkpoint passed 98.
 Preview build/main types and changed-source lint pass; the existing 15
 build warnings remain. Test types report 206 errors/45 signatures against the
 frozen 207/46 baseline, with no new errors.

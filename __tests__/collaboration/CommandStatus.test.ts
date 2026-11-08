@@ -78,6 +78,17 @@ test("a missing endpoint or network error remains an error, never unknown", asyn
 	expect(fetcher).toHaveBeenCalledTimes(2);
 });
 
+test("receipt data arriving after the review context changes is discarded", async () => {
+	let finish!: (value: Response) => void, current = true;
+	const fetcher = jest.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
+	const reading = new DiscussionTransport(identity, credential, fetcher).commandStatus(operation(), () => current);
+	const rejected = expect(reading).rejects.toMatchObject({ code: "action_context_changed" });
+	for (let i = 0; i < 10 && !finish; i++) await Promise.resolve();
+	expect(fetcher).toHaveBeenCalledTimes(1);
+	current = false; finish(response({ status: "accepted", result: result() }));
+	await rejected;
+});
+
 test("capability negotiation is optional and strictly typed", async () => {
 	const fetcher = jest.fn().mockResolvedValue(response({ protocol_version: 1,
 		features: { discussion_commands: true, discussion_command_status: true } }));

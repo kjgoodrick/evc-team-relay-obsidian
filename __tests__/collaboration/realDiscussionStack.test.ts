@@ -114,9 +114,10 @@ integration("real HTTP commands recover lost replies, persist history/reactions,
 		// Read-only receipt reconciliation is still available with note read
 		// access. It cannot silently accept the local queue or resend unknown work.
 		expect((await transport.capabilities()).commandStatus).toBe(true);
-		expect(await transport.commandStatus(ambiguousRejected)).toMatchObject({ status: "accepted",
+		expect(historySession.canCheckSavedCommand).toBe(true);
+		expect(await historySession.checkSavedCommand(ambiguousRejected, () => true)).toMatchObject({ status: "accepted",
 			result: { operation_id: ambiguous.operationId, message_id: (ambiguous.payload as Record<string, Json>).message_id } });
-		expect(await transport.commandStatus(denied)).toEqual({ status: "unknown" });
+		expect(await historySession.checkSavedCommand(denied, () => true)).toEqual({ status: "unknown" });
 		expect(await store.getOperation(ambiguous.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden" });
 		expect(await store.getOperation(denied.operationId)).toMatchObject({ state: "rejected", error: "comment_forbidden" });
 		expect(await store.entity(fixture.entry, messageKey(thread, message))).toBeUndefined();

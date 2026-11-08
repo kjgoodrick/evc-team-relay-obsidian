@@ -1,10 +1,12 @@
+import { queuedEnvelope } from "./QueuedDiscussionCommand";
+export { queuedEnvelope } from "./QueuedDiscussionCommand";
 import { DISCUSSION_EXPORT_MAX_BYTES, DISCUSSION_EXPORT_CATALOG_MAX_BYTES, parseDiscussionExport, parseExportCatalog } from "./DiscussionExportProtocol";
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { baseRecordIds, parseBaseRecordContexts } from "./BaseRecordContexts";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
 import type { Json, QueuedCommand } from "./storage/DiscussionStore";
 import { parsePictureMetadata, parsePictureRendition, parsePictureUpload, pictureHash, type PictureMetadata, type PictureRendition, type PictureUpload } from "./PictureProtocol";
-import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, parseAnchor, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type BaseRecordType, type DiscussionAnchor } from "./DiscussionProtocol";
+import { BASE_TARGET_KINDS, BASE_RECORD_TYPES, isId, isSequence, sourceAnchor, parseBaseTargetContext, parseChanges, parseHistory, parseMessageRead, parseThreadList, parseThreadPage, parseThreadState, type BaseTargetKind, type BaseRecordType, type DiscussionAnchor } from "./DiscussionProtocol";
 import { parseDiscussionScope } from "./DiscussionScope";
 import { parseBaseDefinitionCatalog, parseBaseDefinitionPage, type BaseDefinitionCatalog } from "./BaseDefinitionProtocol";
 import { parseTimelineAxisContext } from "./TimelineRangeProtocol";
@@ -56,46 +58,6 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 function positive(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }
 
-/** Local scope keys retain managed file identity and, for Bases, saved-view identity. */
-export function queuedEnvelope(shareId: string, op: QueuedCommand): string {
-	const payload = op.payload;
-	const scope = parseDiscussionScope(op.scopeId);
-	if (!validId(shareId) || !validId(op.operationId) || !scope || !object(payload) ||
-		payload.type !== op.type || !validId(payload.thread_id) || !validId(payload.message_id) ||
-		!["thread.create", "reply.create", "message.edit", "reaction.set"].includes(op.type)) {
-		throw new DiscussionFailure("reject", "invalid_local_command");
-	}
-	if (op.type === "reply.create" && (payload.reopen !== undefined && payload.reopen !== false ||
-		payload.expected_state_revision != null)) throw new DiscussionFailure("reject", "online_command_required");
-	let body: string;
-	try {
-		body = JSON.stringify({ protocol_version: 1, operation_id: op.operationId, share_id: shareId,
-			entry_id: scope.entryId, command: payload });
-	} catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
-	let limit = 65536;
-	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "base") {
-		try { const anchor = parseAnchor(payload.anchor);
-			if (scope.viewId !== undefined && (anchor.type !== "base" || anchor.view_id !== scope.viewId)) throw new Error("Wrong saved view");
-			if (anchor.type === "base" && (anchor.target.type === "group" || anchor.target.type === "group_summary" || anchor.target.type === "timeline_range" && anchor.target.lane)) limit = 256 * 1024;
-		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
-	}
-	if (op.type === "thread.create" && scope.viewId !== undefined && (!object(payload.anchor) || payload.anchor.type !== "base")) throw new DiscussionFailure("reject", "invalid_local_anchor");
-	if (op.type === "thread.create" && object(payload.anchor) && payload.anchor.type === "image_file") {
-		try {
-			const anchor = parseAnchor(payload.anchor);
-			if (anchor.type !== "image_file" || anchor.asset.entry_id !== op.scopeId) throw new Error("Wrong image file");
-		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
-	}
-	if (op.type === "thread.create" && object(payload.anchor) && ["text", "image"].includes(String(payload.anchor.type))) {
-		try {
-			const anchor = sourceAnchor(parseAnchor(payload.anchor));
-			if (!anchor || anchor.document_id !== op.scopeId) throw new Error("Wrong document");
-		} catch { throw new DiscussionFailure("reject", "invalid_local_anchor"); }
-		limit = 256 * 1024;
-	}
-	if (new TextEncoder().encode(body).byteLength > limit) throw new DiscussionFailure("reject", "command_too_large");
-	return body;
-}
 
 export type OnlineOperation = { operationId: string; scopeId: string; payload: Json };
 export type WithdrawalResult = { status: "withdrawn" } | { status: "accepted"; result: CommandResult };
@@ -176,6 +138,7 @@ export class DiscussionTransport implements DiscussionSender {
 	private async readCommandStatus(operation: OnlineOperation, body: string, current?: () => boolean): Promise<CommandStatus> {
 		const captured = { ...operation, payload: (JSON.parse(body) as { command: Json }).command };
 		const value = await this.request("/commands/status", body, { current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
 		if (object(value) && value.status === "accepted") return { status: "accepted", result: accepted(value.result, captured) };
 		if (!object(value) || !["withdrawn", "unknown"].includes(String(value.status)) || value.operation_id !== captured.operationId ||
 			value.entry_id !== parseDiscussionScope(captured.scopeId)?.entryId) throw new DiscussionFailure("pause", "invalid_command_status_response");

@@ -8,6 +8,7 @@ import { bodyFromText, parseAnchor, protocolJson, type BaseAnchor } from "../../
 import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGroupCommand, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 import { prepareLocalPicture } from "../../src/collaboration/PictureProtocol";
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
+import { savedCommandReview } from "../../src/collaboration/SavedCommandReview";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -68,6 +69,16 @@ test("pending lane ranges preserve exact coordinates while only a verified recei
 		{ ...rangeTarget(), range: { ...rangeTarget().range, unit: "pixels" } }, { ...rangeTarget(), type: "group" }]) {
 		expect(() => parseLocalDiscussionAnchor({ ...target(), range })).toThrow();
 	}
+});
+
+test.each(["group", "range", "summary"])("receipt review preserves the previously prepared %s target and cannot create one", kind => {
+	const operation = kind === "range" ? rangeCommand() : kind === "summary" ? summaryCommand() : command();
+	expect(() => savedCommandReview(operation, identity.shareId)).toThrow("no saved final target");
+	const before = JSON.stringify(operation), captured = anchor();
+	const review = savedCommandReview({ ...operation, preparedAnchor: protocolJson(captured) }, identity.shareId);
+	expect(queuedEnvelope(identity.shareId, review.operation)).toBe(queuedEnvelope(identity.shareId, prepareBaseGroupCommand(operation, captured)));
+	expect(JSON.stringify(operation)).toBe(before);
+	expect(() => savedCommandReview({ ...operation, preparedAnchor: protocolJson({ ...captured, view_id: id(99) }) }, identity.shareId)).toThrow();
 });
 
 test.each(["range", "summary"])("%s capture and send response loss recover across cache reopen without dropping the selection", async kind => {

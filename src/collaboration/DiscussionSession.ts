@@ -11,6 +11,7 @@ import { parseLocalDiscussionAnchor, parsePendingBaseGroupCommand, prepareBaseGr
 import { DiscussionReattachment } from "./DiscussionReattachment";
 import { saveLocalWorkRecovery, type LocalWorkIO } from "./LocalWorkRecovery";
 import { restoreLocalDraft } from "./LocalDraftImport";
+import { savedCommandReview } from "./SavedCommandReview";
 import type { InspectedLocalWork, LocalWorkImportIO } from "./LocalWorkImport";
 import { copySavedDraft, reviewSavedDraftCopy, type SavedDraftCopyReview } from "./SavedDraftCopy";
 import type { ReviewedAbandonment } from "./storage/DiscussionStore";
@@ -83,6 +84,7 @@ export class DiscussionSession {
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
 	private recoveryEnabled = false;
+	private commandStatusEnabled = false;
 	private moderationRecoveryEnabled = false;
 	private inboxEnabled = false;
 	private searchEnabled = false;
@@ -229,6 +231,20 @@ export class DiscussionSession {
 	get canSearch(): boolean { return this.online && this.searchEnabled; }
 	get canReattach(): boolean { return this.online && this.reattachEnabled; }
 	get canRecoverSavedCommand(): boolean { return this.online && this.recoveryEnabled; }
+	get canCheckSavedCommand(): boolean { return this.online && this.commandStatusEnabled; }
+	/** Receipt inspection needs no cached source note, and never alters the queue. */
+	checkSavedCommand(operation: QueuedCommand & Pick<OutboxOperation, "preparedAnchor">, visible: () => boolean) {
+		return this.trackLocal((async () => {
+			const epoch = this.authenticationEpoch, current = () => visible() && this.canCheckSavedCommand && epoch === this.authenticationEpoch;
+			if (!current()) throw new Error("Connect to a server that supports receipt inspection before checking this saved request.");
+			const review = savedCommandReview(operation, this.identity.shareId);
+			try { return await this.transport.commandStatus(review.operation, current); }
+			catch (error) {
+				if (epoch === this.authenticationEpoch && error instanceof DiscussionFailure && error.action === "authenticate") this.requireAuthentication();
+				throw error;
+			}
+		})());
+	}
 	canReviewRemoved(scopeId: string): boolean { return this.online && this.moderationRecoveryEnabled && this.permission(scopeId)?.read === true && this.permission(scopeId)?.moderate === true; }
 	/** Explicit administrative reads never enter the normal cache or outbox. */
 	private reviewRead<T>(scopeId: string, visible: () => boolean, read: (current: () => boolean) => Promise<T>): Promise<T> {
@@ -373,6 +389,7 @@ export class DiscussionSession {
 			this.imageFilesEnabled = capability.imageFiles === true;
 			this.picturesEnabled = capability.pictures === true;
 			this.recoveryEnabled = capability.recovery === true;
+			this.commandStatusEnabled = capability.commandStatus === true;
 			this.moderationRecoveryEnabled = capability.moderationRecovery === true;
 			this.inboxEnabled = capability.inbox === true;
 			this.searchEnabled = capability.search === true;
