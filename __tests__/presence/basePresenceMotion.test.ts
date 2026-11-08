@@ -80,6 +80,23 @@ test("authenticated pointers use exact records, clipped geometry and text labels
 	} finally { f.close(); }
 });
 
+test("native renderer replacement and temporary hidden geometry recover without another peer event", async () => {
+	const f = fixture(), bounds = f.layer.getBoundingClientRect;
+	try {
+		f.layer.getBoundingClientRect = () => f.layer.hidden ? new DOMRect() : bounds();
+		Object.defineProperties(f.layer, {
+			clientWidth: { configurable: true, get: () => f.layer.hidden ? 0 : 400 },
+			clientHeight: { configurable: true, get: () => f.layer.hidden ? 0 : 300 },
+		});
+		f.motion.setPeers([f.peer]); await settle(); expect(f.layer.children).toHaveLength(1);
+		f.active(false); f.motion.refresh(); await settle(); expect(f.layer.hidden).toBe(true);
+		f.active(true); f.motion.refresh(); await settle(); expect(f.layer.hidden).toBe(false); expect(f.layer.children).toHaveLength(1);
+		// Obsidian may replace the host contents while selecting a saved view.
+		f.content.replaceChildren(f.renderer.containerEl); f.rebind(); await settle();
+		expect(f.layer.isConnected).toBe(true); expect(f.layer.children).toHaveLength(1);
+	} finally { f.close(); }
+});
+
 test("Jump targets the pointer and Follow targets the viewport without changing selection or saved view", async () => {
 	const f = fixture();
 	try {

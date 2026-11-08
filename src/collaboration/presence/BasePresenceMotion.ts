@@ -205,6 +205,11 @@ export class BasePresenceMotion {
 	}
 	private paintCurrent(): void {
 		const snapshot = this.snapshot(), wanted = new Set<string>();
+		// Native saved-view changes may replace the host's children. The same
+		// verified surface can recover its owned layer without a new peer frame.
+		if (snapshot && !this.root.contains(this.layer)) this.root.append(this.layer);
+		// Hidden elements have no native layout box; show before measuring.
+		this.layer.hidden = !snapshot;
 		const box = this.layer.getBoundingClientRect(), sx = box.width / this.layer.clientWidth, sy = box.height / this.layer.clientHeight;
 		const handles = snapshot?.surface.handles() ?? [], files = [...new Set(handles.flatMap(handle => "file" in handle.target ? [handle.target.file] : []))];
 		const groups = snapshot && this.peers.some(peer => { const target = peer.baseState?.pointer?.target; return target?.type === "group" || target?.type === "timeline_range" && !!target.lane; }) ? this.groups?.frame(snapshot.surface) : undefined;

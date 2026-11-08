@@ -880,10 +880,10 @@ test("Live Preview widget maps image presence to the exact bound CodeMirror occu
     }
 });
 
-function baseMotionFixture() {
+function baseMotionFixture(multiWatch = false) {
 	const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 	const read = jest.fn(async (entry: string) => ({ protocol_version: 1, share_id: id(3), entry_id: entry, generation: id(50 + Number(entry.slice(-12))), type: "markdown" }));
-	const network = crossNetwork(true, undefined, false, () => f.base!.context, entry => read(entry)), f = fixture(true, false, true), base = f.base!;
+	const network = crossNetwork(true, undefined, false, () => f.base!.context, entry => read(entry), multiWatch), f = fixture(true, false, true), base = f.base!;
 	const rows = base.setRecords(f.notes.map(note => note.view.file!))[0], renderer = base.renderers[0];
 	function box(element: HTMLElement, width: number, height: number, left = 0, top = 0) {
 		Object.defineProperties(element, { offsetWidth: { value: width, configurable: true }, offsetHeight: { value: height, configurable: true }, clientWidth: { value: width, configurable: true }, clientHeight: { value: height, configurable: true } });
@@ -894,12 +894,133 @@ function baseMotionFixture() {
 	const state = (record = 1, generation = 50 + record, x = 0.25) => ({ version: 1, pointer: { target: { type: "cell", record_id: id(record), record_generation: id(generation), property: { source: "note", name: "status" } }, offset: { x, y: 0.5 } }, viewport: null });
 	const send = (record = 1, generation = 50 + record, x = 0.25) => { const socket = network.sockets[0]; socket.message({ type: "base_states", subscription_id: socket.frames.filter(frame => frame.type === "watch").at(-1)!.subscription_id, status: "available",
 		peers: [{ target: { user_id: id(8), session_id: "a".repeat(32), instance_id: id(9) }, state: state(record, generation, x) }] }); };
-	return { f, base, network, rows, renderer, read, state, send, open: async () => {
+	return { f, base, network, rows, renderer, read, state, send, box, open: async () => {
 		await until(() => network.sockets.length === 1); const socket = network.sockets[0]; socket.ready(); f.select(base.view);
 		await until(() => socket.frames.some(frame => frame.type === "watch" && frame.base_states === true));
 		const layer = base.content.querySelector<HTMLElement>(".relay-base-presence")!; box(layer, 400, 300); socket.roster(); return { socket, layer };
 	}, close: () => { f.close(); network.close(); } };
 }
+
+test("passive Bases preserve exact cells across foreground changes and isolate saved views and denial", async () => {
+	const m = baseMotionFixture(true), { f, base } = m;
+	f.extraViews.push(base.view);
+	base.content.getClientRects = () => [base.content.getBoundingClientRect()] as unknown as DOMRectList;
+	const target = { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" };
+	try {
+		await until(() => m.network.sockets.length === 1); const socket = m.network.sockets[0]; socket.ready();
+		const observations = () => socket.frames.filter(frame => frame.type === "observe" && (frame.location as { kind: string }).kind === "base");
+		await until(() => observations().length === 1);
+		const initial = observations()[0].subscription_id, sourceReads = f.vault.read.mock.calls.length;
+		const send = (subscription_id: unknown, name = "Base peer") => {
+			socket.message({ type: "roster", subscription_id, status: "available", peers: [{ target, name }] });
+			socket.message({ type: "base_states", subscription_id, status: "available", peers: [{ target, state: m.state() }] });
+		};
+		const layer = base.content.querySelector<HTMLElement>(".relay-base-presence")!; m.box(layer, 400, 300);
+		send(initial); await until(() => layer.querySelector(".relay-base-presence-pointer")?.textContent === "Base peer");
+		expect(layer.querySelector<HTMLElement>(".relay-base-presence-pointer")?.style.left).toBe("250px");
+		expect(f.controller.peers).toEqual([]);
+		m.rows[0].cells[1].el.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 250, clientY: 75 })); await settled();
+		expect(socket.frames.some(frame => frame.type === "base_state")).toBe(false);
+		f.select(f.notes[1].view); await settled(); expect(observations()).toHaveLength(1);
+		expect(layer.querySelector(".relay-base-presence-pointer")?.textContent).toBe("Base peer");
+		await f.controller.setVisible(false); expect(layer.querySelector(".relay-base-presence-pointer")).not.toBeNull();
+		base.controller.selectView("Cards");
+		const cards = base.renderers[1]; m.box(cards.containerEl, 400, 300); m.box(cards.scrollEl, 400, 200, 0, 40);
+		for (const row of cards.rows as { el: HTMLElement; cells: { el: HTMLElement }[] }[]) {
+			m.box(row.el, 400, 50, 0, 50); row.cells.forEach((cell, index) => m.box(cell.el, 200, 50, index * 200, 50));
+		}
+		await until(() => observations().length === 2);
+		expect(observations()[1].location).toEqual(base.location(1));
+		expect(socket.frames.some(frame => frame.type === "unobserve" && frame.subscription_id === initial)).toBe(true);
+		send(initial, "Stale peer"); await settled(); expect(base.content.textContent).not.toContain("Stale peer");
+		send(observations()[1].subscription_id);
+		await until(() => base.content.querySelector(".relay-base-presence-pointer")?.textContent === "Base peer");
+		expect(f.vault.read).toHaveBeenCalledTimes(sourceReads);
+		const denied = observations()[1].subscription_id;
+		socket.message({ type: "roster", subscription_id: denied, status: "unavailable" }); await settled();
+		expect(base.content.querySelector(".relay-base-presence-pointer")).toBeNull(); expect(f.controller.canRetry).toBe(true);
+		for (let i = 0; i < 10; i++) f.controller.refresh(); await settled(); expect(observations()).toHaveLength(2);
+		f.controller.retry(); await until(() => observations().length === 3); send(observations()[2].subscription_id);
+		await until(() => base.content.querySelector(".relay-base-presence-pointer")?.textContent === "Base peer");
+		expect(f.vault.read.mock.calls.length).toBeGreaterThan(sourceReads);
+		f.logout(); expect(base.content.querySelector(".relay-base-presence")).toBeNull(); expect(m.network.sockets).toHaveLength(1);
+	} finally { m.close(); }
+});
+
+test("passive Base copies share one proof and a pane budget while saved-view rosters stay independent", async () => {
+	const m = baseMotionFixture(true), { f, base } = m, copies = Array.from({ length: 10 }, () => nativePresenceBase());
+	const target = { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" };
+	const layout = (copy: ReturnType<typeof nativePresenceBase>) => {
+		m.box(copy.root, 400, 300); m.box(copy.content, 400, 300);
+		copy.content.getClientRects = () => [copy.content.getBoundingClientRect()] as unknown as DOMRectList;
+		for (const renderer of copy.renderers) {
+			m.box(renderer.containerEl, 400, 300); m.box(renderer.scrollEl, 400, 200, 0, 40);
+			for (const row of renderer.rows as { el: HTMLElement; cells: { el: HTMLElement }[] }[]) {
+				m.box(row.el, 400, 50, 0, 50); row.cells.forEach((cell, index) => m.box(cell.el, 200, 50, index * 200, 50));
+			}
+		}
+	};
+	try {
+		for (const copy of copies) {
+			copy.host.file = base.file; copy.query.file = base.file; copy.setRecords(f.notes.map(note => note.view.file!)); layout(copy); f.extraViews.push(copy.view);
+		}
+		await until(() => m.network.sockets.length === 1); const socket = m.network.sockets[0]; socket.ready();
+		const observations = () => socket.frames.filter(frame => frame.type === "observe" && (frame.location as { kind: string }).kind === "base");
+		await until(() => observations().length === 1);
+		expect(document.querySelectorAll(".relay-base-presence")).toHaveLength(8);
+		expect(f.vault.read).toHaveBeenCalledTimes(1);
+		expect(jest.mocked(platformFetch).mock.calls.filter(([url]) => String(url).includes("/base-context?"))).toHaveLength(1);
+		for (const copy of copies.slice(0, 8)) m.box(copy.content.querySelector<HTMLElement>(".relay-base-presence")!, 400, 300);
+		const send = (subscription_id: unknown, name: string) => {
+			socket.message({ type: "roster", subscription_id, status: "available", peers: [{ target, name }] });
+			socket.message({ type: "base_states", subscription_id, status: "available", peers: [{ target, state: m.state() }] });
+		};
+		const work = observations()[0].subscription_id; send(work, "Work peer");
+		await until(() => document.querySelectorAll(".relay-base-presence-pointer").length === 8);
+		copies[0].controller.selectView("Cards"); await until(() => observations().length === 2);
+		const cards = observations()[1].subscription_id; send(cards, "Cards peer");
+		await until(() => copies[0].content.querySelector(".relay-base-presence-pointer")?.textContent === "Cards peer");
+		expect(copies[1].content.querySelector(".relay-base-presence-pointer")?.textContent).toBe("Work peer");
+		expect(observations()[1].location).toEqual(base.location(1)); expect(f.vault.read).toHaveBeenCalledTimes(1);
+		socket.message({ type: "roster", subscription_id: cards, status: "unavailable" }); await settled();
+		expect(copies[0].content.querySelector(".relay-base-presence-pointer")).toBeNull();
+		expect(copies[1].content.querySelector(".relay-base-presence-pointer")?.textContent).toBe("Work peer");
+		for (let i = 0; i < 10; i++) f.controller.refresh(); await settled(); expect(observations()).toHaveLength(2);
+		f.extraViews.splice(0); f.controller.refresh(); expect(document.querySelectorAll(".relay-base-presence")).toHaveLength(0);
+		expect(socket.frames.some(frame => frame.type === "unobserve" && frame.subscription_id === work)).toBe(true);
+		expect(m.network.sockets).toHaveLength(1); expect(f.controller.peers).toEqual([]);
+	} finally { m.close(); copies.forEach(copy => copy.close()); }
+});
+
+test("same-view Base copies reuse the foreground roster and move together to passive observation", async () => {
+	const m = baseMotionFixture(true), { f, base } = m, copy = nativePresenceBase();
+	copy.host.file = base.file; copy.query.file = base.file; const rows = copy.setRecords(f.notes.map(note => note.view.file!))[0];
+	for (const element of [copy.root, copy.content, copy.renderers[0].containerEl, copy.renderers[0].scrollEl]) m.box(element, 400, 300);
+	rows.forEach(row => { m.box(row.el, 400, 50, 0, 50); row.cells.forEach((cell, index) => m.box(cell.el, 200, 50, index * 200, 50)); });
+	for (const view of [base.view, copy.view]) view.contentEl.getClientRects = () => [view.contentEl.getBoundingClientRect()] as unknown as DOMRectList;
+	f.extraViews.push(base.view, copy.view);
+	try {
+		const { socket, layer } = await m.open();
+		await until(() => !!copy.content.querySelector(".relay-base-presence"));
+		m.box(copy.content.querySelector<HTMLElement>(".relay-base-presence")!, 400, 300); m.send();
+		await until(() => copy.content.querySelector(".relay-base-presence-pointer") !== null);
+		expect(layer.querySelector(".relay-base-presence-pointer")).not.toBeNull();
+		const observations = () => socket.frames.filter(frame => frame.type === "observe" && (frame.location as { kind: string }).kind === "base");
+		const before = observations().length;
+		f.select(f.notes[0].view); await until(() => observations().length > before);
+		const subscription_id = observations().at(-1)!.subscription_id;
+		const target = { user_id: "00000000-0000-4000-8000-000000000008", session_id: "a".repeat(32), instance_id: "00000000-0000-4000-8000-000000000009" };
+		socket.message({ type: "roster", subscription_id, status: "available", peers: [{ target, name: "Shared Base peer" }] });
+		socket.message({ type: "base_states", subscription_id, status: "available", peers: [{ target, state: m.state() }] });
+		await until(() => base.content.querySelector(".relay-base-presence") !== null);
+		m.box(base.content.querySelector<HTMLElement>(".relay-base-presence")!, 400, 300); f.controller.refresh();
+		await until(() => document.querySelectorAll(".relay-base-presence-pointer").length === 2);
+		expect(f.controller.peers).toEqual([]); expect(m.network.sockets).toHaveLength(1);
+		f.select(copy.view); await settled();
+		expect(socket.frames.some(frame => frame.type === "unobserve" && frame.subscription_id === subscription_id)).toBe(true);
+		expect(document.querySelectorAll(".relay-base-presence")).toHaveLength(2);
+	} finally { m.close(); copy.close(); }
+});
 
 test("foreground Bases publish exact cells, render remote cursors, Jump/Follow and preserve hidden observation", async () => {
 	const m = baseMotionFixture();

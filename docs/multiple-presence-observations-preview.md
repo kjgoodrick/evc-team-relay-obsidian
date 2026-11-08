@@ -1,4 +1,4 @@
-# Multiple presence observations: transport, note and image panes
+# Multiple presence observations: transport and visible panes
 
 November 7, 2026. The optional `presence_multi_watch_preview` capability allows
 up to eight additional note/image/saved-view subscriptions on the existing
@@ -123,5 +123,52 @@ The 62 focused host/motion tests include shared pane limits, duplicate proof/byt
 reuse, foreground isolation, denial/retry, preserved subscriptions, no passive
 publication and hidden-layout recovery. Server code is unchanged.
 
-Passive Bases panes, broader cross-share/native two-client coverage, physical
-mobile/touch, resource and accessibility acceptance remain.
+The next checkpoint below adds passive Bases panes. Broader cross-share/native
+two-client coverage, physical mobile/touch, resource and accessibility acceptance
+remain.
+
+## Passive saved Bases views
+
+Visible saved Bases panes now keep their own verified saved-view identity while a
+note, image or another Base is active. Notes, images and Bases share a budget of
+eight passive panes, in that priority order. Duplicate Base panes share a bounded
+source/context cache and a subscription per exact saved-view scope. Copies of the
+foreground view reuse its roster. Moving between foreground files preserves
+eligible passive Base observers; account changes, hidden panes and unload release
+them. A single optional Time & Line bridge serves all visible Bases panes.
+
+Records are authorized in each pane's own share. Each saved view keeps independent
+roster/state and denial handling; Retry obtains fresh verification. Passive panes
+do not publish activity or interrupt foreground Follow. Native renderer replacement
+now restores the owned overlay layer, and hidden geometry recovers after making
+the layer measurable. Regression tests failed before these geometry fixes and
+pass afterward.
+
+Native Obsidian 1.13.7 used `/private/tmp/evc-passive-bases-native-20261107` with the
+local Time & Line provider and a synthetic read-only Bob protocol peer:
+
+- Table status-cell movement at 25% and 75% appears beside an active Live Preview
+  note. Switching to Cards clears the Table participant; Cards-specific cell
+  publication appears on the correct record/property.
+- The timeline's exact SVG item supports visible pointer movement. A clipped
+  coordinate stays hidden, and an unexposed table-sidebar cell does not borrow
+  another target's geometry. The native Hours-to-Week setting changes the saved
+  Base; the test peer refreshed its registry revision after synchronization.
+- Hidden owner presence, full reload, subsequent movement, remote withdrawal and
+  resumption pass. The independent awareness peer observes the owner's withdrawal.
+  Foreground Reading view also retains the passive timeline pointer.
+- The note hash is unchanged. The Base hash matches the deliberately changed week
+  scale; presence itself made no file edits. Read-only diagnostics were cleared by
+  full reload. The test vault is closed, the original vault window restored, and
+  the peer and local services stopped.
+
+Evidence: `/private/tmp/passive-bases-native-evidence.json` and
+`/private/tmp/passive-bases-native-peer.log`. Automated checks cover saved-view
+isolation, independent denial/retry, eight-pane limits, duplicate proof/source
+reuse, foreground/passive handoff, no passive publication, stale frames and
+renderer/hidden-layout recovery. Build/main types and changed-source lint pass;
+frozen test types remain at 206 errors / 45 signatures within the baseline.
+Full regression validation passes **3,293 tests / 250 suites**, with 22
+environment-specific tests skipped.
+No server change or production deployment was required. Broader native two-client,
+cross-share, mobile/touch, accessibility and resource acceptance remain.

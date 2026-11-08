@@ -22,12 +22,14 @@ import { presencePeers, type PresencePeer } from "./PresencePeers";
 import type { YSweetProvider } from "../../client/provider";
 import type { BaseStatesEvent } from "./BasePositionProtocol";
 import type { BaseLocalRecord } from "./BasePresenceRecords";
+import type { BasePresenceContext } from "./BasePresenceProtocol";
 
 type Context = { key: string; serverId: string; identity: LocationIdentity; file: TFile; folder: VaultShare; id: string; kind: "note" | "image" | "base"; location?: NoteLocation };
 type Callbacks = { changed: () => void; location: (event: LocationEvent) => void; stopped: () => void; interacted?: () => void; positions?: () => void };
 export type NoteImageObserver = { view: MarkdownView; text: Y.Text; provider: YSweetProvider; current: () => boolean;
 	targets: (images: ImageOccurrence[]) => RenderedImageTarget[] };
 type ImageObserver = { surface: ImagePresenceSurface; context: Context };
+type BaseObserver = { surface: BasePresenceSurface; context: Context };
 type EmbeddedObserver = { surface: EmbeddedImageSurface; mode: string; scope: NoteImageObserver; context: Context; stop: () => void };
 const noteScopeKey = (scope: Pick<NoteLocation, "share_id" | "entry_id">) => JSON.stringify([scope.share_id, scope.entry_id]);
 
@@ -44,6 +46,9 @@ export class LocationHost extends Component {
 	private deniedImages = new Set<string>();
 	private imageProofs = new Map<string, Promise<ImageLocation>>();
 	private base?: BasePresenceSurface;
+	private baseObservers = new Map<FileView, BaseObserver>();
+	private observerBaseStates = new Map<string, BaseStatesEvent>();
+	private baseProofs = new Map<string, { context: Promise<BasePresenceContext>; source: Promise<string> }>();
 	private timeline?: TimelineBridgeClient;
 	private roster?: SurfaceRosterEvent;
 	private imageStates?: ImageStatesEvent;
@@ -83,6 +88,7 @@ export class LocationHost extends Component {
 	get surfaceState(): ImagePresenceSurface["state"] { return this.baseActive ? this.base?.state ?? "waiting" : this.imageState; }
 	get imageState(): ImagePresenceSurface["state"] { return this.image?.state ?? "waiting"; }
 	get imageObserverUnavailable(): boolean { return [...this.imageObservers.values()].some(({ surface }) => surface.state === "unavailable"); }
+	get baseObserverUnavailable(): boolean { return [...this.baseObservers.values()].some(({ surface }) => surface.state === "unavailable"); }
 	get imagePeers(): SurfacePresencePeer[] { return this.imageActive ? this.surfacePeers : []; }
 	get surfacePeers(): SurfacePresencePeer[] {
 		return this.peersFor(this.currentLocation, this.roster, this.imageStates, this.baseStates);
@@ -97,7 +103,7 @@ export class LocationHost extends Component {
 			userId: peer.target.user_id, sessionId: peer.target.session_id, instanceId: peer.target.instance_id, name: peer.name, surface: scope.kind, location: scope, imageState: positions?.get(JSON.stringify(peer.target)), baseState: basePositions?.get(JSON.stringify(peer.target)) }))
 			.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 	}
-	retry(): void { this.embedDenied = false; this.observerDenied.clear(); this.deniedImages.clear(); this.imageProofs.clear(); this.channel?.retry(); this.image?.retry(); this.base?.retry(); this.embedded?.retry(); for (const { surface } of this.embedObservers.values()) surface.retry(); for (const { surface } of this.imageObservers.values()) surface.retry(); }
+	retry(): void { this.embedDenied = false; this.observerDenied.clear(); this.deniedImages.clear(); this.imageProofs.clear(); this.baseProofs.clear(); this.channel?.retry(); this.image?.retry(); this.base?.retry(); this.embedded?.retry(); for (const { surface } of this.embedObservers.values()) surface.retry(); for (const { surface } of this.imageObservers.values()) surface.retry(); for (const { surface } of this.baseObservers.values()) surface.retry(); }
 	unfollow(): void { this.channel?.unfollow(); this.base?.cancelNavigation(); }
 	cancelSurfaceNavigation(): void { this.base?.cancelNavigation(); }
 	follow(peer: ActivePresencePeer): string | undefined {
@@ -133,29 +139,34 @@ export class LocationHost extends Component {
 		observer.surface.setPeers(embeds, foreground ? this.notePeers : observer.scope.current() ? presencePeers(observer.scope.provider.awareness) : []);
 	}
 	private syncObservations(): void {
-		const notes = new Map<string, NoteLocation>(), images = new Map<string, ImageLocation>();
+		const notes = new Map<string, NoteLocation>(), images = new Map<string, ImageLocation>(), bases = new Map<string, BaseLocation>();
 		for (const observer of this.embedObservers.values()) if (!this.foregroundNote(observer.context)) {
 			const location = observer.context.location!; notes.set(noteScopeKey(location), location);
 		}
 		for (const observer of this.imageObservers.values()) if (!this.foregroundImage(observer.context)) {
 			const location = observer.surface.location; if (location) images.set(JSON.stringify(location), location);
 		}
+		for (const observer of this.baseObservers.values()) {
+			const location = observer.surface.location;
+			if (location && !this.foregroundBase(location)) bases.set(JSON.stringify(location), location);
+		}
 		// Note panes get a stable priority. The host also bounds total passive
 		// panes, but a transition can briefly retain the preceding image set.
-		const wanted = [...notes.values(), ...images.values()].slice(0, 8), keys = new Set(wanted.map(scope => JSON.stringify(scope)));
+		const wanted = [...notes.values(), ...images.values(), ...bases.values()].slice(0, 8), keys = new Set(wanted.map(scope => JSON.stringify(scope)));
 		for (const key of this.observerEmbeds.keys()) if (!notes.has(key)) this.observerEmbeds.delete(key);
 		for (const key of this.observerDenied) if (!notes.has(key)) this.observerDenied.delete(key);
 		for (const key of this.observerRosters.keys()) if (!keys.has(key)) this.observerRosters.delete(key);
 		for (const key of this.observerImageStates.keys()) if (!keys.has(key)) this.observerImageStates.delete(key);
+		for (const key of this.observerBaseStates.keys()) if (!keys.has(key)) this.observerBaseStates.delete(key);
 		this.channel?.observe(wanted);
 	}
 	private observation(event: ObservationEvent): void {
 		if (event.type === "reset") {
 			if (!event.scope) {
 				this.observerEmbeds.clear(); this.observerDenied.clear(); this.observerRosters.clear();
-				this.observerImageStates.clear(); this.deniedImages.clear(); this.imageProofs.clear();
+				this.observerImageStates.clear(); this.observerBaseStates.clear(); this.deniedImages.clear(); this.imageProofs.clear(); this.baseProofs.clear();
 			} else if (event.scope.kind === "note") { this.observerEmbeds.delete(noteScopeKey(event.scope)); this.observerDenied.delete(noteScopeKey(event.scope)); }
-			else { const key = JSON.stringify(event.scope); this.observerRosters.delete(key); this.observerImageStates.delete(key); }
+			else { const key = JSON.stringify(event.scope); this.observerRosters.delete(key); this.observerImageStates.delete(key); this.observerBaseStates.delete(key); }
 		} else if (event.type === "image_embeds" && event.scope) {
 			const key = noteScopeKey(event.scope);
 			if (![...this.embedObservers.values()].some(observer => !this.foregroundNote(observer.context) && noteScopeKey(observer.context.location!) === key)) return;
@@ -169,9 +180,16 @@ export class LocationHost extends Component {
 			if (event.status === "unavailable") for (const observer of observers) {
 				this.deniedImages.add(noteScopeKey({ share_id: observer.context.folder.entityGuid, entry_id: observer.context.id })); observer.surface.deny();
 			}
+		} else if ((event.type === "roster" || event.type === "base_states") && event.scope?.kind === "base") {
+			const key = JSON.stringify(event.scope);
+			const observers = [...this.baseObservers.values()].filter(observer => JSON.stringify(observer.surface.location) === key && !this.foregroundBase(event.scope!));
+			if (!observers.length) return;
+			if (event.type === "roster") this.observerRosters.set(key, event); else this.observerBaseStates.set(key, event);
+			if (event.status === "unavailable") for (const observer of observers) { this.baseProofs.delete(this.baseProofKey(observer.context)); observer.surface.deny(); }
 		} else return;
 		for (const observer of this.embedObservers.values()) this.paintNoteObserver(observer);
 		for (const observer of this.imageObservers.values()) this.paintImageObserver(observer);
+		for (const observer of this.baseObservers.values()) this.paintBaseObserver(observer);
 		if (event.type !== "reset" && event.status === "unavailable") this.callbacks.changed();
 	}
 	/** Visible note panes reuse their existing shared binding and account.
@@ -279,6 +297,87 @@ export class LocationHost extends Component {
 		for (const { surface } of this.imageObservers.values()) surface.close();
 		this.imageObservers.clear(); this.observerRosters.clear(); this.observerImageStates.clear(); this.deniedImages.clear(); this.imageProofs.clear(); this.syncObservations();
 	}
+	private foregroundBase(location: SurfaceLocation | undefined): boolean {
+		return location?.kind === "base" && this.context?.kind === "base" && JSON.stringify(location) === JSON.stringify(this.base?.location);
+	}
+	private paintBaseObserver(observer: BaseObserver): void {
+		const location = observer.surface.location, key = JSON.stringify(location);
+		observer.surface.setPeers(this.foregroundBase(location) ? this.surfacePeers : this.peersFor(location, this.observerRosters.get(key), undefined, this.observerBaseStates.get(key)));
+		observer.surface.refreshMovement();
+	}
+	private baseProofKey(context: Context): string {
+		return JSON.stringify([context.folder.entityGuid, context.id, this.entry(context.file)?.hash, context.file.stat.mtime, context.file.stat.size]);
+	}
+	private baseProof(context: Context): { context: Promise<BasePresenceContext>; source: Promise<string> } {
+		const key = this.baseProofKey(context);
+		let proof = this.baseProofs.get(key);
+		if (!proof) {
+			proof = { context: this.channel!.readBaseContext(context.folder.entityGuid, context.id), source: this.plugin.app.vault.read(context.file) };
+			if (this.baseProofs.size >= 8) this.baseProofs.delete(this.baseProofs.keys().next().value!);
+			this.baseProofs.set(key, proof);
+		}
+		return proof;
+	}
+	private ensureTimeline(): void {
+		if (this.timeline) return;
+		this.timeline = new TimelineBridgeClient(this.plugin.app.workspace, () => {
+			this.base?.refresh(); for (const { surface } of this.baseObservers.values()) surface.refresh(); this.callbacks.changed();
+		});
+		this.timeline.start();
+	}
+	/** Each visible Base keeps its own saved-view identity and verified records.
+	 * It consumes the remaining shared pane budget and never publishes activity. */
+	setBaseObservers(views: readonly FileView[]): void {
+		const context = this.context;
+		const eligible = (view: FileView) => {
+			const owner = view.containerEl.ownerDocument;
+			if (!context || this.closed || this.context?.key !== context.key || !this.supportsBases || !this.channel?.supportsMultiWatch ||
+				view === this.view || !view.contentEl.isConnected || !owner.hasFocus() || owner.hidden || !view.contentEl.getClientRects().length) return false;
+			const identity = this.identify(view); return identity?.kind === "base" && identity.key === context.key;
+		};
+		const wanted = new Set(views.filter(eligible).slice(0, Math.max(0, 8 - this.embedObservers.size - this.imageObservers.size)));
+		for (const [view, observer] of this.baseObservers) {
+			const identity = this.identify(view);
+			if (!wanted.has(view) || identity?.key !== observer.context.key || identity.folder !== observer.context.folder || identity.id !== observer.context.id || identity.file !== observer.context.file) {
+				observer.surface.close(); this.baseObservers.delete(view);
+			}
+		}
+		if (wanted.size) this.ensureTimeline();
+		for (const view of wanted) {
+			let observer = this.baseObservers.get(view);
+			if (!observer) {
+				const identity = this.identify(view)!;
+				const current = () => eligible(view) && this.identify(view)?.folder === identity.folder && this.identify(view)?.id === identity.id && view.file === identity.file;
+				observer = { context: identity, surface: this.makeBaseSurface(view, identity, current, true) }; this.baseObservers.set(view, observer);
+			}
+			observer.surface.refresh(); this.paintBaseObserver(observer);
+		}
+		const keys = new Set([...this.baseObservers.values()].map(observer => this.baseProofKey(observer.context)));
+		for (const key of this.baseProofs.keys()) if (!keys.has(key)) this.baseProofs.delete(key);
+		if (context?.kind !== "base" && !this.baseObservers.size) { this.timeline?.close(); this.timeline = undefined; }
+		this.syncObservations();
+	}
+	private closeBaseObservers(): void {
+		for (const { surface } of this.baseObservers.values()) surface.close();
+		this.baseObservers.clear(); this.observerBaseStates.clear(); this.baseProofs.clear(); this.syncObservations();
+	}
+	private makeBaseSurface(view: FileView, context: Context, current: () => boolean, passive = false): BasePresenceSurface {
+		return new BasePresenceSurface(view, context.folder.entityGuid, context.id, {
+			current, connected: () => this.ready, supported: () => this.supportsBases, hash: () => this.entry(context.file)?.hash,
+			inspect: () => NativeBasesSurface.inspect(view, apiVersion, true, this.timeline),
+			read: () => passive ? this.baseProof(context).context : this.channel!.readBaseContext(context.folder.entityGuid, context.id),
+			readSource: () => passive ? this.baseProof(context).source : this.plugin.app.vault.read(context.file),
+			changed: this.callbacks.changed, interacted: () => { if (!passive) this.callbacks.interacted?.(); },
+			motion: {
+				current: () => current() && this.channel?.supportsBaseStates === true,
+				publishing: () => !passive && this.visible, local: file => this.baseRecord(context, file), file: id => this.baseRecordFile(context, id),
+				read: id => this.channel!.readBaseRecordContext(context.folder.entityGuid, id), publish: state => { if (!passive) this.channel?.publishBaseState(this.visible ? state : null); },
+				groups: { supported: () => this.channel?.supportsBaseTargetsV2 === true,
+					resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
+					fileAtPath: path => this.plugin.app.vault.getFileByPath(path) },
+			},
+		});
+	}
 	setNoteSurface(view: MarkdownView | undefined, text: Y.Text | undefined, targets: (images: ImageOccurrence[]) => RenderedImageTarget[], permitted: () => boolean): void {
 		const context = this.context, mode = view?.getMode();
 		if (this.embedded && (this.embedded.view !== view || this.embedded.text !== text || this.embedMode !== mode || !permitted() || !this.channel?.supportsEmbeddedImages)) {
@@ -303,7 +402,9 @@ export class LocationHost extends Component {
 		const wanted = new Set(this.shares.toArray());
 		for (const [folder, stop] of this.folders) if (!wanted.has(folder)) { stop(); this.folders.delete(folder); }
 		for (const folder of wanted) if (!this.folders.has(folder)) {
-			const change = () => { if (this.context?.folder === folder) this.base?.recordsChanged(); this.callbacks.changed(); }, base = folder.crdtDoc.getMap("managed_base_v1");
+			const change = () => { if (this.context?.folder === folder) this.base?.recordsChanged();
+				for (const observer of this.baseObservers.values()) if (observer.context.folder === folder) observer.surface.recordsChanged();
+				this.callbacks.changed(); }, base = folder.crdtDoc.getMap("managed_base_v1");
 			const stop = folder.folderIndex.on(change); base.observe(change);
 			this.folders.set(folder, () => { stop(); base.unobserve(change); });
 		}
@@ -322,7 +423,7 @@ export class LocationHost extends Component {
 	private baseRecord(context: Context | undefined, file: TFile): BaseLocalRecord | undefined {
 		if (!context) return;
 		const folder = context.folder;
-		if (this.closed || this.context !== context || !folder.wantsConnection || folder.isRecoveringStructure || this.plugin.app.vault.getFileByPath(file.path) !== file || this.shares.shareFor(file.path) !== folder) return;
+		if (this.closed || this.context?.key !== context.key || !folder.wantsConnection || folder.isRecoveringStructure || this.plugin.app.vault.getFileByPath(file.path) !== file || this.shares.shareFor(file.path) !== folder) return;
 		const path = folder.toVirtualPath(file.path), record = folder.folderIndex.recordFor(path), index = folder._liveProvider.managedIndex;
 		const permissions = folder.crdtDoc.getMap<{ owner: boolean; permissions: Record<string, string> }>("managed_base_v1").get("snapshot");
 		if (!record || !locationId(record.id) || (record.type !== "markdown" && record.type !== "image" && record.type !== "file") || !index?.registered(path, record.id) || index.isBlocked(path, record.id) || !permissions || !permissions.owner && !["read", "write"].includes(permissions.permissions[path])) return;
@@ -361,7 +462,7 @@ export class LocationHost extends Component {
 			// Reconcile changed/hidden panes below without replacing live scopes.
 			if (this.context?.key !== context?.key) this.closeImageObservers();
 			this.base?.close(); this.base = undefined; this.baseStates = undefined;
-			this.timeline?.close(); this.timeline = undefined;
+			if (this.context?.key !== context?.key) { this.closeBaseObservers(); this.timeline?.close(); this.timeline = undefined; }
 			this.embedded?.close(); this.embedded = undefined; this.embeds = undefined; this.notePeers = []; this.embedDenied = false;
 			this.closeNoteObservers();
 		}
@@ -396,6 +497,7 @@ export class LocationHost extends Component {
 					baseStates: event => {
 						if (!current()) return;
 						this.baseStates = event; this.base?.setPeers(this.baseActive ? this.surfacePeers : []);
+						for (const observer of this.baseObservers.values()) this.paintBaseObserver(observer);
 						if (event.scope && event.status === "unavailable" && JSON.stringify(event.scope) === JSON.stringify(this.currentLocation)) { this.base?.deny(); this.callbacks.stopped(); this.callbacks.changed(); }
 						else this.callbacks.positions?.();
 					},
@@ -423,25 +525,9 @@ export class LocationHost extends Component {
 			this.image.refresh();
 		}
 		if (context.kind === "base" && view) {
-			if (!this.timeline) {
-				this.timeline = new TimelineBridgeClient(this.plugin.app.workspace, () => { this.base?.refresh(); this.callbacks.changed(); });
-				this.timeline.start();
-			}
-			if (!this.base) this.base = new BasePresenceSurface(view, context.folder.entityGuid, context.id, {
-				current: () => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder,
-				connected: () => this.ready, supported: () => this.supportsBases, hash: () => this.entry(context.file)?.hash,
-				inspect: () => NativeBasesSurface.inspect(view, apiVersion, true, this.timeline),
-				read: () => this.channel!.readBaseContext(context.folder.entityGuid, context.id), readSource: () => this.plugin.app.vault.read(context.file),
-				changed: this.callbacks.changed, interacted: () => this.callbacks.interacted?.(),
-				motion: {
-					current: () => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder && this.channel?.supportsBaseStates === true,
-					publishing: () => this.visible, local: file => this.baseRecord(this.context, file), file: id => this.baseRecordFile(this.context, id),
-					read: id => this.channel!.readBaseRecordContext(context.folder.entityGuid, id), publish: state => this.channel?.publishBaseState(this.visible ? state : null),
-					groups: { supported: () => this.channel?.supportsBaseTargetsV2 === true,
-						resolve: (link, source) => this.plugin.app.metadataCache.getFirstLinkpathDest(link, source),
-						fileAtPath: path => this.plugin.app.vault.getFileByPath(path) },
-				},
-			});
+			this.ensureTimeline();
+			if (!this.base) this.base = this.makeBaseSurface(view, context,
+				() => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder);
 			this.base.refresh();
 		}
 		const location = this.currentLocation;
@@ -469,7 +555,7 @@ export class LocationHost extends Component {
 	}
 	onunload(): void {
 		this.closed = true; this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
-		this.closeImageObservers();
+		this.closeImageObservers(); this.closeBaseObservers();
 		this.base?.close(); this.base = undefined; this.baseStates = undefined; this.timeline?.close(); this.timeline = undefined;
 		this.embedded?.close(); this.embedded = undefined; this.embeds = undefined; this.notePeers = [];
 		this.closeNoteObservers();
