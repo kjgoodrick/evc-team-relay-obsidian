@@ -14,6 +14,8 @@ import { SourceSelectionJournal } from "../../src/storage/source-selection-journ
 import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress";
 import { ItemKind } from "../../src/ItemKinds";
 import { trackNativeSourceMutation } from "../../src/storage/native-document-writes";
+import { seedSourceInstallationCaches } from "../../src/SourceInstallationCaches";
+import { openSourceDocumentCache } from "../../src/storage/source-document-cache";
 
 jest.mock("obsidian", () => ({ Platform: { isMobile: false }, FileSystemAdapter: class {} }));
 const encode = (text: string) => new TextEncoder().encode(text).buffer;
@@ -78,8 +80,13 @@ test("real desktop installation preserves originals and source artifacts, create
 	expect(await fs.readFile(path.join(directory, "Team", "Note.md"), "utf8")).toBe("Original offline work");
 	expect(await f.staging.stat(`${f.staged.path}/sources/${f.noteId}.yjs`)).toMatchObject({ type: "file" });
 	expect(vault.createBinary).not.toHaveBeenCalled(); expect(vault.createFolder).not.toHaveBeenCalled();
+	expect(await seedSourceInstallationCaches(f.journal, f.staging, { ...f.request, revision: result.selection.revision! })).toMatchObject({ created: 2, resumed: 0 });
+	const doc = new Y.Doc(), store = await openSourceDocumentCache({ ...f.request.source, s3rn: `${f.request.source.s3rn}:doc:${f.noteId}` }, doc);
+	expect(doc.getText("contents").toString()).toBe(await fs.readFile(installed("Notes/Note.md"), "utf8"));
+	await store.close(); doc.destroy();
 	const again = await reopen(f), resumed = await materializeSourceInstallation(again.journal, f.staging, again.native, again.request);
 	expect(resumed).toMatchObject({ created: 0, resumed: 2 }); expect(await fs.readdir(installed(INSTALLATION_METADATA))).toEqual(["owner.json"]);
+	expect(await seedSourceInstallationCaches(again.journal, f.staging, again.request)).toMatchObject({ created: 0, resumed: 2 });
 });
 
 test("lost completion after the first published file resumes by verifying bytes after a journal/adapter restart", async () => {

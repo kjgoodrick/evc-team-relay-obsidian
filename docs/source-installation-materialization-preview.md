@@ -79,6 +79,7 @@ check. Main types, changed-source lint, unchanged test-type ratchet, production
 preview build and an isolated browser bundle of the desktop installer pass. The
 existing 15 production-build warnings remain.
 
-Native Obsidian acceptance, mobile exclusive installation, selected-cache imports,
-mapping activation, restart UI, external-writer isolation and final server
+Verified [selected-cache imports](source-installation-caches-preview.md) are now
+implemented separately and keep the journal paused. Native Obsidian acceptance,
+mobile exclusive installation, mapping activation, restart UI, external-writer isolation and final server
 admission remain unfinished. This module is not enabled by a user-facing action.
