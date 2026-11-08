@@ -42,7 +42,7 @@ function openCache(name: string, check: () => void): Promise<IDBDatabase> {
 /** One atomic cache import. A retry accepts only the exact untouched seed. It
  * never appends to a populated cache, clears metadata, or opens a live provider. */
 async function seedCache(descriptor: SourceCacheDescriptor, update: Uint8Array, receipt: string,
-	syncBase: string | undefined, check: () => void, signal?: AbortSignal): Promise<"created" | "resumed"> {
+	syncBase: string | undefined, allowLegacyCanvasBase: boolean, check: () => void, signal?: AbortSignal): Promise<"created" | "resumed"> {
 	check(); const db = await openCache(descriptor.name, check);
 	try {
 		check();
@@ -62,18 +62,22 @@ async function seedCache(descriptor: SourceCacheDescriptor, update: Uint8Array, 
 					for (const [key, value] of expected) custom.add(value, key);
 					updates.add(update); outcome = "created"; return;
 				}
-				if (count.result !== 1 || metadata.result !== expected.size) throw unchanged();
+				const missingCanvasBase = allowLegacyCanvasBase && syncBase !== undefined && metadata.result === expected.size - 1;
+				if (count.result !== 1 || metadata.result !== expected.size && !missingCanvasBase) throw unchanged();
 				let remaining = expected.size;
 				for (const [key, value] of expected) {
 					const saved = custom.get(key);
 					saved.onsuccess = () => safely(() => {
-						if (saved.result !== value) throw unchanged();
+						if (saved.result !== (missingCanvasBase && key === "syncBase" ? undefined : value)) throw unchanged();
 						if (--remaining) return;
 						const record = updates.openCursor();
 						record.onsuccess = () => safely(() => {
 							const bytes = record.result?.value;
 							if (!ArrayBuffer.isView(bytes) || Object.prototype.toString.call(bytes) !== "[object Uint8Array]"
 								|| bytes.byteLength !== update.byteLength || !new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).every((byte, i) => byte === update[i])) throw unchanged();
+							// Older previews seeded Canvas without a native base. Only
+							// its exact untouched seed may acquire that missing field.
+							if (missingCanvasBase) custom.add(syncBase, "syncBase");
 							outcome = "resumed";
 						});
 					});
@@ -115,10 +119,11 @@ export async function seedSourceInstallationCaches(journal: SourceSelectionJourn
 		const bytes = await io.readBinary(name); await confirm();
 		if (bytes.byteLength !== record.artifact.bytes || await sha256Hex(bytes) !== record.artifact.sha256) throw new Error("The staged source cache artifact digest changed");
 		const update = new Uint8Array(ArrayBuffer.prototype.slice.call(bytes, 0) as ArrayBuffer);
-		const syncBase = record.kind === "markdown" ? new TextDecoder("utf-8", { fatal: true }).decode(installationSourceBytes("markdown", update)) : undefined;
+		const syncBase = record.kind === "markdown" || record.kind === "canvas"
+			? new TextDecoder("utf-8", { fatal: true }).decode(installationSourceBytes(record.kind, update)) : undefined;
 		const receipt = JSON.stringify({ format: "team-relay-source-cache-seed", version: 1, plan: verified.reference, artifact: record.artifact });
 		await confirm();
-		const result = await seedCache(record.descriptor, update, receipt, syncBase, check, signal); await confirm();
+		const result = await seedCache(record.descriptor, update, receipt, syncBase, record.kind === "canvas", check, signal); await confirm();
 		if (result === "created") created++; else resumed++;
 	}
 	await confirm(); return { reference: verified.reference, revision: state.revision, created, resumed };

@@ -229,3 +229,37 @@ The full regression passes **4,581 tests across 308 suites**, with 41 tests in
 (205/44 versus frozen 207/46) and the preview build pass; 15 existing build
 warnings remain. The extended Python fixture passes lint/format checks and the
 actual HTTP/Rust proof; owned processes and temporary stores are cleaned up.
+
+## Preserving native Canvas edits during synchronization
+
+Selected Canvas caches now carry the native JSON sync base alongside the staged
+history. A compatible interrupted seed without this field can acquire it only
+after exact receipt, metadata and source-byte verification. The normal Canvas
+download path compares native content against this base structurally, ignoring
+JSON formatting and key order. Unchanged files receive server updates directly.
+A divergent native file, including a legacy file without a base or invalid JSON,
+is copied before adopting server state. The editing history is not rewritten to
+match that divergent file. A matching file/base causes no redundant cache write.
+
+Delivery rechecks native bytes after preservation and defers if they changed.
+Failed reads are distinguished from confirmed missing files; failed preservation
+or native writes cannot acknowledge delivery. Active editors, deleted/untracked
+entries, restore pauses and incomplete editing history prevent delivery. A
+newer remote update during the write cannot advance the base beyond the version
+actually delivered. Both native mutations and baseline persistence are awaited.
+
+The extended HTTP/Rust fixture verifies both direct updates without conflict
+copies and preservation of a divergent native Canvas file before current server
+JSON is written. Independent observers retain server state. Focused cases cover
+formatting, absent files, missing bases, failed I/O, editing while preservation
+waits, source changes, active editors, missing history and exact legacy-seed
+compatibility. The Obsidian adapter still offers no atomic compare-and-write
+against arbitrary external processes; these checks do not replace host
+isolation or native/mobile acceptance of the final recovery workflow.
+
+Validation passes **4,598 tests across 309 suites**, with 41 tests in 27 opt-in
+suites skipped; the focused Canvas/native/cache/transfer selection passes 44
+tests. The extended real HTTP/Rust proof, main types, changed-source lint,
+unchanged test-type ratchet (205/44 versus 207/46) and preview build pass. The
+existing 15 build warnings remain. Only owned disposable fixture data was used;
+no native Obsidian acceptance or production deployment is claimed.

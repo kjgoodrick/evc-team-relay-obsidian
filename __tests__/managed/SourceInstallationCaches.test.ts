@@ -65,9 +65,30 @@ test("seeded Markdown, Canvas and inventory reopen through the existing store, s
 	expect(inventory.getMap("managed_base_v1").get("snapshot")).toMatchObject({ restore_generation: f.source.restoreGeneration });
 	await inventoryStore.close(); inventory.destroy();
 	const canvas = new Y.Doc(), canvasStore = await openSourceDocumentCache(f.canvasIdentity, canvas);
-	expect(canvas.getMap("nodes").get("node")).toMatchObject({ text: "Restored canvas" }); await canvasStore.close(); canvas.destroy();
+	expect(canvas.getMap("nodes").get("node")).toMatchObject({ text: "Restored canvas" });
+	expect(JSON.parse((await canvasStore.loadSyncBase())!).nodes[0].text).toBe("Restored canvas");
+	await canvasStore.close(); canvas.destroy();
 	expect(await seedSourceInstallationCaches(f.journal, f.io, f.request)).toMatchObject({ created: 0, resumed: 3 });
 	expect(await f.journal.read()).toMatchObject({ active: { kind: "legacy" }, pending: { phase: "applying" } });
+});
+
+test.each([false, true])("older Canvas seeds acquire the missing baseline only with unchanged history (changed: %s)", async changed => {
+	const f = await fixture(), descriptor = sourceDocumentCacheSync(f.canvasIdentity);
+	await seedSourceInstallationCaches(f.journal, f.io, f.request);
+	await mutateCache(descriptor.name, (custom, updates) => {
+		custom.delete("syncBase");
+		if (changed) updates.add(new Uint8Array([0, 0]));
+	});
+	const before = await snapshot(descriptor.name);
+	if (changed) {
+		await expect(seedSourceInstallationCaches(f.journal, f.io, f.request)).rejects.toThrow("not replaced or merged");
+		expect(await snapshot(descriptor.name)).toEqual(before);
+	} else {
+		expect(await seedSourceInstallationCaches(f.journal, f.io, f.request)).toMatchObject({ created: 0, resumed: 3 });
+		const doc = new Y.Doc(), store = await openSourceDocumentCache(f.canvasIdentity, doc);
+		expect(JSON.parse((await store.loadSyncBase())!).nodes[0].text).toBe("Restored canvas");
+		await store.close(); doc.destroy();
+	}
 });
 
 test("legacy and previous-generation histories remain separate and unchanged", async () => {

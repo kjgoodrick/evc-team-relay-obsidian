@@ -41,7 +41,7 @@ function makeRelayLinkedDoc<T extends Document | CanvasDocument>(proto: object, 
 	const doc = Object.create(proto) as T;
 	Object.defineProperty(doc, "entryPath", { value: "note.md" });
 	Object.defineProperty(doc, "entityGuid", { value: DOC_ID });
-	Object.defineProperty(doc, "editLock", { value: false });
+	Object.defineProperty(doc, "editLock", { value: false, writable: true });
 	Object.defineProperty(doc, "resourceAddress", { value: address });
 	Object.defineProperty(doc, "crdtDoc", { value: new Y.Doc() });
 	Object.defineProperty(doc, "requestProviderToken", {
@@ -49,7 +49,7 @@ function makeRelayLinkedDoc<T extends Document | CanvasDocument>(proto: object, 
 	});
 	Object.defineProperty(doc, "awaitFirstSync", { value: async () => {} });
 	Object.defineProperty(doc, "content", { get: () => "real content from the relay" });
-	Object.defineProperty(doc, "canvasJson", { get: () => "{}" });
+	Object.defineProperty(doc, "canvasJson", { get: () => '{"nodes":[],"edges":[]}' });
 	Object.defineProperty(doc, "connectionIntent", { get: () => "disconnected" });
 	Object.defineProperty(doc, "bringOnline", { value: async () => true });
 	Object.defineProperty(doc, "onceEverSynced", { value: async () => {} });
@@ -65,6 +65,8 @@ function makeRelayLinkedDoc<T extends Document | CanvasDocument>(proto: object, 
 				throw new Error("file does not exist");
 			},
 			writeContents,
+			isDeletePending: () => false,
+			hasFile: async () => false,
 			folderIndex: { tracks: () => true },
 			credentialCache: { dropFromQueue: () => {} },
 		},
@@ -128,6 +130,26 @@ describe("as-update requests for relay-linked docs", () => {
 		expect(requestUrl).not.toHaveBeenCalled();
 		expect(error).not.toHaveBeenCalled();
 		expect(writeContents).toHaveBeenCalled();
+	});
+
+	test("a Canvas editor keeps ownership of its native file during background fetch", async () => {
+		const { doc, writeContents } = makeRelayLinkedDoc<CanvasDocument>(CanvasDocument.prototype, new RemoteCanvasAddress(RELAY_ID, FOLDER_ID, DOC_ID));
+		doc.editLock = true;
+		const { queue, clock, error } = makeQueue();
+		await settle(clock, queue.fetchCanvas(doc));
+		expect(writeContents).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
+	});
+
+	test("incomplete Canvas editing history cannot overwrite its native file", async () => {
+		const { doc, writeContents } = makeRelayLinkedDoc<CanvasDocument>(CanvasDocument.prototype, new RemoteCanvasAddress(RELAY_ID, FOLDER_ID, DOC_ID));
+		const author = new Y.Doc(); author.getMap("seed").set("identity", "unavailable prefix");
+		const before = Y.encodeStateVector(author); author.getMap("nodes").set("card", { id: "card", text: "pending" });
+		Y.applyUpdate(doc.crdtDoc, Y.encodeStateAsUpdate(author, before)); author.destroy();
+		expect(doc.crdtDoc.store.pendingStructs).not.toBeNull();
+		const { queue, clock, error } = makeQueue();
+		await settle(clock, queue.fetchCanvas(doc));
+		expect(writeContents).not.toHaveBeenCalled();
+		expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ message: expect.stringContaining("history is incomplete") }));
 	});
 });
 

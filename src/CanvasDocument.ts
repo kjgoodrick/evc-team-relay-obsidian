@@ -372,6 +372,10 @@ export class CanvasDocument extends ProviderBacked implements SyncableEntry, Mim
 		return this._indexeddbPersistence.loadOrigin();
 	}
 
+	/** JSON last delivered to the native file; remote updates alone never advance it. */
+	async getSyncBase(): Promise<string | undefined> { return this._indexeddbPersistence.loadSyncBase(); }
+	async setSyncBase(json: string): Promise<void> { await this._indexeddbPersistence.rememberSyncBase(json); }
+
 	applyJsonPayload(json: string) {
 		if (json === "") return;
 		const data = JSON.parse(json) as CanvasData;

@@ -36,6 +36,7 @@ import {
 } from "./initContentClaim";
 import { claimReconcile, wonReconcileClaim, awaitReconcileSettled } from "./reconcileClaim";
 import { holdBackgroundTokens } from "./auth/tokenRequestClass";
+import { deliverCanvasNative } from "./CanvasNativeSync";
 
 export interface TransferTask {
 	entityGuid: string;
@@ -2135,12 +2136,30 @@ export class TransferQueue extends Loggable {
 		return this.enqueueFetch(canvas);
 	}
 
+	private async deliverCanvas(canvas: CanvasDocument): Promise<boolean> {
+		const check = () => {
+			if (canvas.restoreReviewRequired || canvas.editLock || !canvas.vaultShare.folderIndex.tracks(canvas.entryPath)
+				|| canvas.vaultShare.isDeletePending(canvas.entryPath)) throw new Error("Canvas synchronization context changed; native work is retained");
+			if (canvas.crdtDoc.store.pendingStructs !== null || canvas.crdtDoc.store.pendingDs !== null) throw new Error("Canvas editing history is incomplete; native work is retained");
+		};
+		const result = await deliverCanvasNative({
+			check, readBase: () => canvas.getSyncBase(), remote: () => canvas.canvasJson,
+			readNative: async () => {
+				try { return await canvas.vaultShare.readContents(canvas); }
+				catch (error) { check(); if (!await canvas.vaultShare.hasFile(canvas)) return undefined; throw error; }
+			},
+			preserve: async local => { await canvas.vaultShare.writeConflictCopy(canvas, local, `canvas conflict ${new Date().toISOString().replace(/[:.]/g, "-")}`); },
+			writeNative: value => canvas.vaultShare.writeContents(canvas, value), writeBase: value => canvas.setSyncBase(value),
+		});
+		return result !== "deferred";
+	}
+
 	async fetchCanvas(canvas: CanvasDocument, retry = 3, wait = 3000) {
 		if (canvas.restoreReviewRequired) return;
 		// Relay-linked canvases sync over the WebSocket; see fetchDocument().
 		if (this.isRelayLinked(canvas)) {
 			await this.fallbackToWebsocketSync(canvas, "fetchCanvas", () =>
-				canvas.vaultShare.writeContents(canvas, canvas.canvasJson),
+				this.deliverCanvas(canvas),
 			);
 			return;
 		}
@@ -2185,7 +2204,7 @@ export class TransferQueue extends Loggable {
 				(e as Error).message,
 			);
 			await this.fallbackToWebsocketSync(canvas, "fetchCanvas", () =>
-				canvas.vaultShare.writeContents(canvas, canvas.canvasJson),
+				this.deliverCanvas(canvas),
 			);
 		}
 	}
@@ -2386,13 +2405,13 @@ export class TransferQueue extends Loggable {
 	private async fallbackToWebsocketSync(
 		doc: Document | CanvasDocument,
 		label: string,
-		flush: () => Promise<void>,
+		flush: () => Promise<void | boolean>,
 		shouldFlush: () => boolean = () => true,
 	): Promise<boolean> {
 		try {
 			const synced = await this.uploadDocumentViaSocket(doc);
-			if (synced && !doc.restoreReviewRequired && !(isDocument(doc) && doc.editLock) && doc.vaultShare.folderIndex.tracks(doc.entryPath) && shouldFlush()) {
-				await flush();
+			if (synced && !doc.restoreReviewRequired && !doc.editLock && doc.vaultShare.folderIndex.tracks(doc.entryPath) && shouldFlush()) {
+				if (await flush() === false) return false;
 				this.log(`[${label}] WS sync fallback successful, flushed to disk`);
 				return true;
 			}

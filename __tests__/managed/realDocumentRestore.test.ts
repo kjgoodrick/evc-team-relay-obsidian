@@ -238,13 +238,25 @@ integration("managed document sockets reject original grants after generation ro
 						editLock: { value: false }, isLocallyPersisted: { value: true }, awaitFirstSync: { value: async () => {} },
 						connectionIntent: { get: () => "connected" }, bringOnline: { value: () => canvas.bringOnline() },
 						restoreReviewRequired: { get: () => canvas.restoreReviewRequired }, _liveProvider: { get: () => canvas._liveProvider },
-						vaultShare: { value: { workspaceId: f.share, folderIndex: { tracks: () => true },
+						getSyncBase: { value: () => canvasStore.loadSyncBase() }, setSyncBase: { value: (value: string) => canvasStore.rememberSyncBase(value) },
+						vaultShare: { value: { workspaceId: f.share, folderIndex: { tracks: () => true }, isDeletePending: () => false,
+							writeConflictCopy: async (_doc: CanvasDocument, value: string) => { await fs.promises.writeFile(path.join(directory, "Preserved.canvas"), value); return "Preserved.canvas"; },
 							readContents: () => fs.promises.readFile(canvasPath, "utf8"),
 							writeContents: (_doc: CanvasDocument, value: string) => fs.promises.writeFile(canvasPath, value) } },
 					});
 					expect(nativeCanvas.textNodeSafe(preparedCanvas.nodes[0]).toString()).toBe(newerCanvasText);
 					const canvasQueue = new TransferQueue({} as never, new SystemClock(), {} as never);
 					try { await canvasQueue.fetchCanvas(nativeCanvas); } finally { canvasQueue.shutdown(); }
+					expect(JSON.parse(fs.readFileSync(canvasPath, "utf8"))).toEqual(canvasData);
+					expect(JSON.parse((await canvasStore.loadSyncBase())!)).toEqual(canvasData);
+					expect(fs.existsSync(path.join(directory, "Preserved.canvas"))).toBe(false);
+					// A divergent native edit must be preserved before delivery,
+					// even when it never entered the Canvas CRDT/editor binding.
+					const localCanvas = { ...canvasData, nodes: [{ ...canvasData.nodes[0], x: 999, text: "local native Canvas edit" }] };
+					fs.writeFileSync(canvasPath, JSON.stringify(localCanvas));
+					const retryQueue = new TransferQueue({} as never, new SystemClock(), {} as never);
+					try { await retryQueue.fetchCanvas(nativeCanvas); } finally { retryQueue.shutdown(); }
+					expect(JSON.parse(fs.readFileSync(path.join(directory, "Preserved.canvas"), "utf8"))).toEqual(localCanvas);
 					expect(JSON.parse(fs.readFileSync(canvasPath, "utf8"))).toEqual(canvasData);
 					const canvasObserver = await peer(await grant("read", generation, 200, f.canvas), f.canvas);
 					await until(() => canvasObserver.doc.getMap<CanvasNodeData>("nodes").get("card")?.x === newerCanvasX, "independent Canvas observer receives current structure");

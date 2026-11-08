@@ -9,7 +9,7 @@ importing. It opens no live provider, awareness session or native writer.
 Each cache uses the existing generation/server/endpoint/vault-bound cache name
 and existing `LocalDocumentStore` schema. One read/write transaction stores the
 identity, plan/artifact receipt, source update, remote origin, known-server-state
-flag and, for Markdown, the exact native sync base. A failed transaction leaves
+flag and, for Markdown/Canvas, the exact native sync base. A failed transaction leaves
 none of those records committed. Successful caches can survive interruption of
 the remaining folder import.
 
@@ -20,6 +20,13 @@ quarantine flag or merge an existing editing history. A cache already opened or
 modified for another purpose is preserved and refused. Version/schema changes
 are refused, and open/transaction waits are bounded. Cancellation after an
 uncertain commit is recovered by inspecting the exact stored receipt on retry.
+
+Older preview Canvas seeds omitted the native sync base. A retry may add only
+that missing field, in the same transaction, after verifying the exact original
+identity/receipt, one byte-identical source update and all remaining metadata.
+Changed history, additional updates or unexpected metadata still refuse the
+import without modification. This compatibility step does not relabel, merge or
+replace history, and does not apply to already-active caches.
 
 Imports run one cache at a time, bounded by the plan's 16 MiB source-update limit
 and 10,000-entry limit. The import is atomic per cache, not across every document
