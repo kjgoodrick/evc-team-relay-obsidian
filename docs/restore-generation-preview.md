@@ -159,4 +159,8 @@ requires reading current policy, explicitly merging and reviewing, then saving
 against that new snapshot. New narrower exceptions remain in the merge. Reads
 carry no mutation header. Lost acknowledgments require read-only reconciliation;
 a mismatched generation or dropped guard in a success response remains
-unconfirmed. Legacy file-only/comment-rule endpoints remain a separate follow-up.
+unconfirmed. Independent file-only/comment-rule endpoints now enforce the same
+server guard. Legacy file-only forms send no binding and remain usable only on
+original-lineage shares; use the combined editor after a restore. The legacy
+list response shape remains unchanged, and no client silently adopts a new
+binding for its old rules.

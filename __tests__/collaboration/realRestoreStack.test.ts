@@ -173,6 +173,13 @@ integration("restored permission forms require their original generation and rec
 	});
 	const before = await client.read();
 	expect(before).toMatchObject({ restore_guard: true, restore_generation: f.restoreGeneration });
+	// Older permission endpoints must not offer a headerless bypass.
+	for (const [path, payload] of [["managed/shares/" + f.share + "/rules", []],
+		["collaboration/shares/" + f.share + "/comment-rules", { expected_revision: before.comment_revision, rules: [] }]] as const) {
+		const result = await fetch(f.base + "/v1/" + path, { method: "PUT", headers: { Authorization: "Bearer " + f.ownerToken, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+		expect(result.status).toBe(409);
+		expect(await result.json()).toMatchObject({ error: { message: { code: "restore_generation_changed" } } });
+	}
 	const old = { ...before, restore_generation: null };
 	await expect(client.save(old, old)).rejects.toMatchObject({ code: "restore_changed", status: 409 });
 	expect(await client.read()).toEqual(before);
