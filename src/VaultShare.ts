@@ -64,6 +64,7 @@ import { instanceLabels } from "./logging";
 import { VaultScopedMap } from "./VaultScopedMap";
 import { withRootRelativePaths } from "./rootRelativeProxy";
 import { BlobClient } from "./BlobClient";
+import type { AttachmentUpload } from "./BlobClient";
 import { AttachmentSyncSettings, type AttachmentToggles } from "./AttachmentSyncSettings";
 import type { BaseSyncDelegate } from "./bases/BaseSyncHost";
 import { retiredBaseEntries } from "./bases/BaseContentProtocol";
@@ -398,6 +399,23 @@ export class VaultShare extends ProviderBacked {
 			this.uploadClaims,
 			this.attachmentSettings,
 		);
+	}
+
+	/** Retain the original source-transfer context across native and network waits. */
+	captureAttachmentContext(file: AttachmentFile) {
+		const provider = this._liveProvider, index = provider?.managedIndex;
+		const context = index?.captureContentContext(file.entryPath, file.entityGuid);
+		const path = file.entryPath, id = file.entityGuid, server = this.config.onpremServerId;
+		const sharePath = this.path, shareId = this.entityGuid;
+		const check = () => {
+			if (this._liveProvider !== provider || this._liveProvider?.managedIndex !== index || this.path !== sharePath || this.entityGuid !== shareId
+				|| file.vaultShare !== this || file.entryPath !== path
+				|| file.entityGuid !== id || this.config.onpremServerId !== server || this.isRecoveringStructure
+				|| this.deletedEntries.has(file) || this.isDeletePending(path)) throw new Error("Attachment context changed. Local content is retained.");
+			context?.check();
+		};
+		check();
+		return { binding: context?.binding ?? {}, managed: !!index, check };
 	}
 
 	/** Reserve the file identity in the server inventory before asking for content access. */
@@ -2314,8 +2332,17 @@ export class VaultShare extends ProviderBacked {
 			: this.newCanvas(vpath, update);
 	}
 
-	async noteUploaded(file: SyncableEntry): Promise<void> {
+	async noteUploaded(file: SyncableEntry, upload?: AttachmentUpload): Promise<void> {
 		if (this.usesBaseSync(file.entryPath, file.entityGuid)) return;
+		if (upload && isAttachmentFile(file)) {
+			upload.check();
+			// A late success acknowledges only the exact bytes sent. Reading the
+			// latest CAF hash here could publish a newer file that was never uploaded.
+			const type = this.folderIndex.kinds.kindForPath(file.path);
+			if (!type) throw new Error("No registered sync type covers this path");
+			this._commitMeta(file, makeFileRecord(type as AttachmentKind, file.entityGuid, file.mimeType, upload.hash, upload.mtime));
+			return;
+		}
 		const meta = await this._metaForUpload(file);
 		if (meta) {
 			this._commitMeta(file, meta);

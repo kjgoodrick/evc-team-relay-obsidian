@@ -208,3 +208,27 @@ This checkpoint has no safe-resume or discard operation. Full inventory/CRDT/fil
 reconciliation, verified byte recovery, minimum client versions, native acceptance
 and coordinated restore remain unfinished. The metadata record does not by itself
 back up source bytes, fence an older plugin cache worker or drain document sockets.
+
+## Managed source attachments
+
+Blob transfers capture file, share, provider/account and inventory context before
+their first asynchronous read. Token requests retain that original restore
+binding. A returned different generation, observed inventory restore, stopped
+transport, moved file/share, changed login or teardown prevents later transfer
+steps and metadata acknowledgment. The final upload response must succeed, and
+the acknowledged digest/mtime belongs to the captured bytes rather than a later
+local hash lookup. Downloads validate status and digest before returning bytes;
+local stat/context checks guard the subsequent native write.
+
+File grants have their own bounded memory cache (256 entries), outside persisted
+document credentials and background renewal. Server/provider session, file,
+digest, content type, byte length and restore binding distinguish requests.
+Identical requests coalesce; session changes and cache clear reject late results.
+Routine JWT refresh within the same session does not invalidate the namespace.
+
+The paired server stores verified revisions at
+`managed-assets/v1/{share}/{entry}/{sha256}`, with verified legacy reads. This keeps
+an in-flight old upload from replacing the bytes selected by restored inventory.
+Actual TypeScript/HTTP/MinIO and PostgreSQL race tests cover these boundaries.
+It does not provide atomic filesystem replacement, a pre-write source-byte
+backup, native/mobile acceptance, full restore reconciliation or safe resume.

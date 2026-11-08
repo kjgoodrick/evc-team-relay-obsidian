@@ -131,6 +131,17 @@ export class ManagedIndexTransport {
 
 	get conflicts(): StructuralConflict[] { return [...this.doc.getMap<StructuralConflict>(CONFLICTS).values()]; }
 	get restoreReview(): ManagedRestoreReview | undefined { return this.doc.getMap<ManagedRestoreReview>(BASE).get("restoreReview"); }
+	/** Bind a source transfer before its first asynchronous read. */
+	captureContentContext(path: string, id: string): { binding: RestoreBinding; check: () => void } {
+		if (!this.doc.getMap(BASE).has("snapshot")) throw new Error("Wait for the shared file inventory before transferring a file");
+		const binding = restoreMetadata(restoreBinding(this.snapshot)), generation = this.generation;
+		const check = () => {
+			this.check(generation, binding);
+			if (this.isBlocked(path, id)) throw new Error("File synchronization is paused. Local content is retained.");
+		};
+		check();
+		return { binding, check };
+	}
 	private check(generation = this.generation, binding?: RestoreBinding): void {
 		if (this.stopped || generation !== this.generation) throw new Error("File inventory context changed. Local work is retained.");
 		if (this.restoreReview) throw new Error(restoreMessage);

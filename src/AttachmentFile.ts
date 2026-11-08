@@ -192,6 +192,9 @@ export class HashedFile extends Loggable {
 		return content;
 	}
 
+	/** The digest belongs to these exact bytes, not a later cache lookup. */
+	readSnapshot(): Promise<{ content: ArrayBuffer; hash: string }> { return this.readAndPersistHash(); }
+
 	async computeFreshHash(): Promise<string> {
 		const { hash } = await this.readAndPersistHash();
 		return hash;
@@ -388,8 +391,10 @@ export class AttachmentFile
 
 	private async uploadNow(): Promise<void> {
 		try {
-			await this.vaultShare.blobs.pushFile(this);
-			await this.vaultShare.noteUploaded(this);
+			const share = this.vaultShare;
+			const upload = await share.blobs.pushFile(this);
+			upload.check();
+			await share.noteUploaded(this, upload);
 			this.lastUploadError = undefined;
 		} catch (error: unknown) {
 			this.lastUploadError = AttachmentFile.formatUploadError(error);
@@ -512,8 +517,16 @@ export class AttachmentFile
 		}
 
 		try {
-			const content = await this.vaultShare.blobs.pullFile(this);
+			const context = this.vaultShare.captureAttachmentContext(this), hash = this.syncMeta.hash;
 			const diskPath = this.vaultShare.absolutePath(this.path);
+			const before = await this.vault.adapter.stat(diskPath);
+			context.check();
+			const content = await this.vaultShare.blobs.pullFile(this);
+			const after = await this.vault.adapter.stat(diskPath);
+			context.check();
+			if (hash !== this.syncMeta?.hash || before?.mtime !== after?.mtime || before?.ctime !== after?.ctime || before?.size !== after?.size) {
+				throw new Error("Attachment changed during download. Local content is retained.");
+			}
 			await this.vault.adapter.writeBinary(diskPath, content);
 			await this.contentAddressedCache.resolveHash();
 		} catch (e: unknown) {

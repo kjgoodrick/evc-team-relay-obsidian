@@ -62,4 +62,7 @@ export interface FileGrant extends DocumentGrant {
 	contentType: string;
 	contentLength: number;
 	fileHash: string;
+	/** Current server context, separate from the request's immutable write binding. */
+	restoreGuard?: boolean;
+	restoreGeneration?: string | null;
 }

@@ -23,6 +23,20 @@ afterEach(() => { transports.splice(0).forEach(t => t.destroy()); documents.spli
 
 const baseId = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const restored = (snapshot = empty(), generation = baseId(80)): ManagedManifest => ({ ...snapshot, restore_guard: true, restore_generation: generation });
+
+test("source transfer contexts require a loaded inventory and expire on restore or stop", async () => {
+	const s = setup();
+	expect(() => s.transport.captureContentContext("photo.png", baseId(3))).toThrow("Wait for");
+	fetchMock.mockResolvedValueOnce(response(200, empty())); await s.transport.flush();
+	const captured = s.transport.captureContentContext("photo.png", baseId(3)); captured.check();
+	fetchMock.mockResolvedValueOnce(response(200, restored()));
+	await expect(s.transport.flush()).rejects.toThrow("restored");
+	expect(captured.check).toThrow("restored");
+	const other = setup(); fetchMock.mockResolvedValueOnce(response(200, restored())); await other.transport.flush();
+	const second = other.transport.captureContentContext("photo.png", baseId(3));
+	expect(second.binding.restoreGeneration).toBe(baseId(80)); other.transport.stop();
+	expect(second.check).toThrow("context changed");
+});
 function baseState(version: number): BaseContentState {
 	return { path: "Planning.base", generation: baseId(9), content_version: baseId(version), record: {
 		id: baseId(3), type: "file", version: 0, hash: String(version).padStart(64, "0"), mimetype: "application/yaml", synctime: version } };

@@ -6,6 +6,8 @@
  */
 
 import { platformFetch } from "../platformFetch";
+import { decodeJwt } from "jose";
+import { restoreMetadata, restoreContext, type RestoreBinding } from "../collaboration/RestoreGeneration";
 import { namedLogger } from "../logging";
 import type { DocumentGrant, FileGrant } from "../relay/TokenShapes";
 import type { IAuthProvider } from "./IAuthProvider";
@@ -41,6 +43,8 @@ export interface FileTokenApiResponse {
 	expires_at: string;
 	/** Lifetime in seconds; not sent by the current control-plane. */
 	expires_in?: number;
+	restore_guard?: boolean;
+	restore_generation?: string | null;
 }
 
 export interface RelayOnPremTokenConfig {
@@ -479,6 +483,23 @@ export class RelayOnPremTokenProvider {
 	 * stable across renames, and unique per attachment within a share — a
 	 * better storage key than a path would be anyway.
 	 */
+	private fileIdentity?: string;
+	private fileContext: object = {};
+	/** Opaque in-memory cache namespace; changes on logout/session/account changes.
+	 * Routine JWT refresh within one session retains the namespace. */
+	getFileCredentialContext(): object {
+		const token = this.config.authProvider.getToken();
+		let identity = token;
+		if (token) {
+			try {
+				const claims = decodeJwt(token);
+				if (typeof claims.sub === "string" && typeof claims.session_id === "string") identity = JSON.stringify([claims.sub, claims.session_id]);
+			} catch { /* Legacy credentials are scoped to their exact token. */ }
+		}
+		if (identity !== this.fileIdentity) { this.fileIdentity = identity; this.fileContext = {}; }
+		return this.fileContext;
+	}
+
 	async requestFileToken(
 		relayId: string,
 		folderId: string,
@@ -486,8 +507,15 @@ export class RelayOnPremTokenProvider {
 		fileHash: string,
 		contentType: string,
 		contentLength: number,
+		binding: RestoreBinding = {},
 	): Promise<FileGrant> {
+		binding = restoreMetadata(binding);
+		const identity = this.getFileCredentialContext();
+		const checkIdentity = () => {
+			if (identity !== this.getFileCredentialContext()) throw new Error("Attachment login changed. Retry using the current account.");
+		};
 		const token = await this.config.authProvider.getValidToken();
+		checkIdentity();
 
 		if (!token) {
 			throw new Error("Not authenticated");
@@ -514,6 +542,7 @@ export class RelayOnPremTokenProvider {
 					headers: {
 						"Content-Type": "application/json",
 						Authorization: `Bearer ${token}`,
+						...(binding.restoreGeneration ? { "X-Relay-Restore-Generation": binding.restoreGeneration } : {}),
 					},
 					body: JSON.stringify(request),
 				}
@@ -538,6 +567,8 @@ export class RelayOnPremTokenProvider {
 			}
 
 			const data = (await response.json()) as FileTokenApiResponse;
+			checkIdentity();
+			const context = restoreContext(data.restore_guard, data.restore_generation);
 			const expiryTime = localExpiryTime(data.expires_at, response.headers.get("Date"), data.expires_in);
 
 			const fileToken: FileGrant = {
@@ -556,6 +587,7 @@ export class RelayOnPremTokenProvider {
 				contentType,
 				contentLength,
 				fileHash,
+				...(context ? { restoreGuard: context.supported, restoreGeneration: context.generation } : {}),
 			};
 
 			this.log(`Successfully obtained file token for ${fileId}, expires at ${data.expires_at}`);

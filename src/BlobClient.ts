@@ -1,4 +1,6 @@
 import { ItemKind } from "./ItemKinds";
+import { sha256Hex } from "./contentDigest";
+import { restoreGeneration } from "./collaboration/RestoreGeneration";
 import type { RelayCredentialCache } from "./RelayCredentialCache";
 import type { FileGrant } from "./relay/TokenShapes";
 import { ResourceAddress } from "./ResourceAddress";
@@ -6,6 +8,8 @@ import type { VaultShare } from "./VaultShare";
 import type { AttachmentFile } from "./AttachmentFile";
 import { platformFetch } from "./platformFetch";
 import { Loggable } from "./logging";
+
+export interface AttachmentUpload { readonly hash: string; readonly mtime: number; check: () => void }
 
 interface DownloadUrlApiResponse {
 	downloadUrl: string;
@@ -38,79 +42,91 @@ export class BlobClient extends Loggable {
 		this.credentialCache = vaultShare.credentialCache;
 	}
 
-	private tokenFor(
-		syncFile: AttachmentFile,
-		sha256: string,
-		contentLength: number,
-	): Promise<FileGrant> {
-		return this.credentialCache.resolveFileToken(
-			ResourceAddress.serialize(syncFile.s3rn),
-			sha256,
-			syncFile.mimeType,
-			contentLength,
-			// Read live, not captured at BlobClient construction time -- the
-			// folder's onpremServerId can still be unset when the folder
-			// (and this BlobClient alongside it) is first constructed.
-			this.vaultShare.config.onpremServerId,
-		);
+	private capture(syncFile: AttachmentFile) {
+		const share = this.vaultShare, cache = this.credentialCache;
+		const context = share.captureAttachmentContext(syncFile);
+		const address = ResourceAddress.serialize(syncFile.s3rn), mime = syncFile.mimeType;
+		const server = share.config.onpremServerId;
+		const checkAuth = cache.captureFileContext(address, server);
+		const check = () => {
+			if (this.vaultShare !== share || this.credentialCache !== cache
+				|| ResourceAddress.serialize(syncFile.s3rn) !== address || syncFile.mimeType !== mime) {
+				throw new Error("Attachment context changed. Local content is retained.");
+			}
+			context.check(); checkAuth();
+		};
+		check();
+		return { check, mime, token: async (hash: string, length: number): Promise<FileGrant> => {
+			check();
+			const token = await cache.resolveFileToken(address, hash, mime, length, server, context.binding);
+			check();
+			if (context.managed && (restoreGeneration(token.restoreGeneration) !== restoreGeneration(context.binding.restoreGeneration)
+				|| (context.binding.restoreGeneration && token.restoreGuard !== true))) {
+				throw new Error("This share's restore context changed. Attachment synchronization is paused; local content is retained.");
+			}
+			return token;
+		} };
 	}
 
 	async headFile(syncFile: AttachmentFile): Promise<boolean> {
-		if (!syncFile.syncMeta) {
-			throw new Error("cannot head file with missing hash");
-		}
-		const token = await this.tokenFor(syncFile, syncFile.syncMeta.hash, 0);
-		const response = await platformFetch(token.baseUrl!, {
-			method: "HEAD",
-			headers: { Authorization: `Bearer ${token.token}` },
-		});
-		return response.status === 200;
+		const transfer = this.capture(syncFile), hash = syncFile.syncMeta?.hash;
+		if (!hash) throw new Error("cannot head file with missing hash");
+		const token = await transfer.token(hash, 0);
+		const response = await platformFetch(token.baseUrl!, { method: "HEAD", headers: { Authorization: `Bearer ${token.token}` } });
+		transfer.check();
+		if (syncFile.syncMeta?.hash !== hash) throw new Error("Attachment revision changed");
+		if (response.status === 404 || response.status === 409) return false;
+		if (!response.ok) throw new Error(`Attachment verification failed (${response.status})`);
+		return true;
 	}
 
 	async pullFile(syncFile: AttachmentFile): Promise<ArrayBuffer> {
-		if (!syncFile.syncMeta) {
-			throw new Error("cannot pull file with missing hash");
-		}
-		const token = await this.tokenFor(syncFile, syncFile.syncMeta.hash, 0);
-		const response = await platformFetch(`${token.baseUrl}/download-url`, {
-			method: "GET",
-			headers: { Authorization: `Bearer ${token.token}` },
-		});
-		if (response.status === 404) {
-			throw new Error(
-				`[${this.vaultShare.path}] File is missing: ${syncFile.entityGuid} ${syncFile.syncMeta.hash} ${syncFile.syncMeta.type}`,
-			);
-		}
+		const transfer = this.capture(syncFile), hash = syncFile.syncMeta?.hash;
+		if (!hash) throw new Error("cannot pull file with missing hash");
+		const check = () => { transfer.check(); if (syncFile.syncMeta?.hash !== hash) throw new Error("Attachment revision changed"); };
+		const token = await transfer.token(hash, 0);
+		check();
+		const response = await platformFetch(`${token.baseUrl}/download-url`, { method: "GET", headers: { Authorization: `Bearer ${token.token}` } });
+		check();
+		if (!response.ok) throw new Error(`Attachment download unavailable (${response.status})`);
 		const { downloadUrl } = (await response.json()) as DownloadUrlApiResponse;
-		const downloadResponse = await platformFetch(downloadUrl);
-		return downloadResponse.arrayBuffer();
+		check();
+		if (typeof downloadUrl !== "string" || !downloadUrl) throw new Error("Invalid attachment download response");
+		const download = await platformFetch(downloadUrl);
+		check();
+		if (!download.ok) throw new Error(`Attachment download failed (${download.status})`);
+		const bytes = await download.arrayBuffer();
+		if (await sha256Hex(bytes) !== hash) throw new Error("Attachment download did not match the requested revision. Local content is retained.");
+		check();
+		return bytes;
 	}
 
-	async pushFile(syncFile: AttachmentFile): Promise<void> {
-		const content = await syncFile.contentAddressedCache.readBytes();
-		const hash = await syncFile.contentAddressedCache.resolveHash();
-		this.log("writeFile", hash);
-		if (!(content && hash)) {
-			throw new Error("invalid caf");
-		}
+	async pushFile(syncFile: AttachmentFile): Promise<AttachmentUpload> {
+		const transfer = this.capture(syncFile), { mtime, ctime, size } = syncFile.stat;
+		const check = () => {
+			transfer.check();
+			const stat = syncFile.stat;
+			if (stat.mtime !== mtime || stat.ctime !== ctime || stat.size !== size) throw new Error("Attachment changed during upload. Retry to send the newer content.");
+		};
+		const { content, hash } = await syncFile.contentAddressedCache.readSnapshot();
+		check();
 		await this.vaultShare.ensureManagedEntry(syncFile.entryPath, {
 			id: syncFile.entityGuid, version: 0, type: ItemKind.File,
-			mimetype: syncFile.mimeType, hash, synctime: Date.now(),
+			mimetype: transfer.mime, hash, synctime: mtime,
 		});
-		const token = await this.tokenFor(syncFile, hash, content.byteLength);
-		const response = await platformFetch(`${token.baseUrl}/upload-url`, {
-			method: "POST",
-			headers: { Authorization: `Bearer ${token.token}` },
-		});
+		check();
+		const token = await transfer.token(hash, content.byteLength);
+		check();
+		const response = await platformFetch(`${token.baseUrl}/upload-url`, { method: "POST", headers: { Authorization: `Bearer ${token.token}` } });
+		check();
+		if (!response.ok) throw new Error(`Attachment upload refused (${response.status})`);
 		const body = (await response.json()) as UploadUrlApiResponse;
-		if (response.status !== 200) {
-			throw new Error(body.error);
-		}
-		await platformFetch(body.uploadUrl, {
-			method: "PUT",
-			headers: { "Content-Type": syncFile.mimeType },
-			body: content,
-		});
+		check();
+		if (typeof body.uploadUrl !== "string" || !body.uploadUrl) throw new Error("Invalid attachment upload response");
+		const uploaded = await platformFetch(body.uploadUrl, { method: "PUT", headers: { "Content-Type": transfer.mime }, body: content });
+		check();
+		if (!uploaded.ok) throw new Error(`Attachment upload failed (${uploaded.status}). Local content is retained.`);
+		return { hash, mtime, check };
 	}
 
 	public destroy() {

@@ -15,6 +15,7 @@ import {
 	type RelayOnPremTokenProvider,
 } from "./auth/RelayOnPremTokenProvider";
 import { AccessDeniedBackoff } from "./accessDeniedBackoff";
+import { restoreMetadata, type RestoreBinding } from "./collaboration/RestoreGeneration";
 
 declare const GIT_TAG: string;
 
@@ -67,6 +68,14 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	// until this backoff runs out.
 	private stalled = new AccessDeniedBackoff();
 	private accessListeners = new Set<(shareId: string) => void>();
+	// File grants are bounded, memory-only and never enter the document-token
+	// renewal queue or persisted cache. Every request dimension is part of the key.
+	private fileTokens = new Map<string, CredentialEntry<FileGrant>>();
+	private fileRequests = new Map<string, Promise<FileGrant>>();
+	private fileContexts = new WeakMap<object, number>();
+	private nextFileContext = 0;
+	private fileCacheGeneration = 0;
+	private fileCacheDestroyed = false;
 
 	constructor(
 		private authSession: AuthSession,
@@ -281,6 +290,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	}
 
 	clear(filter?: (token: CredentialEntry<DocumentGrant>) => boolean) {
+		this.fileCacheGeneration++; this.fileTokens.clear(); this.fileRequests.clear();
 		if (!filter) {
 			this.filePathMap.clear();
 			this.documentServerMap.clear();
@@ -297,6 +307,8 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	}
 
 	destroy() {
+		this.fileCacheDestroyed = true;
+		this.fileCacheGeneration++; this.fileTokens.clear(); this.fileRequests.clear();
 		this.filePathMap.clear();
 		this.documentServerMap.clear();
 		for (const provider of this.relayOnPremProviders.values()) {
@@ -333,6 +345,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		fileHash: string,
 		contentType: string,
 		contentLength: number,
+		binding: RestoreBinding = {},
 	): Promise<FileGrant> {
 		const debug = namedLogger("[RelayCredentialCache/fetchFileTokenFromApi]", "debug");
 		debug(`requesting file token for ${documentId}`);
@@ -355,6 +368,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 				fileHash,
 				contentType,
 				contentLength,
+				binding,
 			);
 		}
 
@@ -379,74 +393,18 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		return this.parseFileTokenResponse(response, debug);
 	}
 
-	/**
-	 * documentId+fileHash keys both the token cache and the in-flight-request
-	 * map, so concurrent callers asking for the same file's token collapse
-	 * onto one network request instead of racing duplicate ones.
-	 */
-	private async acquireFreshFileToken(
-		documentId: string,
-		fileHash: string,
-		contentType: string,
-		contentLength: number,
-	): Promise<FileGrant> {
-		const key = `${documentId}${fileHash}`;
-		const inFlight = this._inFlightPromises.get(key);
-		if (inFlight) {
-			return inFlight as Promise<FileGrant>;
-		}
-
-		this.tokenEntries.set(documentId, {
-			token: null,
-			expiryTime: 0,
-			attempts: 0,
-		} as CredentialEntry<DocumentGrant>);
-
-		const request = this.requestAndCacheFileToken(
-			documentId,
-			fileHash,
-			contentType,
-			contentLength,
-			key,
-		);
-		this._inFlightPromises.set(key, request);
-		return request;
-	}
-
-	private async requestAndCacheFileToken(
-		documentId: string,
-		fileHash: string,
-		contentType: string,
-		contentLength: number,
-		key: string,
-	): Promise<FileGrant> {
-		try {
-			const newToken = await this.fetchFileTokenFromApi(
-				documentId,
-				fileHash,
-				contentType,
-				contentLength,
-			);
-			const existing = this.tokenEntries.get(key)!;
-			this.tokenEntries.set(fileHash, {
-				...existing,
-				token: newToken,
-				expiryTime: this.resolveJwtExpiry(newToken),
-			});
-			return newToken;
-		} finally {
-			this._inFlightPromises.delete(key);
-		}
-	}
-
-	private validCachedToken(key: string): FileGrant | undefined {
-		const tokenInfo = this.tokenEntries.get(key);
-		if (!tokenInfo?.token || !this.tokenIsValid(tokenInfo)) {
-			return undefined;
-		}
-		this.logLine("cache hit: cached token still passes validity check");
-		this._inFlightPromises.delete(key);
-		return tokenInfo.token as FileGrant;
+	captureFileContext(documentId: string, onpremServerId?: string): () => void {
+		if (this.isRelayOnPremMode && onpremServerId) this.documentServerMap.set(documentId, onpremServerId);
+		const provider = this.isRelayOnPremMode ? this.getRelayOnPremProvider(documentId) : null;
+		const context = provider?.getFileCredentialContext(), generation = this.fileCacheGeneration;
+		const cloudToken = provider ? undefined : this.authSession.currentUser?.authToken;
+		return () => {
+			const currentProvider = this.isRelayOnPremMode ? this.getRelayOnPremProvider(documentId) : null;
+			if (this.fileCacheDestroyed || generation !== this.fileCacheGeneration || currentProvider !== provider
+				|| (provider ? provider.getFileCredentialContext() !== context : this.authSession.currentUser?.authToken !== cloudToken)) {
+				throw new Error("Attachment account or server changed. Local content is retained.");
+			}
+		};
 	}
 
 	async resolveFileToken(
@@ -455,20 +413,36 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		contentType: string,
 		contentLength: number,
 		onpremServerId?: string,
+		binding: RestoreBinding = {},
 	): Promise<FileGrant> {
-		if (this.isRelayOnPremMode && onpremServerId) {
-			this.documentServerMap.set(documentId, onpremServerId);
-		}
-		const key = `${documentId}${fileHash}`;
-		const cached = this.validCachedToken(key);
-		if (cached) {
-			return cached;
-		}
-		return this.acquireFreshFileToken(
-			documentId,
-			fileHash,
-			contentType,
-			contentLength,
-		);
+		if (this.fileCacheDestroyed) throw new Error("Attachment credentials are closed");
+		binding = restoreMetadata(binding);
+		if (this.isRelayOnPremMode && onpremServerId) this.documentServerMap.set(documentId, onpremServerId);
+		const provider = this.isRelayOnPremMode ? this.getRelayOnPremProvider(documentId) : null;
+		// Cloud/legacy auth has no session-scoped provider namespace. Do not reuse
+		// a credential there across a possible account transition.
+		if (!provider) return this.fetchFileTokenFromApi(documentId, fileHash, contentType, contentLength, binding);
+		const context = provider.getFileCredentialContext(), generation = this.fileCacheGeneration;
+		if (!this.fileContexts.has(context)) this.fileContexts.set(context, ++this.nextFileContext);
+		const key = JSON.stringify([this.fileContexts.get(context), documentId, fileHash, contentType, contentLength, binding.restoreGeneration ?? null]);
+		const check = () => {
+			if (generation !== this.fileCacheGeneration || this.fileCacheDestroyed || !this.isRelayOnPremMode
+				|| this.getRelayOnPremProvider(documentId) !== provider || provider.getFileCredentialContext() !== context) {
+				throw new Error("Attachment account or server changed. Retry using the current connection.");
+			}
+		};
+		for (const [cachedKey, entry] of this.fileTokens) if (!this.tokenIsValid(entry)) this.fileTokens.delete(cachedKey);
+		const cached = this.fileTokens.get(key);
+		if (cached?.token) { check(); return cached.token; }
+		const inFlight = this.fileRequests.get(key);
+		if (inFlight) return inFlight;
+		const request = this.fetchFileTokenFromApi(documentId, fileHash, contentType, contentLength, binding).then(token => {
+			check();
+			this.fileTokens.set(key, { token, expiryTime: this.resolveJwtExpiry(token), attempts: 0, friendlyName: documentId });
+			while (this.fileTokens.size > 256) this.fileTokens.delete(this.fileTokens.keys().next().value!);
+			return token;
+		}).finally(() => { if (this.fileRequests.get(key) === request) this.fileRequests.delete(key); });
+		this.fileRequests.set(key, request);
+		return request;
 	}
 }

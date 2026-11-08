@@ -4,6 +4,8 @@ import { FolderIndex } from "../src/FolderIndex";
 import { VaultShare } from "../src/VaultShare";
 import { Document } from "../src/Document";
 import { TrackedFolder } from "../src/TrackedFolder";
+import { AttachmentFile } from "../src/AttachmentFile";
+import { ItemKind } from "../src/ItemKinds";
 import { TFolder } from "obsidian";
 import { makeDocumentRecord, makeFolderRecord } from "../src/ItemKinds";
 import type { AttachmentSyncSettings } from "../src/AttachmentSyncSettings";
@@ -45,6 +47,20 @@ function trackedDoc(path: string, guid: string) {
 }
 
 describe("shared subfolder deletion", () => {
+	test("attachment acknowledgement uses its captured upload, never a newer cached hash", async () => {
+		const { share, folderIndex } = fixture();
+		const file = Object.create(AttachmentFile.prototype) as AttachmentFile;
+		const latestHash = jest.fn(async () => "newer-unuploaded-hash");
+		Object.assign(file, { path: "photo.png", _localGuid: "image", contentAddressedCache: { resolveHash: latestHash } });
+		jest.spyOn(folderIndex.kinds, "kindForPath").mockReturnValue(ItemKind.Image);
+		const check = jest.fn();
+		await share.noteUploaded(file, { hash: "uploaded-hash", mtime: 123, check });
+		expect(folderIndex.recordFor("photo.png")).toMatchObject({ type: ItemKind.Image, hash: "uploaded-hash", synctime: 123 });
+		expect(latestHash).not.toHaveBeenCalled(); expect(check).toHaveBeenCalledTimes(1);
+		await expect(share.noteUploaded(file, { hash: "stale", mtime: 456, check: () => { throw new Error("restored"); } })).rejects.toThrow("restored");
+		expect(folderIndex.recordFor("photo.png")?.hash).toBe("uploaded-hash");
+	});
+
 	test.each(["empty", "empty-tree", "populated", "legacy-only"])("%s tree is deleted on a synced peer and stays deleted after migration", (kind) => {
 		const { share, folderIndex, crdtDoc } = fixture();
 		if (kind !== "legacy-only") folderIndex.put("notes", makeFolderRecord("folder"));
