@@ -124,3 +124,37 @@ pictureIntegration("a restored session uploads and attaches pictures through act
 		expect(await store.pictureSource(source.id, fixture.entry)).toBeUndefined();
 	} finally { await session.close(); }
 });
+
+integration("restored sessions deliver queued inbox choices with immutable generation headers over real HTTP", async () => {
+	const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as {
+		base: string; share: string; entry: string; reviewer: string; token: string; owner: string; ownerToken: string; restoreGeneration: string;
+	};
+	if (new URL(fixture.base).hostname !== "127.0.0.1") throw new Error("Only a disposable loopback server is allowed");
+	const identity = { serverId: fixture.base, accountId: fixture.reviewer, shareId: fixture.share, vaultId: "synthetic-restore-inbox" };
+	const owner = new DiscussionTransport({ ...identity, accountId: fixture.owner }, async () => ({ accountId: fixture.owner, accessToken: fixture.ownerToken }), fetch);
+	const transport = new DiscussionTransport(identity, async () => ({ accountId: fixture.reviewer, accessToken: fixture.token }), fetch);
+	const store = await DiscussionStore.open(identity, new IDBFactory()), session = new DiscussionSession(store, transport), thread = randomUUID();
+	try {
+		await owner.send({ operationId: randomUUID(), scopeId: fixture.entry, type: "thread.create", dependsOn: [], restoreGeneration: fixture.restoreGeneration,
+			payload: protocolJson({ type: "thread.create", thread_id: thread, message_id: randomUUID(), anchor: { version: 1, type: "note" },
+				body: { version: 1, blocks: [{ type: "paragraph", children: [{ type: "text", text: "Restore inbox fixture", marks: [] }, { type: "mention", user_id: fixture.reviewer }] }] } }) });
+		await session.start();
+		for (let attempt = 0; attempt < 40 && !session.inbox.items.some(item => item.thread_id === thread); attempt++) {
+			session.inbox.wake(); await session.inbox.settled(); await new Promise(resolve => setTimeout(resolve, 100));
+		}
+		const item = session.inbox.items.find(item => item.thread_id === thread)!;
+		expect(item).toMatchObject({ thread_id: thread, unread: true });
+		await session.inbox.configure(true, "offline", true);
+		await session.inbox.queue(item, { type: "state", seen_version: item.version, action: "read" });
+		await session.inbox.queueSubscription(fixture.entry, thread, item.subscription, true, true);
+		expect(session.inbox.pending.map(op => op.restoreGeneration)).toEqual([fixture.restoreGeneration, fixture.restoreGeneration]);
+		await session.inbox.configure(true, "online", true); await session.inbox.settled();
+		expect(session.inbox.pending).toEqual([]);
+		expect((await transport.inbox()).items.find(row => row.thread_id === thread)).toMatchObject({ unread: false, subscription: { following: true, muted: true, version: 1 } });
+		await expect(transport.changeInbox(fixture.entry, thread, { type: "state", seen_version: item.version, action: "unread" })).rejects.toMatchObject({ code: "restore_generation_changed" });
+		const subscription = { type: "subscription" as const, expected_version: 0, following: true, muted: true };
+		await expect(transport.changeInbox(fixture.entry, thread, subscription)).rejects.toMatchObject({ code: "restore_generation_changed" });
+		expect(await transport.changeInbox(fixture.entry, thread, subscription, session.restoreBinding)).toEqual({ version: 1, following: true, muted: true });
+		expect((await transport.inbox()).items.find(row => row.thread_id === thread)?.unread).toBe(false);
+	} finally { await session.close(); }
+}, 15000);

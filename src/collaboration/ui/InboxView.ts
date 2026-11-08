@@ -120,7 +120,8 @@ export class InboxView extends ItemView {
 		this.pending.empty();
 		for (const source of sources) for (const op of source.session.inbox.pending) if (op.state === "rejected") {
 			const line = this.pending.createDiv();
-			line.createEl("p", { text: source.label + ": " + (op.error === "stale_subscription_version" ? "Preferences changed on another device. Review the current state before trying again." :
+			line.createEl("p", { text: source.label + ": " + (op.error === "restore_generation_changed" ? "This choice was saved before the service was restored. It has been kept for review and will not send automatically. Review the current notification before making a new choice." :
+				op.error === "stale_subscription_version" ? "Preferences changed on another device. Review the current state before trying again." :
 				["stale_inbox_version", "inbox_version_unavailable"].includes(op.error ?? "") ? "New activity arrived before this change. Review the notification before trying again." :
 				"This inbox change could not be applied. Check discussion access and review the current state.") });
 			const discard = line.createEl("button", { text: "Keep server state" }); this.action(discard, () => source.session.inbox.discard(op.id));

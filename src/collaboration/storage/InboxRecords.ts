@@ -1,11 +1,12 @@
 import { isId, isRecord, isSequence } from "../DiscussionProtocol";
+import { restoreMetadata, type RestoreBinding } from "../RestoreGeneration";
 import { parseDiscussionScope } from "../DiscussionScope";
 import { inboxCursor, inboxScope, parseInboxChange, parseInboxItem, parseInboxSubscription, type InboxChange, type InboxItem, type InboxSubscription } from "../InboxProtocol";
 
 export const INBOX_KEY = "inbox:v1";
 export const INBOX_CACHE_LIMIT = 500;
 export const INBOX_QUEUE_LIMIT = 200;
-export type InboxOperation = { id: string; scopeId: string; threadId: string; change: InboxChange;
+export type InboxOperation = RestoreBinding & { id: string; scopeId: string; threadId: string; change: InboxChange;
 	state: "queued" | "rejected"; attempted: boolean; error?: string };
 export type InboxLease = { token: string; expiresAt: number };
 export type InboxLocalState = { version: 1; revision: number; epoch: number; items: InboxItem[]; operations: InboxOperation[];
@@ -28,7 +29,7 @@ export function parseInboxLocalState(value: unknown): InboxLocalState {
 		if (!isRecord(op) || !isId(op.id) || typeof op.scopeId !== "string" || !parseDiscussionScope(op.scopeId) || !isId(op.threadId) ||
 			!["queued", "rejected"].includes(String(op.state)) || typeof op.attempted !== "boolean" ||
 			(op.error !== undefined && (typeof op.error !== "string" || !/^[a-z_]{1,80}$/.test(op.error)))) throw new Error("Invalid local inbox operation");
-		return { id: op.id, scopeId: op.scopeId, threadId: op.threadId, change: parseInboxChange(op.change),
+		return { ...restoreMetadata(op as RestoreBinding), id: op.id, scopeId: op.scopeId, threadId: op.threadId, change: parseInboxChange(op.change),
 			state: op.state as InboxOperation["state"], attempted: op.attempted, ...(op.error ? { error: op.error as string } : {}) };
 	});
 	if (new Set(items.map(item => item.thread_id)).size !== items.length || new Set(operations.map(op => op.id)).size !== operations.length) throw new Error("Duplicate inbox identity");

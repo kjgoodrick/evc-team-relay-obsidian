@@ -3,7 +3,8 @@ import { DiscussionInbox } from "../../src/collaboration/DiscussionInbox";
 import { DiscussionStore } from "../../src/collaboration/storage/DiscussionStore";
 import { DiscussionTransport, DiscussionFailure } from "../../src/collaboration/DiscussionTransport";
 import { inboxScope, parseInboxPage, type InboxItem, type InboxChange, type InboxSubscription } from "../../src/collaboration/InboxProtocol";
-import { INBOX_KEY } from "../../src/collaboration/storage/InboxRecords";
+import { INBOX_KEY, parseInboxLocalState } from "../../src/collaboration/storage/InboxRecords";
+import type { RestoreBinding } from "../../src/collaboration/RestoreGeneration";
 
 Object.assign(globalThis, { IDBKeyRange });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -15,14 +16,14 @@ function item(n = 3): InboxItem { return {
 }; }
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const response = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
-async function fixture(factory = new IDBFactory()) {
+async function fixture(factory = new IDBFactory(), binding: () => RestoreBinding = () => ({})) {
 	const store = await DiscussionStore.open(identity, factory);
 	const server = { rows: [item()] };
 	const subscriptions = new Map<string, InboxSubscription>();
 	const transport = {
 		inbox: jest.fn(async (_cursor: string | null = null) => ({ items: clone(server.rows), next_cursor: null as string | null })),
 		inboxSubscription: jest.fn(async (_scope: string, thread: string) => clone(subscriptions.get(thread) ?? { version: 0, following: false, muted: false })),
-		changeInbox: jest.fn(async (_scope: string, thread: string, change: InboxChange) => {
+		changeInbox: jest.fn(async (_scope: string, thread: string, change: InboxChange, _binding: RestoreBinding = {}, _current?: () => boolean) => {
 			const row = server.rows.find(row => row.thread_id === thread);
 			if (change.type === "subscription") {
 				const value = { version: change.expected_version + 1, following: change.following, muted: change.muted };
@@ -36,7 +37,7 @@ async function fixture(factory = new IDBFactory()) {
 			return { version: row.version, read_version: row.read_version, dismissed_version: row.dismissed_version, unread: row.unread };
 		}),
 	};
-	const inbox = new DiscussionInbox(store, transport);
+	const inbox = new DiscussionInbox(store, transport, undefined, binding);
 	await store.updateInbox(state => { state.items = clone(server.rows); });
 	return { store, server, transport, inbox, factory, close: async () => { await inbox.close(); store.close(); } };
 }
@@ -104,7 +105,7 @@ test("lost response retains the exact request and another worker can recover aft
 		expect(f.inbox.pending[0].attempted).toBe(true);
 		await f.store.updateInbox(state => { state.retryAt = 0; });
 		f.inbox.wake(); await f.inbox.settled();
-		expect(f.transport.changeInbox.mock.calls[1]).toEqual(original);
+		expect(f.transport.changeInbox.mock.calls[1].slice(0, 4)).toEqual(original.slice(0, 4));
 		expect(f.inbox.pending).toEqual([]);
 	} finally { await f.close(); }
 });
@@ -202,7 +203,7 @@ test("readers can follow a discussion without an inbox entry, including offline"
 		await f.inbox.queueSubscription(id(4), id(77), f.inbox.subscription(id(4), id(77))!, true, false);
 		expect(f.inbox.subscription(id(4), id(77))?.following).toBe(true);
 		await f.inbox.configure(true, "online", true); await f.inbox.settled();
-		expect(f.transport.changeInbox).toHaveBeenCalledWith(id(4), id(77), { type: "subscription", expected_version: 0, following: true, muted: false });
+		expect(f.transport.changeInbox).toHaveBeenCalledWith(id(4), id(77), { type: "subscription", expected_version: 0, following: true, muted: false }, {}, expect.any(Function));
 	} finally { await f.close(); }
 });
 
@@ -278,5 +279,95 @@ test("corrupted inbox data cannot prevent ordinary authorization-cache cleanup",
 		expect((await f.store.inboxState()).items).toEqual([]);
 		expect(await f.store.preference("inbox:recovery")).toEqual({ broken: true });
 		expect((await f.store.getDraft("saved"))?.body).toBe("keep draft");
+	} finally { await f.close(); }
+});
+
+test("inbox transport freezes restore binding and payload before credential refresh", async () => {
+	let credentials!: (value: { accountId: string; accessToken: string }) => void;
+	const fetcher = jest.fn().mockResolvedValue(response({ version: 1, read_version: 1, dismissed_version: 0, unread: false }));
+	const transport = new DiscussionTransport(identity, () => new Promise(resolve => { credentials = resolve; }), fetcher);
+	const binding = { restoreGeneration: id(90) }, change: InboxChange = { type: "state", action: "read", seen_version: 1 };
+	const request = transport.changeInbox(id(4), id(3), change, binding);
+	binding.restoreGeneration = id(91); change.action = "dismiss";
+	credentials({ accountId: id(1), accessToken: "synthetic" }); await request;
+	expect(new Headers(fetcher.mock.calls[0][1].headers).get("X-Relay-Restore-Generation")).toBe(id(90));
+	expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ seen_version: 1, action: "read" });
+	await expect(transport.changeInbox(id(4), id(3), change, binding, () => false)).rejects.toMatchObject({ code: "action_context_changed" });
+	expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+test("offline inbox choices retain their generation through parsing, reopen and delivery", async () => {
+	const f = await fixture(new IDBFactory(), () => ({ restoreGeneration: id(90) }));
+	try {
+		await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+		await f.store.updateInbox(state => { state.items = clone(f.server.rows); });
+		await f.inbox.configure(true, "offline", true);
+		await f.inbox.queue(f.inbox.items[0], { type: "state", action: "read", seen_version: 1 });
+		await f.inbox.queueSubscription(id(4), id(3), f.inbox.items[0].subscription, true, true);
+		expect(f.inbox.pending.map(op => op.restoreGeneration)).toEqual([id(90), id(90)]);
+		const saved = await f.store.inboxState();
+		expect(() => parseInboxLocalState({ ...saved, operations: [{ ...saved.operations[0], restoreGeneration: "invalid" }] })).toThrow();
+		await f.inbox.close(); f.store.close();
+		const store = await DiscussionStore.open(identity, f.factory), inbox = new DiscussionInbox(store, f.transport);
+		try {
+			await inbox.configure(true, "online", true); await inbox.settled();
+			expect(inbox.pending).toEqual([]);
+			expect(f.transport.changeInbox.mock.calls.map(call => call[3])).toEqual([{ restoreGeneration: id(90) }, { restoreGeneration: id(90) }]);
+		} finally { await inbox.close(); store.close(); }
+	} finally { await f.close(); }
+});
+
+test("inbox intent captured before another window restores cannot queue into the new generation", async () => {
+	const f = await fixture(new IDBFactory(), () => ({ restoreGeneration: id(90) }));
+	try {
+		await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+		await f.store.updateInbox(state => { state.items = clone(f.server.rows); });
+		await f.inbox.configure(true, "offline", true);
+		const original = f.store.updateInbox.bind(f.store);
+		let release!: () => void;
+		jest.spyOn(f.store, "updateInbox").mockImplementationOnce((work, binding) => new Promise((resolve, reject) => {
+			release = () => { void original(work, binding).then(resolve, reject); };
+		}));
+		const saving = f.inbox.queue(f.inbox.items[0], { type: "state", action: "read", seen_version: 1 });
+		const rejected = expect(saving).rejects.toMatchObject({ code: "restore_generation_changed" });
+		await f.store.observeRestoreContext({ supported: true, generation: id(91) }, (await f.store.restoreCheckpoint()).revision);
+		await original(state => { state.items = clone(f.server.rows); });
+		release(); await rejected;
+		expect((await f.store.inboxState()).operations).toEqual([]);
+		expect(f.transport.changeInbox).not.toHaveBeenCalled();
+	} finally { await f.close(); }
+});
+
+test("restore during inbox delivery preserves the old choice and ignores the late accepted state", async () => {
+	const f = await fixture(new IDBFactory(), () => ({ restoreGeneration: id(90) }));
+	let release!: (value: { version: number; read_version: number; dismissed_version: number; unread: boolean }) => void;
+	try {
+		await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+		await f.store.updateInbox(state => { state.items = clone(f.server.rows); });
+		await f.inbox.configure(true, "offline", true);
+		await f.inbox.queue(f.inbox.items[0], { type: "state", action: "read", seen_version: 1 });
+		f.transport.changeInbox.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+		await f.inbox.configure(true, "online", true); await until(() => !!release);
+		await f.store.observeRestoreContext({ supported: true, generation: id(91) }, (await f.store.restoreCheckpoint()).revision);
+		release({ version: 1, read_version: 1, dismissed_version: 0, unread: false }); await f.inbox.settled();
+		const saved = await f.store.inboxState();
+		expect(saved.items).toEqual([]);
+		expect(saved.operations).toEqual([expect.objectContaining({ state: "rejected", error: "restore_generation_changed", restoreGeneration: id(90) })]);
+		expect(f.transport.changeInbox).toHaveBeenCalledTimes(1);
+	} finally { release?.({ version: 1, read_version: 1, dismissed_version: 0, unread: false }); await f.close(); }
+});
+
+test("a server restore rejection stops inbox replay and retains dependent choices for review", async () => {
+	const f = await fixture();
+	try {
+		await f.inbox.configure(true, "offline", true);
+		await f.inbox.queue(f.inbox.items[0], { type: "state", action: "read", seen_version: 1 });
+		await f.inbox.queue(f.inbox.items[0], { type: "subscription", expected_version: 0, following: true, muted: false });
+		f.transport.changeInbox.mockRejectedValueOnce(new DiscussionFailure("pause", "restore_generation_changed", 409));
+		await f.inbox.configure(true, "online", true); await f.inbox.settled();
+		expect(f.inbox.pending.map(op => [op.state, op.error])).toEqual([["rejected", "restore_generation_changed"], ["rejected", "prior_change_rejected"]]);
+		expect(f.inbox.status).toBe("error");
+		f.inbox.wake(); await f.inbox.settled();
+		expect(f.transport.changeInbox).toHaveBeenCalledTimes(1);
 	} finally { await f.close(); }
 });

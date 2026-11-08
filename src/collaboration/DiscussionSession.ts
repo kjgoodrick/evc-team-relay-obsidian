@@ -114,7 +114,7 @@ export class DiscussionSession {
 
 	constructor(readonly store: DiscussionStore, readonly transport: DiscussionTransport) {
 		this.reattachments = new DiscussionReattachment(store, transport);
-		this.inbox = new DiscussionInbox(store, transport, broadcast => { if (broadcast) this.channel?.postMessage("inbox"); this.notify(); });
+		this.inbox = new DiscussionInbox(store, transport, broadcast => { if (broadcast) this.channel?.postMessage("inbox"); this.notify(); }, () => this.restoreBinding);
 		this.outbox = new DiscussionOutbox(store, new DiscussionDelivery(store, transport, () => this.picturesEnabled, () => this.restoreLineage === null || this.baseGroupRestoreGuard), uuid(), status => {
 			if (this.closed) return;
 			if (status === "authentication_required") { this.requireAuthentication(); return; }
@@ -438,7 +438,7 @@ export class DiscussionSession {
 			this.recoveryEnabled = capability.recovery === true;
 			this.commandStatusEnabled = capability.commandStatus === true;
 			this.moderationRecoveryEnabled = capability.moderationRecovery === true;
-			this.inboxEnabled = capability.inbox === true;
+			this.inboxEnabled = capability.inbox === true && (this.restoreLineage === null || capability.inboxRestoreGuard === true);
 			this.searchEnabled = capability.search === true;
 			this.exportEnabled = capability.export === true;
 			this.exportCatalogEnabled = capability.exportCatalog === true;

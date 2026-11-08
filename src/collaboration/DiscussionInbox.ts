@@ -1,4 +1,5 @@
 import { v4 as uuid } from "uuid";
+import { restoreMetadata, type RestoreBinding } from "./RestoreGeneration";
 import { DiscussionFailure, type DiscussionTransport } from "./DiscussionTransport";
 import { inboxScope, parseInboxChange, parseInboxItem, type InboxChange, type InboxItem, type InboxSubscription } from "./InboxProtocol";
 import { DiscussionStore } from "./storage/DiscussionStore";
@@ -28,7 +29,7 @@ export class DiscussionInbox {
 	private hiddenScopes = new Set<string>();
 	private subscriptionChain: Promise<unknown> = Promise.resolve();
 	private subscriptionFlights = new Map<string, Promise<void>>();
-	constructor(private store: DiscussionStore, private transport: Transport, private changed: (broadcast: boolean) => void = () => {}) {}
+	constructor(private store: DiscussionStore, private transport: Transport, private changed: (broadcast: boolean) => void = () => {}, private restoreBinding: () => RestoreBinding = () => ({})) {}
 	get status(): InboxStatus { return this.statusValue; }
 	get available(): boolean { return !this.closed && this.enabled && this.mode !== "blocked"; }
 	get items(): InboxItem[] { return this.available ? this.state.items.filter(item => !this.hiddenScopes.has(inboxScope(item))).map(item => overlayInbox(item, this.state.operations)) : []; }
@@ -73,6 +74,7 @@ export class DiscussionInbox {
 	}
 	async queueSubscription(scopeId: string, threadId: string, value: InboxSubscription, following: boolean, muted: boolean): Promise<void> {
 		if (!this.available) throw new Error("The inbox is unavailable for this account.");
+		const binding = restoreMetadata(this.restoreBinding());
 		const change = parseInboxChange({ type: "subscription", expected_version: value.version, following, muted });
 		const id = uuid();
 		this.adopt(await this.save(this.store.updateInbox(state => {
@@ -80,8 +82,8 @@ export class DiscussionInbox {
 				state.items.some(row => inboxScope(row) === scopeId && row.thread_id === threadId);
 			if (this.closed || !this.available || this.hiddenScopes.has(scopeId) || !known) throw new Error("Refresh this discussion’s notification preferences first.");
 			if (state.operations.length >= INBOX_QUEUE_LIMIT || state.operations.some(op => op.threadId === threadId && op.state === "rejected")) throw new Error("Review pending changes in the comment inbox first.");
-			state.operations.push({ id, scopeId, threadId, change, state: "queued", attempted: false });
-		})), true); this.wake();
+			state.operations.push({ id, scopeId, threadId, change, state: "queued", attempted: false, ...binding });
+		}, binding)), true); this.wake();
 	}
 	onChange(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
 	private notify(broadcast = false): void {
@@ -146,6 +148,7 @@ export class DiscussionInbox {
 	}
 	async queue(item: InboxItem, change: InboxChange): Promise<void> {
 		if (!this.available) throw new Error("The inbox is unavailable for this account.");
+		const binding = restoreMetadata(this.restoreBinding());
 		item = parseInboxItem(item); change = parseInboxChange(change);
 		const scopeId = inboxScope(item), id = uuid();
 		const state = await this.save(this.store.updateInbox(state => {
@@ -155,8 +158,8 @@ export class DiscussionInbox {
 			if (state.operations.some(op => op.threadId === item.thread_id && op.state === "rejected")) throw new Error("Review this discussion’s rejected inbox change first.");
 			if (state.operations.length >= INBOX_QUEUE_LIMIT) throw new Error("Review pending inbox changes before adding more.");
 			if (change.type === "state" && change.seen_version !== item.version) throw new Error("The read version changed.");
-			state.operations.push({ id, scopeId, threadId: item.thread_id, change, state: "queued", attempted: false });
-		}));
+			state.operations.push({ id, scopeId, threadId: item.thread_id, change, state: "queued", attempted: false, ...binding });
+		}, binding));
 		this.adopt(state, true); this.wake();
 	}
 	async discard(id: string): Promise<void> {
@@ -228,7 +231,9 @@ export class DiscussionInbox {
 				if (!owns(selected) || !operation) break;
 				const op = operation;
 				try {
-					const result = await this.transport.changeInbox(op.scopeId, op.threadId, op.change);
+					await this.store.requireRestoreBinding(op);
+					if (!current()) return;
+					const result = await this.transport.changeInbox(op.scopeId, op.threadId, op.change, restoreMetadata(op), current);
 					const saved = await this.store.updateInbox(state => {
 						if (!owns(state)) return;
 						state.operations = state.operations.filter(item => item.id !== op.id);
@@ -245,7 +250,7 @@ export class DiscussionInbox {
 					});
 					this.adopt(saved, true); this.rerun = true;
 				} catch (error) {
-					if (!(error instanceof DiscussionFailure) || error.action !== "reject") throw error;
+					if (!(error instanceof DiscussionFailure) || error.action !== "reject" && error.code !== "restore_generation_changed") throw error;
 					this.adopt(await this.store.updateInbox(state => {
 						if (!owns(state)) return;
 						const row = state.operations.find(row => row.id === op.id);
@@ -257,6 +262,7 @@ export class DiscussionInbox {
 						}
 						if ([403, 404].includes(error.status)) state.items = state.items.filter(item => item.thread_id !== op.threadId);
 					}), true);
+					if (error.code === "restore_generation_changed") throw error;
 				}
 			}
 			if (current()) { this.statusValue = "ready"; this.notify(); }

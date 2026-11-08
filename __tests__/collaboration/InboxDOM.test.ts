@@ -103,3 +103,17 @@ test("thread follow controls queue preferences for a reader without edit permiss
 		expect((await f.store.inboxState()).operations[0].change).toEqual({ type: "subscription", expected_version: 0, following: true, muted: false });
 	} finally { controls.dispose(); parent.remove(); await f.close(); }
 });
+
+test("restored inbox choices explain why replay stopped and can keep the current server state", async () => {
+	const f = await fixture();
+	try {
+		button(f.view.contentEl, "Mark read").click(); await until(() => f.inbox.pending.length === 1);
+		await f.store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
+		await f.inbox.reload();
+		expect(f.view.contentEl.textContent).toContain("saved before the service was restored");
+		expect(f.view.contentEl.textContent).toContain("will not send automatically");
+		expect(f.inbox.pending[0]).toMatchObject({ state: "rejected", error: "restore_generation_changed" });
+		button(f.view.contentEl, "Keep server state").click(); await until(() => f.inbox.pending.length === 0);
+		expect((await f.store.inboxState()).operations).toEqual([]);
+	} finally { await f.close(); }
+});

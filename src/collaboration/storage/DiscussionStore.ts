@@ -96,9 +96,9 @@ export class DiscussionStore {
 	static async open(identity: StoreIdentity, factory: IDBFactory = indexedDB): Promise<DiscussionStore> {
 		const parts = [identity.serverId, identity.accountId, identity.vaultId, identity.shareId];
 		parts.forEach(requiredId);
-		// Version 26 fences workers that do not preserve restore-generation bindings.
+		// Version 27 also fences workers that drop inbox restore-generation bindings.
 		// Preserve all stores while fencing older workers from rewriting this data.
-		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 26);
+		const open = factory.open("team-relay-discussions:" + JSON.stringify(parts), 27);
 		open.onupgradeneeded = event => {
 			const db = open.result;
 			if (event.oldVersion < 1) {
@@ -405,8 +405,10 @@ export class DiscussionStore {
 	}
 	async inboxState(): Promise<InboxLocalState> { return parseInboxLocalState(await this.preference(INBOX_KEY)); }
 	/** Synchronous work inside one transaction serializes inbox windows/workers. */
-	async updateInbox(work: (state: InboxLocalState) => void): Promise<InboxLocalState> {
+	async updateInbox(work: (state: InboxLocalState) => void, binding?: RestoreBinding): Promise<InboxLocalState> {
+		const captured = binding === undefined ? undefined : restoreMetadata(binding);
 		return this.transaction(["preferences"], "readwrite", async tx => {
+			if (captured !== undefined) await requireRestoreBinding(tx, captured);
 			const prefs = tx.objectStore("preferences"), state = parseInboxLocalState(await request(prefs.get(INBOX_KEY)));
 			work(state);
 			state.revision++;

@@ -1,6 +1,6 @@
 # Restore-generation client foundation
 
-This is a tested discussion-command, picture-upload and group-capture restore
+This is a tested discussion-command, picture-upload, group-capture and inbox restore
 guard, not a complete restore workflow.
 Do not activate a restore generation in a live deployment yet. Complete
 user-facing reconciliation, guards for other mutations, and a
@@ -46,7 +46,7 @@ dependencies inherit their parent's binding. Online draft completion/retry canno
 erase or restamp an older unconfirmed action. Group wire preparation and saved
 request review preserve this metadata.
 
-IndexedDB version 26 closes older workers and prevents them from opening this
+IndexedDB version 27 closes older workers and prevents them from opening this
 store with an earlier version. Portable recovery copies retain the optional
 metadata and validate it on inspection. Their existing envelope format remains
 version 1/storageVersion 23; older strict readers reject requests containing the
@@ -74,6 +74,20 @@ capabilities. Missing guards disable those authoring paths. Cached capability
 decisions survive offline startup; an older queued request cannot gain a new
 binding when these features become available.
 
+Inbox read/unread/dismiss and follow/mute choices also retain their original
+generation. It is captured before the local save and checked in that transaction
+and before delivery; the transport freezes it before credential refresh. A
+restored share requires `discussion_inbox_restore_guard` before enabling the
+inbox. Exact subscription retries still require the matching generation. Reads
+remain accessible through ordinary authorization without a mutation header.
+
+Local rotation rejects queued choices and invalidates the worker lease/epoch,
+so a late old response cannot clear the choice or replace restored state. A
+server restore rejection stops delivery, preserves dependent choices for review,
+and never retries automatically. The inbox explains the reason and lets the user
+keep the server state before making a new choice. Version 27 specifically fences
+older workers whose inbox parser would discard this binding.
+
 Validation includes fake-IndexedDB multiwindow, rollback, unseen-scope response,
 dependency, picture preservation, inbox and online-draft tests. The real HTTP
 proof runs an isolated loopback control plane with a synthetic nonnull generation:
@@ -88,7 +102,10 @@ That proof verifies old writes/withdrawals are rejected, old queued content stay
 local, explicitly bound new commands work, accepted retries stay idempotent, and
 receipt reads remain available. It also exercises the ordinary session against
 HTTP: startup quarantine, new delivery, online resolve, offline queue capture and
-reconnect delivery. Adding `--pictures-endpoint 127.0.0.1:PORT` with an owned
+reconnect delivery. The actual inbox projection worker also delivers a mention,
+then the ordinary session sends offline read-state and follow/mute choices with
+their original binding. Missing-generation retries fail without changing state.
+Adding `--pictures-endpoint 127.0.0.1:PORT` with an owned
 disposable MinIO fixture also exercises ordinary-session picture upload,
 attachment, stale retry rejection and local-original reclamation. PostgreSQL
 group capture tests rotate the generation during private source observation and

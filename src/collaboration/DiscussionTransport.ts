@@ -173,11 +173,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current, restoreGeneration: restoreGeneration(captured.restoreGeneration) }), captured);
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; inboxRestoreGuard?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_picture_restore_guard", "discussion_base_group_restore_guard", "discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_inbox_restore_guard", "discussion_picture_restore_guard", "discussion_base_group_restore_guard", "discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		const restore = restoreContext(value.features.discussion_command_restore_guard, value.restore_generation);
@@ -212,6 +212,7 @@ export class DiscussionTransport implements DiscussionSender {
 			}
 		}
 		return { ...(restore ? { restoreContext: restore } : {}),
+			...(value.features.discussion_inbox_restore_guard === undefined ? {} : { inboxRestoreGuard: value.features.discussion_inbox_restore_guard === true }),
 			...(value.features.discussion_picture_restore_guard === undefined ? {} : { pictureRestoreGuard: value.features.discussion_picture_restore_guard === true }),
 			...(value.features.discussion_base_group_restore_guard === undefined ? {} : { baseGroupRestoreGuard: value.features.discussion_base_group_restore_guard === true }), discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
@@ -256,11 +257,13 @@ export class DiscussionTransport implements DiscussionSender {
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		return this.parse(await this.request(this.scopePath(scopeId) + `/threads/${threadId}/subscription`), parseInboxSubscription);
 	}
-	async changeInbox(scopeId: string, threadId: string, change: InboxChange) {
+	async changeInbox(scopeId: string, threadId: string, change: InboxChange, binding: RestoreBinding = {}, current?: () => boolean) {
+		const generation = restoreGeneration(binding.restoreGeneration);
 		if (!isId(threadId)) throw new DiscussionFailure("reject", "invalid_local_target");
 		try { change = parseInboxChange(change); } catch { throw new DiscussionFailure("reject", "invalid_local_command"); }
 		const { type, ...payload } = change;
-		const value = await this.request(this.scopePath(scopeId) + `/threads/${threadId}/` + (type === "state" ? "inbox" : "subscription"), JSON.stringify(payload));
+		const value = await this.request(this.scopePath(scopeId) + `/threads/${threadId}/` + (type === "state" ? "inbox" : "subscription"), JSON.stringify(payload), { restoreGeneration: generation, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
 		if (change.type === "subscription") {
 			const result = this.parse(value, parseInboxSubscription);
 			if (result.version !== change.expected_version + 1 || result.following !== change.following || result.muted !== change.muted) throw new DiscussionFailure("pause", "invalid_read_response");

@@ -128,3 +128,13 @@ test("restored sessions require advertised picture and group guards before enabl
 		expect(await f.store.preference("baseGroupRestoreGuard")).toBe(true);
 	} finally { await f.close(); }
 });
+
+test("a restored session enables inbox changes only with an advertised mutation guard", async () => {
+	const f = await fixture(id(90));
+	try {
+		f.transport.capabilities.mockResolvedValue({ ...caps(id(90)), inbox: true });
+		await f.ready(); expect(await f.store.preference("inboxEnabled")).toBe(false);
+		f.transport.capabilities.mockResolvedValue({ ...caps(id(90)), inbox: true, inboxRestoreGuard: true });
+		await f.session.refresh(); expect(await f.store.preference("inboxEnabled")).toBe(true);
+	} finally { await f.close(); }
+});
