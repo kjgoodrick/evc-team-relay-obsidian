@@ -50,6 +50,11 @@ also does not prove that unsaved editor buffers or pending discussion/Bases work
 have been reconciled. Private packaged archive storage, recovery UI and the
 same-root registry/startup handoff remain unfinished.
 
+A separate [desktop file-operation primitive](same-folder-native-operations-preview.md)
+now retains original inodes and publishes reviewed replacements at the same path
+with restart receipts. It is not yet the complete replacement coordinator and
+does not turn this read-only comparison into write authorization.
+
 ## Verification
 
 Real temporary-directory tests cover native comparison without a second working
