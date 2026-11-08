@@ -25,8 +25,11 @@ Preparation stores an archive path/manifest hash and installation-plan ID/hash.
 Recording these references does **not** verify their files or quiesce native
 writers. The installation coordinator must perform those checks before the
 corresponding transitions. The [archive verifier](recovery-archive-verification-preview.md)
-can now reopen the saved archive against its recorded digest; installation plans
-and the coordinator are still unfinished. A pending phase survives close/reopen, including a
+can now reopen the saved archive against its recorded digest. A hash-bound
+[installation plan](source-installation-plan-preview.md) can also be reopened and
+checked against the journal's source/review/archive, including every staged byte.
+Source semantic checks, exclusive staging and the coordinator remain unfinished.
+A pending phase survives close/reopen, including a
 crash between native writes and the final journal commit; startup must resume
 recovery instead of treating that phase as permission to synchronize.
 
