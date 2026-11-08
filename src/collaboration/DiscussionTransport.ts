@@ -2,6 +2,7 @@ import { restoreContext, restoreGeneration, type RestoreBinding, type RestoreCon
 import { queuedEnvelope } from "./QueuedDiscussionCommand";
 export { queuedEnvelope } from "./QueuedDiscussionCommand";
 import { DISCUSSION_EXPORT_MAX_BYTES, DISCUSSION_EXPORT_CATALOG_MAX_BYTES, parseDiscussionExport, parseExportCatalog } from "./DiscussionExportProtocol";
+import { DISCUSSION_SNAPSHOT_MAX_BYTES, parseDiscussionSnapshot } from "./DiscussionSnapshotProtocol";
 import { platformFetch, type PlatformRequestInit } from "../platformFetch";
 import { baseRecordIds, parseBaseRecordContexts } from "./BaseRecordContexts";
 import { RelayHttpError, parseRetryAfterMs } from "../relayRequestErrors";
@@ -42,6 +43,7 @@ const errorCodes = new Set(["target_unavailable", "comment_forbidden", "operatio
 	"too_many_mentions", "invalid_command", "command_too_large", "discussion_preview_disabled", "snapshot_required", "restore_generation_changed"]);
 for (const code of ["inbox_preview_disabled", "inbox_cursor_reset", "stale_subscription_version", "inbox_version_unavailable", "stale_inbox_version"]) errorCodes.add(code);
 for (const code of ["discussion_search_disabled", "discussion_search_cursor_reset", "invalid_search_query", "discussion_export_disabled", "discussion_export_limit"]) errorCodes.add(code);
+for (const code of ["discussion_snapshot_disabled", "discussion_snapshot_limit", "discussion_snapshot_busy"]) errorCodes.add(code);
 for (const code of ["reattach_disabled", "stale_anchor_revision", "reattach_scope_changed", "reattach_readers_changed", "reattach_target_unanchored"]) errorCodes.add(code);
 for (const code of ["anchor_dependency_not_ready", "anchor_generation_mismatch", "invalid_anchor", "invalid_anchor_scope", "text_anchors_disabled", "image_unavailable", "image_anchors_disabled", "image_files_disabled"]) errorCodes.add(code);
 for (const code of ["base_discussions_disabled", "base_definition_not_synced", "base_view_unavailable", "base_view_required"]) errorCodes.add(code);
@@ -173,11 +175,11 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current, restoreGeneration: restoreGeneration(captured.restoreGeneration) }), captured);
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; inboxRestoreGuard?: boolean; timelineMarkerRestoreGuard?: boolean; timelineMarkerCommandStatus?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; inboxRestoreGuard?: boolean; timelineMarkerRestoreGuard?: boolean; timelineMarkerCommandStatus?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; snapshot?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
-		for (const key of ["discussion_timeline_marker_command_status", "discussion_timeline_marker_restore_guard", "discussion_inbox_restore_guard", "discussion_picture_restore_guard", "discussion_base_group_restore_guard", "discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
+		for (const key of ["discussion_timeline_marker_command_status", "discussion_timeline_marker_restore_guard", "discussion_inbox_restore_guard", "discussion_picture_restore_guard", "discussion_base_group_restore_guard", "discussion_command_restore_guard", "discussion_command_status", "discussion_moderation_recovery", "discussion_moderation_catalog", "discussion_text_anchors", "discussion_block_anchors", "discussion_image_occurrences", "discussion_image_files", "discussion_pictures", "discussion_recovery", "discussion_bases", "discussion_base_definition_catalog", "discussion_base_groups", "discussion_inbox", "discussion_search", "discussion_export", "discussion_snapshot", "discussion_export_catalog", "discussion_timeline_markers", "discussion_reattach"]) {
 			if (value.features[key] !== undefined && typeof value.features[key] !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
 		}
 		const restore = restoreContext(value.features.discussion_command_restore_guard, value.restore_generation);
@@ -225,6 +227,7 @@ export class DiscussionTransport implements DiscussionSender {
 			...(value.features.discussion_moderation_catalog === undefined ? {} : { moderationRecovery: value.features.discussion_commands && value.features.discussion_moderation_recovery === true && value.features.discussion_moderation_catalog === true }),
 			...(value.features.discussion_reattach === undefined ? {} : { reattach: value.features.discussion_commands && value.features.discussion_reattach === true }),
 			...(value.features.discussion_export_catalog === undefined ? {} : { exportCatalog: value.features.discussion_commands && value.features.discussion_export === true && value.features.discussion_export_catalog === true }),
+			...(value.features.discussion_snapshot === undefined ? {} : { snapshot: value.features.discussion_commands && value.features.discussion_snapshot === true }),
 			...(value.features.discussion_export === undefined ? {} : { export: value.features.discussion_commands && value.features.discussion_export === true }),
 			...(value.features.discussion_search === undefined ? {} : { search: value.features.discussion_commands && value.features.discussion_search === true }),
 			...(value.features.discussion_inbox === undefined ? {} : { inbox: value.features.discussion_commands && value.features.discussion_inbox === true }) };
@@ -243,6 +246,15 @@ export class DiscussionTransport implements DiscussionSender {
 		const value = await this.request(path, undefined, { responseLimit: DISCUSSION_EXPORT_MAX_BYTES, boundedText: true, current });
 		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
 		return this.parse(value, item => parseDiscussionExport(item, { ...this.identity, scopeId }));
+	}
+
+	async snapshot(scopeId: string, current?: () => boolean) {
+		const scope = parseDiscussionScope(scopeId);
+		if (!scope) throw new DiscussionFailure("reject", "invalid_local_target");
+		const path = this.scopePath(scopeId) + "/snapshot" + (scope.viewId ? "?view_id=" + scope.viewId : "");
+		const value = await this.request(path, undefined, { responseLimit: DISCUSSION_SNAPSHOT_MAX_BYTES, boundedText: true, current });
+		if (current && !current()) throw new DiscussionFailure("pause", "action_context_changed");
+		return this.parse(value, item => parseDiscussionSnapshot(item, scope.entryId, scope.viewId));
 	}
 
 	async search(input: DiscussionSearchRequest) {
@@ -630,7 +642,7 @@ export class DiscussionTransport implements DiscussionSender {
 				const code = object(message) && typeof message.code === "string" && errorCodes.has(message.code) ? message.code : "command_rejected";
 				if (response.status === 409 && ["anchor_dependency_not_ready", "base_definition_not_synced"].includes(code)) throw new DiscussionFailure("retry", code, 409, parseRetryAfterMs(response.headers.get("Retry-After")));
 				if (response.status === 409 && ["restore_generation_changed", "text_anchors_disabled", "image_anchors_disabled", "image_files_disabled", "base_discussions_disabled", "base_definition_targets_disabled", "base_formula_cells_disabled", "base_groups_disabled", "base_formula_groups_disabled", "base_group_summaries_disabled", "reattach_disabled"].includes(code)) throw new DiscussionFailure("pause", code, 409);
-				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
+				if (response.status === 404 && code !== "target_unavailable" && code !== "image_unavailable" && code !== "discussion_snapshot_disabled") throw new DiscussionFailure("pause", "discussion_endpoint_unavailable", 404);
 				throw new DiscussionFailure([403, 404, 409, 410, 413, 415, 422].includes(response.status) ? "reject" : "pause", code, response.status);
 			}
 			return value;

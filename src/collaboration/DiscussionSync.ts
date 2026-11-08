@@ -2,12 +2,14 @@ import { DiscussionFailure, type DiscussionIdentity } from "./DiscussionTranspor
 import { protocolJson, type ChangesPage, type MessageRead, type ThreadStateRead, type TimelineMarkerVersion } from "./DiscussionProtocol";
 import type { CachedEntity, CachePurge, DiscussionStore } from "./storage/DiscussionStore";
 import { parseDiscussionScope } from "./DiscussionScope";
+import type { DiscussionSnapshot } from "./DiscussionSnapshotProtocol";
 
 export interface DiscussionReader {
 	readonly identity: Readonly<DiscussionIdentity>;
 	changes(entryId: string, cursor?: string): Promise<ChangesPage>;
 	state(entryId: string, threadId: string): Promise<ThreadStateRead>;
 	message(entryId: string, threadId: string, messageId: string): Promise<MessageRead>;
+	snapshot?(entryId: string, current?: () => boolean): Promise<DiscussionSnapshot>;
 }
 export type SyncStatus = "stopped" | "syncing" | "current" | "offline" | "authentication_required" | "unavailable" | "protocol_error" | "storage_error";
 export const threadKey = (id: string) => "thread:" + id;
@@ -17,8 +19,8 @@ export const messageKey = (threadId: string, messageId: string) => messagePrefix
 /** Authorized metadata replay with targeted current-state fetches. Host suspends
  * this worker when its surface is hidden. WebSocket invalidations can call wake;
  * the five-second fallback is used only while the discussion surface is active.
- * The current server retains all events, so reset replays from zero. A future
- * retained snapshot protocol must replace that before event pruning is enabled.
+ * A capable server supplies one complete baseline before catch-up. Legacy or
+ * oversized scopes still replay retained events; event pruning remains disabled.
  */
 export class DiscussionSync {
 	private active = false;
@@ -33,7 +35,8 @@ export class DiscussionSync {
 	constructor(private store: DiscussionStore, private reader: DiscussionReader, readonly entryId: string,
 		private onChange: (status: SyncStatus) => void = () => {}, private now: () => number = Date.now,
 		private random: () => number = Math.random, private onReset: () => Promise<void> = async () => {},
-		private onTimelineMarkers: (version: TimelineMarkerVersion) => void = () => {}) {
+		private onTimelineMarkers: (version: TimelineMarkerVersion) => void = () => {},
+		private snapshotEnabled: () => boolean = () => false) {
 		if (!parseDiscussionScope(entryId) || ["serverId", "accountId", "shareId"].some(key =>
 			store.identity[key as keyof typeof reader.identity] !== reader.identity[key as keyof typeof reader.identity])) {
 			throw new Error("Discussion reader identity does not match its local store");
@@ -77,6 +80,23 @@ export class DiscussionSync {
 			const checkpoint = await this.store.checkpoint(this.entryId);
 			if (!this.valid(generation)) return;
 			try {
+				if (checkpoint.cursor === undefined && this.snapshotEnabled() && this.reader.snapshot) {
+					let snapshot: DiscussionSnapshot | undefined;
+					try { snapshot = await this.reader.snapshot(this.entryId, () => this.valid(generation)); }
+					catch (error) {
+						// Existing event history remains available until the server's
+						// retention/admission protocol is enabled independently.
+						if (!(error instanceof DiscussionFailure) || !(error.status === 404 && error.code === "discussion_snapshot_disabled"
+							|| error.status === 413 && error.code === "discussion_snapshot_limit")) throw error;
+					}
+					if (!this.valid(generation)) return;
+					if (snapshot) {
+						const applied = await this.store.applyRemoteSnapshot(this.entryId, checkpoint, snapshot, () => this.valid(generation));
+						if (!this.valid(generation)) return;
+						if (applied) { this.failures = 0; this.changed("syncing"); }
+						continue;
+					}
+				}
 				const page = await this.reader.changes(this.entryId, checkpoint.cursor);
 				if (!this.valid(generation)) return;
 				const entities = new Map<string, CachedEntity>(), purges: CachePurge[] = [];

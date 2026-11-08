@@ -96,6 +96,7 @@ export class DiscussionSession {
 	private inboxEnabled = false;
 	private searchEnabled = false;
 	private exportEnabled = false;
+	private snapshotEnabled = false;
 	private exportCatalogEnabled = false;
 	private exporting = false;
 	private reattachEnabled = false;
@@ -460,6 +461,7 @@ export class DiscussionSession {
 			this.inboxEnabled = capability.inbox === true && (this.restoreLineage === null || capability.inboxRestoreGuard === true);
 			this.searchEnabled = capability.search === true;
 			this.exportEnabled = capability.export === true;
+			this.snapshotEnabled = capability.snapshot === true;
 			this.exportCatalogEnabled = capability.exportCatalog === true;
 			this.reattachEnabled = capability.reattach === true;
 			this.baseKinds = (capability.baseTargets ?? []).filter(kind => this.restoreLineage === null || (kind === "timeline_marker" ? this.timelineMarkerRestoreGuard : this.baseGroupRestoreGuard || !["group", "group_summary"].includes(kind)));
@@ -501,7 +503,7 @@ export class DiscussionSession {
 		if (entry && entry.kind !== kind) throw new Error("Reopen comments after the file type changes.");
 		if (!entry) {
 			const sync = new DiscussionSync(this.store, this.transport, entryId, status => this.syncChanged(entryId, status), undefined, undefined,
-				() => this.reauthorizeAfterReset(entryId), version => this.observeTimelineMarkerVersion(entryId, version));
+				() => this.reauthorizeAfterReset(entryId), version => this.observeTimelineMarkerVersion(entryId, version), () => this.snapshotEnabled);
 			entry = { kind, listeners: new Set(), sync, permissionChecked: 0, unavailable: false, people: [] };
 			this.entries.set(entryId, entry);
 		}

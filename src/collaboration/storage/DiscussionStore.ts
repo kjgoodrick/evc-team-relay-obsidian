@@ -11,6 +11,7 @@ import { pictureCacheLimit, validPictureCacheLimit, type DiscussionStorageUsage 
 import { LOCAL_WORK_STORE, captureLocalWork, releaseLocalWork, type LocalWorkSnapshot, type LocalWorkSummary } from "./LocalWorkRecords";
 import { localDraftPage, waitingWorkPage, type WaitingCursor } from "./LocalWorkPage";
 import { commitDraftImport, importOrigin, type ImportedDraftOrigin } from "./ImportedDrafts";
+import { parseDiscussionSnapshot, type DiscussionSnapshot } from "../DiscussionSnapshotProtocol";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface StoreIdentity { serverId: string; accountId: string; vaultId: string; shareId: string }
 export interface Draft { id: string; scopeId: string; revision: number; body: Json; target?: Json }
@@ -1174,6 +1175,58 @@ export class DiscussionStore {
 		if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(after) || after < 0) throw new Error("Invalid cache page");
 		return this.transaction(["entities"], "readonly", tx => request(tx.objectStore("entities").index("ordered").getAll(
 			IDBKeyRange.bound([scopeId, collection, after], [scopeId, collection, Number.MAX_SAFE_INTEGER], true), limit)));
+	}
+
+	/** Install one complete baseline atomically. Keep newer current-state reads,
+	 * original pictures, drafts and outbox records; fence late cache writers. */
+	async applyRemoteSnapshot(scopeId: string, expected: ScopeCheckpoint, input: DiscussionSnapshot, current: () => boolean = () => true): Promise<boolean> {
+		const scope = parseDiscussionScope(scopeId);
+		if (!scope) throw new Error("Invalid snapshot scope");
+		const snapshot = parseDiscussionSnapshot(JSON.parse(JSON.stringify(input)), scope.entryId, scope.viewId);
+		const checkpoint = { ...expected };
+		return this.transaction(["entities", "cursors", "generations", "preferences", "pictureCache"], "readwrite", async tx => {
+			const cursors = tx.objectStore("cursors"), entities = tx.objectStore("entities"), preferences = tx.objectStore("preferences");
+			const generation = await cacheGeneration(tx, scopeId);
+			if (!current() || generation !== checkpoint.generation || await request(cursors.get(scopeId)) !== checkpoint.cursor) return false;
+			await requireRestoreBinding(tx, { restoreGeneration: snapshot.restore_generation });
+			if (!Number.isSafeInteger(generation + 1)) throw new Error("Cache generation limit reached");
+			await new Promise<void>((resolve, reject) => {
+				const cursor = entities.index("scope").openCursor(scopeId);
+				cursor.onerror = () => reject(cursor.error);
+				cursor.onsuccess = () => {
+					const row = cursor.result;
+					if (!row) { resolve(); return; }
+					if ((row.value as CachedEntity).revision <= snapshot.through_sequence) row.delete();
+					row.continue();
+				};
+			});
+			for (const group of snapshot.threads) {
+				const id = "thread:" + group.thread.id;
+				const old: CachedEntity | undefined = await request(entities.get([scopeId, id]));
+				if (old && isRecord(old.value) && old.value.removed === true) continue;
+				const next: CachedEntity[] = [{ id, revision: group.thread.activity_sequence, value: protocolJson({ ...group.thread, anchor: group.anchor }) },
+					...group.messages.map(message => ({ id: "message:" + group.thread.id + ":" + message.id, revision: group.thread.activity_sequence,
+						value: protocolJson({ ...message, thread_id: group.thread.id }) }))];
+				for (const entity of next) {
+					const prior: CachedEntity | undefined = await request(entities.get([scopeId, entity.id]));
+					if (!prior || prior.revision < entity.revision) await request(entities.put({ ...entity, ...ordered(entity), scopeId }));
+				}
+			}
+			// Downloaded renditions may belong to comments removed from this
+			// baseline. Saved originals use different stores and remain intact.
+			const cache = tx.objectStore("pictureCache");
+			let cachedBytes: number = await request(preferences.get("pictureCacheBytes")) ?? 0;
+			for (const key of await request(cache.index("scope").getAllKeys(scopeId))) {
+				cachedBytes -= (await request(cache.get(key)) as CachedPicture).rendition.size; await request(cache.delete(key));
+			}
+			await request(preferences.put(cachedBytes, "pictureCacheBytes"));
+			await request(preferences.put((await request(preferences.get("pictureCacheEpoch")) ?? 0) + 1, "pictureCacheEpoch"));
+			await request(preferences.delete("timelineMarkers:" + scopeId));
+			await request(tx.objectStore("generations").put(generation + 1, scopeId));
+			await request(cursors.put(snapshot.cursor, scopeId));
+			if (!current()) throw new Error("Snapshot context changed before cache replacement");
+			return true;
+		});
 	}
 
 	/** Cache, acknowledgments and cursor advance together; stale streams cannot rewind it. */

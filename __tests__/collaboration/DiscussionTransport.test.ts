@@ -179,3 +179,39 @@ test("export discards a late account/view result and bounds streamed response by
 		.rejects.toMatchObject({ code: "invalid_read_response" });
 	expect(chunks).toBeLessThanOrEqual(10); expect(canceled).toBe(true);
 });
+
+test("snapshot negotiates independently and binds its response to the exact entry and saved view", async () => {
+	const fetcher = jest.fn().mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_snapshot: true } }));
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	expect((await transport.capabilities()).snapshot).toBe(true);
+	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: false, discussion_snapshot: true } }));
+	expect((await transport.capabilities()).snapshot).toBe(false);
+	fetcher.mockResolvedValue(reply(200, { protocol_version: 1, features: { discussion_commands: true, discussion_snapshot: "true" } }));
+	await expect(transport.capabilities()).rejects.toMatchObject({ code: "invalid_read_response" });
+	const value = { protocol_version: 1, entry_id: id(4), through_sequence: 0, cursor: "zero", restore_generation: null, threads: [] };
+	fetcher.mockResolvedValue(reply(200, value)); expect(await transport.snapshot(id(4))).toEqual(value);
+	expect(fetcher.mock.calls.at(-1)![0]).toBe(`https://relay.example/v1/collaboration/shares/${id(2)}/entries/${id(4)}/snapshot`);
+	expect(fetcher.mock.calls.at(-1)![1]).toMatchObject({ method: "GET", sensitive: true });
+	fetcher.mockResolvedValue(reply(200, value)); await expect(transport.snapshot(id(9))).rejects.toMatchObject({ code: "invalid_read_response" });
+	fetcher.mockResolvedValue(reply(200, { ...value, view_id: id(20) }));
+	expect((await transport.snapshot(`base:${id(4)}:${id(20)}`)).view_id).toBe(id(20));
+	expect(fetcher.mock.calls.at(-1)![0]).toContain(`/snapshot?view_id=${id(20)}`);
+	fetcher.mockResolvedValue(reply(200, { ...value, view_id: id(21) }));
+	await expect(transport.snapshot(`base:${id(4)}:${id(20)}`)).rejects.toMatchObject({ code: "invalid_read_response" });
+});
+
+test("snapshot bounds a streamed response and rejects late context changes before caching", async () => {
+	let current = true;
+	const fetcher = jest.fn(async () => { current = false; return reply(200, {}); });
+	await expect(new DiscussionTransport(identity, credentials, fetcher).snapshot(id(4), () => current)).rejects.toMatchObject({ code: "action_context_changed" });
+	let chunks = 0, canceled = false;
+	const stream = new ReadableStream({ pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); }, cancel() { canceled = true; } });
+	await expect(new DiscussionTransport(identity, credentials, jest.fn().mockResolvedValue(new Response(stream))).snapshot(id(4)))
+		.rejects.toMatchObject({ code: "invalid_read_response" });
+	expect(chunks).toBeLessThanOrEqual(10); expect(canceled).toBe(true);
+});
+
+test.each([[404, "discussion_snapshot_disabled"], [413, "discussion_snapshot_limit"]])("snapshot fallback preserves the explicit HTTP %s code", async (status, code) => {
+	const fetcher = jest.fn().mockResolvedValue(reply(Number(status), { error: { message: { code } } }));
+	await expect(new DiscussionTransport(identity, credentials, fetcher).snapshot(id(4))).rejects.toMatchObject({ status, code });
+});
