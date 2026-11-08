@@ -35,8 +35,11 @@ publish index changes. Token response bodies are excluded from network logging.
 Streaming inventory and attachment requests require a host-supported `fetch`
 and a server origin policy allowing that host. Desktop/mobile origin and stream
 behavior still need native acceptance; no live origin policy was changed and
-there is no fallback to the buffering Obsidian HTTP adapter. Native recovery
-directory I/O, operation-intent persistence/resume UI, writer isolation, native
+there is no fallback to the buffering Obsidian HTTP adapter. Exclusive
+[desktop recovery-directory I/O](source-installation-host-io-preview.md) is now
+implemented and tested with real temporary filesystem operations; native host
+acceptance and a mobile equivalent remain. Operation-intent persistence/resume UI,
+writer isolation, native
 installation and activation remain separate unfinished work. No user-facing
 activation control is enabled by this adapter.
 
