@@ -174,7 +174,7 @@ export class ProviderBacked extends Loggable {
 
 		this.credentialCache = credentialCache;
 		this.issuedToken =
-			this.credentialCache.peekToken(ResourceAddress.serialize(this.resourceAddress)) || { ...EMPTY_TOKEN };
+			this.credentialCache.peekToken(ResourceAddress.serialize(this.resourceAddress), onpremServerId) || { ...EMPTY_TOKEN };
 
 		this._liveProvider = buildProvider(
 			this.issuedToken, this.crdtDoc, () => this.refreshStaleProviderToken(),
@@ -431,6 +431,7 @@ export class ProviderBacked extends Loggable {
 		if (!this.issuedToken) {
 			return false;
 		}
+		if (this.credentialCache.isDocumentGrantCurrent?.(this.issuedToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId()) === false) return false;
 		const hasCurrentUrl = this._liveProvider.hasUrl(this.issuedToken.url);
 		const notExpired = Date.now() <= (this.issuedToken?.expiryTime || 0);
 		return hasCurrentUrl && notExpired;
@@ -445,12 +446,14 @@ export class ProviderBacked extends Loggable {
 	 */
 	private hasUsableProviderToken(): boolean {
 		if (this.restoreReviewRequired) return false;
+		if (this.issuedToken && this.credentialCache.isDocumentGrantCurrent?.(this.issuedToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId()) === false) return false;
 		const expiry = this.issuedToken?.expiryTime ?? 0;
 		return !!this.issuedToken?.token && Date.now() + RECONNECT_TOKEN_MARGIN_MS <= expiry;
 	}
 
 	applyRefreshedToken(clientToken: DocumentGrant): void {
 		if (this.restoreReviewRequired) return;
+		if (this.credentialCache.isDocumentGrantCurrent?.(clientToken, ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId()) === false) return;
 		// point the live provider connection at the freshly-issued token
 		this.issuedToken = clientToken;
 
@@ -549,12 +552,12 @@ export class ProviderBacked extends Loggable {
 
 	/** Ask for this share's token on the next connect instead of after its backoff. */
 	clearAccessDenied(): void {
-		this.credentialCache.clearAccessDenied(ResourceAddress.serialize(this.resourceAddress));
+		this.credentialCache.clearAccessDenied(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
 	}
 
 	/** The control plane refuses this share's token (401/403); retries are backed off. */
 	get accessDenied(): boolean {
-		return this.credentialCache.isAccessDenied(ResourceAddress.serialize(this.resourceAddress));
+		return this.credentialCache.isAccessDenied(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
 	}
 
 	public get connectionState(): ConnectionState {
@@ -582,7 +585,7 @@ export class ProviderBacked extends Loggable {
 		// above) schedule it AFTER calling this.
 		this.reconnectGate.cancel();
 		this._liveProvider.disconnect();
-		this.credentialCache.dropFromQueue(ResourceAddress.serialize(this.resourceAddress));
+		this.credentialCache.dropFromQueue(ResourceAddress.serialize(this.resourceAddress), this.getOnpremServerId());
 		this.broadcastState();
 	}
 

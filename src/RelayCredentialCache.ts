@@ -4,7 +4,6 @@ import type { Clock } from "./Clock";
 import { AuthSession } from "./AuthSession";
 import { namedLogger } from "./logging";
 import type { DocumentGrant, FileGrant } from "./relay/TokenShapes";
-import { VaultScopedMap } from "./VaultScopedMap";
 import type { App } from "obsidian";
 import { ResourceAddress, type ResourceAddressType, RemoteFileAddress } from "./ResourceAddress";
 import { platformFetch } from "./platformFetch";
@@ -17,6 +16,12 @@ import {
 } from "./auth/RelayOnPremTokenProvider";
 import { AccessDeniedBackoff } from "./accessDeniedBackoff";
 import { restoreMetadata, type RestoreBinding } from "./collaboration/RestoreGeneration";
+
+interface DocumentCredentialContext {
+	key: string; documentId: string; shareId: string; shareKey: string; probeKey: string; serverId: string;
+	provider: RelayOnPremTokenProvider; binding: RestoreBinding; filePath?: string;
+	check(): void;
+}
 
 declare const GIT_TAG: string;
 
@@ -48,15 +53,10 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	// created before onpremServerId existed) -- preserves the old
 	// single-provider behavior for that case instead of failing outright.
 	private defaultRelayOnPremServerId?: string;
+	private documentDefaultGeneration = 0;
 	private isRelayOnPremMode = false;
-	// documentId -> filePath, needed by relay-onprem refresh (it has no other
-	// way to recover the path once it's holding only a documentId).
-	private filePathMap: Map<string, string> = new Map();
-	// documentId -> onprem serverId, so refresh()/fetchFileTokenFromApi() can pick
-	// the right provider out of relayOnPremProviders. Same outbound-parameter
-	// pattern as filePathMap -- kept alongside the ResourceAddress-encoded
-	// documentId rather than inside it, since relayId in that encoding is a
-	// fixed "relay-onprem" marker, not a real server identifier.
+	// File-transfer provider selection. Document credentials instead retain an
+	// immutable server/session context; identical resource IDs may exist on two servers.
 	private documentServerMap: Map<string, string> = new Map();
 	// Shares whose token the control plane refused (401/403): not asked again
 	// until their backoff runs out, whichever path asks (reconnect gate,
@@ -77,17 +77,24 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 	private nextFileContext = 0;
 	private fileCacheGeneration = 0;
 	private fileCacheDestroyed = false;
+	private documentContexts = new Map<string, DocumentCredentialContext>();
+	private knownDocumentIdentities = new WeakSet<object>();
+	private documentGrantContexts = new WeakMap<DocumentGrant, DocumentCredentialContext>();
+	private deniedContextShares = new Map<string, { shareId: string; serverId: string }>();
 	private restorePauses = new Set<string>();
 	private restoreListeners = new Set<(documentId: string) => void>();
-	private restoreKey(documentId: string, serverId?: string): string {
-		return JSON.stringify([serverId ?? this.documentServerMap.get(documentId) ?? this.defaultRelayOnPremServerId ?? "legacy", documentId]);
+	private documentServer(serverId?: string): string | undefined {
+		return serverId ?? this.defaultRelayOnPremServerId ?? this.relayOnPremProviders.keys().next().value;
 	}
-	isRestoreRequired(documentId: string, serverId?: string): boolean { return this.restorePauses.has(this.restoreKey(documentId, serverId)); }
+	private restoreKey(documentId: string, serverId?: string, binding: RestoreBinding = {}): string {
+		return JSON.stringify([this.documentServer(serverId) ?? "legacy", documentId, restoreMetadata(binding).restoreGeneration ?? null]);
+	}
+	isRestoreRequired(documentId: string, serverId?: string, binding: RestoreBinding = {}): boolean { return this.restorePauses.has(this.restoreKey(documentId, serverId, binding)); }
 	onRestoreRequired(listener: (documentId: string) => void): () => void { this.restoreListeners.add(listener); return () => this.restoreListeners.delete(listener); }
-	markRestoreRequired(documentId: string, serverId?: string): void {
+	markRestoreRequired(documentId: string, serverId?: string, binding: RestoreBinding = {}): void {
 		if (this.fileCacheDestroyed) return;
-		this.restorePauses.add(this.restoreKey(documentId, serverId));
-		this.dropFromQueue(documentId);
+		this.restorePauses.add(this.restoreKey(documentId, serverId, binding));
+		this.dropFromQueue(documentId, serverId, binding);
 		for (const listener of this.restoreListeners) listener(documentId);
 	}
 
@@ -105,19 +112,8 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 				logMessage: namedLogger("[RelayCredentialCache/store]", "debug"),
 				getTokenExpiry: getJwtExpiryFromDocumentGrant,
 				getClock: () => timeProvider,
-				getPersistedTokens: app
-					? () =>
-							new VaultScopedMap<CredentialEntry<DocumentGrant>>(
-								// Persisted storage key, not a class name: this string is
-								// the vault-scoped local storage key under which cached
-								// credentials already live on every existing install, and
-								// it survives restarts. Changing it to match the class name
-								// would orphan those entries and force everyone to log in
-								// again. Renaming it needs a data migration, not an edit.
-								"TokenStore/" + vaultName,
-								app,
-							)
-					: undefined,
+				// Short-lived document grants are memory-only. Old persisted grants
+				// lack a proven server/session/lineage and must never seed this cache.
 				refreshToken: (
 					documentId: string,
 					onSuccess: (grant: DocumentGrant) => void,
@@ -126,6 +122,9 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 			},
 			maxConnections,
 		);
+		// Keep the constructor's vault/app arguments for existing integrations.
+		// Authentication itself remains in AuthSession, independently of this cache.
+		void vaultName; void app;
 
 		if (relayOnPremProviders && relayOnPremProviders.size > 0) {
 			this.relayOnPremProviders = relayOnPremProviders;
@@ -134,27 +133,23 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		}
 	}
 
-	/**
-	 * Resolve the provider for a document's OWN server, falling back to the
-	 * default server's provider when the document's server is unknown, and
-	 * to whichever provider exists when there's no default either --
-	 * matches the pre-multi-server behavior of "there's exactly one
-	 * provider" for callers that never recorded a serverId.
-	 */
+	/** File transfers may use the default only when no server was selected.
+	 * An explicitly selected but unavailable server must not redirect credentials. */
 	private getRelayOnPremProvider(documentId: string): RelayOnPremTokenProvider | null {
 		const serverId = this.documentServerMap.get(documentId);
-		const provider =
-			(serverId && this.relayOnPremProviders.get(serverId)) ||
-			(this.defaultRelayOnPremServerId &&
-				this.relayOnPremProviders.get(this.defaultRelayOnPremServerId)) ||
-			this.relayOnPremProviders.values().next().value;
-		return provider ?? null;
+		if (serverId !== undefined) return this.relayOnPremProviders.get(serverId) ?? null;
+		if (this.defaultRelayOnPremServerId !== undefined) return this.relayOnPremProviders.get(this.defaultRelayOnPremServerId) ?? null;
+		return this.relayOnPremProviders.values().next().value ?? null;
 	}
 
 	/** Relay-onprem mode can flip at runtime (settings change), unlike the
 	 * constructor args, which are fixed for the plugin's lifetime. */
 	setRelayOnPremMode(enabled: boolean) {
+		if (this.isRelayOnPremMode !== enabled) {
+			this.fileCacheGeneration++; this.fileTokens.clear(); this.fileRequests.clear();
+		}
 		this.isRelayOnPremMode = enabled;
+		this.pruneDocumentContexts();
 	}
 
 	/** Multi-server management, mirroring AuthSession's addServer/
@@ -168,15 +163,89 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		this.relayOnPremProviders.get(serverId)?.destroy();
 		this.relayOnPremProviders.set(serverId, provider);
 		this.isRelayOnPremMode = true;
+		this.pruneDocumentContexts();
 	}
 
 	removeRelayOnPremProvider(serverId: string): void {
 		this.relayOnPremProviders.get(serverId)?.destroy();
 		this.relayOnPremProviders.delete(serverId);
+		this.pruneDocumentContexts();
 	}
 
 	setDefaultRelayOnPremServerId(serverId: string | undefined): void {
+		if (this.defaultRelayOnPremServerId !== serverId) this.documentDefaultGeneration++;
 		this.defaultRelayOnPremServerId = serverId;
+		this.pruneDocumentContexts();
+	}
+
+	private documentContext(documentId: string, serverId: string | undefined, binding: RestoreBinding, create: boolean): DocumentCredentialContext | undefined {
+		if (this.fileCacheDestroyed || !this.isRelayOnPremMode) return;
+		const selected = this.documentServer(serverId), provider = selected ? this.relayOnPremProviders.get(selected) : undefined;
+		if (!selected || !provider) return;
+		const identity = provider.getFileCredentialContext();
+		if (create && !this.knownDocumentIdentities.has(identity)) {
+			this.knownDocumentIdentities.add(identity); this.pruneDocumentContexts();
+		}
+		if (!this.fileContexts.has(identity)) {
+			if (!create) return;
+			this.fileContexts.set(identity, ++this.nextFileContext);
+		}
+		const contextId = this.fileContexts.get(identity), generation = this.fileCacheGeneration, defaultGeneration = this.documentDefaultGeneration;
+		const key = JSON.stringify(["document", generation, selected, contextId, documentId, binding.restoreGeneration ?? null, serverId === undefined ? defaultGeneration : null]);
+		const existing = this.documentContexts.get(key) ?? (!create ? this.documentContexts.get(JSON.stringify(
+			["document", generation, selected, contextId, documentId, binding.restoreGeneration ?? null, serverId !== undefined ? defaultGeneration : null])) : undefined);
+		if (existing || !create) return existing;
+		const shareId = shareIdOf(documentId), shareKey = JSON.stringify([selected, contextId, binding.restoreGeneration ?? null, shareId]);
+		const probeKey = JSON.stringify([shareKey, generation, serverId === undefined ? defaultGeneration : null]);
+		const context: DocumentCredentialContext = { key, documentId, shareId, shareKey, probeKey, serverId: selected, provider, binding,
+			check: () => {
+				if (this.fileCacheDestroyed || !this.isRelayOnPremMode || generation !== this.fileCacheGeneration
+					|| this.relayOnPremProviders.get(selected) !== provider || provider.getFileCredentialContext() !== identity
+					|| serverId === undefined && (this.documentServer() !== selected || this.documentDefaultGeneration !== defaultGeneration)) throw new Error("Document account or server changed. Retry using the current connection.");
+			} };
+		this.documentContexts.set(key, context);
+		return context;
+	}
+
+	private pruneDocumentContexts(): void {
+		const currentShares = new Set<string>();
+		for (const [key, context] of this.documentContexts) {
+			try { context.check(); currentShares.add(context.shareKey); } catch {
+				super.dropFromQueue(key); this.tokenEntries.delete(key);
+				if (!this._inFlightPromises.has(key)) this.documentContexts.delete(key);
+			}
+		}
+		for (const key of this.accessDenied.deniedShares()) if (!currentShares.has(key)) {
+			this.accessDenied.clear(key); this.deniedContextShares.delete(key);
+		}
+		for (const key of this.stalled.deniedShares()) if (!currentShares.has(key)) this.stalled.clear(key);
+	}
+
+	override peekToken(documentId: string, serverId?: string, binding: RestoreBinding = {}): DocumentGrant | null | undefined {
+		const context = this.documentContext(documentId, serverId, restoreMetadata(binding), false);
+		if (!context) return;
+		try { context.check(); } catch { return; }
+		return super.peekToken(context.key);
+	}
+
+	isDocumentGrantCurrent(grant: DocumentGrant, documentId: string, serverId?: string, binding: RestoreBinding = {}): boolean {
+		binding = restoreMetadata(binding);
+		const context = this.documentGrantContexts.get(grant);
+		if (!context || context.documentId !== documentId || context.serverId !== this.documentServer(serverId)
+			|| (context.binding.restoreGeneration ?? null) !== (binding.restoreGeneration ?? null)) return false;
+		if (this.documentContext(documentId, serverId, binding, true)?.key !== context.key) return false;
+		try { context.check(); return true; } catch { return false; }
+	}
+
+	override dropFromQueue(documentId: string, serverId?: string, binding: RestoreBinding = {}): boolean {
+		binding = restoreMetadata(binding);
+		if (this.documentContexts.has(documentId)) return super.dropFromQueue(documentId);
+		let removed = false;
+		for (const context of this.documentContexts.values()) {
+			if (context.documentId === documentId && (serverId === undefined || context.serverId === serverId)
+				&& (context.binding.restoreGeneration ?? null) === (binding.restoreGeneration ?? null)) removed = super.dropFromQueue(context.key) || removed;
+		}
+		return removed;
 	}
 
 	async getToken(
@@ -184,17 +253,22 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		friendlyName: string,
 		callback: (token: DocumentGrant) => void,
 		onpremServerId?: string,
+		binding: RestoreBinding = {},
 	): Promise<DocumentGrant> {
 		if (this.fileCacheDestroyed) throw new Error("Credential cache was destroyed");
-		const havePath = this.isRelayOnPremMode && friendlyName && friendlyName !== "unknown";
-		if (havePath) {
-			this.filePathMap.set(documentId, friendlyName);
+		binding = restoreMetadata(binding);
+		if (this.isRestoreRequired(documentId, onpremServerId, binding)) throw new RelayRestoreRequiredError();
+		const context = this.documentContext(documentId, onpremServerId, binding, true);
+		if (!context) throw new Error("No relay-onprem server configured for this document");
+		if (friendlyName && friendlyName !== "unknown") context.filePath = friendlyName;
+		try {
+			const result = await super.acquireToken(context.key, friendlyName, grant => { context.check(); callback(grant); });
+			context.check(); return result;
+		} finally {
+			try { context.check(); } catch {
+				super.dropFromQueue(context.key); this.tokenEntries.delete(context.key); this.documentContexts.delete(context.key);
+			}
 		}
-		if (this.isRelayOnPremMode && onpremServerId) {
-			this.documentServerMap.set(documentId, onpremServerId);
-		}
-		if (this.isRestoreRequired(documentId, onpremServerId)) throw new RelayRestoreRequiredError();
-		return super.acquireToken(documentId, friendlyName, callback);
 	}
 
 	/**
@@ -208,7 +282,10 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		onError: (err: Error) => void,
 	): Promise<void> {
 		if (this.fileCacheDestroyed) { onError(new Error("Credential cache was destroyed")); return; }
-		const shareId = shareIdOf(documentId);
+		const cacheKey = documentId, context = this.documentContexts.get(cacheKey);
+		if (!context) { void Promise.resolve().then(() => onError(new Error("Document credential context expired"))); return; }
+		const shareId = context.shareKey, filePath = context.filePath;
+		documentId = context.documentId;
 		// A share's documents ask one at a time, so a share refused at any
 		// point (first connect, after a sleep, mid-session) costs one request
 		// per backoff window, not one per document asking at once. This
@@ -220,12 +297,13 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		// than asked again at once, and the provider sends nothing for that
 		// share until the old request has settled.
 		for (;;) {
-			const probe = this.shareProbes.get(shareId);
+			const probe = this.shareProbes.get(context.probeKey);
 			if (!probe) break;
 			await probe;
 		}
+		try { context.check(); } catch (error) { void Promise.resolve().then(() => onError(error instanceof Error ? error : new Error(String(error)))); return; }
 		if (this.fileCacheDestroyed) { onError(new Error("Credential cache was destroyed")); return; }
-		const restoreKey = this.restoreKey(documentId);
+		const restoreKey = this.restoreKey(documentId, context.serverId, context.binding);
 		if (this.restorePauses.has(restoreKey)) {
 			void Promise.resolve().then(() => onError(new RelayRestoreRequiredError()));
 			return;
@@ -248,66 +326,84 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 		}
 		let settle!: () => void;
 		const probe = new Promise<void>((resolve) => (settle = resolve));
-		this.shareProbes.set(shareId, probe);
+		this.shareProbes.set(context.probeKey, probe);
 		const done = () => {
-			if (this.shareProbes.get(shareId) === probe) this.shareProbes.delete(shareId);
+			if (this.shareProbes.get(context.probeKey) === probe) this.shareProbes.delete(context.probeKey);
 			settle();
+		};
+		const current = () => {
+			try { context.check(); return true; }
+			catch (error) { done(); onError(error instanceof Error ? error : new Error(String(error))); return false; }
 		};
 		try {
 			await universalRefresh(
-				this.getRelayOnPremProvider(documentId),
+				context.provider,
 				this.isRelayOnPremMode,
 				documentId,
 				(grant) => {
-					if (this.fileCacheDestroyed) { done(); onError(new Error("Credential cache was destroyed")); return; }
+					if (!current()) return;
 					if (this.restorePauses.has(restoreKey)) { done(); onError(new RelayRestoreRequiredError()); return; }
 					const wasDenied = this.accessDenied.isDenied(shareId);
 					this.accessDenied.clear(shareId);
+					this.deniedContextShares.delete(shareId);
 					this.stalled.clear(shareId);
 					done();
-					if (wasDenied) this.notifyAccessChange(shareId);
+					if (wasDenied) this.notifyAccessChange(context.shareId);
+					this.documentGrantContexts.set(grant, context);
 					onSuccess(grant);
 				},
 				(err) => {
-					if (this.fileCacheDestroyed) { done(); onError(err); return; }
+					if (!current()) return;
 					if (err instanceof RelayRestoreRequiredError) {
 						this.restorePauses.add(restoreKey);
-						this.dropFromQueue(documentId);
+						super.dropFromQueue(cacheKey);
 						for (const listener of this.restoreListeners) listener(documentId);
 					}
 					if (err instanceof RelayAccessDeniedError) {
+						this.deniedContextShares.set(shareId, { shareId: context.shareId, serverId: context.serverId });
 						const wasDenied = this.accessDenied.isDenied(shareId);
 						err.retryAt = this.accessDenied.recordDenied(shareId, Date.now());
-						if (!wasDenied) this.notifyAccessChange(shareId);
+						if (!wasDenied) this.notifyAccessChange(context.shareId);
 					}
 					if (err instanceof RelayTokenTimeoutError) this.stalled.recordDenied(shareId, Date.now());
 					done();
 					onError(err);
 				},
-				this.filePathMap.get(documentId),
+				filePath, context.binding, context.check,
 			);
+		} catch (error) {
+			onError(error instanceof Error ? error : new Error(String(error)));
 		} finally {
 			done();
 		}
 	}
 
 	/** True while the share of this document is refused by the control plane. */
-	isAccessDenied(documentId: string): boolean {
-		return this.accessDenied.isDenied(shareIdOf(documentId));
+	isAccessDenied(documentId: string, serverId?: string, binding: RestoreBinding = {}): boolean {
+		const context = this.documentContext(documentId, serverId, restoreMetadata(binding), true);
+		if (!context) return false;
+		try { context.check(); return this.accessDenied.isDenied(context.shareKey); } catch { return false; }
 	}
 
 	/**
 	 * Forget refusals: every share after a sign-in or token refresh, one
 	 * share on its manual reconnect.
 	 */
-	clearAccessDenied(documentId?: string): void {
+	clearAccessDenied(documentId?: string, serverId?: string): void {
 		const shareId = documentId === undefined ? undefined : shareIdOf(documentId);
-		const denied = this.accessDenied.deniedShares().filter((id) => shareId === undefined || id === shareId);
-		this.accessDenied.clear(shareId);
-		for (const provider of this.relayOnPremProviders.values()) {
-			provider.clearRefused(shareId);
+		const denied = this.accessDenied.deniedShares().filter(key => {
+			const identity = this.deniedContextShares.get(key);
+			return (shareId === undefined || identity?.shareId === shareId) && (serverId === undefined || identity?.serverId === serverId);
+		});
+		for (const key of denied) this.accessDenied.clear(key);
+		for (const [id, provider] of this.relayOnPremProviders) {
+			if (serverId === undefined || id === serverId) provider.clearRefused(shareId);
 		}
-		for (const id of denied) this.notifyAccessChange(id);
+		for (const key of denied) {
+			const identity = this.deniedContextShares.get(key);
+			if (identity) this.notifyAccessChange(identity.shareId);
+			this.deniedContextShares.delete(key);
+		}
 	}
 
 	/** Called with a share id whenever that share becomes refused or stops being refused. */
@@ -322,26 +418,20 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 
 	clear(filter?: (token: CredentialEntry<DocumentGrant>) => boolean) {
 		this.fileCacheGeneration++; this.fileTokens.clear(); this.fileRequests.clear();
+		this.pruneDocumentContexts();
 		if (!filter) {
-			this.filePathMap.clear();
 			this.documentServerMap.clear();
 			super.purge(filter);
 			return;
 		}
-		this.tokenEntries?.forEach((value, key) => {
-			if (filter(value)) {
-				this.filePathMap.delete(key);
-				this.documentServerMap.delete(key);
-			}
-		});
 		super.purge(filter);
 	}
 
 	destroy() {
 		this.restoreListeners.clear(); this.restorePauses.clear();
 		this.fileCacheDestroyed = true;
+		this.documentContexts.clear(); this.deniedContextShares.clear();
 		this.fileCacheGeneration++; this.fileTokens.clear(); this.fileRequests.clear();
-		this.filePathMap.clear();
 		this.documentServerMap.clear();
 		for (const provider of this.relayOnPremProviders.values()) {
 			provider.destroy();
@@ -403,6 +493,7 @@ export class RelayCredentialCache extends CredentialCache<DocumentGrant> {
 				binding,
 			);
 		}
+		if (this.isRelayOnPremMode) throw new Error("No relay-onprem server configured for this file");
 
 		if (!this.authSession.isAuthenticated) {
 			throw new Error("cannot fetch a file token while logged out");

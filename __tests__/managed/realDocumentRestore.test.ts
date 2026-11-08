@@ -91,7 +91,11 @@ integration("managed document sockets reject original grants after generation ro
 		await grant("write", undefined, 409); await grant("read", undefined, 409);
 		await grant("write", crypto.randomUUID(), 409);
 		const bound = await grant("write", generation); expect(bound.restore_generation).toBe(generation);
-		const fresh = await peer(bound);
+		const scoped = await writer.cache.getToken(ResourceAddress.serialize(address), "Note.md", () => {}, "fixture", { restoreGeneration: generation });
+		expect(scoped.restoreGeneration).toBe(generation); expect(writer.backing.restoreReviewRequired).toBe(true);
+		// Only a new low-level peer consumes the explicitly selected generation.
+		// The original automatic source client and its retained edits stay paused.
+		const fresh = await peer({ relay_url: scoped.url, token: scoped.token });
 		expect(fresh.text.toString()).toBe("content before rotation\n");
 		fresh.text.insert(fresh.text.length, "bound edit\n");
 		const currentReader = await peer(await grant("read", generation));

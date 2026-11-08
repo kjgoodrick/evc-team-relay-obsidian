@@ -18,6 +18,7 @@ import {
 	RemoteCanvasAddress,
 } from "./ResourceAddress";
 import type { RelayOnPremTokenProvider } from "./auth/RelayOnPremTokenProvider";
+import type { RestoreBinding } from "./collaboration/RestoreGeneration";
 
 /**
  * Extract relay/folder/doc information from ResourceAddress entity
@@ -68,6 +69,8 @@ async function refreshRelayOnPrem(
 	onSuccess: (clientToken: DocumentGrant) => void,
 	onError: (err: Error) => void,
 	filePath?: string,
+	binding: RestoreBinding = {},
+	checkContext?: () => void,
 ) {
 	const debug = namedLogger("[CredentialCache][Refresh][RelayOnPrem]", "debug");
 	const error = namedLogger("[CredentialCache][Refresh][RelayOnPrem]", "error");
@@ -90,7 +93,9 @@ async function refreshRelayOnPrem(
 			// back to "read" on a 403 (viewer-role member), so this doesn't need to
 			// pre-determine the member's role client-side (U3).
 			"write",
-			filePath // Pass file path for folder share validation
+			filePath, // Pass file path for folder share validation
+			binding,
+			checkContext,
 		);
 
 		onSuccess(clientToken);
@@ -113,10 +118,12 @@ export async function refresh(
 	onSuccess: (clientToken: DocumentGrant) => void,
 	onError: (err: Error) => void,
 	filePath?: string,
+	binding: RestoreBinding = {},
+	checkContext?: () => void,
 ) {
 	if (!isRelayOnPremMode || !tokenProvider) {
 		onError(new Error("No relay-onprem server configured for this document"));
 		return;
 	}
-	await refreshRelayOnPrem(tokenProvider, documentId, onSuccess, onError, filePath);
+	await refreshRelayOnPrem(tokenProvider, documentId, onSuccess, onError, filePath, binding, checkContext);
 }

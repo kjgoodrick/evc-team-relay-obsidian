@@ -478,8 +478,11 @@ describe("tokens/relay 401/403: back off instead of retrying on a fixed floor", 
 		expect(pb.accessDenied).toBe(true);
 
 		const gated = (cache as unknown as { gatedRefresh: (id: string, ok: () => void, err: (e: Error) => void) => Promise<void> }).gatedRefresh;
+		const contexts = (cache as unknown as { documentContexts: Map<string, { key: string; documentId: string }> }).documentContexts;
+		const address = ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", G));
+		const key = [...contexts.values()].find(context => context.documentId === address)!.key;
 		const err = jest.fn();
-		void gated.call(cache, ResourceAddress.serialize(new RemoteFolderAddress("relay-onprem", G)), () => {}, err);
+		void gated.call(cache, key, () => {}, err);
 		expect(err).not.toHaveBeenCalled();
 		await Promise.resolve();
 		await Promise.resolve();

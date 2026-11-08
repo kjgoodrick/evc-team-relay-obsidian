@@ -239,8 +239,10 @@ classified as a new account's restore refusal. A normalized equivalent URL and
 ordinary JWT refresh in the same session remain compatible. Endpoint changes
 also invalidate cached file grants and clear refusal/network tracking belonging
 to the previous context. Tests cover those boundaries with delayed auth,
-throttle, response and parsing; document credential/cache namespacing is still
-required before safe restored-source resumption.
+throttle, response and parsing. Document credentials now have
+[separate server/session/generation contexts](document-credential-context-preview.md),
+including current-context checks on grant application and reconnect. Local source
+cache namespaces and reviewed replacement remain required before safe resumption.
 
 The paired server stores verified revisions at
 `managed-assets/v1/{share}/{entry}/{sha256}`, with verified legacy reads. This keeps

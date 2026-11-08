@@ -244,16 +244,14 @@ export class CredentialCache<TokenType extends TokenBearing> {
 	private handleRefreshFailure(documentId: string) {
 		if (this.destroyed) return;
 		const existing = this.tokenEntries.get(documentId);
+		// A purge/context invalidation may have removed this entry while the
+		// request was in flight. Its failure must not recreate a stale cache slot.
+		if (!existing) return;
 		const attempts = (existing?.attempts ?? 0) + 1;
 		const MAX_ATTEMPTS = 3;
 		if (attempts <= MAX_ATTEMPTS) {
-			// NB: `existing` can in principle be undefined here (documentId not
-			// yet in tokenEntries); every real call site guarantees it's already
-			// present, so this stays a documented no-op edge case rather than
-			// something to branch on — preserved from the pre-rewrite shape
-			// rather than "corrected", since neither behavior is reachable.
 			this.tokenEntries.set(documentId, {
-				...(existing as CredentialEntry<TokenType>),
+				...existing,
 				attempts,
 			});
 		} else {

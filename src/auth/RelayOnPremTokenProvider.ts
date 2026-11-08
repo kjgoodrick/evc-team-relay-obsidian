@@ -344,13 +344,16 @@ export class RelayOnPremTokenProvider {
 		mode: "read" | "write" = "read",
 		filePath?: string,
 		binding: RestoreBinding = {},
+		checkContext?: () => void,
 	): Promise<DocumentGrant> {
 		if (this.destroyed) throw new Error("Token provider was destroyed");
 		binding = restoreMetadata(binding);
 		const identity = this.getFileCredentialContext(), endpoint = this.normalizedUrl;
 		const checkIdentity = () => {
 			if (this.destroyed || identity !== this.getFileCredentialContext()) throw new Error("Document login or server changed. Retry using the current connection.");
+			checkContext?.();
 		};
+		checkIdentity();
 		const token = await this.config.authProvider.getValidToken();
 		checkIdentity();
 
@@ -445,7 +448,7 @@ export class RelayOnPremTokenProvider {
 				this.log(
 					`Write access denied for doc ${docId} — retrying as read-only (viewer role)`
 				);
-				return this.requestToken(relayId, folderId, docId, "read", filePath, binding);
+				return this.requestToken(relayId, folderId, docId, "read", filePath, binding, checkContext);
 			}
 
 			if (response.status === 401 || response.status === 403) {

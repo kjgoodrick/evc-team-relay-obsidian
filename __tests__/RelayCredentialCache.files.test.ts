@@ -78,6 +78,12 @@ test("request binding is frozen before asynchronous authentication", async () =>
 	s.cache.destroy();
 });
 
+test("an unavailable selected file server cannot use the default provider or cloud fallback", async () => {
+	const s = setup();
+	await expect(s.cache.resolveFileToken(address, "hash", "image/png", 0, "missing")).rejects.toThrow("No relay-onprem server");
+	expect(fetch).not.toHaveBeenCalled(); s.cache.destroy();
+});
+
 test("editing the same provider's endpoint invalidates cached and waiting file credentials", async () => {
 	const s = setup(), read = () => s.cache.resolveFileToken(address, "hash", "image/png", 0, "a");
 	const first = await read();
