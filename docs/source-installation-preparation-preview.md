@@ -16,7 +16,9 @@ the verified staged inventory. Changed access, files, activity or generation
 leaves the journal in review and retains staged artifacts for inspection.
 
 Only after those checks does a version-checked journal command record the exact
-archive reference and installation-plan digest. The active source choice remains
+archive reference, installation-plan digest and distinct start/commit operation
+IDs for restart-safe activation. The transaction also rechecks caller context
+before writing. The active source choice remains
 unchanged, pending state still denies ordinary synchronization, and no native
 destination, source cache or original file is modified. Competing preparations
 may retain separate staged directories; only one journal decision can win.
@@ -36,9 +38,9 @@ admission, relevant editing-history freshness, writer isolation and native-byte
 checks remain required at installation. The
 [download adapters](source-installation-downloads-preview.md) now supply isolated
 sources, bounded attachments and fresh read-only inventory, with native transport
-acceptance still pending. Production host I/O, persisting the UI's operation intent,
-prepared-state resume/reconciliation UI,
-native installation and final activation are not connected yet. No user-facing
+acceptance still pending. Desktop staging/native I/O, durable activation IDs and
+the installation/cache/mapping/commit coordinator now exist. Prepared-state
+resume/reconciliation UI and integrated writer isolation remain. No user-facing
 activation control is enabled by this API.
 
 Focused coverage includes real staging files and journal transactions/reopen,

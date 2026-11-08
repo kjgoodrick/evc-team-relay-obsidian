@@ -74,6 +74,7 @@ export async function withMaterializedSourceInstallation<T>(journal: SourceSelec
 		|| pending.restoreGeneration !== request.source.restoreGeneration || !pending.preparation
 		|| !["prepared", "applying"].includes(pending.phase)) throw new Error("The prepared source selection changed");
 	const preparation = pending.preparation;
+	if (preparation.activation && preparation.activation.startOperationId !== request.operationId) throw new Error("Use the saved source installation operation");
 	const verified = await verifySourceInstallationPlan(staging, preparation.plan,
 		{ source: request.source, reviewId: request.reviewId, archive: preparation.archive }, { check, signal, timeoutMs });
 	const { plan } = verified, root = plan.destinationRoot, owner = native.nativeWriteOwner;

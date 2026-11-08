@@ -9,9 +9,18 @@ isolation, start providers, or authorize a production restore.
 
 `activateSourceInstallation` captures the source, operation IDs, authenticated
 context checks and host methods before asynchronous work. It requires an explicit
-generation and separate start/commit UUIDs. The caller must retain those IDs and
-reread the journal's current revision before resuming an interrupted applying
-installation. A different review or source cannot reuse the operation.
+generation and separate start/commit UUIDs. Preparation now stores those IDs with
+the reviewed archive/plan. `sourceActivationRequest` reloads them with the current
+reviewed journal revision, including after an interrupted applying installation.
+A different review/source or changed operation IDs cannot reuse the operation.
+
+Older prepared/applying previews can reserve the pair with one compare-and-swap
+journal transition. This changes no artifacts or source choices. Existing intent
+cannot be replaced; used/equal operation IDs and late-aborted reservations are
+refused. A lost reservation reply requires rereading its saved revision and IDs,
+not allocating replacement operations. A completed activation is discovered
+through the ordinary selected-root state; an in-flight caller can also reconcile
+its captured exact commit receipt.
 
 The materializer holds registered native writers at both the original and new
 locations until the entire activation continuation settles. It verifies the
@@ -74,7 +83,7 @@ in one host realm. A fresh inventory read is **not** a remote writer lease;
 document CRDT edits need not change inventory metadata. The coordinator must not
 be exposed as a ready-to-use restore action until that admission protocol exists.
 
-Recovery UI, durable operation-intent/resume flow, integrated registry acceptance, server
+Recovery UI and integrated resume/registry acceptance, server
 maintenance/client admission, off-host backup and physical desktop/mobile
 acceptance remain. Mobile still needs a host-supported exclusive-publication
 adapter. Cache seeds retain the existing Canvas sync format; Canvas comments
@@ -99,3 +108,12 @@ The full regression passes **4,542 tests across 308 suites**; 41 tests in 27
 opt-in suites remain skipped. Main TypeScript, changed-source lint, an isolated browser bundle and the preview
 build pass. The existing 15 build warnings remain. The test-type ratchet is
 unchanged at 205 errors/44 signatures versus the frozen 207/46 baseline.
+
+Durable activation intent adds **166 focused passing tests** across the selected
+storage/recovery set. Coverage includes IDs saved atomically with preparation,
+reopen, older-preview reservation, collision/refusal, late rollback, restart
+after native materialization, lost reservation response and unchanged postcommit
+reconciliation. These are automated checks; the recovery UI is still unfinished.
+The full intent regression passes **4,568 tests across 308 suites**, with 41 tests
+in 27 opt-in suites skipped. Main types, changed-source lint, unchanged test-type
+ratchet and preview build pass (15 existing warnings).

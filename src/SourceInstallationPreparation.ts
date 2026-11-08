@@ -57,6 +57,7 @@ export async function prepareSourceInstallation(journal: SourceSelectionJournal,
 	if (!same(installationManifest(staged.plan, fresh), staged.inventorySnapshot)) throw new Error("The server inventory changed during preparation. Retained work is unchanged; refresh the review.");
 	await confirmJournal(); check();
 	const selection = await journal.apply({ type: "prepare", operationId: captured.operationId, expectedRevision: captured.reviewRevision,
-		reviewId: captured.reviewId, preparation: { archive: { ...staged.plan.archive }, plan: { ...staged.reference } } });
+		reviewId: captured.reviewId, preparation: { archive: { ...staged.plan.archive }, plan: { ...staged.reference },
+			activation: { startOperationId: crypto.randomUUID(), commitOperationId: crypto.randomUUID() } } }, { check });
 	check(); return { selection, staged };
 }

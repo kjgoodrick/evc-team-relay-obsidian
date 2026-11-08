@@ -5,9 +5,11 @@ import { notifySourceSelection } from "./source-selection-events";
 import { sourceInstallationNativeRoot } from "../SourceInstallationPlan";
 
 export type SourceChoice = { kind: "legacy" } | { kind: "source"; restoreGeneration: string | null };
+export interface SourceActivationOperations { startOperationId: string; commitOperationId: string }
 export interface SourcePreparation {
 	archive: { path: string; manifestSha256: string };
 	plan: { id: string; sha256: string };
+	activation?: SourceActivationOperations;
 }
 export interface PendingSourceSelection {
 	reviewId: string;
@@ -28,6 +30,7 @@ export interface SourceSelectionState {
 }
 type Change = { type: "begin"; reviewId: string; restoreGeneration: string | null }
 	| { type: "prepare"; reviewId: string; preparation: SourcePreparation }
+	| { type: "reserve-activation"; reviewId: string; activation: SourceActivationOperations }
 	| { type: "start" | "cancel"; reviewId: string }
 	| { type: "commit"; reviewId: string; destinationRoot?: string };
 export type SourceSelectionCommand = Change & { operationId: string; expectedRevision: string | null };
@@ -48,18 +51,26 @@ function digest(value: unknown): string {
 	if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw invalid();
 	return value;
 }
+function activation(value: SourceActivationOperations): SourceActivationOperations {
+	if (!value || typeof value !== "object" || Object.keys(value).length !== 2) throw invalid();
+	const result = { startOperationId: uuid(value.startOperationId), commitOperationId: uuid(value.commitOperationId) };
+	if (result.startOperationId === result.commitOperationId) throw new Error("Source activation operations must be distinct");
+	return result;
+}
 function preparation(value: SourcePreparation): SourcePreparation {
 	const path = value?.archive?.path;
 	if (typeof path !== "string" || path.length > 2048 || !path.startsWith(RECOVERY_FOLDER + "/")
 		|| path.includes("\\") || path.includes(":") || [...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
 		|| path.split("/").some(part => !part || part === "." || part === "..")) throw invalid();
-	return { archive: { path, manifestSha256: digest(value.archive.manifestSha256) }, plan: { id: uuid(value.plan?.id), sha256: digest(value.plan?.sha256) } };
+	return { archive: { path, manifestSha256: digest(value.archive.manifestSha256) }, plan: { id: uuid(value.plan?.id), sha256: digest(value.plan?.sha256) },
+		...(Object.prototype.hasOwnProperty.call(value, "activation") ? { activation: activation(value.activation!) } : {}) };
 }
 function command(value: SourceSelectionCommand): SourceSelectionCommand {
 	const base = { operationId: uuid(value?.operationId), expectedRevision: value?.expectedRevision === null ? null : uuid(value?.expectedRevision), reviewId: uuid(value?.reviewId) };
 	switch (value.type) {
 		case "begin": return { ...base, type: value.type, restoreGeneration: generation(value.restoreGeneration) };
 		case "prepare": return { ...base, type: value.type, preparation: preparation(value.preparation) };
+		case "reserve-activation": return { ...base, type: value.type, activation: activation(value.activation) };
 		case "start": case "cancel": return { ...base, type: value.type };
 		case "commit": return { ...base, type: value.type, ...("destinationRoot" in value ? { destinationRoot: sourceInstallationNativeRoot(value.destinationRoot) } : {}) };
 		default: throw invalid();
@@ -117,11 +128,17 @@ function advance(current: SourceSelectionState, change: SourceSelectionCommand):
 			case "prepare":
 				if (pending.phase !== "review") throw new Error("This source review is already prepared.");
 				pending.phase = "prepared"; pending.preparation = change.preparation; break;
+			case "reserve-activation":
+				if (pending.phase === "review" || !pending.preparation) throw new Error("Prepare source artifacts before reserving activation operations");
+				if (pending.preparation.activation) throw new Error("This source already has saved activation operations");
+				pending.preparation.activation = change.activation; break;
 			case "start":
 				if (pending.phase !== "prepared") throw new Error("Prepare and verify recovery files before installing a source generation.");
+				if (pending.preparation?.activation && change.operationId !== pending.preparation.activation.startOperationId) throw new Error("Use the saved source installation operation");
 				pending.phase = "applying"; break;
 			case "commit":
 				if (pending.phase !== "applying") throw new Error("Source installation has not started.");
+				if (pending.preparation?.activation && change.operationId !== pending.preparation.activation.commitOperationId) throw new Error("Use the saved source activation operation");
 				if (next.active.kind === "source") next.retired.push(next.active.restoreGeneration);
 				if (next.retired.length > 1024) throw new Error("Source selection history needs maintenance before another activation.");
 				next.active = { kind: "source", restoreGeneration: pending.restoreGeneration }; next.pending = null;
@@ -197,6 +214,8 @@ export class SourceSelectionJournal {
 			const tx = this.db.transaction(["selection", "receipts"], change ? "readwrite" : "readonly");
 			const states = tx.objectStore("selection"), receipts = tx.objectStore("receipts"), request = states.get("state");
 			const historyCount = receipts.count();
+			const reserved = change?.type === "prepare" ? change.preparation.activation : change?.type === "reserve-activation" ? change.activation : undefined;
+			const reservations = reserved ? [receipts.get(reserved.startOperationId), receipts.get(reserved.commitOperationId)] : [];
 			const receipt = change || reconciliation ? receipts.get((change ?? reconciliation)!.operationId) : undefined;
 			let result: SourceSelectionState, failure: unknown;
 			const timer = window.setTimeout(() => {
@@ -230,6 +249,8 @@ export class SourceSelectionJournal {
 						return;
 					}
 					if (change.expectedRevision !== result.revision) throw new Error("The source selection changed. Reload it before continuing.");
+					if (reserved && (reserved.startOperationId === change.operationId || reserved.commitOperationId === change.operationId
+						|| reservations.some(saved => saved.result !== undefined))) throw new Error("An activation operation ID was already used");
 					result = advance(result, change);
 					states.put(result, "state"); receipts.add({ command: text, revision: result.revision }, change.operationId);
 				} catch (error) { failure = error; tx.abort(); }

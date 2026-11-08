@@ -20,7 +20,7 @@ import { admitSourceStartup, releaseRetiredSourceHold } from "../../src/storage/
 import { stageSourceInstallationMapping } from "../../src/SourceInstallationMapping";
 import { Settings, SettingsScope } from "../../src/SettingsPersistence";
 import type { VaultShareSettings } from "../../src/VaultShare";
-import { activateSourceInstallation } from "../../src/SourceInstallationActivation";
+import { activateSourceInstallation, sourceActivationRequest } from "../../src/SourceInstallationActivation";
 import { UnsavedFileStore } from "../../src/UnsavedFile";
 
 jest.mock("obsidian", () => ({ Platform: { isMobile: false }, FileSystemAdapter: class {} }));
@@ -184,6 +184,33 @@ test("invalid activation operations and a lost writer lease are refused before c
 	f.host.checkIsolation.mockImplementation(() => { throw new Error("Isolation unavailable"); });
 	await expect(f.run()).rejects.toThrow("Isolation"); await expect(fs.stat(installed(""))).rejects.toMatchObject({ code: "ENOENT" });
 	expect((await f.journal.read()).pending?.phase).toBe("prepared");
+});
+
+test("durable activation intent resumes after a journal restart without regenerating operation IDs", async () => {
+	const f = await activationFixture(), request = await sourceActivationRequest(f.journal, f.request);
+	expect(request.revision).not.toBe(f.request.revision);
+	const first = await materializeSourceInstallation(f.journal, f.staging, f.native, request);
+	f.journal.close(); const journal = await SourceSelectionJournal.open(f.request.source); journals.push(journal);
+	const resumed = await sourceActivationRequest(journal, { ...request, revision: first.selection.revision! });
+	expect(resumed).toEqual({ ...request, revision: first.selection.revision });
+	expect(await activateSourceInstallation(journal, f.staging, f.native, resumed, f.host, f.downloads)).toMatchObject({ selection: { pending: null } });
+	expect(await activateSourceInstallation(journal, f.staging, f.native, resumed, f.host, f.downloads)).toMatchObject({ reconciled: true });
+});
+
+test("a lost reservation reply is recovered from saved intent without another reservation", async () => {
+	const f = await activationFixture(), apply = f.journal.apply.bind(f.journal);
+	const spy = jest.spyOn(f.journal, "apply").mockImplementationOnce(async (change, options) => { await apply(change, options); throw new Error("Lost intent response"); });
+	await expect(sourceActivationRequest(f.journal, f.request)).rejects.toThrow("Lost intent"); spy.mockRestore();
+	const state = await f.journal.read(), saved = state.pending!.preparation!.activation!, writes = jest.spyOn(f.journal, "apply");
+	const resumed = await sourceActivationRequest(f.journal, { ...f.request, revision: state.revision! });
+	expect(resumed.operationId).toBe(saved.startOperationId); expect(resumed.commitOperationId).toBe(saved.commitOperationId); expect(writes).not.toHaveBeenCalled();
+});
+
+test("an activation with different saved operations fails before any native writes", async () => {
+	const f = await activationFixture(), request = await sourceActivationRequest(f.journal, f.request), claim = jest.spyOn(f.native, "claim");
+	await expect(activateSourceInstallation(f.journal, f.staging, f.native, { ...request, commitOperationId: crypto.randomUUID() }, f.host, f.downloads)).rejects.toThrow("saved source activation");
+	await expect(materializeSourceInstallation(f.journal, f.staging, f.native, { ...request, operationId: crypto.randomUUID() })).rejects.toThrow("saved source installation");
+	expect(claim).not.toHaveBeenCalled(); expect((await f.journal.read()).pending?.phase).toBe("prepared");
 });
 
 test("real desktop installation preserves originals and source artifacts, creates implicit/empty directories, and stays paused", async () => {

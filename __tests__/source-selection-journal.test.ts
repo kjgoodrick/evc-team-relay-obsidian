@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { SourceSelectionJournal, type SourceSelectionState, type SourceSelectionCommand, type SourcePreparation } from "../src/storage/source-selection-journal";
+import { SourceSelectionJournal, type SourceSelectionState, type SourceSelectionCommand, type SourcePreparation, type SourceActivationOperations } from "../src/storage/source-selection-journal";
 import { RemoteFolderAddress, ResourceAddress } from "../src/ResourceAddress";
 import { RECOVERY_FOLDER } from "../src/conflictCopyPath";
 import { watchSourceSelection } from "../src/storage/source-selection-events";
@@ -69,6 +69,52 @@ test("an activation precondition lost while the transaction reads cannot save a 
 		check: () => { if (++checks > 1) throw new Error("Writer isolation was lost"); },
 	})).rejects.toThrow("isolation");
 	expect(await journal.read()).toEqual(state); await expect(journal.reconcileCommit(receipt)).rejects.toThrow("missing");
+});
+
+test("prepared activation operations survive reopen and bind both installation transitions", async () => {
+	const value = scope(); let journal = await open(value), state = await journal.apply(begin());
+	const activation = { startOperationId: crypto.randomUUID(), commitOperationId: crypto.randomUUID() };
+	state = await journal.apply({ type: "prepare", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId,
+		preparation: { ...preparation(), activation } });
+	journal.close(); journal = await open(value); expect((await journal.read()).pending!.preparation!.activation).toEqual(activation);
+	await expect(step(journal, state, "start")).rejects.toThrow("saved source installation operation");
+	state = await journal.apply({ type: "start", operationId: activation.startOperationId, expectedRevision: state.revision, reviewId: state.pending!.reviewId });
+	await expect(step(journal, state, "commit")).rejects.toThrow("saved source activation operation");
+	const receipt = { operationId: activation.commitOperationId, reviewId: state.pending!.reviewId, restoreGeneration: state.pending!.restoreGeneration };
+	const selected = await journal.apply({ ...receipt, type: "commit", expectedRevision: state.revision, destinationRoot: "Restored Team" });
+	expect(await journal.reconcileCommit(receipt)).toEqual(selected);
+});
+
+test.each(["prepared", "applying"])("an older %s preview can durably reserve operations once without changing its artifacts", async phase => {
+	const journal = await open(); let state = await journal.apply(begin()); state = await step(journal, state, "prepare");
+	if (phase === "applying") state = await step(journal, state, "start");
+	const prior = structuredClone(state), activation = { startOperationId: crypto.randomUUID(), commitOperationId: crypto.randomUUID() };
+	const change = { type: "reserve-activation" as const, operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId, activation };
+	state = await journal.apply(change);
+	expect(state.pending).toEqual({ ...prior.pending, preparation: { ...prior.pending!.preparation, activation } }); expect(state.active).toEqual(prior.active);
+	expect(await journal.apply(change)).toEqual(state);
+	await expect(journal.apply({ ...change, operationId: crypto.randomUUID(), expectedRevision: state.revision })).rejects.toThrow("already has saved");
+});
+
+test.each(["same", "current operation", "used operation"])("activation reservation refuses %s IDs without changing the prepared artifacts", async kind => {
+	const journal = await open(), beginning = begin(); let state = await journal.apply(beginning); state = await step(journal, state, "prepare");
+	const operationId = crypto.randomUUID(), activation: SourceActivationOperations = { startOperationId: crypto.randomUUID(), commitOperationId: crypto.randomUUID() };
+	if (kind === "same") activation.commitOperationId = activation.startOperationId;
+	if (kind === "current operation") activation.commitOperationId = operationId;
+	if (kind === "used operation") activation.startOperationId = beginning.operationId;
+	await expect(journal.apply({ type: "reserve-activation", operationId, expectedRevision: state.revision, reviewId: state.pending!.reviewId, activation })).rejects.toThrow();
+	expect(await journal.read()).toEqual(state);
+});
+
+test("a late operation-reservation abort retains the prepared review without a partial intent", async () => {
+	const journal = await open(); let state = await journal.apply(begin()); state = await step(journal, state, "prepare");
+	const add = IDBObjectStore.prototype.add;
+	const spy = jest.spyOn(IDBObjectStore.prototype, "add").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+		const request = add.call(this, value, key); if (this.name === "receipts") request.addEventListener("success", () => queueMicrotask(() => this.transaction.abort()), { once: true }); return request;
+	});
+	await expect(journal.apply({ type: "reserve-activation", operationId: crypto.randomUUID(), expectedRevision: state.revision, reviewId: state.pending!.reviewId,
+		activation: { startOperationId: crypto.randomUUID(), commitOperationId: crypto.randomUUID() } })).rejects.toThrow("aborted");
+	spy.mockRestore(); expect(await journal.read()).toEqual(state);
 });
 
 test.each(["", "/Team", "../Team", "Team/../Other", ".obsidian", "Team/.hidden", "TEAM/Relay Recovery (local only)", "Relay Recovery (local only)/Child", "Team/CON", "Team/e\u0301"])("unsafe activation root is refused: %s", async destinationRoot => {

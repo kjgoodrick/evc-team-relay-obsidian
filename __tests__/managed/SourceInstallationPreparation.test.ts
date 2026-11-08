@@ -9,6 +9,7 @@ import { RemoteFolderAddress, ResourceAddress } from "../../src/ResourceAddress"
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
 import type { SourceInstallationStageIO } from "../../src/SourceInstallationStaging";
 import { prepareSourceInstallation, type SourcePreparationDownloads, type SourcePreparationRequest } from "../../src/SourceInstallationPreparation";
+import { sourceActivationRequest } from "../../src/SourceInstallationActivation";
 
 let root: string, io: SourceInstallationStageIO;
 const journals: SourceSelectionJournal[] = [];
@@ -54,6 +55,10 @@ test("only verified artifacts and a fresh unchanged inventory can prepare the du
 	expect(await io.stat("Restored")).toBeNull(); expect(new TextDecoder().decode(await io.readBinary("Team/Note.md"))).toBe("Original");
 	f.journal.close(); const reopened = await SourceSelectionJournal.open(f.input.source); journals.push(reopened);
 	expect(await reopened.read()).toEqual(result.selection);
+	const request = await sourceActivationRequest(reopened, { source: f.input.source, reviewId: f.input.reviewId, revision: result.selection.revision! });
+	expect(request.operationId).toBe(result.selection.pending!.preparation!.activation!.startOperationId);
+	expect(request.commitOperationId).toBe(result.selection.pending!.preparation!.activation!.commitOperationId);
+	expect(request.operationId).not.toBe(request.commitOperationId); expect(await reopened.read()).toEqual(result.selection);
 	await expect(reopened.assertActive(result.selection.revision, result.selection.active)).rejects.toThrow("awaiting recovery");
 });
 

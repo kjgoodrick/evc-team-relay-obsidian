@@ -35,7 +35,8 @@ stages artifacts, rechecks current inventory and records the verified references
 with an expected journal revision. Production downloads, desktop staging,
 [resumable native copying](source-installation-materialization-preview.md) and
 [selected-cache imports](source-installation-caches-preview.md) are implemented.
-External-writer isolation, final mapping/activation and the recovery UI remain.
+Mapping and final activation now have internal coordinators. External-writer
+isolation and the recovery UI remain.
 A pending phase survives close/reopen, including a
 crash between native writes and the final journal commit; startup must resume
 recovery instead of treating that phase as permission to synchronize.
@@ -47,6 +48,17 @@ same current decision; reused IDs with different bodies and superseded receipts
 are refused. Competing reviewers cannot overwrite each other's decisions.
 Cancelling review/preparation preserves the previous active choice but advances
 the revision, so earlier admission checks cannot be reused.
+
+Preparation now also saves distinct start/commit operation IDs in its optional
+`activation` field. The journal binds the corresponding transitions to those
+IDs; its transaction refuses IDs already used by another receipt. Older prepared
+or applying preview records can add this field once with `reserve-activation`,
+without changing their archive, plan, phase or active choice. Reservation uses
+the same revision/receipt transaction and cannot replace existing intent.
+`sourceActivationRequest` reloads the saved pair after restart. Lost reservation
+responses are recovered by rereading the durable state before continuing.
+Older strict readers reject preparations containing this new field; they must
+not silently discard it or activate the source with new operation IDs.
 
 The commit command can additionally bind `destinationRoot`, validated with the
 same native-path rules as installation plans. Its canonical path is stored as
@@ -85,13 +97,15 @@ Open/read/write waits are bounded; a timeout never grants fallback authority.
 An operation that timed out near commit is reconciled through its exact receipt.
 Input objects and returned snapshots cannot mutate stored state by reference.
 
-The native activation coordinator, cross-window writer coordination,
-selection-journal recovery export and user-facing recovery flow remain to be
-connected. A separate [native source write hold](native-source-write-hold-preview.md)
+The [native activation coordinator](source-installation-activation-preview.md)
+now combines verified file/cache/mapping installation with the final journal
+commit. Cross-window writer coordination, selection-journal recovery export and
+the user-facing recovery flow remain. A separate [native source write hold](native-source-write-hold-preview.md)
 now fences and drains registered text/attachment writes in one host realm;
 structural, attachment, Bases and inbound mutations also use that admission.
 The new-folder installer can drain a paused startup hold without releasing its
-original barrier. Its final activation is not yet connected. The journal
+original barrier. Ordinary startup can reconcile its committed new location
+after reload, and the registry creates a fresh instance there. The journal
 is not a filesystem lock and cannot stop another process,
 older plugin binary or external editor from writing a vault path.
 

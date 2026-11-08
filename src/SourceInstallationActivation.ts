@@ -27,6 +27,27 @@ export interface SourceActivationHost {
 }
 export interface SourceActivationResult { selection: SourceSelectionState; destinationRoot: string; reconciled: boolean }
 
+/** Recover stable operation IDs from the reviewed journal. Older prepared
+ * previews can reserve IDs with one CAS transition before native/cache work;
+ * a lost response requires rereading the saved revision, never new operations. */
+export async function sourceActivationRequest(journal: SourceSelectionJournal, input: Omit<SourceMaterializationRequest, "operationId">,
+	options: SourcePlanVerificationOptions = {}): Promise<SourceActivationRequest> {
+	const captured = { ...input, source: { ...input.source } }, signal = options.signal, checkContext = options.check;
+	if (captured.source.restoreGeneration === undefined) throw new Error("Source activation requires an explicit generation");
+	if (journal.scopeIdentity !== sourceInventoryCacheSync({ ...captured.source, restoreGeneration: null }).identity) throw new Error("The activation journal belongs to another source");
+	const check = () => { if (signal?.aborted) throw Object.assign(new Error("Source activation was cancelled"), { name: "AbortError" }); checkContext?.(); };
+	check(); let state = await journal.read(); check();
+	if (state.revision !== captured.revision || state.pending?.reviewId !== captured.reviewId || !state.pending.preparation
+		|| state.pending.phase === "review" || state.pending.restoreGeneration !== captured.source.restoreGeneration) throw new Error("The prepared source selection changed");
+	if (!state.pending.preparation.activation) {
+		state = await journal.apply({ type: "reserve-activation", operationId: crypto.randomUUID(), expectedRevision: state.revision,
+			reviewId: captured.reviewId, activation: { startOperationId: crypto.randomUUID(), commitOperationId: crypto.randomUUID() } }, { check });
+		check();
+	}
+	const saved = state.pending!.preparation!.activation!;
+	return { source: captured.source, reviewId: captured.reviewId, revision: state.revision!, operationId: saved.startOperationId, commitOperationId: saved.commitOperationId };
+}
+
 /** Commit a prepared installation under native holds. This is a coordinator,
  * not an admission authority: the host must establish writer isolation and
  * current authenticated account/server context, then separately hand off the
@@ -57,6 +78,8 @@ export async function activateSourceInstallation(journal: SourceSelectionJournal
 		const selection = await journal.reconcileCommit(receipt); checkContextOnly();
 		return { selection, destinationRoot: selection.nativeRoot!, reconciled: true };
 	}
+	const saved = current.pending.preparation?.activation;
+	if (saved && (saved.startOperationId !== request.operationId || saved.commitOperationId !== request.commitOperationId)) throw new Error("Use the saved source activation operations");
 	check(); const checks = { check, signal, timeoutMs: timeout };
 	return withMaterializedSourceInstallation(journal, staging, native, request, async session => {
 		const applying = { ...request, revision: session.selection.revision! };
