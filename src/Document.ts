@@ -1,5 +1,6 @@
 import { ItemKind } from "./ItemKinds";
 import { LocalDocumentStore } from "./storage/local-document-store";
+import { trackNativeDocumentWrite } from "./storage/native-document-writes";
 import * as Y from "yjs";
 import { ProviderBacked } from "./ProviderBacked";
 import { AuthSession } from "./AuthSession";
@@ -458,7 +459,7 @@ export class Document extends ProviderBacked implements SyncableEntry, MimeTyped
 			const check = this.vaultShare.captureDocumentWrite(this), content = this.content;
 			await this.assertNoRestoreReview(); check();
 			if (this.obsidianFile !== file || this.content !== content) return;
-			await this.obsidianVault.modify(file, content);
+			await trackNativeDocumentWrite(this.obsidianVault, file.path, () => this.obsidianVault.modify(file, content));
 			this.warn("file saved", this.entryPath);
 		} catch (error) { this.warn("Document save paused; local cached content is retained", error); }
 	}

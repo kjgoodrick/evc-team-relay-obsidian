@@ -22,6 +22,7 @@ import { SOURCE_CACHE_IDENTITY } from "../../src/storage/document-cache-binding"
 import { readManagedSource } from "../../src/client/readManagedSource";
 import type { ManagedRestoreInspection } from "../../src/client/ManagedIndexTransport";
 import { readDocumentRecoverySnapshot } from "../../src/storage/document-recovery-snapshot";
+import * as nativeWrites from "../../src/storage/native-document-writes";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 jest.mock("../../src/client/readManagedSource", () => ({ readManagedSource: jest.fn() }));
@@ -233,6 +234,31 @@ test("source comparison keeps local history, buffer, disk and restored text dist
 	expect(await s.share.unsavedStore.readUnsaved(s.note.id)).toBe("UNSAVED EDITOR BUFFER");
 	expect(Y.encodeStateAsUpdate(s.share.crdtDoc)).toEqual(index); expect(fetchMock).not.toHaveBeenCalled();
 	result.check(); s.config.onpremServerId = "different"; expect(result.check).toThrow("changed");
+});
+
+test.each(["complete", "cancel"])("source comparison can %s while an admitted native write is still pending", async mode => {
+	const s = await sourceTextFixture(), controller = new AbortController();
+	let release!: () => void, entered!: () => void;
+	const held = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { entered = resolve; });
+	const write = s.vault.adapter.write, read = jest.spyOn(s.vault, "readBinary");
+	s.vault.adapter.write = async (path, text) => { await held; await write(path, text); };
+	Object.assign(s.share, { deletedEntries: new Set(), isDeletePending: () => false });
+	const save = s.share.writeContents({ entryPath: "Local.md" } as Document, "FINISHED NATIVE SAVE");
+	const originalWait = nativeWrites.waitForNativeDocumentWrites;
+	const spy = jest.spyOn(nativeWrites, "waitForNativeDocumentWrites").mockImplementation((...args) => { entered(); return originalWait(...args); });
+	try {
+		const comparison = s.share.inspectManagedRestoreText(s.inspection, s.note.id, controller.signal);
+		await waiting; expect(read).not.toHaveBeenCalled(); expect(sourceMock).not.toHaveBeenCalled();
+		if (mode === "cancel") {
+			controller.abort(); await expect(comparison).rejects.toMatchObject({ name: "AbortError" });
+			expect(read).not.toHaveBeenCalled(); expect(sourceMock).not.toHaveBeenCalled();
+			release(); await save;
+		} else {
+			release(); await save;
+			expect((await comparison).local).toContainEqual({ label: "Local file on disk", text: "FINISHED NATIVE SAVE" });
+		}
+		expect(await fs.readFile(path.join(root, "Team/Local.md"), "utf8")).toBe("FINISHED NATIVE SAVE");
+	} finally { release(); await save; spy.mockRestore(); read.mockRestore(); }
 });
 
 test("server-only text inspection creates no retained cache or local buffer", async () => {

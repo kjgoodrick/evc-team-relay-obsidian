@@ -27,6 +27,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
+import { trackNativeDocumentWrite, waitForNativeDocumentWrites } from "./storage/native-document-writes";
 import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
@@ -538,6 +539,7 @@ export class VaultShare extends ProviderBacked {
 				if (unsaved !== null && unsaved !== undefined) local.push({ label: "Local unsaved buffer", text: unsaved });
 			} finally { retained.destroy(); }
 			const path = sharePath ? `${sharePath}/${localEntries[0][0]}` : localEntries[0][0];
+			await waitForNativeDocumentWrites(this.vaultApi, path, { check, signal }); check();
 			const file = this.vaultApi.getAllLoadedFiles().find(file => file instanceof TFile && file.path === path);
 			if (file instanceof TFile) {
 				if (file.stat?.size > 2 * 1024 * 1024) throw new Error("The local file is too large for an inline comparison. Save a recovery copy instead.");
@@ -2431,7 +2433,7 @@ export class VaultShare extends ProviderBacked {
 		}
 		const vaultPath = normalizePath(this.absolutePath(doc.entryPath));
 		this.log("writing to ", vaultPath);
-		return this.vaultApi.adapter.write(vaultPath, content);
+		return trackNativeDocumentWrite(this.vaultApi, vaultPath, () => this.vaultApi.adapter.write(vaultPath, content));
 	}
 
 	/**
