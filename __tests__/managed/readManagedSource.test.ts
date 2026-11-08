@@ -63,6 +63,15 @@ test("a changed review before the snapshot is returned rejects the preview", asy
 	expect(provider.doc.isDestroyed).toBe(true);
 });
 
+test.each(["insertion", "deletion"])("a missing %s dependency cannot be displayed as a complete restored source", async kind => {
+	const source = new Y.Doc(), updates: Uint8Array[] = []; source.on("update", update => updates.push(update));
+	source.getText("contents").insert(0, "base text");
+	if (kind === "insertion") source.getText("contents").insert(9, " later text"); else source.getText("contents").delete(0, 9);
+	const s = credentials(), pending = readManagedSource(s.cache, "source", "Note.md", "server", {}); await tick();
+	Y.applyUpdate(provider.doc, updates[1]); provider.emit("sync", true);
+	await expect(pending).rejects.toThrow("incomplete changes"); expect(provider.doc.isDestroyed).toBe(true); source.destroy();
+});
+
 test("the encoded update budget also bounds an unfinished incoming stream", async () => {
 	const s = credentials(), pending = readManagedSource(s.cache, "source", "Note.md", "server", {}, { maxBytes: 16 }); await tick();
 	provider.doc.getText("contents").insert(0, "a large source update that exceeds the preview budget");

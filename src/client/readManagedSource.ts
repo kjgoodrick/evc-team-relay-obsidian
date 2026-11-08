@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import type { RelayCredentialCache } from "../RelayCredentialCache";
 import type { RestoreBinding } from "../collaboration/RestoreGeneration";
 import { YSweetProvider } from "./provider";
+import { assertCompleteComparisonSource } from "./ManagedRestoreText";
 
 export interface ManagedSourcePreview {
 	update: Uint8Array;
@@ -53,7 +54,7 @@ export function readManagedSource(credentials: RelayCredentialCache, documentId:
 			provider.on("sync", synced => {
 				if (!synced || settled) return;
 				try {
-					active(); const update = Y.encodeStateAsUpdate(doc);
+					active(); assertCompleteComparisonSource(doc, "The restored source"); const update = Y.encodeStateAsUpdate(doc);
 					if (update.byteLength > maxBytes) throw new Error("This source is too large for an inline comparison. Local work is retained.");
 					finish(undefined, { update, stateVector: Y.encodeStateVector(doc), downloadedAt: new Date().toISOString(), check });
 				} catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }

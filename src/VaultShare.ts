@@ -19,7 +19,7 @@ import { dirname, join, sep } from "path-browserify";
 import * as Y from "yjs";
 import { CONFLICTS, select, touches, type Records, type StructuralConflict } from "./client/managedRecovery";
 import type { ManagedRestoreReview, ManagedRestoreInspection } from "./client/ManagedIndexTransport";
-import { requireRestoreRelativePath, type ManagedRestoreText, type RestoreLocalText } from "./client/ManagedRestoreText";
+import { assertCompleteComparisonSource, requireRestoreRelativePath, type ManagedRestoreText, type RestoreLocalText } from "./client/ManagedRestoreText";
 import { readManagedSource } from "./client/readManagedSource";
 import { restoreMetadata } from "./collaboration/RestoreGeneration";
 import { prepareRecoveryBackup, sameCapture, type RecoveryCapture, type RecoveryIO } from "./ManagedRecoveryBackup";
@@ -27,7 +27,7 @@ import { ManagedConflictsModal } from "./ui/ManagedConflictsModal";
 
 // Sync primitives / CRDT plumbing
 import { LocalDocumentStore } from "./storage/local-document-store";
-import { readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
+import { readDocumentComparisonSnapshot, readDocumentRecoverySnapshot } from "./storage/document-recovery-snapshot";
 import { encodeDocumentRecoveryMetadata } from "./storage/document-recovery-metadata";
 import { discoverDocumentRecovery, type DiscoveredRecoveryDocument } from "./storage/discover-document-recovery";
 import { discoverSourceRecovery, type SourceRecoveryDiscovery } from "./storage/discover-source-recovery";
@@ -520,8 +520,8 @@ export class VaultShare extends ProviderBacked {
 		check(); const local: RestoreLocalText[] = [];
 		if (localEntries.length) {
 			const cacheName = `${host}-relay-${kind === ItemKind.Canvas ? "canvas" : "doc"}-${entryId}`;
-			const stored = await readDocumentRecoverySnapshot(cacheName); check();
-			const appId = stored.custom.find(item => item.key === "appId")?.value, s3rn = stored.custom.find(item => item.key === "s3rn")?.value;
+			const stored = await readDocumentComparisonSnapshot(cacheName, { check, signal }); check();
+			const { appId, s3rn } = stored;
 			if (stored.exists && (appId !== undefined && appId !== host || s3rn !== undefined && s3rn !== address)) {
 				throw new Error("The retained history has a different association. Save a recovery copy before continuing.");
 			}
@@ -532,6 +532,7 @@ export class VaultShare extends ProviderBacked {
 					if (live.vaultShare !== this || live.entityGuid !== entryId || (isCanvasDocument(live) ? ItemKind.Canvas : ItemKind.Document) !== kind) throw new Error("The local document association changed");
 					Y.applyUpdate(retained, Y.encodeStateAsUpdate(live.crdtDoc));
 				} else if (live) throw new Error("The local entry changed type");
+				assertCompleteComparisonSource(retained, "The retained editing history");
 				if (stored.exists || live) local.push({ label: "Local editing history", text: kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(retained), null, 2) : retained.getText("contents").toString() });
 				const unsaved = isDocument(live) && live._unsavedFile ? live._unsavedFile.unsavedText : await this.unsavedStore.readUnsaved(entryId); check();
 				if (unsaved !== null && unsaved !== undefined) local.push({ label: "Local unsaved buffer", text: unsaved });
@@ -551,6 +552,7 @@ export class VaultShare extends ProviderBacked {
 		check(); const doc = new Y.Doc({ gc: false });
 		try {
 			Y.applyUpdate(doc, snapshot.update);
+			assertCompleteComparisonSource(doc, "The restored source");
 			const serverText = kind === ItemKind.Canvas ? JSON.stringify(CanvasDocument.exportData(doc), null, 2) : doc.getText("contents").toString();
 			if (serverText.length > 2 * 1024 * 1024) throw new Error("The server text is too large for an inline comparison.");
 			return { entryId, serverPath, serverText, local, capturedAt: snapshot.downloadedAt, check: snapshot.check };

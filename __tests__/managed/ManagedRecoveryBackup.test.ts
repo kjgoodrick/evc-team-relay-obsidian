@@ -268,6 +268,25 @@ test("source comparison includes live unsaved work without appending it to the r
 	} finally { liveDoc.destroy(); }
 });
 
+test("incomplete retained history stays exportable and is compared only after live history supplies its dependency", async () => {
+	const s = await sourceTextFixture(), source = new Y.Doc(), updates: Uint8Array[] = [];
+	source.on("update", update => updates.push(update)); source.getMap("seed").set("owner", "test"); source.getText("contents").insert(0, "MISSING BASE TEXT");
+	await new Promise<void>((resolve, reject) => {
+		const opened = indexedDB.open(s.name); opened.onerror = () => reject(opened.error);
+		opened.onsuccess = () => { const db = opened.result, tx = db.transaction("updates", "readwrite"); tx.objectStore("updates").add(updates[1]); tx.oncomplete = () => { db.close(); resolve(); }; tx.onabort = () => { db.close(); reject(tx.error); }; };
+	});
+	const retained = await readDocumentRecoverySnapshot(s.name);
+	try {
+		await expect(s.share.inspectManagedRestoreText(s.inspection, s.note.id)).rejects.toThrow("incomplete changes"); expect(sourceMock).not.toHaveBeenCalled();
+		expect(await readDocumentRecoverySnapshot(s.name)).toEqual(retained);
+		const live = Object.create(Document.prototype) as Document;
+		Object.assign(live, { entityGuid: s.note.id, _parent: s.share, crdtDoc: source, _unsavedFile: { unsavedText: "LIVE BUFFER" } }); s.share.trackedEntries.set(s.note.id, live);
+		const result = await s.share.inspectManagedRestoreText(s.inspection, s.note.id);
+		expect(result.local[0].text).toContain("MISSING BASE TEXT"); expect(result.local[0].text).toContain("OFFLINE EDIT IN INDEXEDDB");
+		expect(await readDocumentRecoverySnapshot(s.name)).toEqual(retained);
+	} finally { source.destroy(); }
+});
+
 test.each(["duplicate server", "duplicate local", "different type", "unsafe server path", "unsafe local path", "missing check"])("source comparison rejects %s before downloading", async kind => {
 	const s = await sourceTextFixture();
 	if (kind === "duplicate server") s.inspection.server.records["Other.md"] = s.note;

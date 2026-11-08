@@ -59,8 +59,24 @@ run only for combined text up to 48,000 characters, with a 20-ms computation
 deadline and edit-distance cap. Larger or complex differences retain the paged
 originals. Large-history resource acceptance remains outstanding.
 
-Local cache reads use a readonly transaction, preserve cache metadata and
-pending update bytes, and do not create missing databases. Known local inventory
+Inline local cache reads use a readonly cursor transaction, capped at 16 MiB of
+update backing buffers and 50,000 rows, with a five-second transaction deadline.
+They read only the two association metadata keys and do not enumerate/load
+unrelated custom metadata. Cache opening has its existing ten-second deadline;
+abort while waiting prevents any late database creation. Size/count/deadline
+failures leave the full original history available to the separate recovery
+export, whose capture is not silently truncated to these preview limits.
+
+Both retained and restored documents must have all insertion/deletion
+dependencies applied before text is displayed. Otherwise the comparison fails
+instead of presenting partial/empty text as a full version. Captured live history
+may supply a missing local dependency in the temporary comparison document;
+persisted bytes still remain unchanged. The checks do not establish that a
+previously unsynchronized cache contains every remote change. They establish
+that the captured updates can be applied together without unresolved parts.
+
+Local cache reads preserve cache metadata and pending update bytes and do not
+create missing databases. Known local inventory
 identity, cache association and live document ownership/kind are checked before
 overlaying live edits into a temporary local document. Ambiguous identities,
 changed kinds, unsafe paths, invalid UTF-8, changed account/folder/review context
@@ -83,7 +99,10 @@ commenting.
 Automated temporary-filesystem/IndexedDB tests verify distinct text versions,
 unchanged persisted updates/native bytes/buffers, absent-cache preservation,
 live-only edits, Canvas source export, association/path/encoding/size failures
-and changing contexts. DOM tests cover safe rendering, bounded pages, selection,
+and changing contexts. Cursor tests verify bounded reads, cancellation, metadata
+selectivity, preserved export inputs, missing caches and late opens. Incomplete
+insertions/deletions are withheld, and a live dependency can complete a retained
+preview without rewriting its cache. DOM tests cover safe rendering, bounded pages, selection,
 inventory-to-source navigation, cancellation, errors and modal reopen. The
 actual FastAPI/Rust document-restore fixture reads the selected restored source
 without altering its history while the original source remains paused. This

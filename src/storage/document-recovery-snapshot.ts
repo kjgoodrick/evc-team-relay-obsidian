@@ -11,16 +11,20 @@ export interface DocumentRecoverySnapshot {
 }
 
 /** A missing cache is reported without committing a newly created database. */
-function openExisting(name: string): Promise<IDBDatabase | undefined> {
+function openExisting(name: string, signal?: AbortSignal): Promise<IDBDatabase | undefined> {
 	return new Promise((resolve, reject) => {
+		const cancelled = () => Object.assign(new Error("Source comparison was cancelled"), { name: "AbortError" });
+		if (signal?.aborted) { reject(cancelled()); return; }
 		let created = false, settled = false;
 		const request = indexedDB.open(name);
 		const timer = window.setTimeout(() => finish(new Error("Opening the recovery cache timed out")), 10_000);
 		const finish = (error?: Error, db?: IDBDatabase) => {
 			if (settled) { db?.close(); return; }
-			settled = true; window.clearTimeout(timer);
+			settled = true; window.clearTimeout(timer); signal?.removeEventListener("abort", abort);
 			if (error) reject(error); else resolve(db);
 		};
+		const abort = () => finish(cancelled());
+		signal?.addEventListener("abort", abort, { once: true });
 		request.onupgradeneeded = () => { created = true; request.transaction!.abort(); };
 		request.onblocked = () => finish(new Error("Another window is changing the document cache; retry after it finishes"));
 		request.onerror = event => {
@@ -30,6 +34,59 @@ function openExisting(name: string): Promise<IDBDatabase | undefined> {
 		};
 		request.onsuccess = () => finish(undefined, request.result);
 	});
+}
+
+export interface DocumentComparisonSnapshot extends DocumentRecoveryIdentity { update: Uint8Array; updateCount: number }
+export interface DocumentComparisonOptions { check?: () => void; signal?: AbortSignal; maxBytes?: number; maxRecords?: number; timeoutMs?: number }
+
+/** Bounded inline review, distinct from a lossless recovery export. Reads only
+ * association metadata and update rows in one readonly transaction. Unrelated
+ * custom metadata is neither enumerated nor loaded for a text comparison. */
+export async function readDocumentComparisonSnapshot(name: string, options: DocumentComparisonOptions = {}): Promise<DocumentComparisonSnapshot> {
+	const maxBytes = options.maxBytes ?? 16 * 1024 * 1024, maxRecords = options.maxRecords ?? 50_000, timeoutMs = options.timeoutMs ?? 5_000;
+	if (typeof name !== "string" || !name || name.length > 1024 || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 16 * 1024 * 1024
+		|| !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 50_000 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new Error("Invalid source comparison cache limits");
+	const check = () => { if (options.signal?.aborted) throw Object.assign(new Error("Source comparison was cancelled"), { name: "AbortError" }); options.check?.(); };
+	check(); const db = await openExisting(name, options.signal);
+	try {
+		check();
+		if (!db) return { exists: false, updateCount: 0, update: Y.mergeUpdates([]) };
+		if (!db.objectStoreNames.contains("updates") || !db.objectStoreNames.contains("custom")) throw new Error("Unsupported source comparison cache schema");
+		const snapshot = await new Promise<{ updates: Uint8Array[]; appId?: unknown; s3rn?: unknown }>((resolve, reject) => {
+			const tx = db.transaction(["updates", "custom"], "readonly"), updates: Uint8Array[] = [];
+			let finished = false, total = 0;
+			const finish = (error?: Error) => {
+				if (finished) return; finished = true; window.clearTimeout(timer); options.signal?.removeEventListener("abort", abort);
+				if (error) { try { tx.abort(); } catch { /* Already complete. */ } reject(error); }
+				else resolve({ updates, appId: appId.result, s3rn: s3rn.result });
+			};
+			const abort = () => finish(Object.assign(new Error("Source comparison was cancelled"), { name: "AbortError" }));
+			const timer = window.setTimeout(() => finish(new Error("Reading the source comparison cache timed out")), timeoutMs);
+			options.signal?.addEventListener("abort", abort, { once: true });
+			db.onversionchange = () => { finish(new Error("The source comparison cache changed")); db.close(); };
+			const custom = tx.objectStore("custom"), appId = custom.get("appId"), s3rn = custom.get("s3rn");
+			for (const request of [appId, s3rn]) request.onsuccess = () => {
+				if (request.result !== undefined && (typeof request.result !== "string" || request.result.length > 2048)) finish(new Error("The source comparison cache association is invalid"));
+			};
+			const cursor = tx.objectStore("updates").openCursor();
+			cursor.onsuccess = () => {
+				if (finished) return;
+				try {
+					check(); const row = cursor.result; if (!row) return;
+					const value: unknown = row.value;
+					const size = ArrayBuffer.isView(value) ? value.buffer.byteLength : Object.prototype.toString.call(value) === "[object ArrayBuffer]" ? (value as ArrayBuffer).byteLength : undefined;
+					if (size === undefined || !size) throw new Error("The source comparison cache has an invalid update");
+					if (updates.length >= maxRecords || (total += size) > maxBytes) throw new Error("The retained history is too large for an inline comparison. Save a recovery copy instead.");
+					updates.push(updateBytes(value)); row.continue();
+				} catch (error) { finish(error instanceof Error ? error : new Error("The source comparison cache could not be read")); }
+			};
+			tx.onabort = () => finish(tx.error ?? new Error("Reading the source comparison cache was interrupted"));
+			tx.onerror = () => { /* onabort reports failure. */ };
+			tx.oncomplete = () => { try { check(); finish(); } catch (error) { finish(error instanceof Error ? error : new Error("The source comparison context changed")); } };
+		});
+		check(); const update = Y.mergeUpdates(snapshot.updates); Y.decodeUpdate(update); check();
+		return { exists: true, updateCount: snapshot.updates.length, update, appId: snapshot.appId, s3rn: snapshot.s3rn };
+	} finally { db?.close(); }
 }
 
 function updateBytes(value: unknown): Uint8Array {
