@@ -28,3 +28,23 @@ test("inline Follow selects the exact registered definition in the containing no
 		expect(host.activateBase(location, () => false)).toBe("unavailable");
 	} finally { focus.close(); }
 });
+
+test.each([false, true])("off-screen Follow materializes only the authorized generation (cancel: %s)", async cancel => {
+	const { MarkdownView } = await import("obsidian"), Y = await import("yjs");
+	const doc = new Y.Doc(), text = doc.getText("content");
+	text.insert(0, 'Heading\n\n```base\nviews:\n  - name: Work\n    type: table\n```\n');
+	const scroll = jest.fn(), file = { extension: "md" };
+	const view = Object.assign(Object.create(MarkdownView.prototype), { file, getMode: () => "preview", previewMode: { applyScroll: scroll } });
+	const location: BaseLocation = { kind: "base", share_id: id(1), entry_id: id(2), definition_id: id(3), generation: id(4), view_id: id(5), registry_revision: 1 };
+	let current = true;
+	const channel = { readInlineBaseContext: jest.fn(async () => { if (cancel) current = false; return { definition_id: id(3), generation: id(4) }; }) };
+	const host = Object.assign(Object.create(LocationHost.prototype), { closed: false, inlineViews: new Map(),
+		inlineScopes: [{ view, text, current: () => true }], channel, callbacks: { changed: jest.fn() }, fileFor: () => file,
+		plugin: { app: { workspace: { getActiveViewOfType: () => view } } } }) as LocationHost;
+	try {
+		expect(host.activateBase(location, () => current)).toBe("waiting");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(channel.readInlineBaseContext).toHaveBeenCalledTimes(1);
+		if (cancel) expect(scroll).not.toHaveBeenCalled(); else expect(scroll).toHaveBeenCalledWith(2);
+	} finally { doc.destroy(); }
+});

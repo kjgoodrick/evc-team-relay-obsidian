@@ -1,3 +1,4 @@
+import { findInlineBase } from "../../bases/FindInlineBase";
 import { InlineBaseAnchors } from "../../bases/InlineBaseAnchors";
 import { inlineBaseRenderers, inlineBaseHost, inlineBaseHostInfo, inlineBaseInEditor, inlineBaseInSection } from "../../bases/InlineBasesHost";
 import { apiVersion, Component, FileView, MarkdownView, type Plugin, type TFile, type MarkdownPostProcessorContext } from "obsidian";
@@ -55,6 +56,7 @@ export class LocationHost extends Component {
 	private inlineScopes: readonly NoteImageObserver[] = [];
 	private inlineSections = new Map<HTMLElement, MarkdownPostProcessorContext>();
 	private inlineViews = new Map<object, { view: FileView; parent: FileView; anchors: InlineBaseAnchors; proof: BasePresenceContext; current: () => boolean }>();
+	private materializingInline = false;
 	private loadingInline = new Set<object>();
 	private loadingBaseEmbeds = new Set<object>();
 	private embeddedBaseFocus = new EmbeddedBaseFocus<FileView>(() => { this.callbacks.interacted?.(); this.callbacks.changed(); });
@@ -138,7 +140,10 @@ export class LocationHost extends Component {
 				saved.proof.share_id === location.share_id && saved.proof.entry_id === location.entry_id &&
 				saved.proof.definition_id === location.definition_id && saved.proof.generation === location.generation);
 			if (matches.length > 1) return "unavailable";
-			if (!matches.length) return "waiting";
+			if (!matches.length) {
+				if (parent instanceof MarkdownView) this.materializeInline(parent, location, current);
+				return "waiting";
+			}
 			const selected = matches[0];
 			if (this.embeddedBaseFocus.active(parent) !== selected.view) {
 				if (!this.embeddedBaseFocus.select(parent, selected.view)) return "waiting";
@@ -146,6 +151,24 @@ export class LocationHost extends Component {
 			}
 		}
 		return this.base?.activate(location, current) ?? "waiting";
+	}
+	private materializeInline(view: MarkdownView, location: BaseLocation, navigating: () => boolean): void {
+		const scope = this.inlineScopes.find(scope => scope.view === view && scope.current()), channel = this.channel;
+		if (!scope || !channel || this.materializingInline) return;
+		const current = () => !this.closed && navigating() && scope.current() && this.channel === channel &&
+			this.fileFor(location) === view.file && this.plugin.app.workspace.getActiveViewOfType(FileView) === view;
+		this.materializingInline = true;
+		void findInlineBase(scope.text, location.definition_id, async request => {
+			const proof = await channel.readInlineBaseContext(location.share_id, location.entry_id, request, current);
+			return proof.generation === location.generation ? proof : undefined;
+		}, current).then(target => {
+			if (!target || !current()) return;
+			if (view.getMode() === "preview") view.previewMode.applyScroll(scope.text.toString().slice(0, target.from).split("\n").length - 1);
+			else view.editor.scrollIntoView({ from: view.editor.offsetToPos(target.from), to: view.editor.offsetToPos(target.to) }, true);
+		}).catch(() => { /* Follow's existing timeout reports unavailable targets. */ }).finally(() => {
+			this.materializingInline = false;
+			if (current()) this.callbacks.changed();
+		});
 	}
 	embedPosition(peer: PresencePeer, follow = false): ReturnType<EmbeddedImageSurface["position"]> { return this.embedded?.position(peer, follow); }
 	revealEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): boolean { return this.embedded?.reveal(peer, follow, current) === true; }
