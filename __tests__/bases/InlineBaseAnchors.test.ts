@@ -24,3 +24,12 @@ test("replacing the opening fence cannot inherit the deleted definition", () => 
 	expect(anchors.definitions).toHaveLength(1); expect(anchors.resolve(first)).toBeUndefined();
 	anchors.close(); doc.destroy();
 });
+
+test("wire requests retain fence identity but capture fresh snapshot dependencies", () => {
+ const doc = new Y.Doc(), text = doc.getText('contents'); text.insert(0, block.replace('```base', '```base  '));
+ const anchors = new InlineBaseAnchors(text), anchor = anchors.capture(anchors.definitions[0])!;
+ const first = anchors.request(anchor)!; expect(first.selected_length).toBe(7);
+ text.insert(text.length, '\nmore'); const next = anchors.request(anchor)!;
+ expect(next.start).toBe(first.start); expect(next.end).toBe(first.end); expect(next.dependency).not.toBe(first.dependency);
+ anchors.close(); expect(anchors.request(anchor)).toBeUndefined(); doc.destroy();
+});

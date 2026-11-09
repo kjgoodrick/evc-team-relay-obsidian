@@ -1,7 +1,9 @@
 import * as Y from "yjs";
+import { toBase64 } from "lib0/buffer";
 import { commentMarkdownParser } from "../collaboration/anchors/blocks";
 
 export type InlineBaseSource = { from: number; to: number; headerTo: number; source: string };
+export type InlineBaseSourceRequest = { dependency: string; start: string; end: string; selected_length: number };
 export type InlineBaseAnchor = { anchor: Y.RelativePosition; head: Y.RelativePosition };
 
 /** Keep identical inline definitions distinct by their opening fence's CRDT
@@ -24,6 +26,14 @@ export class InlineBaseAnchors {
 		if (!this.text.doc || !this.definitions.some(item => item.from === definition.from && item.headerTo === definition.headerTo && item.source === definition.source)) return;
 		return { anchor: Y.createRelativePositionFromTypeIndex(this.text, definition.from, 0),
 			head: Y.createRelativePositionFromTypeIndex(this.text, definition.headerTo, -1) };
+	}
+	request(anchor: InlineBaseAnchor): InlineBaseSourceRequest | undefined {
+		const definition = this.resolve(anchor); if (!definition || !this.text.doc) return;
+		const dependency = Y.encodeSnapshot(Y.snapshot(this.text.doc));
+		const start = Y.encodeRelativePosition(anchor.anchor), end = Y.encodeRelativePosition(anchor.head);
+		const length = definition.headerTo - definition.from;
+		if (dependency.length > 65_536 || start.length > 256 || end.length > 256 || length > 256) return;
+		return { dependency: toBase64(dependency), start: toBase64(start), end: toBase64(end), selected_length: length };
 	}
 	resolve(anchor: InlineBaseAnchor): InlineBaseSource | undefined {
 		if (this.closed || !this.text.doc) return;
@@ -48,7 +58,7 @@ export function inlineBaseSources(source: string): InlineBaseSource[] {
 		const node = ref.node, info = node.getChild("CodeInfo"), marks = node.getChildren("CodeMark");
 		if (!info || source.slice(info.from, info.to).trim() !== "base" || marks.length !== 2) return false;
 		const body = node.getChildren("CodeText").map(text => source.slice(text.from, text.to)).join("").replace(/\r\n/g, "\n");
-		if (body.length <= 262_144) result.push({ from: marks[0].from, headerTo: info.to, to: node.to, source: body });
+		if (body.length <= 262_144) result.push({ from: marks[0].from, headerTo: info.to - (source.slice(info.from, info.to).match(/[ \t\r]+$/)?.[0].length ?? 0), to: node.to, source: body });
 		return false;
 	} });
 	return result;
