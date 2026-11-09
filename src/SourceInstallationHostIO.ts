@@ -3,6 +3,7 @@ import { requireRecoveryRelativePath, type RecoveryArchiveReader } from "./Manag
 import { sourceInstallationPath } from "./SourceInstallationPlan";
 import type { SourceInstallationStageIO } from "./SourceInstallationStaging";
 import { trackNativeSourceMutation } from "./storage/native-document-writes";
+import { MAX_NATIVE_REVIEW_BYTES, sameFolderReviewPath } from "./SameFolderReview";
 
 /** Explicit host capability, not a raw Obsidian Vault. Obsidian's public create
  * methods check existence separately from writing and do not provide atomic
@@ -14,6 +15,7 @@ export interface SourceInstallationHost {
 	createFileExclusive(path: string, data: ArrayBuffer): Promise<void>;
 }
 const parent = `${RECOVERY_FOLDER}/Source installations`;
+const reviewParent = `${RECOVERY_FOLDER}/Source reviews`;
 const uuid = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
 const artifact = new RegExp(`^(?:plan\\.json|inventory\\.yjs|files/${uuid}\\.bin|sources/${uuid}\\.yjs)$`);
 
@@ -30,8 +32,9 @@ export function createSourceInstallationHostIO(host: SourceInstallationHost, che
 		if (path.includes(":") || path !== RECOVERY_FOLDER && !path.startsWith(RECOVERY_FOLDER + "/")) throw new Error("Installation I/O is outside local recovery storage");
 	};
 	const rootOf = (path: string) => {
-		if (!path.startsWith(parent + "/")) return;
-		const slash = path.indexOf("/", parent.length + 1), root = slash < 0 ? "" : path.slice(0, slash);
+		const collection = [parent, reviewParent].find(prefix => path.startsWith(prefix + "/"));
+		if (!collection) return;
+		const slash = path.indexOf("/", collection.length + 1), root = slash < 0 ? "" : path.slice(0, slash);
 		return roots.has(root) ? root : undefined;
 	};
 	const mutate = async <T>(path: string, action: () => Promise<T>): Promise<T> => {
@@ -40,8 +43,9 @@ export function createSourceInstallationHostIO(host: SourceInstallationHost, che
 	const write = async (path: string, input: ArrayBuffer) => {
 		check(); recoveryPath(path);
 		const root = rootOf(path);
-		if (!root || !artifact.test(path.slice(root.length + 1))) throw new Error("The installation artifact does not belong to this staging operation");
-		if (new DataView(input).byteLength > 256 * 1024 * 1024) throw new Error("The installation artifact exceeds its size limit");
+		const review = root?.startsWith(reviewParent + "/");
+		if (!root || (review ? path.slice(root.length + 1) !== "review.json" : !artifact.test(path.slice(root.length + 1)))) throw new Error("The installation artifact does not belong to this staging operation");
+		if (new DataView(input).byteLength > (review ? MAX_NATIVE_REVIEW_BYTES : 256 * 1024 * 1024)) throw new Error("The installation artifact exceeds its size limit");
 		const bytes = ArrayBuffer.prototype.slice.call(input, 0) as ArrayBuffer;
 		await mutate(path, () => createBinary(path, bytes));
 	};
@@ -51,7 +55,8 @@ export function createSourceInstallationHostIO(host: SourceInstallationHost, che
 		mkdir: async path => {
 			check(); recoveryPath(path);
 			const root = rootOf(path);
-			if (path !== RECOVERY_FOLDER && path !== parent && (!root || ![`${root}/files`, `${root}/sources`].includes(path))) {
+			if (path !== RECOVERY_FOLDER && path !== parent && path !== reviewParent
+				&& (!root || root.startsWith(reviewParent + "/") || ![`${root}/files`, `${root}/sources`].includes(path))) {
 				throw new Error("The staging directory is outside this installation operation");
 			}
 			let current = "";
@@ -69,9 +74,9 @@ export function createSourceInstallationHostIO(host: SourceInstallationHost, che
 		},
 		createDirectoryExclusive: async path => {
 			check(); recoveryPath(path);
-			const id = path.slice(parent.length + 1);
-			if (sourceInstallationPath(id) !== path || roots.has(path)) throw new Error("Invalid or existing installation staging root");
-			if ((await adapter.stat(parent))?.type !== "folder") throw new Error("The installation staging parent is unavailable");
+			const review = path.startsWith(reviewParent + "/"), collection = review ? reviewParent : parent, id = path.slice(collection.length + 1);
+			if ((review ? sameFolderReviewPath(id) : sourceInstallationPath(id)) !== path || roots.has(path)) throw new Error("Invalid or existing installation staging root");
+			if ((await adapter.stat(collection))?.type !== "folder") throw new Error("The installation staging parent is unavailable");
 			check(); await mutate(path, () => createFolder(path)); roots.add(path);
 		},
 		write: (path, text) => write(path, new TextEncoder().encode(text).buffer),

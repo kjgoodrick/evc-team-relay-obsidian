@@ -6,16 +6,19 @@ import { sourceInstallationNativeRoot } from "../SourceInstallationPlan";
 
 export type SourceChoice = { kind: "legacy" } | { kind: "source"; restoreGeneration: string | null };
 export interface SourceActivationOperations { startOperationId: string; commitOperationId: string }
+export interface SourceNativeReviewReference { id: string; sha256: string; operations: number }
 export interface SourcePreparation {
 	archive: { path: string; manifestSha256: string };
 	plan: { id: string; sha256: string };
 	activation?: SourceActivationOperations;
+	nativeReview?: SourceNativeReviewReference;
 }
 export interface PendingSourceSelection {
 	reviewId: string;
 	restoreGeneration: string | null;
 	phase: "review" | "prepared" | "applying";
 	preparation?: SourcePreparation;
+	completedNativeOperations?: number;
 }
 export interface SourceSelectionState {
 	version: 1;
@@ -31,6 +34,8 @@ export interface SourceSelectionState {
 type Change = { type: "begin"; reviewId: string; restoreGeneration: string | null }
 	| { type: "prepare"; reviewId: string; preparation: SourcePreparation }
 	| { type: "reserve-activation"; reviewId: string; activation: SourceActivationOperations }
+	| { type: "review-native"; reviewId: string; nativeReview: SourceNativeReviewReference }
+	| { type: "finish-native-operation"; reviewId: string; nativeReview: SourceNativeReviewReference; index: number }
 	| { type: "start" | "cancel"; reviewId: string }
 	| { type: "commit"; reviewId: string; destinationRoot?: string };
 export type SourceSelectionCommand = Change & { operationId: string; expectedRevision: string | null };
@@ -57,13 +62,19 @@ function activation(value: SourceActivationOperations): SourceActivationOperatio
 	if (result.startOperationId === result.commitOperationId) throw new Error("Source activation operations must be distinct");
 	return result;
 }
+function nativeReview(value: SourceNativeReviewReference): SourceNativeReviewReference {
+	if (!value || typeof value !== "object" || Object.keys(value).length !== 3 || !Number.isSafeInteger(value.operations)
+		|| value.operations < 0 || value.operations > 100_000) throw invalid();
+	return { id: uuid(value.id), sha256: digest(value.sha256), operations: value.operations };
+}
 function preparation(value: SourcePreparation): SourcePreparation {
 	const path = value?.archive?.path;
 	if (typeof path !== "string" || path.length > 2048 || !path.startsWith(RECOVERY_FOLDER + "/")
 		|| path.includes("\\") || path.includes(":") || [...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
 		|| path.split("/").some(part => !part || part === "." || part === "..")) throw invalid();
 	return { archive: { path, manifestSha256: digest(value.archive.manifestSha256) }, plan: { id: uuid(value.plan?.id), sha256: digest(value.plan?.sha256) },
-		...(Object.prototype.hasOwnProperty.call(value, "activation") ? { activation: activation(value.activation!) } : {}) };
+		...(Object.prototype.hasOwnProperty.call(value, "activation") ? { activation: activation(value.activation!) } : {}),
+		...(Object.prototype.hasOwnProperty.call(value, "nativeReview") ? { nativeReview: nativeReview(value.nativeReview!) } : {}) };
 }
 function command(value: SourceSelectionCommand): SourceSelectionCommand {
 	const base = { operationId: uuid(value?.operationId), expectedRevision: value?.expectedRevision === null ? null : uuid(value?.expectedRevision), reviewId: uuid(value?.reviewId) };
@@ -71,6 +82,10 @@ function command(value: SourceSelectionCommand): SourceSelectionCommand {
 		case "begin": return { ...base, type: value.type, restoreGeneration: generation(value.restoreGeneration) };
 		case "prepare": return { ...base, type: value.type, preparation: preparation(value.preparation) };
 		case "reserve-activation": return { ...base, type: value.type, activation: activation(value.activation) };
+		case "review-native": return { ...base, type: value.type, nativeReview: nativeReview(value.nativeReview) };
+		case "finish-native-operation":
+			if (!Number.isSafeInteger(value.index) || value.index < 0 || value.index >= 100_000) throw invalid();
+			return { ...base, type: value.type, nativeReview: nativeReview(value.nativeReview), index: value.index };
 		case "start": case "cancel": return { ...base, type: value.type };
 		case "commit": return { ...base, type: value.type, ...("destinationRoot" in value ? { destinationRoot: sourceInstallationNativeRoot(value.destinationRoot) } : {}) };
 		default: throw invalid();
@@ -97,6 +112,11 @@ function parse(value: unknown, scopeIdentity: string): SourceSelectionState {
 		if (retired.includes(pending.restoreGeneration) || active.kind === "source" && pending.restoreGeneration === active.restoreGeneration) throw invalid();
 		if (item.phase === "review") { if (item.preparation !== undefined) throw invalid(); }
 		else pending.preparation = preparation(item.preparation!);
+		if (pending.phase === "applying" && pending.preparation?.nativeReview) {
+			if (!Number.isSafeInteger(item.completedNativeOperations) || item.completedNativeOperations! < 0
+				|| item.completedNativeOperations! > pending.preparation.nativeReview.operations) throw invalid();
+			pending.completedNativeOperations = item.completedNativeOperations;
+		}
 	}
 	const parsed: SourceSelectionState = { version: 1, scopeIdentity, revision, active, retired, pending };
 	if (Object.prototype.hasOwnProperty.call(row, "nativeRoot")) {
@@ -124,6 +144,11 @@ function advance(current: SourceSelectionState, change: SourceSelectionCommand):
 	} else {
 		const pending = next.pending;
 		if (!pending || pending.reviewId !== change.reviewId) throw new Error("The source review changed. Reload it before continuing.");
+		const reserved = pending.preparation?.activation;
+		if ((change.type === "review-native" || change.type === "finish-native-operation") && reserved
+			&& (change.operationId === reserved.startOperationId || change.operationId === reserved.commitOperationId)) {
+			throw new Error("Native review progress cannot use a reserved activation operation ID");
+		}
 		switch (change.type) {
 			case "prepare":
 				if (pending.phase !== "review") throw new Error("This source review is already prepared.");
@@ -132,13 +157,26 @@ function advance(current: SourceSelectionState, change: SourceSelectionCommand):
 				if (pending.phase === "review" || !pending.preparation) throw new Error("Prepare source artifacts before reserving activation operations");
 				if (pending.preparation.activation) throw new Error("This source already has saved activation operations");
 				pending.preparation.activation = change.activation; break;
+			case "review-native":
+				if (pending.phase !== "prepared" || !pending.preparation) throw new Error("Native choices can only be saved before installation starts");
+				pending.preparation.nativeReview = change.nativeReview; break;
+			case "finish-native-operation": {
+				const saved = pending.preparation?.nativeReview;
+				if (pending.phase !== "applying" || !saved || saved.id !== change.nativeReview.id || saved.sha256 !== change.nativeReview.sha256
+					|| saved.operations !== change.nativeReview.operations) throw new Error("The applying native review changed");
+				if (pending.completedNativeOperations !== change.index || change.index >= saved.operations) throw new Error("Native operation completion is out of order");
+				pending.completedNativeOperations++; break;
+			}
 			case "start":
 				if (pending.phase !== "prepared") throw new Error("Prepare and verify recovery files before installing a source generation.");
 				if (pending.preparation?.activation && change.operationId !== pending.preparation.activation.startOperationId) throw new Error("Use the saved source installation operation");
-				pending.phase = "applying"; break;
+				pending.phase = "applying";
+				if (pending.preparation?.nativeReview) pending.completedNativeOperations = 0;
+				break;
 			case "commit":
 				if (pending.phase !== "applying") throw new Error("Source installation has not started.");
 				if (pending.preparation?.activation && change.operationId !== pending.preparation.activation.commitOperationId) throw new Error("Use the saved source activation operation");
+				if (pending.preparation?.nativeReview && pending.completedNativeOperations !== pending.preparation.nativeReview.operations) throw new Error("Finish the reviewed native operations before activating this source");
 				if (next.active.kind === "source") next.retired.push(next.active.restoreGeneration);
 				if (next.retired.length > 1024) throw new Error("Source selection history needs maintenance before another activation.");
 				next.active = { kind: "source", restoreGeneration: pending.restoreGeneration }; next.pending = null;

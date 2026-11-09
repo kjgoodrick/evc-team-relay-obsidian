@@ -150,5 +150,5 @@ export async function inspectSameFolderSource(staging: RecoveryArchiveReader, na
 	});
 	if ((await bounded(() => stat(root)))?.type !== "folder") throw new Error("The original working folder changed during inspection");
 	check();
-	return { plan: verified.reference, root, rows, nativeEntries: count, nativeBytes: totalBytes };
+	return { plan: verified.reference, root, rows, nativeEntries: count, nativeBytes: totalBytes, sourceArtifacts: verified };
 }
