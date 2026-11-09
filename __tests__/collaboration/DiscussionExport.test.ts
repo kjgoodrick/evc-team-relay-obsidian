@@ -33,12 +33,15 @@ test.each([
 	expect(disk.folders).toEqual([]);
 });
 
-test("saved Bases view retains its identity and unavailable historical targets without fetching their content", () => {
+test.each(["Folder/Plan.base", "Folder/Inline.md"])("Bases export retains view identity and historical targets for %s", async path => {
 	const snapshot = exportFixture(), scopeId = baseDiscussionScope(id(3), id(20));
-	snapshot.entry.kind = "base"; snapshot.view_id = id(20);
+	snapshot.entry.kind = "base"; snapshot.entry.path = path; snapshot.view_id = id(20);
 	const row = snapshot.records[1]; if (row.type !== "anchor_revision") throw new Error();
 	row.anchor = { type: "base", version: 1, definition_id: id(21), view_id: id(20), generation: id(8), registry_revision: 1, target: { type: "view" } };
 	expect(parseDiscussionExport(snapshot, { ...identity, scopeId }).view_id).toBe(id(20));
+	const disk = exportDisk();
+	const folder = await saveDiscussionExport(sourceFor(snapshot), { ...identity, scopeId }, disk.io, () => true);
+	expect(JSON.parse(disk.texts.get(folder + "/manifest.json")!)).toMatchObject({ entry_id: id(3), view_id: id(20) });
 	row.anchor = null; row.unavailable = true;
 	expect(parseDiscussionExport(snapshot, { ...identity, scopeId }).records[1]).toMatchObject({ anchor: null, unavailable: true });
 });
