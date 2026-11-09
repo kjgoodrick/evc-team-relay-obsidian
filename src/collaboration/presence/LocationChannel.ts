@@ -151,6 +151,16 @@ export class LocationChannel {
 		if (definitionId && context.definition_id !== definitionId) throw new Error("Inline Bases definition changed");
 		return context;
 	}
+	async readInlineBaseContext(shareId: string, entryId: string, source: InlineBaseSourceRequest, current: () => boolean): Promise<BasePresenceContext> {
+		if (!this.supportsBaseContext || ![shareId, entryId].every(locationId) || !current()) throw new Error("Inline Bases presence unavailable");
+		const version = this.version;
+		const value = await this.request(`/shares/${shareId}/entries/${entryId}/anchor-context`, version);
+		if (!this.current(version) || !current() || !isRecord(value) || value.protocol_version !== 1 || value.entry_id !== entryId || !locationId(value.generation)) throw new Error("Inline Bases presence unavailable");
+		const registry = await this.inspectInlineBase(shareId, entryId, value.generation, source, current);
+		const context = await this.readBaseContext(shareId, entryId, registry.definition_id);
+		if (!current() || !this.current(version) || context.generation !== registry.generation || context.registry_revision !== registry.revision || context.content_sha256 !== registry.content_sha256) throw new Error("Inline Bases presence changed");
+		return context;
+	}
 	/** Register the verified fence identity with read permission only. Presence
 	 * must not depend on a discussion session or on comments being enabled. */
 	async inspectInlineBase(shareId: string, entryId: string, generation: string, source: InlineBaseSourceRequest, current: () => boolean) {

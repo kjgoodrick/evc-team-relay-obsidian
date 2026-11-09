@@ -1,4 +1,6 @@
-import { apiVersion, Component, FileView, MarkdownView, type Plugin, type TFile } from "obsidian";
+import { InlineBaseAnchors } from "../../bases/InlineBaseAnchors";
+import { inlineBaseRenderers, inlineBaseHost, inlineBaseHostInfo, inlineBaseInEditor, inlineBaseInSection } from "../../bases/InlineBasesHost";
+import { apiVersion, Component, FileView, MarkdownView, type Plugin, type TFile, type MarkdownPostProcessorContext } from "obsidian";
 import { decodeJwt } from "jose";
 import type { AuthSession } from "../../AuthSession";
 import type { RelayOnPremSettings } from "../../RelayOnPremConfig";
@@ -50,6 +52,10 @@ export class LocationHost extends Component {
 	private base?: BasePresenceSurface;
 	private baseObservers = new Map<FileView, BaseObserver>();
 	private embeddedBaseViews = new Map<object, { view: FileView; parent: FileView; mtime: number; size: number; current: () => boolean }>();
+	private inlineScopes: readonly NoteImageObserver[] = [];
+	private inlineSections = new Map<HTMLElement, MarkdownPostProcessorContext>();
+	private inlineViews = new Map<object, { view: FileView; parent: FileView; anchors: InlineBaseAnchors; proof: BasePresenceContext; current: () => boolean }>();
+	private loadingInline = new Set<object>();
 	private loadingBaseEmbeds = new Set<object>();
 	private embeddedBaseFocus = new EmbeddedBaseFocus<FileView>(() => { this.callbacks.interacted?.(); this.callbacks.changed(); });
 	private observerBaseStates = new Map<string, BaseStatesEvent>();
@@ -76,6 +82,9 @@ export class LocationHost extends Component {
 		super(); this.assets = new ImageAssets(plugin.app, shares);
 	}
 	onload(): void {
+		this.plugin.registerMarkdownPostProcessor?.((element, context) => {
+			this.inlineSections.set(element, context); this.callbacks.changed();
+		}, 1001);
 		this.register(this.settings.subscribe(() => this.callbacks.changed()));
 		this.register(this.shares.on(() => { this.watchFolders(); this.callbacks.changed(); }));
 		this.register(this.auth.onTokenRefreshed(() => { this.callbacks.changed(); this.channel?.credentialsChanged(); }));
@@ -201,6 +210,7 @@ export class LocationHost extends Component {
 	 * Same-note copies share the foreground watch; other notes use bounded
 	 * passive subscriptions when supported. None publishes or opens a socket. */
 	setNoteObservers(scopes: readonly NoteImageObserver[]): void {
+		this.inlineScopes = scopes;
 		const context = this.context;
 		const eligible = (scope: NoteImageObserver) => {
 			if (!context || !this.channel?.supportsEmbeddedImages || this.closed || this.context?.key !== context.key ||
@@ -330,6 +340,44 @@ export class LocationHost extends Component {
 		});
 		this.timeline.start();
 	}
+	private discoverInlineBases(): void {
+		for (const [element] of this.inlineSections) if (!element.isConnected) this.inlineSections.delete(element);
+		const scopes = this.inlineScopes.filter(scope => scope.current());
+		const renderers = scopes.flatMap(scope => inlineBaseRenderers(scope.view, apiVersion).map(renderer => ({ scope, renderer })));
+		const owners = new Set<object>(renderers.map(item => item.renderer.owner));
+		for (const [owner, saved] of this.inlineViews) if (!owners.has(owner) || !saved.current()) { saved.anchors.close(); this.inlineViews.delete(owner); }
+		if (!this.supportsBases || !this.channel?.ready) return;
+		for (const { scope, renderer } of renderers.slice(0, 8)) {
+			if (this.inlineViews.has(renderer.owner) || this.loadingInline.has(renderer.owner)) continue;
+			const identity = this.identify(scope.view); if (!identity || identity.key !== this.context?.key) continue;
+			const anchors = new InlineBaseAnchors(scope.text), text = scope.text.toString();
+			let source = scope.view.getMode() !== "preview" ? inlineBaseInEditor(anchors, renderer.containerEl) : undefined;
+			if (scope.view.getMode() === "preview") {
+				const section = [...this.inlineSections].find(([element, context]) => context.sourcePath === renderer.file.path &&
+					(element.contains(renderer.containerEl) || renderer.containerEl.contains(element)));
+				const info = section && (section[1].getSectionInfo(renderer.containerEl) ?? section[1].getSectionInfo(section[0]));
+				if (info?.text === text) {
+					const lines = text.split("\n"), offset = (line: number) => Math.min(text.length, lines.slice(0, line).reduce((sum, value) => sum + value.length + 1, 0));
+					source = inlineBaseInSection(anchors, offset(info.lineStart), offset(info.lineEnd + 1));
+				}
+			}
+			const allowed = () => !this.closed && scope.current() && this.context?.key === identity.key && this.identify(scope.view)?.id === identity.id;
+			const facade = source && inlineBaseHost(renderer, anchors, source, allowed);
+			const metadata = facade && inlineBaseHostInfo(facade), request = metadata && anchors.request(metadata.anchor);
+			if (!facade || !metadata || !request) { anchors.close(); continue; }
+			this.loadingInline.add(renderer.owner);
+			void this.channel.readInlineBaseContext(identity.folder.entityGuid, identity.id, request, metadata.current).then(proof => {
+				if (!metadata.current()) return;
+				this.inlineViews.set(renderer.owner, { view: facade as unknown as FileView, parent: scope.view, anchors, proof, current: metadata.current });
+			}).catch(() => { /* Retry when the synchronized renderer changes. */ }).finally(() => {
+				this.loadingInline.delete(renderer.owner);
+				if (!this.inlineViews.has(renderer.owner)) anchors.close(); else this.callbacks.changed();
+			});
+		}
+	}
+	private inlineProof(view: FileView): BasePresenceContext | undefined {
+		return [...this.inlineViews.values()].find(saved => saved.view === view && saved.current())?.proof;
+	}
 	/** Each visible Base keeps its own saved-view identity and verified records.
 	 * It consumes the remaining shared pane budget and never publishes activity. */
 	setBaseObservers(views: readonly FileView[]): void {
@@ -356,8 +404,9 @@ export class LocationHost extends Component {
 				if (!this.closed && this.embeddedBaseViews.has(embed.owner)) this.callbacks.changed();
 			});
 		}
-		this.embeddedBaseFocus.set(Array.from(this.embeddedBaseViews.values()));
-		views = [...views, ...Array.from(this.embeddedBaseViews.values(), saved => saved.view)];
+		this.discoverInlineBases();
+		this.embeddedBaseFocus.set([...this.embeddedBaseViews.values(), ...this.inlineViews.values()]);
+		views = [...views, ...Array.from(this.embeddedBaseViews.values(), saved => saved.view), ...Array.from(this.inlineViews.values(), saved => saved.view)];
 		const eligible = (view: FileView) => {
 			const owner = view.containerEl.ownerDocument;
 			if (!context || this.closed || this.context?.key !== context.key || !this.supportsBases || !this.channel?.supportsMultiWatch ||
@@ -388,14 +437,15 @@ export class LocationHost extends Component {
 	}
 	private closeBaseObservers(): void {
 		for (const { surface } of this.baseObservers.values()) surface.close();
+		for (const saved of this.inlineViews.values()) saved.anchors.close(); this.inlineViews.clear();
 		this.baseObservers.clear(); this.embeddedBaseFocus.close(); this.embeddedBaseViews.clear(); this.observerBaseStates.clear(); this.baseProofs.clear(); this.syncObservations();
 	}
 	private makeBaseSurface(view: FileView, context: Context, current: () => boolean, passive = false): BasePresenceSurface {
 		return new BasePresenceSurface(view, context.folder.entityGuid, context.id, {
-			current, connected: () => this.ready, supported: () => this.supportsBases, hash: () => this.entry(context.file)?.hash,
+			current, connected: () => this.ready, supported: () => this.supportsBases, hash: () => this.inlineProof(view)?.content_sha256 ?? this.entry(context.file)?.hash,
 			inspect: () => NativeBasesSurface.inspect(view, apiVersion, true, this.timeline),
-			read: () => passive ? this.baseProof(context).context : this.channel!.readBaseContext(context.folder.entityGuid, context.id),
-			readSource: () => passive ? this.baseProof(context).source : this.plugin.app.vault.read(context.file),
+			read: () => this.inlineProof(view) ? this.channel!.readBaseContext(context.folder.entityGuid, context.id, this.inlineProof(view)!.definition_id) : passive ? this.baseProof(context).context : this.channel!.readBaseContext(context.folder.entityGuid, context.id),
+			readSource: () => inlineBaseHostInfo(view)?.read() ?? (passive ? this.baseProof(context).source : this.plugin.app.vault.read(context.file)),
 			changed: this.callbacks.changed, interacted: () => { if (!passive) this.callbacks.interacted?.(); },
 			motion: {
 				current: () => current() && this.channel?.supportsBaseStates === true,
@@ -472,13 +522,13 @@ export class LocationHost extends Component {
 		const entry = this.entry(view?.file), settings = this.settings.readValue();
 		const server = entry && settings.enabled ? settings.servers.find(server => server.id === entry.folder.config.onpremServerId) : undefined;
 		const provider = server && this.auth.getAuthProviderForServer(server.id), user = provider?.getCurrentUser();
-		if (!entry || !view?.file || !server || !provider?.isLoggedIn() || !user || !locationId(user.id) || (entry.kind === "note") !== (view instanceof MarkdownView)) return;
+		if (!entry || !view?.file || !server || !provider?.isLoggedIn() || !user || !locationId(user.id) || (entry.kind === "note") !== (view instanceof MarkdownView || !!inlineBaseHostInfo(view)?.current())) return;
 		try {
 			const claims = decodeJwt(provider.getToken() ?? "");
 			if (claims.sub !== user.id || !locationId(claims.session_id) || claims.scope !== undefined) return;
 			const identity = { serverUrl: server.controlPlaneUrl, accountId: user.id, loginSessionId: claims.session_id, instanceId: this.instanceId };
-			return { key: JSON.stringify([server.id, identity]), serverId: server.id, identity, file: view.file, folder: entry.folder, id: entry.id, kind: entry.kind,
-				location: entry.kind === "note" ? { kind: "note", share_id: entry.folder.entityGuid, entry_id: entry.id, surface: (view as MarkdownView).getMode() === "preview" ? "reading" : "editor" } : undefined };
+			return { key: JSON.stringify([server.id, identity]), serverId: server.id, identity, file: view.file, folder: entry.folder, id: entry.id, kind: inlineBaseHostInfo(view)?.current() ? "base" : entry.kind,
+				location: entry.kind === "note" && !inlineBaseHostInfo(view) ? { kind: "note", share_id: entry.folder.entityGuid, entry_id: entry.id, surface: (view as MarkdownView).getMode() === "preview" ? "reading" : "editor" } : undefined };
 		} catch { return; }
 	}
 	update(view: FileView | null | undefined, foreground: boolean, visible: boolean): void {
@@ -586,6 +636,7 @@ export class LocationHost extends Component {
 		return matches.length === 1 ? matches[0] : undefined;
 	}
 	onunload(): void {
+		this.inlineScopes = []; this.inlineSections.clear();
 		this.closed = true; this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
 		this.closeImageObservers(); this.closeBaseObservers();
 		this.base?.close(); this.base = undefined; this.baseStates = undefined; this.timeline?.close(); this.timeline = undefined;

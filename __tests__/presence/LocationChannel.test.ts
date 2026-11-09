@@ -708,3 +708,20 @@ test.each([false, true])("inline presence registers a fence without a discussion
 				headers: expect.objectContaining({ "Content-Type": "application/json" }) }));
 	} finally { f.channel.stop(); }
 });
+
+test("inline presence binds registration and location context to the same source revision", async () => {
+	const f = fixture(true), source = { dependency: "AA==", start: "AA==", end: "AQ==", selected_length: 7 };
+	const registry = { protocol_version: 1, entry_id: id(10), definition_id: id(11), generation: id(9), revision: 1,
+		content_sha256: "a".repeat(64), views: [{ slot: 0, id: id(12), name: "Work", type: "table", descriptor_sha256: "b".repeat(64) }],
+		unmatched: { views: [], has_more: false, next_after: null } };
+	try {
+		await ready(f);
+		for (const revision of [1, 2]) {
+			f.fetcher.mockResolvedValueOnce(response({ protocol_version: 1, entry_id: id(10), generation: id(9) }))
+				.mockResolvedValueOnce(response(registry)).mockResolvedValueOnce(response({ ...baseContext(), registry_revision: revision }));
+			const result = f.channel.readInlineBaseContext(id(5), id(10), source, () => true);
+			if (revision === 1) expect(await result).toEqual(baseContext());
+			else await expect(result).rejects.toThrow("Inline Bases presence changed");
+		}
+	} finally { f.channel.stop(); }
+});
