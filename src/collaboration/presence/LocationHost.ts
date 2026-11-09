@@ -8,6 +8,7 @@ import { ImageAssets } from "../ImageAssets";
 import { ImagePresenceSurface } from "./ImagePresenceSurface";
 import { BasePresenceSurface } from "./BasePresenceSurface";
 import { NativeBasesSurface } from "../../bases/NativeBasesSurface";
+import { EmbeddedBaseFocus } from "../../bases/EmbeddedBaseFocus";
 import { embeddedBases, embeddedBaseHost } from "../../bases/EmbeddedBasesHost";
 import { TimelineBridgeClient } from "../../bases/TimelineBridgeClient";
 import { LocationChannel, type LocationChannelStatus, type LocationIdentity, type ObservationEvent } from "./LocationChannel";
@@ -48,8 +49,9 @@ export class LocationHost extends Component {
 	private imageProofs = new Map<string, Promise<ImageLocation>>();
 	private base?: BasePresenceSurface;
 	private baseObservers = new Map<FileView, BaseObserver>();
-	private embeddedBaseViews = new Map<object, { view: FileView; mtime: number; size: number; current: () => boolean }>();
+	private embeddedBaseViews = new Map<object, { view: FileView; parent: FileView; mtime: number; size: number; current: () => boolean }>();
 	private loadingBaseEmbeds = new Set<object>();
+	private embeddedBaseFocus = new EmbeddedBaseFocus<FileView>(() => { this.callbacks.interacted?.(); this.callbacks.changed(); });
 	private observerBaseStates = new Map<string, BaseStatesEvent>();
 	private baseProofs = new Map<string, { context: Promise<BasePresenceContext>; source: Promise<string> }>();
 	private timeline?: TimelineBridgeClient;
@@ -348,12 +350,13 @@ export class LocationHost extends Component {
 			this.loadingBaseEmbeds.add(embed.owner);
 			void this.plugin.app.vault.read(embed.file).then(source => {
 				if (!allowed() || !embed.containerEl.isConnected || embed.file.stat.mtime !== mtime || embed.file.stat.size !== size || source.length > 262_144) return;
-				this.embeddedBaseViews.set(embed.owner, { view: embeddedBaseHost(embed, source, allowed) as unknown as FileView, mtime, size, current: allowed });
+				this.embeddedBaseViews.set(embed.owner, { view: embeddedBaseHost(embed, source, allowed) as unknown as FileView, parent, mtime, size, current: allowed });
 			}).catch(() => { /* Retry on the next host reconciliation. */ }).finally(() => {
 				this.loadingBaseEmbeds.delete(embed.owner);
 				if (!this.closed && this.embeddedBaseViews.has(embed.owner)) this.callbacks.changed();
 			});
 		}
+		this.embeddedBaseFocus.set(Array.from(this.embeddedBaseViews.values()));
 		views = [...views, ...Array.from(this.embeddedBaseViews.values(), saved => saved.view)];
 		const eligible = (view: FileView) => {
 			const owner = view.containerEl.ownerDocument;
@@ -385,7 +388,7 @@ export class LocationHost extends Component {
 	}
 	private closeBaseObservers(): void {
 		for (const { surface } of this.baseObservers.values()) surface.close();
-		this.baseObservers.clear(); this.embeddedBaseViews.clear(); this.observerBaseStates.clear(); this.baseProofs.clear(); this.syncObservations();
+		this.baseObservers.clear(); this.embeddedBaseFocus.close(); this.embeddedBaseViews.clear(); this.observerBaseStates.clear(); this.baseProofs.clear(); this.syncObservations();
 	}
 	private makeBaseSurface(view: FileView, context: Context, current: () => boolean, passive = false): BasePresenceSurface {
 		return new BasePresenceSurface(view, context.folder.entityGuid, context.id, {
@@ -481,6 +484,8 @@ export class LocationHost extends Component {
 	update(view: FileView | null | undefined, foreground: boolean, visible: boolean): void {
 		if (this.closed) return;
 		this.visible = visible;
+		const embeddedView = this.embeddedBaseFocus.active(view);
+		if (embeddedView) view = embeddedView;
 		const context = foreground ? this.identify(view) : undefined;
 		if (this.context?.key !== context?.key || this.view !== view || this.context?.file !== context?.file || this.context?.id !== context?.id || this.context?.kind !== context?.kind || this.context?.folder !== context?.folder) {
 			this.image?.close(); this.image = undefined; this.roster = undefined; this.imageStates = undefined;
@@ -553,7 +558,8 @@ export class LocationHost extends Component {
 		if (context.kind === "base" && view) {
 			this.ensureTimeline();
 			if (!this.base) this.base = this.makeBaseSurface(view, context,
-				() => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder);
+				() => current() && this.view === view && view.file === context.file && this.context?.id === context.id && this.context?.folder === context.folder &&
+					(!embeddedView || this.embeddedBaseFocus.active(this.plugin.app.workspace.getActiveViewOfType(FileView)) === embeddedView));
 			this.base.refresh();
 		}
 		const location = this.currentLocation;

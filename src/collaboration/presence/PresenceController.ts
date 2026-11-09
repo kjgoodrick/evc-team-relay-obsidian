@@ -210,7 +210,7 @@ export class PresenceController extends Component {
 			const bound = !!candidate && (surface === "editor" ? candidate.isTracking :
 				reading?.documentId === candidate.boundDocument.entityGuid && reading.text === candidate.boundDocument.crdtText);
 			const currentAccount = candidate && this.auth.getCurrentUserForServer(candidate.boundDocument.vaultShare.config.onpremServerId);
-			const allowed = this.visible && candidate && bound && currentAccount && candidate.connectionAllowed && candidate.wantsConnection &&
+			const allowed = this.visible && !this.locations?.surfaceActive && candidate && bound && currentAccount && candidate.connectionAllowed && candidate.wantsConnection &&
 				candidate.boundDocument.vaultShare.wantsConnection && view?.containerEl.isConnected && owner?.hasFocus() &&
 				!owner.hidden && !this.blurred.has(owner);
 			const changed = this.active?.binding !== candidate || this.active?.surface !== surface;
