@@ -9,7 +9,7 @@ import type { BaseAnchor } from "../../src/collaboration/DiscussionProtocol";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
 import { pendingRangeLocation, type PendingBaseGroupAnchor } from "../../src/collaboration/LocalDiscussionAnchor";
 
-jest.mock("obsidian", () => ({ Component: class {}, FileView: class {}, Notice: class {}, apiVersion: "1.13.7" }));
+jest.mock("obsidian", () => ({ Component: class {}, FileView: class {}, TFile: class {}, Notice: class {}, apiVersion: "1.13.7" }));
 const id = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 type Stage = "before" | "open" | "reveal" | "activate" | "ready" | "verify" | "never";
 

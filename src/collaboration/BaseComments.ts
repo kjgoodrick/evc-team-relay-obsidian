@@ -14,6 +14,7 @@ import { rangeLane, rangeLaneHandle, timelineTargetMatchesAxis, readNativeTimeli
 import type { TimelineAxisContext } from "./TimelineRangeProtocol";
 import { renderTimelineDiscussionMarkers, renderTimelineSharedMarkers } from "./TimelineRangeMarkers";
 import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
+import { embeddedBases, embeddedBaseHost, type EmbeddedBase } from "../bases/EmbeddedBasesHost";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -25,6 +26,9 @@ export class BaseComments extends Component {
 	private targetListeners = new Set<{ session: DiscussionSession; entryId: string; listener: () => void }>();
 	private stopped = false;
 	private timeline: TimelineBridgeClient;
+	private embeds = new Map<object, { view: FileView; mtime: number; size: number }>();
+	private loadingEmbeds = new Set<object>();
+	private embedTimer?: number;
 	constructor(private host: DiscussionHost, private plugin: Plugin, private bases?: BaseSyncHost) {
 		super(); this.timeline = new TimelineBridgeClient(plugin.app.workspace, binding => {
 			for (const pane of this.panes.values()) pane.invalidate(binding, binding);
@@ -32,6 +36,9 @@ export class BaseComments extends Component {
 	}
 	onload(): void {
 		this.timeline.start();
+		this.plugin.registerMarkdownPostProcessor?.(() => {
+			if (this.embedTimer === undefined) this.embedTimer = window.setTimeout(() => { this.embedTimer = undefined; this.reconcile(); }, 50);
+		}, 1001);
 		this.register(this.host.onChange(() => this.reconcile()));
 		if (this.bases) this.register(this.bases.onChange(() => { for (const pane of this.panes.values()) pane.invalidate(true, true); }));
 		this.registerEvent(this.plugin.app.workspace.on("layout-change", () => this.reconcile()));
@@ -39,6 +46,7 @@ export class BaseComments extends Component {
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.reconcile()));
 		this.registerEvent(this.plugin.app.vault.on("modify", file => {
 			for (const [view, pane] of this.panes) if (file === view.file) pane.invalidate(true, true);
+			this.reconcile();
 		}));
 		const moved = () => { for (const pane of this.panes.values()) pane.invalidate(true, true); };
 		this.registerEvent(this.plugin.app.vault.on("rename", moved)); this.registerEvent(this.plugin.app.vault.on("delete", moved));
@@ -52,6 +60,14 @@ export class BaseComments extends Component {
 	private reconcile(): void {
 		if (this.stopped) return;
 		const wanted = new Set(this.host.nativeBasesCommentsEnabled ? this.plugin.app.workspace.getLeavesOfType("bases").map(leaf => leaf.view).filter((view): view is FileView => view instanceof FileView) : []);
+		const found = this.host.nativeBasesCommentsEnabled ? this.plugin.app.workspace.getLeavesOfType("markdown").flatMap(leaf => embeddedBases(leaf.view, apiVersion)) : [];
+		const owners = new Set<object>(found.map(embed => embed.owner));
+		for (const [owner, saved] of this.embeds) if (!owners.has(owner) || saved.view.file?.stat.mtime !== saved.mtime || saved.view.file?.stat.size !== saved.size) this.embeds.delete(owner);
+		for (const embed of found) {
+			const saved = this.embeds.get(embed.owner);
+			if (saved) wanted.add(saved.view);
+			else this.loadEmbed(embed);
+		}
 		for (const [view, pane] of this.panes) if (!wanted.has(view)) { pane.close(); this.panes.delete(view); }
 		for (const view of wanted) {
 			let pane = this.panes.get(view);
@@ -62,6 +78,27 @@ export class BaseComments extends Component {
 			}); this.panes.set(view, pane); }
 			pane.invalidate();
 		}
+	}
+	private loadEmbed(embed: EmbeddedBase): void {
+		if (this.loadingEmbeds.has(embed.owner)) return;
+		this.loadingEmbeds.add(embed.owner);
+		const { mtime, size } = embed.file.stat;
+		const allowed = () => {
+			const parent = this.host.targetFor(embed.containingFile);
+			return !this.stopped && this.host.nativeBasesCommentsEnabled && !!parent.session && !!parent.entryId &&
+				parent.session.permission(parent.entryId)?.read === true &&
+				this.plugin.app.vault.getFileByPath(embed.containingFile.path) === embed.containingFile &&
+				this.plugin.app.vault.getFileByPath(embed.file.path) === embed.file;
+		};
+		if (!allowed()) { this.loadingEmbeds.delete(embed.owner); return; }
+		void this.plugin.app.vault.cachedRead(embed.file).then(source => {
+			if (!allowed() || !embed.containerEl.isConnected || embed.file.stat.mtime !== mtime || embed.file.stat.size !== size || source.length > 262_144) return;
+			const view = embeddedBaseHost(embed, source, allowed) as unknown as FileView;
+			this.embeds.set(embed.owner, { view, mtime, size });
+		}).catch(() => { /* A later host/file change can retry unavailable source. */ }).finally(() => {
+			this.loadingEmbeds.delete(embed.owner);
+			if (this.embeds.has(embed.owner)) this.reconcile();
+		});
 	}
 	watchTargetStatus(session: DiscussionSession, entryId: string, listener: () => void): () => void {
 		const watched = { session, entryId, listener }; this.targetListeners.add(watched);
@@ -126,7 +163,7 @@ export class BaseComments extends Component {
 			return true;
 		} catch { new Notice("This target or its saved-view association changed. Refresh synchronization before navigating again."); return true; }
 	}
-	onunload(): void { this.stopped = true; for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.targetListeners.clear(); this.timeline.close(); }
+	onunload(): void { this.stopped = true; if (this.embedTimer !== undefined) window.clearTimeout(this.embedTimer); this.embeds.clear(); for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.targetListeners.clear(); this.timeline.close(); }
 }
 
 /** One visible native pane owns one scope subscription and an external overlay.
