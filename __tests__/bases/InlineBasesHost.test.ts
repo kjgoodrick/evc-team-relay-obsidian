@@ -1,8 +1,9 @@
 /** @jest-environment jsdom */
+import { EditorView } from "@codemirror/view";
 import * as Y from "yjs";
 import { TFile } from "obsidian";
 import { InlineBaseAnchors } from "../../src/bases/InlineBaseAnchors";
-import { inlineBaseHost, inlineBaseHostInfo, inlineBaseInSection, inlineBaseRenderers } from "../../src/bases/InlineBasesHost";
+import { inlineBaseHost, inlineBaseInEditor, inlineBaseHostInfo, inlineBaseInSection, inlineBaseRenderers } from "../../src/bases/InlineBasesHost";
 import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface";
 import { nativePresenceBase } from "../mocks/nativePresenceBase";
 jest.mock("obsidian", () => ({ ...jest.requireActual("obsidian"), FileView: class {}, parseYaml: JSON.parse }));
@@ -47,5 +48,23 @@ test("foreign, saved-file and detached controllers are not inline candidates", (
 		Object.assign(f.base.controller, { currentFile: f.note }); Object.assign(f.base.query, { file: f.base.file });
 		expect(inlineBaseRenderers(f.view, "1.13.7")).toEqual([]);
 		Object.assign(f.base.query, { file: undefined }); f.base.root.remove(); expect(inlineBaseRenderers(f.view, "1.13.7")).toEqual([]);
+	} finally { f.close(); }
+});
+
+
+test("Live Preview maps duplicate inline widgets by editor position and rejects stale text", () => {
+	const f = fixture();
+	try {
+		const source = f.text.toString(); f.text.insert(f.text.length, "\n\n" + source);
+		let position = source.length + 2, text = f.text.toString();
+		f.base.root.classList.add("cm-editor");
+		const find = jest.spyOn(EditorView, "findFromDOM").mockReturnValue({ contentDOM: f.base.root,
+			state: { doc: { toString: () => text } }, posAtDOM: () => position } as unknown as EditorView);
+		try {
+			expect(inlineBaseInEditor(f.anchors, f.base.content)?.from).toBe(source.length + 2);
+			expect(find).toHaveBeenLastCalledWith(f.base.root);
+			position = 0; expect(inlineBaseInEditor(f.anchors, f.base.content)?.from).toBe(0);
+			text += "changed"; expect(inlineBaseInEditor(f.anchors, f.base.content)).toBeUndefined();
+		} finally { find.mockRestore(); }
 	} finally { f.close(); }
 });

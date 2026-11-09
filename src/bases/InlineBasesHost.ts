@@ -1,3 +1,4 @@
+import { EditorView } from "@codemirror/view";
 import { TFile } from "obsidian";
 import { InlineBaseAnchors, type InlineBaseAnchor, type InlineBaseSource } from "./InlineBaseAnchors";
 
@@ -61,4 +62,16 @@ export function inlineBaseHost(renderer: InlineBaseRenderer, anchors: InlineBase
 		if (!current()) throw new Error("Inline Base changed"); return source.source;
 	} });
 	return host;
+}
+
+/** Live Preview widgets are mapped by CodeMirror, which owns their source
+ * positions even when no Markdown postprocessor section survives mounting. */
+export function inlineBaseInEditor(anchors: InlineBaseAnchors, container: HTMLElement): InlineBaseSource | undefined {
+	const editor = EditorView.findFromDOM(container.closest<HTMLElement>(".cm-editor") ?? container);
+	if (!editor || !editor.contentDOM.contains(container) || editor.state.doc.toString() !== anchors.text.toString()) return;
+	try {
+		const position = editor.posAtDOM(container);
+		const matches = anchors.definitions.filter(source => source.from <= position && position < source.to);
+		return matches.length === 1 ? matches[0] : undefined;
+	} catch { return; }
 }

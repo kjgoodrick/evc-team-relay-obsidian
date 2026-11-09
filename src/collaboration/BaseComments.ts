@@ -17,7 +17,7 @@ import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { embeddedBases, embeddedBaseHost, type EmbeddedBase } from "../bases/EmbeddedBasesHost";
 
 import { InlineBaseAnchors } from "../bases/InlineBaseAnchors";
-import { inlineBaseRenderers, inlineBaseInSection, inlineBaseHost, inlineBaseHostInfo } from "../bases/InlineBasesHost";
+import { inlineBaseRenderers, inlineBaseInSection, inlineBaseInEditor, inlineBaseHost, inlineBaseHostInfo } from "../bases/InlineBasesHost";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -90,12 +90,17 @@ export class BaseComments extends Component {
 						const context = this.host.imageContext(markdown, false), text = context.text.toString();
 						const sectionContext = [...this.inlineSections].find(([element, section]) => section.sourcePath === renderer.file.path &&
 							(element === renderer.containerEl || element.contains(renderer.containerEl) || renderer.containerEl.contains(element)));
-						if (!sectionContext) continue;
-						const section = sectionContext[1].getSectionInfo(renderer.containerEl) ?? sectionContext[1].getSectionInfo(sectionContext[0]);
-						if (!section || section.text !== text) continue;
-						const lines = text.split("\n"), from = lines.slice(0, section.lineStart).reduce((sum, line) => sum + line.length + 1, 0);
-						const to = Math.min(text.length, lines.slice(0, section.lineEnd + 1).reduce((sum, line) => sum + line.length + 1, 0));
-						const anchors = new InlineBaseAnchors(context.text), source = inlineBaseInSection(anchors, from, to);
+						const anchors = new InlineBaseAnchors(context.text);
+						let source;
+						if (markdown.getMode() !== "preview") source = inlineBaseInEditor(anchors, renderer.containerEl);
+						else if (sectionContext) {
+							const section = sectionContext[1].getSectionInfo(renderer.containerEl) ?? sectionContext[1].getSectionInfo(sectionContext[0]);
+							if (section?.text === text) {
+								const lines = text.split("\n"), from = lines.slice(0, section.lineStart).reduce((sum, line) => sum + line.length + 1, 0);
+								const to = Math.min(text.length, lines.slice(0, section.lineEnd + 1).reduce((sum, line) => sum + line.length + 1, 0));
+								source = inlineBaseInSection(anchors, from, to);
+							}
+						}
 						const facade = source && inlineBaseHost(renderer, anchors, source, () => !this.stopped && this.host.nativeBasesCommentsEnabled && context.current());
 						if (!facade) { anchors.close(); continue; }
 						saved = { view: facade as unknown as FileView, anchors }; this.inlineHosts.set(renderer.owner, saved);
