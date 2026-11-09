@@ -1296,3 +1296,28 @@ test.each([["reading", false], ["live-preview", false], ["reading", true], ["liv
 		if (oldBounds) Object.defineProperty(Range.prototype, "getBoundingClientRect", oldBounds); else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
 	}
 });
+
+test("embedded Bases render precise peers and Jump/Follow without opening a standalone file", async () => {
+	const m = baseMotionFixture(true), { f, base } = m, note = f.notes[0];
+	note.view.contentEl.append(base.root);
+	Object.assign(note.view, { _children: [{ _loaded: true, file: base.file, containingFile: note.view.file, containerEl: base.content, controller: base.controller }] });
+	base.content.getClientRects = () => [base.content.getBoundingClientRect()] as unknown as DOMRectList;
+	try {
+		await until(() => m.network.sockets.length === 1); const socket = m.network.sockets[0]; socket.ready();
+		await until(() => base.content.querySelector(".relay-base-presence") !== null);
+		base.content.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+		await until(() => socket.frames.some(frame => frame.type === "watch" && frame.base_states === true));
+		const layer = base.content.querySelector<HTMLElement>(".relay-base-presence")!; m.box(layer, 400, 300);
+		socket.roster(); m.send(); await until(() => layer.querySelector(".relay-base-presence-pointer") !== null);
+		const peer = f.controller.peers[0];
+		expect(f.controller.surfaceName).toBe("Bases view");
+		expect(await f.controller.navigate(peer.key, false)).toBe(true);
+		expect(await f.controller.navigate(peer.key, true)).toBe(true);
+		expect(m.rows[0].cells[1].el.scrollIntoView).toHaveBeenCalled();
+		expect(f.openFile).not.toHaveBeenCalled();
+		m.send(1, 51, 0.75); await new Promise(resolve => window.setTimeout(resolve, 200));
+		expect(f.controller.following).toBeDefined(); expect(f.openFile).not.toHaveBeenCalled();
+		note.view.contentEl.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+		await until(() => f.controller.surfaceName !== "Bases view"); expect(f.controller.following).toBeUndefined();
+	} finally { m.close(); }
+});
