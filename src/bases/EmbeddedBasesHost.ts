@@ -38,7 +38,7 @@ export function embeddedBaseHost(embed: EmbeddedBase, source: string, allowed: (
 		embed.owner.containingFile === embed.containingFile && embed.owner.containerEl === embed.containerEl &&
 		embed.containerEl.isConnected && embed.file.stat.mtime === mtime && embed.file.stat.size === size;
 	return {
-		file: embed.file, contentEl: embed.containerEl,
+		file: embed.file, contentEl: embed.containerEl, containerEl: embed.containerEl,
 		getViewType: () => "bases",
 		get controller() { return current() ? embed.owner.controller : undefined; },
 		get query() { const controller = embed.owner.controller; return current() && object(controller) ? controller.query : undefined; },

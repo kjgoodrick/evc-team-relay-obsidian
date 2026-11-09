@@ -8,6 +8,7 @@ import { ImageAssets } from "../ImageAssets";
 import { ImagePresenceSurface } from "./ImagePresenceSurface";
 import { BasePresenceSurface } from "./BasePresenceSurface";
 import { NativeBasesSurface } from "../../bases/NativeBasesSurface";
+import { embeddedBases, embeddedBaseHost } from "../../bases/EmbeddedBasesHost";
 import { TimelineBridgeClient } from "../../bases/TimelineBridgeClient";
 import { LocationChannel, type LocationChannelStatus, type LocationIdentity, type ObservationEvent } from "./LocationChannel";
 import { locationId, type BaseLocation, type LocationEvent, type NoteLocation, type SurfaceLocation, type SurfaceRosterEvent } from "./LocationProtocol";
@@ -47,6 +48,8 @@ export class LocationHost extends Component {
 	private imageProofs = new Map<string, Promise<ImageLocation>>();
 	private base?: BasePresenceSurface;
 	private baseObservers = new Map<FileView, BaseObserver>();
+	private embeddedBaseViews = new Map<object, { view: FileView; mtime: number; size: number; current: () => boolean }>();
+	private loadingBaseEmbeds = new Set<object>();
 	private observerBaseStates = new Map<string, BaseStatesEvent>();
 	private baseProofs = new Map<string, { context: Promise<BasePresenceContext>; source: Promise<string> }>();
 	private timeline?: TimelineBridgeClient;
@@ -329,6 +332,29 @@ export class LocationHost extends Component {
 	 * It consumes the remaining shared pane budget and never publishes activity. */
 	setBaseObservers(views: readonly FileView[]): void {
 		const context = this.context;
+		const embeds = context && !this.closed && this.supportsBases && this.channel?.supportsMultiWatch
+			? views.flatMap(parent => embeddedBases(parent, apiVersion).map(embed => ({ parent, embed }))) : [];
+		const owners = new Set<object>(embeds.map(({ embed }) => embed.owner));
+		for (const [owner, saved] of this.embeddedBaseViews) if (!owners.has(owner) || !saved.current() || saved.view.file?.stat.mtime !== saved.mtime || saved.view.file?.stat.size !== saved.size) this.embeddedBaseViews.delete(owner);
+		for (const { parent, embed } of embeds.slice(0, 8)) {
+			if (this.embeddedBaseViews.has(embed.owner) || this.loadingBaseEmbeds.has(embed.owner)) continue;
+			const parentIdentity = this.identify(parent);
+			const allowed = () => !this.closed && !!context && this.context?.key === context.key &&
+				parentIdentity?.key === context.key && this.identify(parent)?.id === parentIdentity.id &&
+				this.identify(parent)?.key === parentIdentity.key && parent.file === embed.containingFile &&
+				parent.contentEl.contains(embed.containerEl) && embed.containerEl.isConnected && !!this.entry(embed.file);
+			if (!allowed()) continue;
+			const { mtime, size } = embed.file.stat;
+			this.loadingBaseEmbeds.add(embed.owner);
+			void this.plugin.app.vault.read(embed.file).then(source => {
+				if (!allowed() || !embed.containerEl.isConnected || embed.file.stat.mtime !== mtime || embed.file.stat.size !== size || source.length > 262_144) return;
+				this.embeddedBaseViews.set(embed.owner, { view: embeddedBaseHost(embed, source, allowed) as unknown as FileView, mtime, size, current: allowed });
+			}).catch(() => { /* Retry on the next host reconciliation. */ }).finally(() => {
+				this.loadingBaseEmbeds.delete(embed.owner);
+				if (!this.closed && this.embeddedBaseViews.has(embed.owner)) this.callbacks.changed();
+			});
+		}
+		views = [...views, ...Array.from(this.embeddedBaseViews.values(), saved => saved.view)];
 		const eligible = (view: FileView) => {
 			const owner = view.containerEl.ownerDocument;
 			if (!context || this.closed || this.context?.key !== context.key || !this.supportsBases || !this.channel?.supportsMultiWatch ||
@@ -359,7 +385,7 @@ export class LocationHost extends Component {
 	}
 	private closeBaseObservers(): void {
 		for (const { surface } of this.baseObservers.values()) surface.close();
-		this.baseObservers.clear(); this.observerBaseStates.clear(); this.baseProofs.clear(); this.syncObservations();
+		this.baseObservers.clear(); this.embeddedBaseViews.clear(); this.observerBaseStates.clear(); this.baseProofs.clear(); this.syncObservations();
 	}
 	private makeBaseSurface(view: FileView, context: Context, current: () => boolean, passive = false): BasePresenceSurface {
 		return new BasePresenceSurface(view, context.folder.entityGuid, context.id, {

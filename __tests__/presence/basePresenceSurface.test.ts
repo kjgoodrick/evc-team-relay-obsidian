@@ -1,4 +1,6 @@
 /** @jest-environment jsdom */
+import { embeddedBaseHost } from "../../src/bases/EmbeddedBasesHost";
+import { TFile } from "obsidian";
 import { webcrypto } from "node:crypto";
 import { TextEncoder } from "node:util";
 import { BasePresenceSurface } from "../../src/collaboration/presence/BasePresenceSurface";
@@ -118,4 +120,22 @@ test("owned overlays do not rebind, and shutdown cancels scheduled DOM work and 
 		f.content.dispatchEvent(new WheelEvent("wheel")); await new Promise(resolve => window.setTimeout(resolve, 60));
 		expect(f.changed).not.toHaveBeenCalled(); expect(f.interacted).toHaveBeenCalledTimes(1);
 	} finally { f.close(); }
+});
+
+test("saved-file embed binds the same presence location and drops it when the host loses access", async () => {
+	const f = nativePresenceBase(); let allowed = true;
+	const note = Object.assign(Object.create(TFile.prototype), { path: "Team/Note.md", extension: "md" });
+	const owner = { _loaded: true, file: f.file, containingFile: note, containerEl: f.content, controller: f.controller };
+	const host = embeddedBaseHost({ owner, file: f.file, containingFile: note, containerEl: f.content }, f.source, () => allowed);
+	const surface = new BasePresenceSurface(host as unknown as typeof f.view, f.context.share_id, f.context.entry_id, {
+	current: () => allowed, connected: () => true, supported: () => true, hash: () => f.hash,
+	read: async () => f.context, readSource: async () => f.source,
+	inspect: () => NativeBasesSurface.inspect(host, "1.13.7", true), changed: jest.fn(), interacted: jest.fn(),
+});
+	try {
+	surface.refresh(); await until(() => surface.state === "ready");
+	expect(surface.location).toEqual(f.location());
+	expect(host.containerEl).toBe(f.content);
+	allowed = false; surface.refresh(); expect(surface.location).toBeUndefined();
+	} finally { surface.close(); f.close(); }
 });
