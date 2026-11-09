@@ -129,3 +129,28 @@ test("inline discussion navigation selects the matching definition inside its Ma
 		expect(f.pane.reveal).toHaveBeenCalled();
 	} finally { f.close(); }
 });
+
+
+test.each([false, true])("inline navigation waits for mounting and stops if cancelled (cancel: %s)", async cancel => {
+	jest.useFakeTimers();
+	const f = fixture("never"); let authorized = true;
+	try {
+		f.leaf.view.file.path = "Team/Inline.md"; f.leaf.view.file.extension = "md";
+		const root = document.createElement("div"); f.leaf.view.contentEl.append(root);
+		const view = { file: f.leaf.view.file, contentEl: root };
+		const internals = f.comments as unknown as { reconcile(): void; panes: Map<unknown, unknown>; inlineHosts: Map<object, unknown> };
+		internals.panes.clear();
+		jest.spyOn(internals, "reconcile").mockImplementation(() => {});
+		window.setTimeout(() => {
+			if (cancel) authorized = false;
+			internals.panes.set(view, f.pane);
+			internals.inlineHosts.set({}, { view, anchors: { close: jest.fn() } });
+		}, 150);
+		const result = f.comments.reveal(f.session, f.scope, f.anchor, () => authorized);
+		await jest.advanceTimersByTimeAsync(250);
+		expect(await result).toBe(true);
+		expect(f.leaf.openFile).toHaveBeenCalledTimes(1);
+		expect(f.pane.reveal).toHaveBeenCalledTimes(cancel ? 0 : 1);
+		expect(f.host.activateBaseView).toHaveBeenCalledTimes(cancel ? 0 : 1);
+	} finally { f.close(); jest.useRealTimers(); }
+});

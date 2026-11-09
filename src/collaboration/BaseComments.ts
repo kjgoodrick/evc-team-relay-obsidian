@@ -180,14 +180,24 @@ export class BaseComments extends Component {
 		if (interrupted()) return true;
 		let selected = leaf.view, pane = selected instanceof FileView ? this.panes.get(selected) : undefined;
 		if (inline) {
-			for (const saved of this.inlineHosts.values()) {
-				if (saved.view.file !== file || !leaf.view.containerEl.contains(saved.view.contentEl)) continue;
-				const candidate = this.panes.get(saved.view), context = await candidate?.ready();
-				if (interrupted()) return true;
-				if (context?.current() && context.session === session && context.binding.snapshot.definition_id === placement.definition_id && context.binding.snapshot.generation === placement.generation) {
-					selected = saved.view; pane = candidate; break;
+			pane = undefined;
+			// Markdown leaves open before their embedded Base renderers mount.
+			const deadline = Date.now() + 2_000;
+			do {
+				if (this.stopped || !authorized() || !(leaf.view instanceof FileView) || leaf.view.file !== file) return true;
+				this.reconcile();
+				for (const saved of this.inlineHosts.values()) {
+					if (saved.view.file !== file || !leaf.view.containerEl.contains(saved.view.contentEl)) continue;
+					const candidate = this.panes.get(saved.view), context = await candidate?.ready();
+					if (interrupted()) return true;
+					if (context?.current() && context.session === session && context.binding.snapshot.definition_id === placement.definition_id && context.binding.snapshot.generation === placement.generation) {
+						selected = saved.view; pane = candidate; break;
+					}
 				}
-			}
+				if (pane || Date.now() >= deadline) break;
+				await new Promise<void>(resolve => window.setTimeout(resolve, 50));
+				if (interrupted()) return true;
+			} while (Date.now() < deadline);
 		}
 		if (!pane) return false;
 		const guard = pane.navigationGuard(), navigating = () => authorized() && guard();
