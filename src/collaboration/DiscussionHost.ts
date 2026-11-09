@@ -355,7 +355,7 @@ export class DiscussionHost extends Component {
 			const selection = session ? this.baseSelection(session, record.id) : undefined;
 			return { path: file.path, kind: "base", baseEntryId: record.id, session,
 				entryId: selection ? baseDiscussionScope(record.id, selection.id) : undefined, baseViewName: selection?.name,
-				message: session ? "Choose a saved view to open its discussions." : "Opening comments…" };
+				message: !session ? "Opening comments…" : selection ? undefined : "Choose a saved view to open its discussions." };
 		}
 		return { path: file.path, kind: record.type === "image" ? "image" : "note", entryId: record.id, session, message: session ? undefined : slot?.failed ? "Local comments could not be opened. Retry after checking storage and server settings." : "Opening comments…" };
 	}
