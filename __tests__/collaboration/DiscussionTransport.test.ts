@@ -230,3 +230,13 @@ test("inline registry inspection binds the containing note and generation", asyn
 	await expect(transport.inspectInlineBase(id(4), id(6), source, () => false)).rejects.toBeInstanceOf(DiscussionFailure);
 	expect(fetcher).toHaveBeenCalledTimes(2);
 });
+
+
+test("inline view history requests bind definition and retain pagination", async () => {
+	const page = { views: [{ id: id(8), name: "Old cards", type: "cards", state: "archived", descriptor_sha256: "a".repeat(64) }], has_more: false, next_after: id(8) };
+	const fetcher = jest.fn().mockResolvedValue(reply(200, page));
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	expect(await transport.inlineBaseViews(id(4), id(5), "archived", id(7), () => true)).toEqual(page);
+	expect(fetcher.mock.calls[0][0]).toContain(`/entries/${id(4)}/bases/views?state=archived&definition_id=${id(5)}&after=${id(7)}`);
+	await expect(transport.inlineBaseViews(id(4), id(5), "archived", undefined, () => false)).rejects.toMatchObject({ code: "action_context_changed" });
+});

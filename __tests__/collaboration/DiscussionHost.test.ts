@@ -936,7 +936,7 @@ test("inline Bases bind verified definition bytes and pin their view within the 
 });
 
 
-test("inline sidebar view choice selects another scope without changing the rendered layout", async () => {
+test.each([false, true])("inline sidebar view choice selects another scope without changing the rendered layout (historical: %s)", async historical => {
 	const s = await nativeBaseFixture();
 	try {
 		s.file.path = "Team/Inline.md"; s.file.extension = "md";
@@ -947,10 +947,15 @@ test("inline sidebar view choice selects another scope without changing the rend
 		Object.assign(s.host, { lastFile: s.file, detachedTarget: { path: s.file.path, kind: "base", session: s.session, entryId: s.scope, baseEntryId: id(3) },
 			baseComments: { inlineContext: jest.fn().mockResolvedValue(context), unload: jest.fn() } });
 		jest.spyOn(s.host, "open").mockResolvedValue(undefined);
+		if (historical) {
+			context.binding.snapshot.views.pop();
+			Object.assign(s.session, { transport: { inlineBaseViews: jest.fn().mockResolvedValue({ views: [{ id: id(5), name: "Cards", type: "cards", state: "archived" }], has_more: false, next_after: id(5) }) } });
+		}
 		s.host.chooseBaseView(); await Promise.resolve(); await Promise.resolve();
 		const args = jest.mocked(BaseDiscussionPicker).mock.calls.at(-1)!;
-		expect((await args[1]()).choices).toHaveLength(2);
-		await args[2]({ id: id(5), name: "Cards", type: "cards", state: "active" });
+		expect((await args[1]()).choices).toHaveLength(historical ? 1 : 2);
+		if (historical) expect((await args[1]("archived")).choices[0].id).toBe(id(5));
+		await args[2]({ id: id(5), name: "Cards", type: "cards", state: historical ? "archived" : "active" });
 		expect(s.host.current()).toMatchObject({ kind: "base", entryId: baseDiscussionScope(id(3), id(5)), baseViewName: "Cards" });
 		expect(s.surface.activateView).not.toHaveBeenCalled();
 		const save = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);

@@ -732,11 +732,17 @@ export class DiscussionHost extends Component {
 			session.knownDocumentGeneration(scopeId) === context.binding.snapshot.generation;
 		if (!current()) return;
 		const snapshot = context.binding.snapshot;
-		new BaseDiscussionPicker(this.plugin.app, async () => {
+		const choices = new Set(snapshot.views.flatMap(view => view.id ? [view.id] : []));
+		new BaseDiscussionPicker(this.plugin.app, async (state, after) => {
 			if (!current()) throw new Error("Inline view changed");
+			if (state) {
+				const page = await session.transport.inlineBaseViews(context.baseEntryId, snapshot.definition_id, state, after, current);
+				for (const view of page.views) choices.add(view.id);
+				return { choices: page.views, next: page.has_more ? page.next_after ?? undefined : undefined };
+			}
 			return { choices: snapshot.views.flatMap(view => view.id ? [{ id: view.id, name: view.name, type: view.type, state: "active" as const }] : []) };
 		}, async choice => {
-			if (!current() || !snapshot.views.some(view => view.id === choice.id)) throw new Error("Inline view changed");
+			if (!current() || !choices.has(choice.id)) throw new Error("Inline view changed");
 			const entryId = baseDiscussionScope(context.baseEntryId, choice.id), stop = session.watch(entryId, () => this.notify(), "base");
 			try {
 				await session.scopeReady(entryId);
@@ -747,7 +753,7 @@ export class DiscussionHost extends Component {
 				this.detachedTarget = { path: file.path, kind: "base", entryId, session, baseEntryId: context.baseEntryId, baseViewName: choice.name };
 				this.focus = undefined; this.notify(); await this.open();
 			} finally { stop(); }
-		}, current, listener => this.onChange(listener), []).open();
+		}, current, listener => this.onChange(listener)).open();
 	}
 	chooseBaseView(): void {
 		const file = this.lastFile, target = this.current(), session = target.session, entryId = target.baseEntryId;

@@ -156,12 +156,19 @@ export class BaseComments extends Component {
 	}
 	async inlineContext(session: DiscussionSession, entryId: string): Promise<BaseCommentContext | undefined> {
 		const scope = parseDiscussionScope(entryId); if (!scope?.viewId || this.stopped) return;
+		const candidates: BaseCommentContext[] = [];
 		for (const saved of this.inlineHosts.values()) {
 			const context = await this.panes.get(saved.view)?.ready();
+			if (context?.current() && context.session === session && context.baseEntryId === scope.entryId) candidates.push(context);
 			if (context?.current() && context.session === session && context.baseEntryId === scope.entryId &&
 				(context.binding.snapshot.views.some(view => view.id === scope.viewId) || context.binding.snapshot.unmatched.views.some(view => view.id === scope.viewId))) return context;
 		}
+		if (candidates.length) try {
+			const proof = await session.readBaseContext(entryId);
+			return candidates.find(context => context.current() && context.binding.snapshot.definition_id === proof.definition_id && context.binding.snapshot.generation === proof.generation);
+		} catch { /* Historical scope is no longer readable. */ }
 	}
+
 	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor, authorized: () => boolean = () => true): Promise<boolean> {
 		if (this.stopped || !authorized() || !this.host.nativeBasesCommentsEnabled) return false;
 		const placement = anchor.type === "base_group_pending" ? anchor.capture : anchor;
