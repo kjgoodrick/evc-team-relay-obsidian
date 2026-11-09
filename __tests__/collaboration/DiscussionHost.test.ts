@@ -1,6 +1,6 @@
 /** @jest-environment jsdom */
 import type { Plugin } from "obsidian";
-import { TFile } from "obsidian";
+import { Platform, TFile } from "obsidian";
 import type { AuthSession } from "../../src/AuthSession";
 import type { ShareRegistry } from "../../src/VaultShare";
 import type { SettingsScope } from "../../src/SettingsPersistence";
@@ -49,6 +49,7 @@ jest.mock("../../src/collaboration/ui/CommentStorage", () => ({ CommentStorageMo
 jest.mock("../../src/Document", () => ({ isDocument: (value: { isDocument?: boolean }) => value?.isDocument === true }));
 jest.mock("../../src/AttachmentFile", () => ({ isAttachmentFile: (value: { isAttachment?: boolean }) => value?.isAttachment === true }));
 jest.mock("obsidian", () => ({
+	Platform: { isMobile: false },
 	Component: class { register() {} registerEvent() {} registerDomEvent() {} addChild<T>(child: T): T { return child; } },
 	MarkdownRenderChild: class {},
 	ItemView: class {}, Modal: class {}, Notice: class {}, TFile: class { path = "Team/Note.md"; extension = "md"; },
@@ -269,6 +270,34 @@ test("direct links use stable IDs across file renames, focus an older reply and 
 	} finally { s.close(); }
 });
 
+test("linked discussions remain visible when revealing a file closes the mobile drawer", async () => {
+	const s = await linkFixture(); let drawerOpen = false;
+	s.open.mockImplementation(async () => { drawerOpen = true; });
+	s.reveal.mockImplementation(async () => { drawerOpen = false; });
+	try {
+		await s.host.openDiscussionLink(s.url);
+		expect(s.reveal).toHaveBeenCalledTimes(1);
+		expect(drawerOpen).toBe(true);
+		expect(s.host.focusedThread(s.typed, id(3))).toMatchObject({ threadId: id(30), messageId: id(31) });
+	} finally { s.close(); }
+});
+
+test("mobile link navigation waits for the old drawer collapse before opening its discussion", async () => {
+	const s = await linkFixture(); let shown = true;
+	const mobile = Platform.isMobile;
+	const drawer = { collapsed: false, containerEl: { isShown: () => shown }, collapse: () => {
+		drawer.collapsed = true; window.setTimeout(() => { shown = false; }, 20);
+	} };
+	Object.assign(s.plugin.app.workspace, { rightSplit: drawer, containerEl: { querySelector: () => drawer.containerEl } });
+	Platform.isMobile = true;
+	s.reveal.mockImplementation(async () => { expect(shown).toBe(false); });
+	s.open.mockImplementation(async () => { shown = true; drawer.collapsed = false; });
+	try {
+		await s.host.openDiscussionLink(s.url);
+		expect(s.open).toHaveBeenCalledTimes(1); expect(shown).toBe(true);
+	} finally { Platform.isMobile = mobile; s.close(); }
+});
+
 test.each(["missing", "ambiguous"])("%s local files show authorized discussion without inventing a target", async situation => {
 	const s = await linkFixture();
 	Object.assign(s.folder.folderIndex, { eachRecord: (fn: (record: { id: string }, path: string) => void) => {
@@ -343,13 +372,16 @@ test("Bases links retain the original saved view rather than whichever view the 
 });
 
 test("inbox navigation resolves the current local file by managed identity instead of its old display path", async () => {
-	const s = await inboxFixture();
+	const s = await inboxFixture(); let drawerOpen = false;
+	s.open.mockImplementation(async () => { drawerOpen = true; });
+	s.reveal.mockImplementation(async () => { drawerOpen = false; });
 	try {
 		await s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
 		expect(s.open).toHaveBeenCalledTimes(1);
 		expect(s.host.current()).toMatchObject({ path: "Team/Note.md", entryId: id(3) });
 		expect(s.reveal).toHaveBeenCalledWith(s.session, id(3), s.anchor, expect.any(Function));
 		expect(s.stop).toHaveBeenCalledTimes(1);
+		expect(drawerOpen).toBe(true);
 	} finally { s.close(); }
 });
 
@@ -413,9 +445,9 @@ test("opening another discussion cancels a delayed inbox message read", async ()
 	} finally { s.close(); }
 });
 
-test("an inbox target is not revealed after its sidebar opening is superseded", async () => {
+test("an inbox drawer is not reopened after its target navigation is superseded", async () => {
 	const s = await inboxFixture(); let release!: () => void;
-	s.open.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+	s.reveal.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
 	const opening = s.host.openInboxItem(s.session as unknown as DiscussionSession, inboxItem());
 	try {
 		for (let tick = 0; tick < 10 && !release; tick++) await Promise.resolve();
@@ -423,7 +455,7 @@ test("an inbox target is not revealed after its sidebar opening is superseded", 
 		await s.host.openThread(s.file, s.session as unknown as DiscussionSession, id(3), id(99));
 		release(); await opening;
 		expect(s.host.focusedThread(s.session as unknown as DiscussionSession, id(3))?.threadId).toBe(id(99));
-		expect(s.reveal).not.toHaveBeenCalled();
+		expect(s.open).toHaveBeenCalledTimes(1); // Only the newer openThread action.
 	} finally { s.close(); }
 });
 

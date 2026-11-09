@@ -10,7 +10,7 @@ import { retainedBaseGroupSources } from "./RetainedBaseGroupSources";
 import { sharedBaseGroupLabel } from "./BaseGroupValueBridge";
 import { isDocument } from "../Document";
 import { pendingRangeLocation, type LocalDiscussionAnchor } from "./LocalDiscussionAnchor";
-import { Component, FileView, MarkdownView, Notice, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
+import { Component, FileView, MarkdownView, Notice, Platform, TFile, type Editor, type Plugin, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { AuthSession } from "../AuthSession";
 import type { ShareRegistry } from "../VaultShare";
@@ -271,8 +271,11 @@ export class DiscussionHost extends Component {
 			this.focus = { session, entryId: scopeId, threadId: link.threadId, serial: ++this.focusSerial,
 				messageId: result.message?.id, messageSequence: result.message?.created_sequence,
 				notice: link.messageId && !result.message ? "The linked message is unavailable or has not been saved offline. Showing its discussion." : undefined };
+			if (file && await this.closeMobileDrawer(current)) await this.revealTarget(session, scopeId, anchor, current);
+			requireCurrent();
+			// Revealing a file closes mobile side drawers. Open the discussion
+			// afterward so inbox/search links leave their destination visible.
 			await this.open(current); requireCurrent();
-			if (file) await this.revealTarget(session, scopeId, anchor, current);
 		} catch (error) {
 			if (error instanceof DiscussionFailure) {
 				if (error.action === "authenticate") throw new Error("Sign in to this shared folder’s server, then open the comment link again.");
@@ -335,8 +338,8 @@ export class DiscussionHost extends Component {
 			this.focus = { session, entryId: scopeId, threadId: item.thread_id, serial: ++this.focusSerial,
 				messageId: result?.message?.id, messageSequence: result?.message?.created_sequence,
 				notice: !result?.message ? "The notified message is unavailable or has not been saved offline. Showing its discussion." : undefined };
-			await this.open(current);
-			if (current() && session.permission(scopeId)?.read) await this.revealTarget(session, scopeId, thread.anchor, current);
+			if (current() && session.permission(scopeId)?.read && await this.closeMobileDrawer(current)) await this.revealTarget(session, scopeId, thread.anchor, current);
+			if (current() && session.permission(scopeId)?.read) await this.open(current);
 		} finally { stop(); }
 	}
 	targetFor(file?: TFile): CommentTarget {
@@ -1161,6 +1164,19 @@ export class DiscussionHost extends Component {
 		if (!current()) return; await leaf.setViewState({ type: COMMENTS_VIEW, active: true });
 		if (!current()) return; await workspace.revealLeaf(leaf);
 		if (current()) this.notify();
+	}
+	private async closeMobileDrawer(current: () => boolean): Promise<boolean> {
+		if (!current() || !Platform.isMobile) return current();
+		const drawer = this.plugin.app.workspace.rightSplit;
+		const element = this.plugin.app.workspace.containerEl.querySelector<HTMLElement>(".workspace-drawer.mod-right");
+		drawer.collapse();
+		// Native collapse hides the drawer at the end of its animation. Opening
+		// it during that animation lets the old callback hide the new discussion.
+		const deadline = Date.now() + 1000;
+		while (current() && drawer.collapsed && element?.isShown() && Date.now() < deadline) {
+			await new Promise(resolve => window.setTimeout(resolve, 16));
+		}
+		return current();
 	}
 	async openInbox(): Promise<void> {
 		const workspace = this.plugin.app.workspace;
