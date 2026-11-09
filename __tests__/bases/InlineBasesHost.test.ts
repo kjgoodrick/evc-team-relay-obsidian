@@ -84,3 +84,13 @@ test("Reading section offsets restore recycled inline source mapping and reject 
 		renderer.text += 'changed'; expect(inlineBaseInReading(view, anchors, container, "1.13.7")).toBeUndefined();
 	} finally { anchors.close(); doc.destroy(); el.remove(); }
 });
+
+
+test("long Reading notes retain inline renderer discovery beyond 256 section components", () => {
+	const f = fixture();
+	try {
+		const original = f.view._children;
+		Object.assign(f.view, { _children: [...Array.from({ length: 600 }, () => ({ _loaded: true, _children: [] })), ...original] });
+		expect(inlineBaseRenderers(f.view, "1.13.7")).toHaveLength(1);
+	} finally { f.close(); }
+});

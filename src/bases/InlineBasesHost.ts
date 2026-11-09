@@ -20,9 +20,9 @@ export function inlineBaseRenderers(view: unknown, version: string): InlineBaseR
 	if (version !== "1.13.7" || !object(view) || !(view.file instanceof TFile) || view.file.extension !== "md") return [];
 	const root = view.contentEl as HTMLElement | undefined; if (!root?.isConnected) return [];
 	const queue: unknown[] = [view], seen = new Set<unknown>(), found: InlineBaseRenderer[] = [];
-	while (queue.length && seen.size < 256) {
+	while (queue.length && seen.size < 4096) {
 		const owner = queue.shift(); if (!object(owner) || seen.has(owner)) continue; seen.add(owner);
-		if (!Array.isArray(owner._children) || owner._children.length > 256) continue;
+		if (!Array.isArray(owner._children) || owner._children.length > 4096) continue;
 		const container = owner.containerEl as HTMLElement | undefined;
 		if (owner._loaded === true && container?.nodeType === 1 && container.isConnected && root.contains(container)) {
 			for (const controller of owner._children) if (object(controller) && controller._loaded === true &&
