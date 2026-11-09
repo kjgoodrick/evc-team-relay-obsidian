@@ -16,7 +16,8 @@ export class BaseDiscussionPicker extends Modal {
 	private unsubscribe?: () => void;
 	constructor(app: App, private load: (state?: "unmatched" | "archived", after?: string) => Promise<BaseDiscussionChoices>,
 		private choose: (choice: BaseDiscussionChoice) => Promise<void>, private current: () => boolean,
-		private subscribe: (listener: () => void) => () => void) { super(app); }
+		private subscribe: (listener: () => void) => () => void,
+		private historyStates: readonly ("unmatched" | "archived")[] = ["unmatched", "archived"]) { super(app); }
 	onOpen(): void {
 		this.setTitle("Choose a discussion view");
 		this.contentEl.createEl("p", { text: "Comments stay with the saved view chosen here. Switching the Bases layout does not move them to another view." });
@@ -24,7 +25,7 @@ export class BaseDiscussionPicker extends Modal {
 		this.select.createEl("option", { text: "Choose a saved view…", attr: { value: "" } });
 		this.select.onchange = () => { if (this.accept) this.accept.disabled = !this.choices.has(this.select!.value); };
 		this.status = this.contentEl.createDiv({ attr: { role: "status" } });
-		for (const state of ["unmatched", "archived"] as const) {
+		for (const state of this.historyStates) {
 			const more = this.contentEl.createEl("button", { text: state === "archived" ? "Load archived views" : "Load more unassociated views" });
 			more.disabled = true; this.pageButtons.push(more);
 			more.onclick = () => { void this.more(state, more); };

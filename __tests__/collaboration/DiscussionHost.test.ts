@@ -9,6 +9,7 @@ import { DiscussionHost } from "../../src/collaboration/DiscussionHost";
 import { DiscussionStore, type OutboxOperation } from "../../src/collaboration/storage/DiscussionStore";
 import type { DiscussionSession } from "../../src/collaboration/DiscussionSession";
 import { baseDiscussionScope } from "../../src/collaboration/DiscussionScope";
+import { BaseDiscussionPicker } from "../../src/collaboration/ui/BaseDiscussionPicker";
 import { BaseTargetPicker } from "../../src/collaboration/ui/BaseTargetPicker";
 import type { BaseSyncHost } from "../../src/bases/BaseSyncHost";
 import type { NativeBasesSurface, NativeBaseHandle } from "../../src/bases/NativeBasesSurface";
@@ -37,6 +38,7 @@ Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: tr
 const mockSessions: { close: jest.Mock; status: string }[] = [];
 const mockCredentials: (() => Promise<unknown>)[] = [];
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
+jest.mock("../../src/collaboration/ui/BaseDiscussionPicker", () => ({ BaseDiscussionPicker: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
 jest.mock("../../src/collaboration/ui/BaseTargetPicker", () => ({ BaseTargetPicker: jest.fn().mockImplementation(() => ({ open: jest.fn() })) }));
 jest.mock("../../src/collaboration/ui/ReattachComment", () => ({
 	ReattachCommentModal: jest.fn().mockImplementation(() => ({ open: jest.fn(), close: jest.fn(), validate: jest.fn() })),
@@ -930,5 +932,31 @@ test("inline Bases bind verified definition bytes and pin their view within the 
 		const offline = await s.context(); expect(offline).toBeDefined(); expect(inspect).not.toHaveBeenCalled(); offline!.release();
 		expect(await s.host.activateBaseView(s.surface as unknown as NativeBasesSurface, s.session as unknown as DiscussionSession, s.scope,
 			{ definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1 }, () => true)).toBe("unchanged");
+	} finally { s.close(); }
+});
+
+
+test("inline sidebar view choice selects another scope without changing the rendered layout", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		s.file.path = "Team/Inline.md"; s.file.extension = "md";
+		const context = { session: s.session, file: s.file, baseEntryId: id(3), current: () => true,
+			surface: { current: () => true, inlineSource: { current: () => true } },
+			binding: { snapshot: { definition_id: id(6), generation: id(7), revision: 1,
+				views: [{ id: id(4), name: "Table", type: "table" }, { id: id(5), name: "Cards", type: "cards" }] } } };
+		Object.assign(s.host, { lastFile: s.file, detachedTarget: { path: s.file.path, kind: "base", session: s.session, entryId: s.scope, baseEntryId: id(3) },
+			baseComments: { inlineContext: jest.fn().mockResolvedValue(context), unload: jest.fn() } });
+		jest.spyOn(s.host, "open").mockResolvedValue(undefined);
+		s.host.chooseBaseView(); await Promise.resolve(); await Promise.resolve();
+		const args = jest.mocked(BaseDiscussionPicker).mock.calls.at(-1)!;
+		expect((await args[1]()).choices).toHaveLength(2);
+		await args[2]({ id: id(5), name: "Cards", type: "cards", state: "active" });
+		expect(s.host.current()).toMatchObject({ kind: "base", entryId: baseDiscussionScope(id(3), id(5)), baseViewName: "Cards" });
+		expect(s.surface.activateView).not.toHaveBeenCalled();
+		const save = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
+		s.session.captureBaseTarget.mockResolvedValue({ version: 1, type: "base", definition_id: id(6), view_id: id(5), generation: id(7), registry_revision: 1, target: { type: "view" } });
+		await s.host.commentCurrentBase(s.session as unknown as DiscussionSession, baseDiscussionScope(id(3), id(5)));
+		expect(s.session.captureBaseTarget).toHaveBeenCalledWith(baseDiscussionScope(id(3), id(5)), { type: "view" });
+		expect(save).toHaveBeenCalled();
 	} finally { s.close(); }
 });

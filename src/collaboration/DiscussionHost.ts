@@ -724,8 +724,34 @@ export class DiscussionHost extends Component {
 			return surface.activateView(anchor.view_id, binding) ? "changed" : "unavailable";
 		} catch { return "unavailable"; }
 	}
+	private async chooseInlineBaseView(file: TFile, session: DiscussionSession, scopeId: string): Promise<void> {
+		const context = await this.baseComments?.inlineContext(session, scopeId);
+		if (!context) { new Notice("Open this inline Base in Live Preview or Reading view before choosing its discussions."); return; }
+		const current = () => !this.stopped && this.nativeBasesCommentsEnabled && context.surface.current() && context.surface.inlineSource?.current() === true &&
+			this.lastFile === file && this.current().session === session && this.current().entryId === scopeId && session.permission(scopeId)?.read === true &&
+			session.knownDocumentGeneration(scopeId) === context.binding.snapshot.generation;
+		if (!current()) return;
+		const snapshot = context.binding.snapshot;
+		new BaseDiscussionPicker(this.plugin.app, async () => {
+			if (!current()) throw new Error("Inline view changed");
+			return { choices: snapshot.views.flatMap(view => view.id ? [{ id: view.id, name: view.name, type: view.type, state: "active" as const }] : []) };
+		}, async choice => {
+			if (!current() || !snapshot.views.some(view => view.id === choice.id)) throw new Error("Inline view changed");
+			const entryId = baseDiscussionScope(context.baseEntryId, choice.id), stop = session.watch(entryId, () => this.notify(), "base");
+			try {
+				await session.scopeReady(entryId);
+				const proof = await session.readBaseContext(entryId);
+				if (!current() || !session.permission(entryId)?.read || proof.definition_id !== snapshot.definition_id || proof.generation !== snapshot.generation || proof.registry_revision !== snapshot.revision) throw new Error("Inline view changed");
+				await session.trackLocal(session.store.setPreference("activeBaseView:" + context.baseEntryId, protocolJson(choice)));
+				if (!current()) return;
+				this.detachedTarget = { path: file.path, kind: "base", entryId, session, baseEntryId: context.baseEntryId, baseViewName: choice.name };
+				this.focus = undefined; this.notify(); await this.open();
+			} finally { stop(); }
+		}, current, listener => this.onChange(listener), []).open();
+	}
 	chooseBaseView(): void {
 		const file = this.lastFile, target = this.current(), session = target.session, entryId = target.baseEntryId;
+		if (file?.extension === "md" && session && target.entryId && target.kind === "base") { void this.chooseInlineBaseView(file, session, target.entryId); return; }
 		const folder = file ? this.shares.shareFor(file.path) : undefined, tracked = entryId ? folder?.trackedEntries.get(entryId) : undefined;
 		if (!file || !session || !entryId || !folder || !tracked || !isAttachmentFile(tracked) || !this.bases) { new Notice("Wait for this Bases file to finish synchronizing before choosing its discussion view."); return; }
 		const current = () => !this.stopped && session.status !== "closed" && this.lastFile === file && this.targetFor(file).session === session && this.targetFor(file).baseEntryId === entryId;
@@ -757,6 +783,19 @@ export class DiscussionHost extends Component {
 	async commentCurrentBase(session: DiscussionSession, scopeId: string): Promise<void> {
 		const file = this.lastFile, target = this.current();
 		if (!file || target.session !== session || target.entryId !== scopeId || target.kind !== "base") return;
+		if (file.extension === "md") {
+			try {
+				const context = await this.baseComments?.inlineContext(session, scopeId);
+				if (!context) throw new Error("Inline Base unavailable");
+				const current = () => !this.stopped && context.surface.current() && context.surface.inlineSource?.current() === true &&
+					this.current().session === session && this.current().entryId === scopeId && session.permission(scopeId)?.comment === true;
+				if (!current()) return;
+				const anchor = await session.captureBaseTarget(scopeId, { type: "view" });
+				if (!current() || anchor.target.type !== "view" || anchor.view_id !== parseDiscussionScope(scopeId)?.viewId || anchor.definition_id !== context.binding.snapshot.definition_id || anchor.generation !== context.binding.snapshot.generation || anchor.registry_revision !== context.binding.snapshot.revision) return;
+				await this.saveCommentSelection({ file, session, entryId: scopeId, anchor });
+			} catch { new Notice("Open this inline Base and refresh its discussions before commenting."); }
+			return;
+		}
 		const folder = this.shares.shareFor(file.path); if (!folder) return;
 		const current = () => !this.stopped && session.status !== "closed" && this.lastFile === file &&
 			this.targetFor(file).session === session && this.targetFor(file).entryId === scopeId && !!session.permission(scopeId)?.comment;

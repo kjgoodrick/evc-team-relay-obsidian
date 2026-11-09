@@ -154,6 +154,14 @@ export class BaseComments extends Component {
 		}
 		return found;
 	}
+	async inlineContext(session: DiscussionSession, entryId: string): Promise<BaseCommentContext | undefined> {
+		const scope = parseDiscussionScope(entryId); if (!scope?.viewId || this.stopped) return;
+		for (const saved of this.inlineHosts.values()) {
+			const context = await this.panes.get(saved.view)?.ready();
+			if (context?.current() && context.session === session && context.baseEntryId === scope.entryId &&
+				(context.binding.snapshot.views.some(view => view.id === scope.viewId) || context.binding.snapshot.unmatched.views.some(view => view.id === scope.viewId))) return context;
+		}
+	}
 	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor, authorized: () => boolean = () => true): Promise<boolean> {
 		if (this.stopped || !authorized() || !this.host.nativeBasesCommentsEnabled) return false;
 		const placement = anchor.type === "base_group_pending" ? anchor.capture : anchor;
