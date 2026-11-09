@@ -14,6 +14,8 @@ export class EmbeddedBaseFocus<T extends { contentEl: HTMLElement }> {
 		for (const doc of docs) if (!this.documents.has(doc)) {
 			const interacted = (event: Event) => {
 				const target = event.target as Node | null; if (!target?.nodeType) return;
+				const element = target.nodeType === 1 ? target as Element : target.parentElement;
+				if (element?.closest(".relay-presence-action,.relay-presence-follow,.relay-presence-roster")) return;
 				const next = this.entries.find(entry => entry.current() && entry.view.contentEl.contains(target));
 				if (!next && !this.selected?.parent.contentEl.contains(target)) return;
 				if (this.selected?.view === next?.view) return;

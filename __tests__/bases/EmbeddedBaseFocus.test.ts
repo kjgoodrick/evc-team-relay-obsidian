@@ -40,3 +40,16 @@ test("verified navigation selects the requested embed without cancelling Follow 
 		f.revoke(); expect(f.focus.select(f.parent, f.view)).toBe(false);
 	} finally { f.focus.close(); }
 });
+
+
+test("presence controls inside a note retain the selected embedded surface", () => {
+	const f = fixture();
+	try {
+		click(f.view.contentEl);
+		for (const name of ["relay-presence-action", "relay-presence-follow", "relay-presence-roster"]) {
+			const control = f.parent.contentEl.appendChild(document.createElement("button")); control.className = name;
+			click(control); click(control, "focusin"); expect(f.focus.active(f.parent)).toBe(f.view);
+		}
+		expect(f.changed).toHaveBeenCalledTimes(1);
+	} finally { f.focus.close(); }
+});
