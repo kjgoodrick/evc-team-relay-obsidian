@@ -949,6 +949,7 @@ test.each([false, true])("inline sidebar view choice selects another scope witho
 		jest.spyOn(s.host, "open").mockResolvedValue(undefined);
 		if (historical) {
 			context.binding.snapshot.views.pop();
+			s.session.readBaseContext.mockRejectedValue(new Error("Archived targets cannot be captured"));
 			Object.assign(s.session, { transport: { inlineBaseViews: jest.fn().mockResolvedValue({ views: [{ id: id(5), name: "Cards", type: "cards", state: "archived" }], has_more: false, next_after: id(5) }) } });
 		}
 		s.host.chooseBaseView(); await Promise.resolve(); await Promise.resolve();
@@ -958,6 +959,7 @@ test.each([false, true])("inline sidebar view choice selects another scope witho
 		await args[2]({ id: id(5), name: "Cards", type: "cards", state: historical ? "archived" : "active" });
 		expect(s.host.current()).toMatchObject({ kind: "base", entryId: baseDiscussionScope(id(3), id(5)), baseViewName: "Cards" });
 		expect(s.surface.activateView).not.toHaveBeenCalled();
+		if (historical) return;
 		const save = jest.spyOn(s.host, "saveCommentSelection").mockResolvedValue(true);
 		s.session.captureBaseTarget.mockResolvedValue({ version: 1, type: "base", definition_id: id(6), view_id: id(5), generation: id(7), registry_revision: 1, target: { type: "view" } });
 		await s.host.commentCurrentBase(s.session as unknown as DiscussionSession, baseDiscussionScope(id(3), id(5)));

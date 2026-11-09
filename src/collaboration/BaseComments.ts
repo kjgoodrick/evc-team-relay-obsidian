@@ -166,7 +166,18 @@ export class BaseComments extends Component {
 		if (candidates.length) try {
 			const proof = await session.readBaseContext(entryId);
 			return candidates.find(context => context.current() && context.binding.snapshot.definition_id === proof.definition_id && context.binding.snapshot.generation === proof.generation);
-		} catch { /* Historical scope is no longer readable. */ }
+		} catch { /* Archived views cannot capture new targets. */ }
+		for (const context of candidates) {
+			let after: string | undefined;
+			try {
+				do {
+					const page = await session.transport.inlineBaseViews(scope.entryId, context.binding.snapshot.definition_id, "archived", after, context.current);
+					if (!context.current()) break;
+					if (page.views.some(view => view.id === scope.viewId)) return context;
+					after = page.has_more ? page.next_after ?? undefined : undefined;
+				} while (after);
+			} catch { /* No readable historical association for this definition. */ }
+		}
 	}
 
 	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor, authorized: () => boolean = () => true): Promise<boolean> {

@@ -746,8 +746,11 @@ export class DiscussionHost extends Component {
 			const entryId = baseDiscussionScope(context.baseEntryId, choice.id), stop = session.watch(entryId, () => this.notify(), "base");
 			try {
 				await session.scopeReady(entryId);
-				const proof = await session.readBaseContext(entryId);
-				if (!current() || !session.permission(entryId)?.read || proof.definition_id !== snapshot.definition_id || proof.generation !== snapshot.generation || proof.registry_revision !== snapshot.revision) throw new Error("Inline view changed");
+				if (!current() || !session.permission(entryId)?.read) throw new Error("Inline view changed");
+				if (choice.state === "active") {
+					const proof = await session.readBaseContext(entryId);
+					if (!current() || proof.definition_id !== snapshot.definition_id || proof.generation !== snapshot.generation || proof.registry_revision !== snapshot.revision) throw new Error("Inline view changed");
+				}
 				await session.trackLocal(session.store.setPreference("activeBaseView:" + context.baseEntryId, protocolJson(choice)));
 				if (!current()) return;
 				this.detachedTarget = { path: file.path, kind: "base", entryId, session, baseEntryId: context.baseEntryId, baseViewName: choice.name };
