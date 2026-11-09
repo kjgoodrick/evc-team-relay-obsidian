@@ -75,3 +75,19 @@ export function inlineBaseInEditor(anchors: InlineBaseAnchors, container: HTMLEl
 		return matches.length === 1 ? matches[0] : undefined;
 	} catch { return; }
 }
+
+/** Reading virtualization can recycle postprocessor wrappers. Native sections
+ * retain exact source offsets; use them only against the synchronized text. */
+export function inlineBaseInReading(view: unknown, anchors: InlineBaseAnchors, container: HTMLElement, version: string): InlineBaseSource | undefined {
+	if (version !== "1.13.7" || !object(view) || !object(view.previewMode) || !object(view.previewMode.renderer)) return;
+	const renderer = view.previewMode.renderer, text = anchors.text.toString();
+	if (renderer.text !== text || !Array.isArray(renderer.sections)) return;
+	const matches = renderer.sections.filter(section => object(section) && section.rendered === true &&
+		section.el instanceof HTMLElement && section.el.isConnected && section.el.contains(container));
+	if (matches.length !== 1) return;
+	const section = matches[0];
+	if (!object(section.start) || !object(section.end)) return;
+	const from = section.start.offset, end = section.end.offset;
+	if (typeof from !== "number" || typeof end !== "number") return;
+	return inlineBaseInSection(anchors, from, end + (text[end] === "\n" ? 1 : 0));
+}

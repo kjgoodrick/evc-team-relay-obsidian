@@ -1,6 +1,6 @@
 import { findInlineBase } from "../../bases/FindInlineBase";
 import { InlineBaseAnchors } from "../../bases/InlineBaseAnchors";
-import { inlineBaseRenderers, inlineBaseHost, inlineBaseHostInfo, inlineBaseInEditor, inlineBaseInSection } from "../../bases/InlineBasesHost";
+import { inlineBaseRenderers, inlineBaseHost, inlineBaseHostInfo, inlineBaseInEditor, inlineBaseInSection, inlineBaseInReading } from "../../bases/InlineBasesHost";
 import { apiVersion, Component, FileView, MarkdownView, type Plugin, type TFile, type MarkdownPostProcessorContext } from "obsidian";
 import { decodeJwt } from "jose";
 import type { AuthSession } from "../../AuthSession";
@@ -400,6 +400,7 @@ export class LocationHost extends Component {
 					source = inlineBaseInSection(anchors, offset(info.lineStart), offset(info.lineEnd + 1));
 				}
 			}
+			source ??= scope.view.getMode() === "preview" ? inlineBaseInReading(scope.view, anchors, renderer.containerEl, apiVersion) : undefined;
 			const allowed = () => !this.closed && scope.current() && this.context?.key === identity.key && this.identify(scope.view)?.id === identity.id;
 			const facade = source && inlineBaseHost(renderer, anchors, source, allowed);
 			const metadata = facade && inlineBaseHostInfo(facade), request = metadata && anchors.request(metadata.anchor);

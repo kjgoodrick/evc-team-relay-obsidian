@@ -3,7 +3,7 @@ import { EditorView } from "@codemirror/view";
 import * as Y from "yjs";
 import { TFile } from "obsidian";
 import { InlineBaseAnchors } from "../../src/bases/InlineBaseAnchors";
-import { inlineBaseHost, inlineBaseInEditor, inlineBaseHostInfo, inlineBaseInSection, inlineBaseRenderers } from "../../src/bases/InlineBasesHost";
+import { inlineBaseHost, inlineBaseInReading, inlineBaseInEditor, inlineBaseHostInfo, inlineBaseInSection, inlineBaseRenderers } from "../../src/bases/InlineBasesHost";
 import { NativeBasesSurface } from "../../src/bases/NativeBasesSurface";
 import { nativePresenceBase } from "../mocks/nativePresenceBase";
 jest.mock("obsidian", () => ({ ...jest.requireActual("obsidian"), FileView: class {}, parseYaml: JSON.parse }));
@@ -67,4 +67,20 @@ test("Live Preview maps duplicate inline widgets by editor position and rejects 
 			text += "changed"; expect(inlineBaseInEditor(f.anchors, f.base.content)).toBeUndefined();
 		} finally { find.mockRestore(); }
 	} finally { f.close(); }
+});
+
+
+test("Reading section offsets restore recycled inline source mapping and reject stale source", () => {
+	const doc = new Y.Doc(), text = doc.getText("content");
+	text.insert(0, '# Heading\n\n```base\nviews: []\n```\n');
+	const anchors = new InlineBaseAnchors(text), source = anchors.definitions[0];
+	const el = document.body.appendChild(document.createElement("div")), container = el.appendChild(document.createElement("div"));
+	const section = { rendered: true, el, start: { offset: source.from }, end: { offset: source.to } };
+	const renderer = { text: text.toString(), sections: [section] }, view = { previewMode: { renderer } };
+	try {
+		expect(inlineBaseInReading(view, anchors, container, "1.13.7")).toEqual(source);
+		expect(inlineBaseInReading(view, anchors, container, "1.14.0")).toBeUndefined();
+		renderer.sections.push(section); expect(inlineBaseInReading(view, anchors, container, "1.13.7")).toBeUndefined(); renderer.sections.pop();
+		renderer.text += 'changed'; expect(inlineBaseInReading(view, anchors, container, "1.13.7")).toBeUndefined();
+	} finally { anchors.close(); doc.destroy(); el.remove(); }
 });

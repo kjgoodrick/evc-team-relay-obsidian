@@ -19,7 +19,7 @@ import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { embeddedBases, embeddedBaseHost, type EmbeddedBase } from "../bases/EmbeddedBasesHost";
 
 import { InlineBaseAnchors } from "../bases/InlineBaseAnchors";
-import { inlineBaseRenderers, inlineBaseInSection, inlineBaseInEditor, inlineBaseHost, inlineBaseHostInfo } from "../bases/InlineBasesHost";
+import { inlineBaseRenderers, inlineBaseInSection, inlineBaseInEditor, inlineBaseInReading, inlineBaseHost, inlineBaseHostInfo } from "../bases/InlineBasesHost";
 
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
@@ -103,6 +103,7 @@ export class BaseComments extends Component {
 								source = inlineBaseInSection(anchors, from, to);
 							}
 						}
+						source ??= markdown.getMode() === "preview" ? inlineBaseInReading(markdown, anchors, renderer.containerEl, apiVersion) : undefined;
 						const facade = source && inlineBaseHost(renderer, anchors, source, () => !this.stopped && this.host.nativeBasesCommentsEnabled && context.current());
 						if (!facade) { anchors.close(); continue; }
 						saved = { view: facade as unknown as FileView, anchors }; this.inlineHosts.set(renderer.owner, saved);
