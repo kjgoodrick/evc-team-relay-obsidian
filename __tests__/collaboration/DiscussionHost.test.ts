@@ -902,3 +902,30 @@ test("group-summary navigation verifies summary and grouping identities independ
 		expect(await s.host.verifyBaseTarget(context, anchor)).toBe(false); context.release();
 	} finally { s.close(); }
 });
+
+
+test("inline Bases bind verified definition bytes and pin their view within the containing note", async () => {
+	const s = await nativeBaseFixture();
+	try {
+		s.file.path = "Team/Inline.md"; s.file.extension = "md";
+		Object.assign(s.folder.folderIndex, { recordFor: () => ({ id: id(3), type: "markdown" }) });
+		Object.assign(s.folder, { trackedEntries: new Map([[id(3), { isDocument: true }]]) });
+		const request = { dependency: "snapshot", start: "start", end: "end", selected_length: 7 };
+		const snapshot = { protocol_version: 1, definition_id: id(6), entry_id: id(3), generation: id(7), revision: 1,
+			content_sha256: "a".repeat(64), views: [], unmatched: { views: [], has_more: false, next_after: null } };
+		const inspect = jest.fn().mockResolvedValue(snapshot), read = jest.fn().mockResolvedValue("views: []");
+		Object.assign(s.surface, { inlineSource: { anchors: { request: () => request }, anchor: {}, current: () => true, read } });
+		Object.assign(s.session, { transport: { inspectInlineBase: inspect } });
+		const context = await s.context(); expect(context).toBeDefined();
+		expect(inspect).toHaveBeenCalledWith(id(3), id(7), request, expect.any(Function));
+		expect(read).toHaveBeenCalled(); expect(s.bases.refreshViews).not.toHaveBeenCalled();
+		Object.assign(s.store, { saveDraft: jest.fn().mockResolvedValue(undefined) });
+		jest.spyOn(s.host, "open").mockResolvedValue(undefined);
+		expect(await s.host.commentBaseHandle(context!, s.handle)).toBe(true);
+		expect(s.host.current()).toMatchObject({ path: "Team/Inline.md", kind: "base", entryId: s.scope, baseEntryId: id(3) });
+		context!.release();
+		s.session.online = false; s.session.status = "offline"; s.store.preference.mockResolvedValue(snapshot);
+		inspect.mockClear();
+		const offline = await s.context(); expect(offline).toBeDefined(); expect(inspect).not.toHaveBeenCalled(); offline!.release();
+	} finally { s.close(); }
+});

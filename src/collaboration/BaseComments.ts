@@ -1,6 +1,6 @@
 import { nativeGroupTargetKey, nativeGroupTargetLabel } from "./NativeBaseGroupComments";
 import { pendingRangeLocation, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
-import { apiVersion, Component, FileView, Menu, Notice, type Plugin } from "obsidian";
+import { apiVersion, Component, FileView, MarkdownView, Menu, Notice, type MarkdownPostProcessorContext, type Plugin } from "obsidian";
 import { NativeBasesSurface, type NativeBaseHandle, type NativeBaseTarget, type NativeBaseGroupHandle, type NativeBaseGroupTarget } from "../bases/NativeBasesSurface";
 import type { BaseSyncHost } from "../bases/BaseSyncHost";
 import type { DiscussionHost } from "./DiscussionHost";
@@ -16,6 +16,9 @@ import { renderTimelineDiscussionMarkers, renderTimelineSharedMarkers } from "./
 import type { TimelineMarkerCatalog } from "./TimelineMarkerProtocol";
 import { embeddedBases, embeddedBaseHost, type EmbeddedBase } from "../bases/EmbeddedBasesHost";
 
+import { InlineBaseAnchors } from "../bases/InlineBaseAnchors";
+import { inlineBaseRenderers, inlineBaseInSection, inlineBaseHost, inlineBaseHostInfo } from "../bases/InlineBasesHost";
+
 const owned = ".relay-bases-comments, .relay-bases-comment-tools";
 type Marker = { handle: NativeBaseHandle | NativeBaseGroupHandle; threads: AnchoredThread[]; hiddenProperty: boolean; mixedTargets?: boolean };
 const label = (target: NativeBaseTarget | NativeBaseGroupTarget) => target.type === "group" ? (target.summary ? "summary · " : "group · ") + nativeGroupTargetLabel(target) : target.type === "view" ? "view" : target.type === "property" ? "property header · " + target.property.source + "." + target.property.name :
@@ -27,6 +30,8 @@ export class BaseComments extends Component {
 	private stopped = false;
 	private timeline: TimelineBridgeClient;
 	private embeds = new Map<object, { view: FileView; mtime: number; size: number }>();
+	private inlineSections = new Map<HTMLElement, MarkdownPostProcessorContext>();
+	private inlineHosts = new Map<object, { view: FileView; anchors: InlineBaseAnchors }>();
 	private loadingEmbeds = new Set<object>();
 	private embedTimer?: number;
 	constructor(private host: DiscussionHost, private plugin: Plugin, private bases?: BaseSyncHost) {
@@ -36,7 +41,8 @@ export class BaseComments extends Component {
 	}
 	onload(): void {
 		this.timeline.start();
-		this.plugin.registerMarkdownPostProcessor?.(() => {
+		this.plugin.registerMarkdownPostProcessor?.((element, context) => {
+			this.inlineSections.set(element, context);
 			if (this.embedTimer === undefined) this.embedTimer = window.setTimeout(() => { this.embedTimer = undefined; this.reconcile(); }, 50);
 		}, 1001);
 		this.register(this.host.onChange(() => this.reconcile()));
@@ -68,6 +74,38 @@ export class BaseComments extends Component {
 			if (saved) wanted.add(saved.view);
 			else this.loadEmbed(embed);
 		}
+		for (const [element] of this.inlineSections) if (!element.isConnected) this.inlineSections.delete(element);
+		const inlineOwners = new Set<object>();
+		if (this.host.nativeBasesCommentsEnabled) for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
+			if (!(leaf.view instanceof MarkdownView)) continue;
+			const markdown = leaf.view;
+			for (const renderer of inlineBaseRenderers(markdown, apiVersion)) {
+				inlineOwners.add(renderer.owner);
+				let saved = this.inlineHosts.get(renderer.owner);
+				if (saved && !inlineBaseHostInfo(saved.view)?.current()) {
+					saved.anchors.close(); this.inlineHosts.delete(renderer.owner); saved = undefined;
+				}
+				if (!saved) {
+					try {
+						const context = this.host.imageContext(markdown, false), text = context.text.toString();
+						const sectionContext = [...this.inlineSections].find(([element, section]) => section.sourcePath === renderer.file.path &&
+							(element === renderer.containerEl || element.contains(renderer.containerEl) || renderer.containerEl.contains(element)));
+						if (!sectionContext) continue;
+						const section = sectionContext[1].getSectionInfo(renderer.containerEl) ?? sectionContext[1].getSectionInfo(sectionContext[0]);
+						if (!section || section.text !== text) continue;
+						const lines = text.split("\n"), from = lines.slice(0, section.lineStart).reduce((sum, line) => sum + line.length + 1, 0);
+						const to = Math.min(text.length, lines.slice(0, section.lineEnd + 1).reduce((sum, line) => sum + line.length + 1, 0));
+						const anchors = new InlineBaseAnchors(context.text), source = inlineBaseInSection(anchors, from, to);
+						const facade = source && inlineBaseHost(renderer, anchors, source, () => !this.stopped && this.host.nativeBasesCommentsEnabled && context.current());
+						if (!facade) { anchors.close(); continue; }
+						saved = { view: facade as unknown as FileView, anchors }; this.inlineHosts.set(renderer.owner, saved);
+					} catch { /* Retry once the shared Markdown binding and source section are ready. */ }
+				}
+				if (saved) wanted.add(saved.view);
+			}
+		}
+		for (const [owner, saved] of this.inlineHosts) if (!inlineOwners.has(owner)) { saved.anchors.close(); this.inlineHosts.delete(owner); }
+
 		for (const [view, pane] of this.panes) if (!wanted.has(view)) { pane.close(); this.panes.delete(view); }
 		for (const view of wanted) {
 			let pane = this.panes.get(view);
@@ -163,7 +201,7 @@ export class BaseComments extends Component {
 			return true;
 		} catch { new Notice("This target or its saved-view association changed. Refresh synchronization before navigating again."); return true; }
 	}
-	onunload(): void { this.stopped = true; if (this.embedTimer !== undefined) window.clearTimeout(this.embedTimer); this.embeds.clear(); for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.targetListeners.clear(); this.timeline.close(); }
+	onunload(): void { this.stopped = true; if (this.embedTimer !== undefined) window.clearTimeout(this.embedTimer); this.embeds.clear(); this.inlineSections.clear(); for (const saved of this.inlineHosts.values()) saved.anchors.close(); this.inlineHosts.clear(); for (const pane of this.panes.values()) pane.close(); this.panes.clear(); this.targetListeners.clear(); this.timeline.close(); }
 }
 
 /** One visible native pane owns one scope subscription and an external overlay.

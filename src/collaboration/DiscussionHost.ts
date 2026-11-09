@@ -41,7 +41,7 @@ import { baseDiscussionScope, parseDiscussionScope } from "./DiscussionScope";
 import { BaseDiscussionPicker, type BaseDiscussionChoice } from "./ui/BaseDiscussionPicker";
 import { BaseTargetPicker, type BaseRecordChoice } from "./ui/BaseTargetPicker";
 import type { BaseSyncHost } from "../bases/BaseSyncHost";
-import type { BaseRegistrySnapshot } from "../bases/BaseRegistryProtocol";
+import { parseBaseRegistry, type BaseRegistrySnapshot } from "../bases/BaseRegistryProtocol";
 import { isAttachmentFile } from "../AttachmentFile";
 import { isRecord } from "./DiscussionProtocol";
 import type { NativeBasesSurface, NativeBaseHandle, NativeBaseTarget, NativeBaseGroupHandle } from "../bases/NativeBasesSurface";
@@ -388,30 +388,52 @@ export class DiscussionHost extends Component {
 	/** Retain one watched scope for a native pane. Registry proof never grants
 	 * access: native target capture and server lineage checks remain independent. */
 	async baseCommentContext(surface: NativeBasesSurface, alive: () => boolean): Promise<BaseCommentContext | undefined> {
-		const file = surface.file, target = this.targetFor(file), session = target.session, baseEntryId = target.baseEntryId;
+		const file = surface.file, inline = surface.inlineSource, target = this.targetFor(file), session = target.session, baseEntryId = inline ? target.entryId : target.baseEntryId;
 		const folder = this.shares.shareFor(file.path), tracked = baseEntryId ? folder?.trackedEntries.get(baseEntryId) : undefined;
-		if (!session || !baseEntryId || !folder || !tracked || !isAttachmentFile(tracked) || !this.bases) return;
+		if (!session || !baseEntryId || !folder || !tracked || (inline ? !isDocument(tracked) : !isAttachmentFile(tracked) || !this.bases)) return;
 		let released = false, transferred = false; let bootstrap: (() => void) | undefined; const retained: (() => void)[] = [];
 		const current = () => !released && !this.stopped && alive() && this.nativeBasesCommentsEnabled && surface.current() &&
-			this.plugin.app.vault.getFileByPath(file.path) === file && this.targetFor(file).session === session && this.targetFor(file).baseEntryId === baseEntryId &&
+			this.plugin.app.vault.getFileByPath(file.path) === file && this.targetFor(file).session === session && (inline ? this.targetFor(file).entryId : this.targetFor(file).baseEntryId) === baseEntryId &&
 			(session.status === "ready" || session.status === "offline");
 		const release = () => { if (released) return; released = true; for (const stop of retained) stop(); retained.length = 0; };
 		try {
 			if (!current()) return;
 			if (session.status === "offline" && target.entryId && !session.permission(target.entryId)?.read) {
-				const stop = session.watch(target.entryId, () => this.notify(), "base"); let stopped = false;
+				const stop = session.watch(target.entryId, () => this.notify(), inline ? "note" : "base"); let stopped = false;
 				bootstrap = () => { if (!stopped) { stopped = true; stop(); } };
 				retained.push(bootstrap); await session.scopeReady(target.entryId);
 			}
-			let cached = await this.bases.cachedViews(folder, tracked, { identity: session.identity, readable: () => {
-				const pinned = this.targetFor(file).entryId;
-				return current() && session.status === "offline" && !!pinned && session.permission(pinned)?.read === true;
-			} });
-			if (session.online) {
-				try { cached = await this.bases.refreshViews(folder, tracked); } catch { /* Exact byte proof below refuses unsynchronized edits. */ }
+			let snapshot: BaseRegistrySnapshot | undefined;
+			if (inline) {
+				retained.push(session.watch(baseEntryId, () => this.notify(), "note"));
+				await session.scopeReady(baseEntryId);
+				const generation = session.knownDocumentGeneration(baseEntryId), request = inline.anchors.request(inline.anchor);
+				if (!current() || !generation || !request || !session.permission(baseEntryId)?.read) return;
+				const key = "inlineBaseRegistry:" + baseEntryId + ":" + request.start + ":" + request.end;
+				const verified = () => current() && inline.current() && session.permission(baseEntryId)?.read === true && session.knownDocumentGeneration(baseEntryId) === generation;
+				if (session.online) {
+					snapshot = await session.transport.inspectInlineBase(baseEntryId, generation, request, verified);
+					if (!verified()) return;
+					await session.trackLocal(session.store.setPreference(key, protocolJson(snapshot)));
+				} else {
+					const saved = await session.store.preference(key);
+					if (saved) snapshot = parseBaseRegistry(saved, baseEntryId, undefined, generation);
+				}
+				if (!verified()) return;
+			} else {
+				if (!isAttachmentFile(tracked) || !this.bases) return;
+				let cached = await this.bases.cachedViews(folder, tracked, { identity: session.identity, readable: () => {
+					const pinned = this.targetFor(file).entryId;
+					return current() && session.status === "offline" && !!pinned && session.permission(pinned)?.read === true;
+				} });
+				if (session.online) {
+					try { cached = await this.bases.refreshViews(folder, tracked); } catch { /* Exact byte proof below refuses unsynchronized edits. */ }
+				}
+				if (cached.pending) return;
+				snapshot = cached.snapshot;
 			}
-			if (!current() || cached.pending || !cached.snapshot) return;
-			const binding = await surface.bind(cached.snapshot, baseEntryId, () => this.plugin.app.vault.read(file), current);
+			if (!current() || !snapshot) return;
+			const binding = await surface.bind(snapshot, baseEntryId, inline ? inline.read : () => this.plugin.app.vault.read(file), current);
 			if (!binding || !current()) return;
 			const entryId = baseDiscussionScope(baseEntryId, binding.viewId);
 			retained.push(session.watch(entryId, () => this.notify(), "base"));
@@ -543,7 +565,10 @@ export class DiscussionHost extends Component {
 		if (!current()) return false;
 		this.baseSelection(context.session, context.baseEntryId);
 		this.baseSelections.get(context.session)!.get(context.baseEntryId)!.choice = choice;
-		this.lastFile = context.file; this.focus = undefined; this.notify(); return true;
+		this.lastFile = context.file;
+		if (context.surface.inlineSource) this.detachedTarget = { path: context.file.path, kind: "base", entryId: context.entryId,
+			session: context.session, baseEntryId: context.baseEntryId, baseViewName: context.binding.name };
+		this.focus = undefined; this.notify(); return true;
 	}
 	async commentBaseHandle(context: BaseCommentContext, handle: NativeBaseHandle, target: NativeBaseTarget = handle.target): Promise<boolean> {
 		const action = ++this.baseAction;
@@ -806,7 +831,14 @@ export class DiscussionHost extends Component {
 	}
 	async saveCommentSelection({ session, entryId, file, anchor }: CapturedCommentSelection<LocalDiscussionAnchor>): Promise<boolean> {
 		try {
-			const current = () => !this.stopped && session.status !== "closed" && this.targetFor(file).session === session && this.targetFor(file).entryId === entryId && session.permission(entryId)?.comment;
+			const current = () => {
+				const target = this.targetFor(file), scope = parseDiscussionScope(entryId);
+				const inline = target.kind === "note" && !!scope && scope.entryId === target.entryId && !!scope.viewId &&
+					this.detachedTarget?.session === session && this.detachedTarget.entryId === entryId && this.detachedTarget.path === file.path &&
+					(anchor.type === "base" && anchor.view_id === scope.viewId || anchor.type === "base_group_pending" && anchor.capture.view_id === scope.viewId);
+				return !this.stopped && session.status !== "closed" && target.session === session &&
+					(target.entryId === entryId || inline) && session.permission(entryId)?.comment;
+			};
 			if (!current()) return false;
 			if (this.recoverySelection) {
 				const recovery = this.recoverySelection;
