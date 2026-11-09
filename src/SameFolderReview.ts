@@ -108,7 +108,7 @@ function recipe(plan: SourceInstallationPlan, before: NativeReviewEntry[], input
 
 /** Fingerprint the native observation shown to the user, including the selected
  * plan and location. It is not authority to write or an atomic tree snapshot. */
-export async function sameFolderComparisonDigest(comparison: { plan: SourceInstallationReference; root: string; rows: SameFolderInspectionRow[] }) {
+export async function sameFolderComparisonDigest(comparison: { plan: SourceInstallationReference; root: string; rows: Pick<SameFolderInspectionRow, "path" | "current">[] }) {
 	const root = sourceInstallationNativeRoot(comparison.root), plan = { id: uuid(comparison.plan.id), sha256: digest(comparison.plan.sha256) };
 	const before = entries(comparison.rows.filter(row => row.current).map(row => ({ path: row.path, ...row.current! })), root);
 	const bytes = new TextEncoder().encode(JSON.stringify({ plan, root, before })).buffer;

@@ -53,8 +53,9 @@ absent. This is not an atomic whole-folder swap or a transparent editor save.
 Editor buffers, watchers and old instances require coordination before exposing
 the flow. Parent directories must already exist. The [saved whole-folder review](same-folder-review-preview.md)
 now defines operation order, including directory creation/removal, renames, case
-changes and file/directory transitions; their physical execution still belongs
-to the complete coordinator.
+changes and file/directory transitions. Their physical execution and final tree
+and retained-original verification now have a [native coordinator](same-folder-materialization-preview.md);
+same-root activation and editor handoff remain separate unfinished work.
 
 If an untracked writer changes the original at the capture boundary, the actual
 new inode/bytes are retained in `before.bin`, verification fails, and the selected
@@ -90,9 +91,9 @@ invalid operations or hosts.
 
 The actual HTTP/Rust restore fixture downloads and verifies the selected source,
 prepares a separate disposable client's same-folder journal and immutable review,
-enters `applying`, and applies all operations in that file-only review using the
-production comparison and filesystem adapters. It verifies retained original
-bytes, selected native bytes, ordered journal progress and retry protection for
+enters `applying`, and applies all operations in that file/directory review using
+the production native coordinator. It verifies retained original files and
+directories, selected native bytes, ordered journal progress and retry protection for
 a later local edit. The journal remains `applying`; this is not evidence that
 the complete folder is ready for activation. The HTTP/MinIO fixture runs the same
 proof with actual managed attachment downloads.
@@ -107,8 +108,9 @@ actually published, and retry preserves the later change rather than adopting
 an unrelated inode or recreating a deleted file.
 
 Durable review binding and ordered completion metadata now have their own
-[implementation and evidence](same-folder-review-preview.md). Next: directory/rename handling,
-complete-folder verification, private archive storage, same-root cache/editor/
+[implementation and evidence](same-folder-review-preview.md). Directory execution
+and complete-tree verification now have [coordinator evidence](same-folder-materialization-preview.md).
+Next: ambiguous-operation/local-edit recovery, private archive storage, same-root cache/editor/
 registry handoff, recovery UI, and native desktop/mobile acceptance. No live
 vault or production service has been changed.
 

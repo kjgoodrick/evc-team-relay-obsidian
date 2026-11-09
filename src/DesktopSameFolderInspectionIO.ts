@@ -1,14 +1,24 @@
 import { FileSystemAdapter, Platform, type Vault } from "obsidian";
 import { requireRecoveryRelativePath } from "./ManagedRecoveryArchive";
-import { sourceInstallationNativeRoot } from "./SourceInstallationPlan";
+import { sourceInstallationNativeRoot, sourceInstallationPath } from "./SourceInstallationPlan";
 import type { SameFolderInspectionIO } from "./SameFolderSourceInspection";
 
 /** Desktop read-only recovery inspection. No files, ownership markers or
  * directories are created. Identity checks detect ordinary replacement; this
  * does not lock arbitrary external processes or provide a whole-tree snapshot. */
 export function createDesktopSameFolderInspectionIO(vault: Vault, inputRoot: string, checkContext = () => {}): SameFolderInspectionIO {
+	return createInspection(vault, sourceInstallationNativeRoot(inputRoot), checkContext, 100_001);
+}
+
+/** Read only the fixed operation area for one source plan. Kept separate from
+ * native-root validation so recovery storage never becomes a sync destination. */
+export function createDesktopOperationInspectionIO(vault: Vault, planId: string, checkContext = () => {}) {
+	return createInspection(vault, `${sourceInstallationPath(planId)}/native-operations`, checkContext, 200_003);
+}
+
+function createInspection(vault: Vault, root: string, checkContext: () => void, maxDirectories: number) {
 	if (Platform.isMobile || typeof FileSystemAdapter !== "function" || !(vault.adapter instanceof FileSystemAdapter)) throw new Error("This host does not provide native recovery inspection");
-	const root = sourceInstallationNativeRoot(inputRoot), adapter = vault.adapter, base = adapter.getBasePath();
+	const adapter = vault.adapter, base = adapter.getBasePath();
 	// eslint-disable-next-line @typescript-eslint/no-require-imports -- established desktop capability
 	const fs = require("fs/promises") as typeof import("node:fs/promises");
 	// eslint-disable-next-line @typescript-eslint/no-require-imports -- desktop filesystem paths
@@ -25,7 +35,7 @@ export function createDesktopSameFolderInspectionIO(vault: Vault, inputRoot: str
 	};
 	const rememberDirectory = (name: string, stat: import("node:fs").BigIntStats) => {
 		if (!stat.isDirectory() || stat.isSymbolicLink() || directories.has(name) && directories.get(name) !== identity(stat)) throw new Error("A native inspection directory changed");
-		if (!directories.has(name) && directories.size >= 100_001) throw new Error("The native inspection directory limit was exceeded");
+		if (!directories.has(name) && directories.size >= maxDirectories) throw new Error("The native inspection directory limit was exceeded");
 		directories.set(name, identity(stat));
 	};
 	const locate = async (relative: string) => {
@@ -54,11 +64,13 @@ export function createDesktopSameFolderInspectionIO(vault: Vault, inputRoot: str
 	};
 	return {
 		root,
-		stat: async relative => {
+		identity: async (relative: string) => { const result = await inspect(relative); return result ? identity(result.value) : null; },
+		vaultIdentity: async () => { await locate(root); return vaultIdentity!; },
+		stat: async (relative: string): Promise<{ type: "file" | "folder"; size: number } | null> => {
 			const result = await inspect(relative);
 			return result ? { type: result.value.isDirectory() ? "folder" : "file", size: Number(result.value.size) } : null;
 		},
-		list: async (relative, maxEntries) => {
+		list: async (relative: string, maxEntries: number) => {
 			if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_001) throw new Error("Invalid native directory inspection limit");
 			const before = await inspect(relative);
 			if (!before?.value.isDirectory()) throw new Error("The native inspection directory is unavailable");
@@ -72,7 +84,7 @@ export function createDesktopSameFolderInspectionIO(vault: Vault, inputRoot: str
 				|| before.value.ctimeNs !== after.value.ctimeNs) throw new Error("A native directory changed while being listed");
 			check(); return result;
 		},
-		readBinary: async (relative, maxBytes) => {
+		readBinary: async (relative: string, maxBytes: number) => {
 			if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 256 * 1024 * 1024) throw new Error("Invalid native file inspection limit");
 			const absolute = await locate(relative), handle = await fs.open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
 			try {

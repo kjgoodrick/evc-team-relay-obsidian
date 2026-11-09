@@ -17,9 +17,8 @@ import { inspectSameFolderSource } from "../../src/SameFolderSourceInspection";
 import { sameFolderComparisonDigest, type NativeReviewChoice } from "../../src/SameFolderReview";
 import { prepareSameFolderReview, verifySameFolderReview } from "../../src/SameFolderReviewPreparation";
 import { createDesktopSameFolderInspectionIO } from "../../src/DesktopSameFolderInspectionIO";
-import { applyDesktopSameFolderFileOperation } from "../../src/DesktopSameFolderFileOperation";
-import type { SameFolderFileOperation } from "../../src/SameFolderFileOperation";
-import { holdNativeSourceWrites } from "../../src/storage/native-document-writes";
+import { createDesktopSameFolderMaterializationIO } from "../../src/DesktopSameFolderMaterializationIO";
+import { withMaterializedSameFolder } from "../../src/SameFolderMaterialization";
 import { activateSourceInstallation, sourceActivationRequest } from "../../src/SourceInstallationActivation";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
 import { admitSourceStartup } from "../../src/storage/source-startup-admission";
@@ -117,21 +116,23 @@ export async function proveSourceInstallation(cache: RelayCredentialCache, fixtu
 	} finally { scope?.destroy(); journal?.close(); await fs.rm(directory, { recursive: true, force: true }); }
 }
 
-/** Bind a complete file-only review to a separate disposable client's journal,
- * apply every reviewed operation and record progress. Directory execution and
- * final cache/editor activation are separate work and are not claimed here. */
+/** Bind a complete review to a separate disposable client's journal, apply all
+ * reviewed file/directory operations and record progress. Final cache/editor
+ * activation is separate work and is not claimed here. */
 async function proveSameFolderNativeOperation(vault: Vault, directory: string, cache: RelayCredentialCache,
 	input: SourceInventoryIdentity, file: string) {
 	const source = { ...input, hostAppId: crypto.randomUUID() }, root = "Same folder native proof", reviewId = crypto.randomUUID();
 	const target = `${root}/${file}`, before = new TextEncoder().encode("Local content retained before replacement").buffer;
 	await fs.mkdir(path.dirname(path.join(directory, target)), { recursive: true }); await fs.writeFile(path.join(directory, target), new Uint8Array(before));
+	const retired = `${root}/Retired parent/Local.md`, retainedText = new TextEncoder().encode("Retain nested local work").buffer;
+	await fs.mkdir(path.join(directory, root, "Retired parent/Empty child"), { recursive: true });
+	await fs.writeFile(path.join(directory, retired), new Uint8Array(retainedText));
 	const archive = await prepareRecoveryBackup({ stat: vault.adapter.stat.bind(vault.adapter), readBinary: vault.adapter.readBinary.bind(vault.adapter),
 		mkdir: async name => { await fs.mkdir(path.join(directory, name), { recursive: true }); },
 		write: (name, value) => fs.writeFile(path.join(directory, name), value), writeBinary: (name, value) => fs.writeFile(path.join(directory, name), new Uint8Array(value)),
-	}, async () => ({ files: [{ path: target, bytes: before }], documents: [], index: new Uint8Array([0, 0]) }), {});
-	const journal = await SourceSelectionJournal.open(source), hold = holdNativeSourceWrites(vault, root);
+	}, async () => ({ files: [{ path: target, bytes: before }, { path: retired, bytes: retainedText }], documents: [], index: new Uint8Array([0, 0]) }), {});
+	const journal = await SourceSelectionJournal.open(source);
 	try {
-		await hold.wait({ check: () => {} });
 		const review = await journal.apply({ type: "begin", expectedRevision: null, operationId: crypto.randomUUID(), reviewId, restoreGeneration: source.restoreGeneration! });
 		const snapshot = await readManagedInventory(cache, source.s3rn, source.serverId, source), staging = createDesktopSourceInstallationIO(vault);
 		const capture = { source, reviewId, archive: archive.reference, originalRoot: root, destinationRoot: root, mode: "existing-folder" as const, snapshot };
@@ -148,35 +149,35 @@ async function proveSameFolderNativeOperation(vault: Vault, directory: string, c
 		const verified = await verifySameFolderReview(createDesktopSourceInstallationIO(vault), saved.reference, { ...capture, plan: prepared.staged.reference });
 		expect(verified.review).toEqual(saved.review);
 		const activation = saved.selection.pending!.preparation!.activation!;
-		let applying = await journal.apply({ type: "start", expectedRevision: saved.selection.revision, reviewId, operationId: activation.startOperationId });
-		await expect(journal.apply({ type: "commit", expectedRevision: applying.revision, reviewId, operationId: activation.commitOperationId, destinationRoot: root })).rejects.toThrow("Finish the reviewed native operations");
-		let replaced: { operation: SameFolderFileOperation; selected: ArrayBuffer | null } | undefined;
-		for (const [index, step] of verified.review.operations.entries()) {
-			if (step.kind !== "file") throw new Error("This fixture requires the directory executor");
-			const operation: SameFolderFileOperation = { format: "team-relay-native-file-operation", version: 1, id: step.id,
-				plan: prepared.staged.reference, reviewId, root, path: step.path, before: step.before, after: step.after };
-			const selected = step.after ? await staging.readBinary(`${prepared.staged.path}/files/${step.entryId}.bin`) : null;
-			const result = await applyDesktopSameFolderFileOperation(vault, operation, selected, hold);
-			if (selected) expect(new Uint8Array(await vault.adapter.readBinary(`${root}/${step.path}`))).toEqual(new Uint8Array(selected));
-			if (step.path === file) {
-				expect(new Uint8Array(await vault.adapter.readBinary(result.preservedPath!))).toEqual(new Uint8Array(before));
-				replaced = { operation, selected };
+		const request = { source, reviewId, revision: saved.selection.revision!, operationId: activation.startOperationId };
+		const materializer = createDesktopSameFolderMaterializationIO(vault, root);
+		const completed = await withMaterializedSameFolder(journal, staging, materializer, request, async session => {
+			await session.verifyNative(); return session;
+		});
+		const applying = completed.selection;
+		expect(completed.applied).toBe(verified.review.operations.length);
+		for (const step of verified.review.operations) {
+			const control = `${prepared.staged.path}/native-operations/${step.id}`;
+			if (step.kind === "directory") {
+				if (step.action === "remove") expect(await fs.readdir(path.join(directory, control, "before.dir"))).toEqual([]);
+				continue;
 			}
-			// A restart between native publication and progress recording must use
-			// the same immutable operation, without replacing the native file again.
-			expect(await applyDesktopSameFolderFileOperation(vault, operation, selected, hold)).toMatchObject({ resumed: true });
-			const command = { type: "finish-native-operation" as const, expectedRevision: applying.revision, reviewId,
-				operationId: step.id, nativeReview: saved.reference, index };
-			applying = await journal.apply(command); expect(await journal.apply(command)).toEqual(applying);
+			if (step.after) {
+				const selected = await staging.readBinary(`${prepared.staged.path}/files/${step.entryId}.bin`);
+				expect(new Uint8Array(await vault.adapter.readBinary(`${root}/${step.path}`))).toEqual(new Uint8Array(selected));
+			}
+			if (step.path === file) expect(new Uint8Array(await vault.adapter.readBinary(`${control}/before.bin`))).toEqual(new Uint8Array(before));
+			if (`${root}/${step.path}` === retired) expect(new Uint8Array(await vault.adapter.readBinary(`${control}/before.bin`))).toEqual(new Uint8Array(retainedText));
 		}
-		expect(replaced).toBeDefined();
 		const reopened = await SourceSelectionJournal.open(source);
 		try { expect((await reopened.read()).pending?.completedNativeOperations).toBe(verified.review.operations.length); }
 		finally { reopened.close(); }
+		const installed = await inspectSameFolderSource(staging, createDesktopSameFolderInspectionIO(vault, root), prepared.staged.reference, capture);
+		expect(installed.rows.every(row => row.change === "unchanged" || row.change === "absent")).toBe(true);
 		await fs.writeFile(path.join(directory, target), "Later local edit at the same path");
-		await expect(applyDesktopSameFolderFileOperation(vault, replaced!.operation, replaced!.selected, hold)).rejects.toThrow();
+		await expect(withMaterializedSameFolder(journal, staging, materializer, { ...request, revision: applying.revision! }, async () => {})).rejects.toThrow("incomplete or changed");
 		expect(await fs.readFile(path.join(directory, target), "utf8")).toBe("Later local edit at the same path");
 		expect((await journal.read()).revision).toBe(applying.revision);
 		expect((await journal.read()).pending?.phase).toBe("applying");
-	} finally { hold.release(); journal.close(); }
+	} finally { journal.close(); }
 }

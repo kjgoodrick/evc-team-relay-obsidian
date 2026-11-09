@@ -30,8 +30,9 @@ The review reconstructs a deterministic recipe from the plan and native tree:
 Each operation has a durable UUID. Parsing rebuilds this recipe and checks every
 operation's order, path, kind, source entry and before/after content descriptor.
 Missing, extra, reordered or duplicate operations cannot verify. Recipes cover
-file/directory transitions and case-only changes; a directory executor is still
-required before those recipes can be physically applied.
+file/directory transitions and case-only changes; the
+[native coordinator](same-folder-materialization-preview.md) now physically
+applies these recipes and checks the complete result while keeping recovery pending.
 
 The artifact is exclusively created at
 `Relay Recovery (local only)/Source reviews/<UUID>/review.json`, read back,
@@ -75,21 +76,20 @@ choices and corrupt recipes, competing reviewers, lost responses, aborted
 transactions, ordered/retryable progress, reserved IDs, superseded reviews and
 zero-operation activation metadata.
 
-The checkpoint passes **25 review tests**, **94 focused recovery tests**, and
+The original saved-review checkpoint passed **25 review tests**, **94 focused recovery tests**, and
 **4,682 tests across 312 suites** in the full plugin regression (41 tests in 27
 opt-in suites skipped). Main types, changed-source lint, browser bundles and the
 production build pass; the build retains 15 existing warnings. The test-type
 ratchet remains at 205 errors/44 signatures against the frozen 207/46 baseline.
 
 The actual HTTP/Rust and HTTP/MinIO fixtures download selected content, save and
-reopen a complete file-only review, apply every reviewed file operation with the
-production desktop primitive, verify preserved originals, record ordered progress
-and reopen the journal. A later edit at the original path survives a retry.
+reopen a complete review, apply its file/directory recipe with the production
+coordinator, verify the selected tree and preserved originals, record ordered
+progress and reopen the journal. A later edit at the original path survives a retry.
 The fixture deliberately remains `applying`; it does not claim complete-folder
 cache/editor activation or native Obsidian acceptance.
 
-Remaining: directory execution, full operation coordinator and final tree
-verification, recovery of retained/merged local changes, private packaged archive
+Remaining: recovery of retained/merged local changes and ambiguous operations, private packaged archive
 storage, same-root cache/editor/registry handoff, recovery UI and native
 desktop/mobile acceptance. No live vault or production service was changed.
 

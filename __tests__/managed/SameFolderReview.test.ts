@@ -14,6 +14,9 @@ import { inspectSameFolderSource } from "../../src/SameFolderSourceInspection";
 import { parseSameFolderReview, sameFolderComparisonDigest, type NativeReviewChoice } from "../../src/SameFolderReview";
 import { prepareSameFolderReview, verifySameFolderReview } from "../../src/SameFolderReviewPreparation";
 import { SourceSelectionJournal } from "../../src/storage/source-selection-journal";
+import { trackNativeDocumentWrite } from "../../src/storage/native-document-writes";
+import { createDesktopSameFolderMaterializationIO } from "../../src/DesktopSameFolderMaterializationIO";
+import { withMaterializedSameFolder } from "../../src/SameFolderMaterialization";
 
 jest.mock("obsidian", () => ({ Platform: { isMobile: false }, FileSystemAdapter: class {} }));
 const encode = (value: string) => new TextEncoder().encode(value).buffer;
@@ -80,6 +83,28 @@ test("type transitions and case-only parent changes produce a complete ordered r
 		"create:Collision", "create:case", "write:Collision/New.md", "write:Retired", "write:case/New.md",
 	]);
 	expect(await fs.readFile(path.join(directory, "Team", "Collision"), "utf8")).toBe("old file");
+});
+
+test("a complete reviewed tree physically handles file/folder and case transitions with retained originals", async () => {
+	const server = { "Collision/New.md": "new nested", Retired: "now a file", "case/New.md": "new case" };
+	const f = await fixture({ local: { Collision: "old file", "Retired/Deep/Old.md": "old nested", "Case/Old.md": "old case" }, server });
+	const saved = await f.run(), native = createDesktopSameFolderMaterializationIO(vault, "Team");
+	const session = await withMaterializedSameFolder(f.journal, f.staging, native, { source: f.source, reviewId: f.request.reviewId,
+		revision: saved.selection.revision!, operationId: saved.selection.pending!.preparation!.activation!.startOperationId }, async session => {
+		await session.verifyNative();
+		await expect(trackNativeDocumentWrite(vault, "Team/New.md", () => fs.writeFile(path.join(directory, "Team/New.md"), "Unsafe"))).rejects.toMatchObject({ code: "native_source_write_held" });
+		return session;
+	});
+	expect(session.selection.pending?.completedNativeOperations).toBe(11); expect(session.applied).toBe(11);
+	await expect(session.verifyNative()).rejects.toThrow("session ended");
+	for (const step of saved.review.operations) {
+		const control = path.join(directory, f.prepared.staged.path, "native-operations", step.id);
+		if (step.kind === "file" && step.before) expect(await fs.readFile(path.join(control, "before.bin"), "utf8")).toBe(f.local[step.path]);
+		if (step.kind === "directory" && step.action === "remove") expect(await fs.readdir(path.join(control, "before.dir"))).toEqual([]);
+	}
+	expect((await fs.readdir(path.join(directory, "Team"))).sort()).toEqual(["Collision", "Retired", "case"]);
+	for (const [name, text] of Object.entries(server)) expect(await fs.readFile(path.join(directory, "Team", name), "utf8")).toBe(text);
+	expect((await f.journal.read()).pending?.phase).toBe("applying");
 });
 
 test("a file edit since the shown comparison requires a fresh review before creating an artifact", async () => {
@@ -220,4 +245,106 @@ test.each([-1, 100_001, 0.5, NaN])("invalid native operation count %s does not c
 	await expect(f.journal.apply({ type: "review-native", expectedRevision: f.request.revision, operationId: crypto.randomUUID(), reviewId: f.request.reviewId,
 		nativeReview: { id: crypto.randomUUID(), sha256: "a".repeat(64), operations } })).rejects.toThrow("Invalid source selection");
 	expect(await f.journal.read()).toEqual(f.prepared.selection);
+});
+
+async function materializationFixture() {
+	const f = await fixture(), saved = await f.run(), native = createDesktopSameFolderMaterializationIO(vault, "Team");
+	const request = { source: f.source, reviewId: f.request.reviewId, revision: saved.selection.revision!,
+		operationId: saved.selection.pending!.preparation!.activation!.startOperationId };
+	const finished = jest.fn(async (session: import("../../src/SameFolderMaterialization").SameFolderMaterializedSession) => session);
+	const run = () => withMaterializedSameFolder(f.journal, f.staging, native, request, finished);
+	return { ...f, saved, native, request, finished, run };
+}
+
+test("native changes after review refuse materialization before journal start", async () => {
+	const f = await materializationFixture(); await fs.writeFile(path.join(directory, "Team/Changed.md"), "Later local work");
+	await expect(f.run()).rejects.toThrow("changed after review");
+	expect(await f.journal.read()).toEqual(f.saved.selection); expect(f.finished).not.toHaveBeenCalled();
+	expect(await fs.readFile(path.join(directory, "Team/Changed.md"), "utf8")).toBe("Later local work");
+});
+
+test.each(["before progress", "after progress"])("native publication resumes after lost response %s without repeating completed work", async point => {
+	const f = await materializationFixture(), apply = f.journal.apply.bind(f.journal);
+	const failure = jest.spyOn(f.journal, "apply").mockImplementation(async (command, options) => {
+		if (command.type === "finish-native-operation" && command.index === 0) {
+			if (point === "after progress") await apply(command, options); throw new Error("lost progress response");
+		}
+		return apply(command, options);
+	});
+	await expect(f.run()).rejects.toThrow("lost progress response"); failure.mockRestore();
+	const pending = await f.journal.read(); expect(pending.pending?.completedNativeOperations).toBe(point === "after progress" ? 1 : 0);
+	f.request.revision = pending.revision!;
+	const file = jest.spyOn(f.native, "applyFile"), result = await f.run();
+	expect(result.resumed).toBe(point === "after progress" ? 0 : 1);
+	expect(file.mock.calls.map(([operation]) => operation.path)).toEqual(point === "after progress" ? ["Changed.md", "New.md"] : ["Retired.md", "Changed.md", "New.md"]);
+	expect(result.selection.pending?.completedNativeOperations).toBe(3);
+	expect(await fs.readFile(path.join(directory, "Team/Changed.md"), "utf8")).toBe("server");
+});
+
+test.each(["edit", "extra file", "corrupt review", "retained edit", "corrupt receipt"])("final verification refuses %s even with every operation recorded complete", async kind => {
+	const f = await materializationFixture(), applyFile = f.native.applyFile.bind(f.native);
+	jest.spyOn(f.native, "applyFile").mockImplementation(async (...args) => {
+		const result = await applyFile(...args);
+		if (args[0].path === "New.md") {
+			if (kind === "edit") await fs.writeFile(path.join(directory, "Team/Same.md"), "Later unchanged-file edit");
+			if (kind === "extra file") await fs.writeFile(path.join(directory, "Team/.local"), "Unexpected local work");
+			if (kind === "corrupt review") await fs.writeFile(path.join(directory, f.saved.path, "review.json"), "{}");
+			const control = path.join(directory, f.prepared.staged.path, "native-operations", f.saved.review.operations[0].id);
+			if (kind === "retained edit") await fs.writeFile(path.join(control, "before.bin"), "External edit to retained inode");
+			if (kind === "corrupt receipt") await fs.unlink(path.join(control, "published.json"));
+		}
+		return result;
+	});
+	await expect(f.run()).rejects.toThrow(); expect(f.finished).not.toHaveBeenCalled();
+	expect((await f.journal.read()).pending).toMatchObject({ phase: "applying", completedNativeOperations: 3 });
+	if (kind === "edit") expect(await fs.readFile(path.join(directory, "Team/Same.md"), "utf8")).toBe("Later unchanged-file edit");
+	if (kind === "extra file") expect(await fs.readFile(path.join(directory, "Team/.local"), "utf8")).toBe("Unexpected local work");
+	if (kind === "retained edit") expect(await fs.readFile(path.join(directory, f.prepared.staged.path, "native-operations", f.saved.review.operations[0].id, "before.bin"), "utf8")).toBe("External edit to retained inode");
+});
+
+test("late work inside a retained directory prevents successful whole-folder verification", async () => {
+	const f = await fixture({ local: { "Old/Local.md": "local" }, server: { "New.md": "selected" } }), saved = await f.run();
+	const native = createDesktopSameFolderMaterializationIO(vault, "Team"), apply = native.applyFile.bind(native);
+	const removed = saved.review.operations.find(step => step.kind === "directory" && step.action === "remove")!;
+	const retained = path.join(directory, f.prepared.staged.path, "native-operations", removed.id, "before.dir", "Later.md");
+	jest.spyOn(native, "applyFile").mockImplementation(async (...args) => { const result = await apply(...args); if (args[0].path === "New.md") await fs.writeFile(retained, "Later retained work"); return result; });
+	const finished = jest.fn(async () => {});
+	await expect(withMaterializedSameFolder(f.journal, f.staging, native, { source: f.source, reviewId: f.request.reviewId,
+		revision: saved.selection.revision!, operationId: saved.selection.pending!.preparation!.activation!.startOperationId }, finished)).rejects.toThrow("Retained directory work changed");
+	expect(finished).not.toHaveBeenCalled(); expect(await fs.readFile(retained, "utf8")).toBe("Later retained work");
+	expect((await f.journal.read()).pending?.completedNativeOperations).toBe(saved.review.operations.length);
+});
+
+test("retry after complete materialization checks later edits without replaying native operations", async () => {
+	const f = await materializationFixture(), first = await f.run(); f.request.revision = first.selection.revision!; f.finished.mockClear();
+	const file = jest.spyOn(f.native, "applyFile"), folder = jest.spyOn(f.native, "applyDirectory");
+	await fs.writeFile(path.join(directory, "Team/Changed.md"), "Later local edit");
+	await expect(f.run()).rejects.toThrow("incomplete or changed"); expect(file).not.toHaveBeenCalled(); expect(folder).not.toHaveBeenCalled(); expect(f.finished).not.toHaveBeenCalled();
+	expect(await fs.readFile(path.join(directory, "Team/Changed.md"), "utf8")).toBe("Later local edit");
+});
+
+test("replacement of the root between operations stops before writing into its substitute", async () => {
+	const f = await materializationFixture(), applyFile = f.native.applyFile.bind(f.native);
+	jest.spyOn(f.native, "applyFile").mockImplementationOnce(async (...args) => {
+		const result = await applyFile(...args); await fs.rename(path.join(directory, "Team"), path.join(directory, "Moved Team"));
+		await fs.mkdir(path.join(directory, "Team")); return result;
+	});
+	await expect(f.run()).rejects.toThrow("directory changed");
+	expect(await fs.readdir(path.join(directory, "Team"))).toEqual([]);
+	expect(await fs.readFile(path.join(directory, "Moved Team/Changed.md"), "utf8")).toBe("local");
+	expect((await f.journal.read()).pending?.completedNativeOperations).toBe(0);
+});
+
+test("cancellation waits for an admitted native operation before releasing its hold", async () => {
+	const f = await materializationFixture(), applyFile = f.native.applyFile.bind(f.native), abort = new AbortController();
+	let entered!: () => void, release!: () => void;
+	const admitted = new Promise<void>(resolve => { entered = resolve; }), settled = new Promise<void>(resolve => { release = resolve; });
+	jest.spyOn(f.native, "applyFile").mockImplementationOnce(async (...args) => { const result = await applyFile(...args); entered(); await settled; return result; });
+	const result = withMaterializedSameFolder(f.journal, f.staging, f.native, f.request, f.finished, { signal: abort.signal });
+	const outcome = expect(result).rejects.toThrow("cancelled");
+	try {
+		await admitted; abort.abort();
+		await expect(trackNativeDocumentWrite(vault, "Team/Changed.md", () => fs.writeFile(path.join(directory, "Team/Changed.md"), "Unsafe"))).rejects.toMatchObject({ code: "native_source_write_held" });
+	} finally { release(); }
+	await outcome; expect(f.finished).not.toHaveBeenCalled(); expect((await f.journal.read()).pending?.completedNativeOperations).toBe(0);
 });
