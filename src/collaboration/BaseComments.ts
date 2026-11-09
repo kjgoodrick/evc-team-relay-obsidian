@@ -1,3 +1,5 @@
+import { findInlineBase } from "../bases/FindInlineBase";
+import { parseBaseRegistry } from "../bases/BaseRegistryProtocol";
 import { nativeGroupTargetKey, nativeGroupTargetLabel } from "./NativeBaseGroupComments";
 import { pendingRangeLocation, type PendingBaseGroupAnchor } from "./LocalDiscussionAnchor";
 import { apiVersion, Component, FileView, MarkdownView, Menu, Notice, type MarkdownPostProcessorContext, type Plugin } from "obsidian";
@@ -180,6 +182,25 @@ export class BaseComments extends Component {
 		}
 	}
 
+	private async materializeInline(view: MarkdownView, session: DiscussionSession, entryId: string, definitionId: string, generation: string, authorized: () => boolean): Promise<void> {
+		try {
+			const context = this.host.imageContext(view, false);
+			const current = () => !this.stopped && authorized() && context.current() && context.session === session && context.entryId === entryId && session.knownDocumentGeneration(entryId) === generation;
+			if (!current()) return;
+			const target = await findInlineBase(context.text, definitionId, async request => {
+				const key = "inlineBaseRegistry:" + entryId + ":" + request.start + ":" + request.end;
+				const cached = await session.store.preference(key);
+				if (!current()) return;
+				if (cached) {
+					try { return parseBaseRegistry(cached, entryId, undefined, generation); } catch { /* Refresh an obsolete local identity. */ }
+				}
+				return session.online ? session.transport.inspectInlineBase(entryId, generation, request, current) : undefined;
+			}, current);
+			if (!target || !current()) return;
+			if (view.getMode() === "preview") view.previewMode.applyScroll(context.text.toString().slice(0, target.from).split("\n").length - 1);
+			else view.editor.scrollIntoView({ from: view.editor.offsetToPos(target.from), to: view.editor.offsetToPos(target.to) }, true);
+		} catch { /* Navigation retains its ordinary unavailable fallback. */ }
+	}
 	async reveal(session: DiscussionSession, entryId: string, anchor: BaseAnchor | PendingBaseGroupAnchor, authorized: () => boolean = () => true): Promise<boolean> {
 		if (this.stopped || !authorized() || !this.host.nativeBasesCommentsEnabled) return false;
 		const placement = anchor.type === "base_group_pending" ? anchor.capture : anchor;
@@ -200,7 +221,7 @@ export class BaseComments extends Component {
 		if (inline) {
 			pane = undefined;
 			// Markdown leaves open before their embedded Base renderers mount.
-			const deadline = Date.now() + 2_000;
+			let deadline = Date.now() + 2_000, materialized = false;
 			do {
 				if (this.stopped || !authorized() || !(leaf.view instanceof FileView) || leaf.view.file !== file) return true;
 				this.reconcile();
@@ -211,6 +232,11 @@ export class BaseComments extends Component {
 					if (context?.current() && context.session === session && context.binding.snapshot.definition_id === placement.definition_id && context.binding.snapshot.generation === placement.generation) {
 						selected = saved.view; pane = candidate; break;
 					}
+				}
+				if (!pane && !materialized && leaf.view instanceof MarkdownView) {
+					materialized = true;
+					await this.materializeInline(leaf.view, session, scope.entryId, placement.definition_id, placement.generation, () => authorized() && canNavigate());
+					deadline = Date.now() + 2_000;
 				}
 				if (pane || Date.now() >= deadline) break;
 				await new Promise<void>(resolve => window.setTimeout(resolve, 50));
