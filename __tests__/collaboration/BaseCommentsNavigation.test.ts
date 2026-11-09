@@ -108,3 +108,24 @@ test.each(["before", "open", "reveal", "activate", "ready", "verify", "never"] a
 		if (stage === "never") expect(revealRange).toHaveBeenCalledWith(expect.anything(), f.anchor, expect.any(Function));
 	} finally { f.close(); }
 });
+
+test("inline discussion navigation selects the matching definition inside its Markdown leaf", async () => {
+	const f = fixture("never", true);
+	try {
+		f.leaf.view.file.path = "Team/Inline.md"; f.leaf.view.file.extension = "md";
+		const first = document.createElement("div"), second = document.createElement("div");
+		f.leaf.view.contentEl.append(first, second);
+		const wrong = { file: f.leaf.view.file, contentEl: first }, right = { file: f.leaf.view.file, contentEl: second };
+		const wrongPane = { ready: jest.fn(async () => ({ session: f.session, current: () => true,
+			binding: { snapshot: { definition_id: id(99), generation: id(4) } } })), close: jest.fn() };
+		const internals = f.comments as unknown as { reconcile(): void; panes: Map<unknown, unknown>; inlineHosts: Map<object, unknown> };
+		jest.spyOn(internals, "reconcile").mockImplementation(() => {});
+		internals.panes.delete(f.leaf.view); internals.panes.set(wrong, wrongPane); internals.panes.set(right, f.pane);
+		internals.inlineHosts.set({}, { view: wrong, anchors: { close: jest.fn() } });
+		internals.inlineHosts.set({}, { view: right, anchors: { close: jest.fn() } });
+		expect(await f.comments.reveal(f.session, f.scope, f.anchor)).toBe(true);
+		expect(f.workspace.getLeaf).not.toHaveBeenCalled(); expect(f.leaf.openFile).not.toHaveBeenCalled();
+		expect(NativeBasesSurface.inspect).toHaveBeenCalledWith(right, "1.13.7", true, expect.anything());
+		expect(f.pane.reveal).toHaveBeenCalled();
+	} finally { f.close(); }
+});

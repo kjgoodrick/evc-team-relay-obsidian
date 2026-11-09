@@ -160,7 +160,8 @@ export class BaseComments extends Component {
 		const scope = parseDiscussionScope(entryId), file = scope ? this.host.baseFile(session, scope.entryId) : undefined;
 		if (!file || scope?.viewId !== placement.view_id || !session.permission(entryId)?.read) return false;
 		const workspace = this.plugin.app.workspace;
-		let leaf = workspace.getLeavesOfType("bases").find(leaf => leaf.view instanceof FileView && leaf.view.file === file);
+		const inline = file.extension === "md";
+		let leaf = workspace.getLeavesOfType(inline ? "markdown" : "bases").find(leaf => leaf.view instanceof FileView && leaf.view.file === file);
 		const canNavigate = () => authorized() && this.timeline.canNavigate(workspace.getMostRecentLeaf()?.view.containerEl.ownerDocument ?? document) &&
 			(!leaf || this.timeline.canNavigate(leaf.view.containerEl.ownerDocument));
 		const interrupted = () => { if (!authorized()) return true; if (canNavigate()) return false; new Notice("Save or discard the task inspector changes before navigating to this discussion."); return true; };
@@ -169,10 +170,20 @@ export class BaseComments extends Component {
 		if (interrupted()) return true;
 		await workspace.revealLeaf(leaf); this.reconcile();
 		if (interrupted()) return true;
-		const pane = leaf.view instanceof FileView ? this.panes.get(leaf.view) : undefined;
+		let selected = leaf.view, pane = selected instanceof FileView ? this.panes.get(selected) : undefined;
+		if (inline) {
+			for (const saved of this.inlineHosts.values()) {
+				if (saved.view.file !== file || !leaf.view.containerEl.contains(saved.view.contentEl)) continue;
+				const candidate = this.panes.get(saved.view), context = await candidate?.ready();
+				if (interrupted()) return true;
+				if (context?.current() && context.session === session && context.binding.snapshot.definition_id === placement.definition_id && context.binding.snapshot.generation === placement.generation) {
+					selected = saved.view; pane = candidate; break;
+				}
+			}
+		}
 		if (!pane) return false;
 		const guard = pane.navigationGuard(), navigating = () => authorized() && guard();
-		const surface = NativeBasesSurface.inspect(leaf.view, apiVersion, this.host.nativeBasesCommentsEnabled, this.timeline);
+		const surface = NativeBasesSurface.inspect(selected, apiVersion, this.host.nativeBasesCommentsEnabled, this.timeline);
 		if (!surface) return false;
 		const activated = await this.host.activateBaseView(surface, session, entryId, placement, navigating);
 		if (interrupted() || !navigating()) return true;

@@ -908,7 +908,8 @@ test("inline Bases bind verified definition bytes and pin their view within the 
 	const s = await nativeBaseFixture();
 	try {
 		s.file.path = "Team/Inline.md"; s.file.extension = "md";
-		Object.assign(s.folder.folderIndex, { recordFor: () => ({ id: id(3), type: "markdown" }) });
+		Object.assign(s.folder.folderIndex, { recordFor: () => ({ id: id(3), type: "markdown" }),
+			eachRecord: (visit: (record: { id: string; type: string }, path: string) => void) => { visit({ id: id(3), type: "markdown" }, "Inline.md"); visit(s.record, "Note.md"); } });
 		Object.assign(s.folder, { trackedEntries: new Map([[id(3), { isDocument: true }]]) });
 		const request = { dependency: "snapshot", start: "start", end: "end", selected_length: 7 };
 		const snapshot = { protocol_version: 1, definition_id: id(6), entry_id: id(3), generation: id(7), revision: 1,
@@ -927,5 +928,7 @@ test("inline Bases bind verified definition bytes and pin their view within the 
 		s.session.online = false; s.session.status = "offline"; s.store.preference.mockResolvedValue(snapshot);
 		inspect.mockClear();
 		const offline = await s.context(); expect(offline).toBeDefined(); expect(inspect).not.toHaveBeenCalled(); offline!.release();
+		expect(await s.host.activateBaseView(s.surface as unknown as NativeBasesSurface, s.session as unknown as DiscussionSession, s.scope,
+			{ definition_id: id(6), view_id: id(4), generation: id(7), registry_revision: 1 }, () => true)).toBe("unchanged");
 	} finally { s.close(); }
 });

@@ -379,7 +379,9 @@ export class DiscussionHost extends Component {
 		const folder = this.shares.toArray().find(folder => folder.entityGuid === session.identity.shareId); if (!folder) return;
 		const paths: string[] = []; folder.folderIndex.eachRecord((record, path) => { if (record.id === entryId) paths.push(path); });
 		const file = paths.length === 1 ? this.plugin.app.vault.getFileByPath(folder.absolutePath(paths[0])) : null;
-		return file?.extension === "base" && this.targetFor(file).session === session && this.targetFor(file).baseEntryId === entryId ? file : undefined;
+		if (!file) return;
+		const target = this.targetFor(file);
+		return target.session === session && (file.extension === "base" && target.baseEntryId === entryId || file.extension === "md" && target.entryId === entryId) ? file : undefined;
 	}
 	async toggleNativeBasesComments(): Promise<void> {
 		await this.settings.mutateValue(value => ({ ...value, nativeBasesComments: !this.nativeBasesCommentsEnabled }));
@@ -696,6 +698,18 @@ export class DiscussionHost extends Component {
 		const current = () => !this.stopped && this.nativeBasesCommentsEnabled && alive() && surface.current() &&
 			!!scope && scope.viewId === anchor.view_id && this.baseFile(session, scope.entryId) === file && session.permission(scopeId)?.read === true &&
 			(session.status === "ready" || session.status === "offline");
+		if (surface.inlineSource) {
+			if (!current()) return "unavailable";
+			const context = await this.baseCommentContext(surface, current);
+			if (!context) return "unavailable";
+			try {
+				const proof = await session.readBaseContext(scopeId), binding = context.binding;
+				if (!current() || !context.current() || proof.definition_id !== anchor.definition_id || proof.generation !== anchor.generation ||
+					proof.definition_id !== binding.snapshot.definition_id || proof.generation !== binding.snapshot.generation || proof.registry_revision !== binding.snapshot.revision) return "unavailable";
+				if (binding.viewId === anchor.view_id) return "unchanged";
+				return surface.activateView(anchor.view_id, binding) ? "changed" : "unavailable";
+			} catch { return "unavailable"; } finally { context.release(); }
+		}
 		if (!scope || !folder || !tracked || !isAttachmentFile(tracked) || !this.bases || !current()) return "unavailable";
 		try {
 			let cached = await this.bases.cachedViews(folder, tracked, { identity: session.identity, readable: () => current() && session.status === "offline" });
