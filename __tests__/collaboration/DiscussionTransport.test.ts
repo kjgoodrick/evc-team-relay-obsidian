@@ -215,3 +215,18 @@ test.each([[404, "discussion_snapshot_disabled"], [413, "discussion_snapshot_lim
 	const fetcher = jest.fn().mockResolvedValue(reply(Number(status), { error: { message: { code } } }));
 	await expect(new DiscussionTransport(identity, credentials, fetcher).snapshot(id(4))).rejects.toMatchObject({ status, code });
 });
+
+test("inline registry inspection binds the containing note and generation", async () => {
+	const source = { dependency: "AA==", start: "AQ==", end: "Ag==", selected_length: 7 };
+	const snapshot = { protocol_version: 1, entry_id: id(4), definition_id: id(5), generation: id(6), revision: 1,
+		content_sha256: "a".repeat(64), views: [], unmatched: { views: [], has_more: false, next_after: null } };
+	const fetcher = jest.fn().mockResolvedValue(reply(200, snapshot));
+	const transport = new DiscussionTransport(identity, credentials, fetcher);
+	expect((await transport.inspectInlineBase(id(4), id(6), source, () => true)).definition_id).toBe(id(5));
+	expect(fetcher.mock.calls[0][0]).toContain('/entries/'+id(4)+'/bases/inline-inspect');
+	expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ generation: id(6), source });
+	fetcher.mockResolvedValue(reply(200, { ...snapshot, generation: id(7) }));
+	await expect(transport.inspectInlineBase(id(4), id(6), source, () => true)).rejects.toMatchObject({ code: "invalid_read_response" });
+	await expect(transport.inspectInlineBase(id(4), id(6), source, () => false)).rejects.toBeInstanceOf(DiscussionFailure);
+	expect(fetcher).toHaveBeenCalledTimes(2);
+});

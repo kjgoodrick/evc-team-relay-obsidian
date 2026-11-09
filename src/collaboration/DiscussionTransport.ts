@@ -1,3 +1,5 @@
+import { parseBaseRegistry } from "../bases/BaseRegistryProtocol";
+import type { InlineBaseSourceRequest } from "../bases/InlineBaseAnchors";
 import { restoreContext, restoreGeneration, type RestoreBinding, type RestoreContext } from "./RestoreGeneration";
 import { queuedEnvelope } from "./QueuedDiscussionCommand";
 export { queuedEnvelope } from "./QueuedDiscussionCommand";
@@ -323,6 +325,12 @@ export class DiscussionTransport implements DiscussionSender {
 		const value = await this.request(this.scopePath(entryId) + "/anchor-context");
 		if (!object(value) || value.protocol_version !== 1 || value.entry_id !== actual || !isId(value.generation)) throw new DiscussionFailure("pause", "invalid_read_response");
 		return { entryId, generation: value.generation };
+	}
+	async inspectInlineBase(entryId: string, generation: string, source: InlineBaseSourceRequest, current: () => boolean) {
+		const scope = parseDiscussionScope(entryId);
+		if (!scope || scope.viewId || !isId(generation)) throw new DiscussionFailure("reject", "invalid_local_target");
+		return this.parse(await this.request(this.scopePath(entryId) + "/bases/inline-inspect", JSON.stringify({ generation, source }), { current }),
+			value => parseBaseRegistry(value, scope.entryId, undefined, generation));
 	}
 	async baseTargetContext(entryId: string, viewId: string, recordId?: string) {
 		if (!isId(viewId) || recordId !== undefined && !isId(recordId)) throw new DiscussionFailure("reject", "invalid_local_target");

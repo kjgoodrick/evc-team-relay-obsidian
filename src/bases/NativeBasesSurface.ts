@@ -1,3 +1,4 @@
+import { inlineBaseHostInfo } from "./InlineBasesHost";
 import { parseYaml, TFile } from "obsidian";
 import { sha256Hex } from "../contentDigest";
 import { isBaseDefinitionProperty, type BaseDefinitionProperty, type TimelineAxis } from "../collaboration/DiscussionProtocol";
@@ -117,6 +118,7 @@ function sameTarget(a: NativeBaseTarget, b: NativeBaseTarget): boolean {
 }
 
 export class NativeBasesSurface {
+	get inlineSource() { return inlineBaseHostInfo(this.host); }
 	readonly file: TFile;
 	readonly root: HTMLElement;
 	readonly name: string;
@@ -138,10 +140,10 @@ export class NativeBasesSurface {
 		if (!enabled || !NATIVE_BASES_VERSIONS.includes(version)) return;
 		try {
 			if (!object(host) || !callable(host.getViewType) || host.getViewType() !== "bases" || !(host.file instanceof TFile) ||
-				host.file.extension !== "base" || typeof host.file.path !== "string" || !element(host.contentEl) || !host.contentEl.isConnected ||
+				(host.file.extension !== "base" && !(host.file.extension === "md" && inlineBaseHostInfo(host)?.current())) || typeof host.file.path !== "string" || !element(host.contentEl) || !host.contentEl.isConnected ||
 				typeof host.data !== "string" || host.data.length > 262_144 || host.lastSavedData !== host.data || host.dirty !== false) return;
 			const controller = host.controller, query = host.query;
-			if (!object(controller) || controller.initialScan !== false || !object(query) || controller.query !== query || query.file !== host.file || !callable(query.getSerializable)) return;
+			if (!object(controller) || controller.initialScan !== false || !object(query) || controller.query !== query || (inlineBaseHostInfo(host) ? query.file !== undefined || controller.currentFile !== host.file : query.file !== host.file) || !callable(query.getSerializable)) return;
 			const renderer = controller.view;
 			if (!object(renderer)) return;
 			const builtin = ["table", "cards", "list"].includes(String(renderer.type));
