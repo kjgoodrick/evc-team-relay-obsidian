@@ -130,7 +130,23 @@ export class LocationHost extends Component {
 	async revealSurface(peer: SurfacePresencePeer, current: () => boolean, follow = false): Promise<boolean> {
 		return peer.surface === "base" ? await this.base?.revealPosition(current, peer.baseState, follow) === true : this.revealImage(current, peer.imageState, follow);
 	}
-	activateBase(location: BaseLocation, current: () => boolean): "ready" | "waiting" | "unavailable" { return this.base?.activate(location, current) ?? "waiting"; }
+	activateBase(location: BaseLocation, current: () => boolean): "ready" | "waiting" | "unavailable" {
+		if (!current() || this.closed) return "unavailable";
+		const parent = this.plugin.app.workspace.getActiveViewOfType(FileView);
+		if (parent?.file?.extension === "md" && this.fileFor(location) === parent.file) {
+			const matches = [...this.inlineViews.values()].filter(saved => saved.parent === parent && saved.current() &&
+				saved.proof.share_id === location.share_id && saved.proof.entry_id === location.entry_id &&
+				saved.proof.definition_id === location.definition_id && saved.proof.generation === location.generation);
+			if (matches.length > 1) return "unavailable";
+			if (!matches.length) return "waiting";
+			const selected = matches[0];
+			if (this.embeddedBaseFocus.active(parent) !== selected.view) {
+				if (!this.embeddedBaseFocus.select(parent, selected.view)) return "waiting";
+				this.callbacks.changed(); return "waiting";
+			}
+		}
+		return this.base?.activate(location, current) ?? "waiting";
+	}
 	embedPosition(peer: PresencePeer, follow = false): ReturnType<EmbeddedImageSurface["position"]> { return this.embedded?.position(peer, follow); }
 	revealEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): boolean { return this.embedded?.reveal(peer, follow, current) === true; }
 	async materializeEmbed(peer: PresencePeer, follow: boolean, current: () => boolean): Promise<boolean> { return await this.embedded?.revealAfterLayout(peer, follow, current) === true; }
@@ -628,7 +644,7 @@ export class LocationHost extends Component {
 		const matches: TFile[] = [];
 		for (const folder of this.shares.toArray()) if (folder.entityGuid === location.share_id && folder.config.onpremServerId === context.serverId) {
 			folder.folderIndex.eachRecord((record, path) => {
-				if (record.id !== location.entry_id || record.type !== (location.kind === "base" ? "file" : location.kind === "image" ? "image" : "markdown") || location.kind === "image" && record.hash !== location.content_sha256) return;
+				if (record.id !== location.entry_id || (location.kind === "base" ? !["file", "markdown"].includes(record.type) : record.type !== (location.kind === "image" ? "image" : "markdown")) || location.kind === "image" && record.hash !== location.content_sha256) return;
 				const file = this.plugin.app.vault.getFileByPath(folder.absolutePath(path));
 				if (file && this.entry(file)?.folder === folder) matches.push(file);
 			});

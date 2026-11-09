@@ -28,3 +28,15 @@ test("navigation, access loss, and removed embeds clear selection; closing remov
 	f.focus.set([]); click(f.view.contentEl); expect(f.focus.active(f.parent)).toBeUndefined();
 	f.focus.close(); const calls = f.changed.mock.calls.length; click(f.other.contentEl); expect(f.changed).toHaveBeenCalledTimes(calls);
 });
+
+
+test("verified navigation selects the requested embed without cancelling Follow as user interaction", () => {
+	const f = fixture();
+	try {
+		expect(f.focus.select(f.parent, f.other)).toBe(true);
+		expect(f.focus.active(f.parent)).toBe(f.other);
+		expect(f.changed).not.toHaveBeenCalled();
+		expect(f.focus.select(f.other, f.view)).toBe(false);
+		f.revoke(); expect(f.focus.select(f.parent, f.view)).toBe(false);
+	} finally { f.focus.close(); }
+});

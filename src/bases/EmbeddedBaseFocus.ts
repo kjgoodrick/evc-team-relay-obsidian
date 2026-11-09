@@ -23,6 +23,13 @@ export class EmbeddedBaseFocus<T extends { contentEl: HTMLElement }> {
 			this.documents.set(doc, () => { for (const event of ["pointerdown", "focusin"]) doc.removeEventListener(event, interacted, true); });
 		}
 	}
+	/** Navigation selects an already verified surface without synthesizing user
+	 * interaction, which would cancel the Follow operation that selected it. */
+	select(parent: T, view: T): boolean {
+		const entry = this.entries.find(entry => entry.parent === parent && entry.view === view && entry.current());
+		if (!entry) return false;
+		this.selected = entry; return true;
+	}
 	active(parent: T | null | undefined): T | undefined {
 		if (this.selected && (this.selected.parent !== parent || !this.selected.current())) this.selected = undefined;
 		return this.selected?.view;
