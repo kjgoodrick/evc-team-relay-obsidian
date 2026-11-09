@@ -1,3 +1,5 @@
+import { BASE_REGISTRY_RESPONSE_LIMIT, parseBaseRegistry } from "../../bases/BaseRegistryProtocol";
+import type { InlineBaseSourceRequest } from "../../bases/InlineBaseAnchors";
 import { decodeJwt } from "jose";
 import { v4 as uuid } from "uuid";
 import { platformFetch, type PlatformRequestInit } from "../../platformFetch";
@@ -148,6 +150,16 @@ export class LocationChannel {
 		const context = parseBasePresenceContext(value, shareId, entryId);
 		if (definitionId && context.definition_id !== definitionId) throw new Error("Inline Bases definition changed");
 		return context;
+	}
+	/** Register the verified fence identity with read permission only. Presence
+	 * must not depend on a discussion session or on comments being enabled. */
+	async inspectInlineBase(shareId: string, entryId: string, generation: string, source: InlineBaseSourceRequest, current: () => boolean) {
+		if (!this.supportsBaseContext || ![shareId, entryId, generation].every(locationId) || !current()) throw new Error("Inline Bases presence unavailable");
+		const version = this.version;
+		const value = await this.request(`/shares/${shareId}/entries/${entryId}/bases/inline-inspect`, version, true, BASE_REGISTRY_RESPONSE_LIMIT,
+			{ generation, source });
+		if (!this.current(version) || !this.supportsBaseContext || !current()) throw new Error("Inline Bases presence unavailable");
+		return parseBaseRegistry(value, entryId, undefined, generation);
 	}
 	async readBaseRecordContext(shareId: string, entryId: string): Promise<BaseRecordContext> {
 		if (!this.supportsBaseStates || !locationId(shareId) || !locationId(entryId)) throw new Error("Bases position unavailable");
@@ -301,7 +313,7 @@ export class LocationChannel {
 			this.retryTimer = window.setTimeout(() => { this.retryTimer = undefined; void this.connect(); }, delay);
 		}
 	}
-	private async request(path: string, version: number, post = false, limit = 65_536): Promise<unknown> {
+	private async request(path: string, version: number, post = false, limit = 65_536, inlineSource?: { generation: string; source: InlineBaseSourceRequest }): Promise<unknown> {
 		let timer: number | undefined, ended = false, cancel: (() => void) | undefined;
 		const current = () => !ended && this.current(version);
 		const attempt = async () => {
@@ -315,7 +327,8 @@ export class LocationChannel {
 			} catch { throw new ChannelFailure("authentication"); }
 			let response: Response;
 			try { response = await this.fetcher(this.identity.serverUrl + "/v1/collaboration" + path, {
-				method: post ? "POST" : "GET", sensitive: true, headers: { Authorization: "Bearer " + credential.accessToken },
+				method: post ? "POST" : "GET", sensitive: true, headers: { Authorization: "Bearer " + credential.accessToken, ...(inlineSource ? { "Content-Type": "application/json" } : {}) },
+				...(inlineSource ? { body: JSON.stringify(inlineSource) } : {}),
 			}); } catch (error) { throw new ChannelFailure("reconnecting", error instanceof RelayHttpError ? error.retryAfterMs : 0); }
 			if (!current()) throw new ChannelFailure("unavailable");
 			if ([401, 403].includes(response.status)) throw new ChannelFailure("authentication");

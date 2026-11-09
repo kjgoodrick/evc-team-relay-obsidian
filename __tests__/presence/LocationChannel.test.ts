@@ -688,3 +688,23 @@ test("inline presence requests select and verify the exact definition within a n
 		await expect(f.channel.readBaseContext(id(5), id(10), id(99))).rejects.toThrow("Inline Bases definition changed");
 	} finally { f.channel.stop(); }
 });
+
+
+test.each([false, true])("inline presence registers a fence without a discussion session and rejects stale results: %s", async stale => {
+	const f = fixture(true);
+	const source = { dependency: "AA==", start: "AA==", end: "AQ==", selected_length: 7 };
+	const registry = { protocol_version: 1, entry_id: id(10), definition_id: id(11), generation: id(9), revision: 1,
+		content_sha256: "a".repeat(64), views: [{ slot: 0, id: id(12), name: "Work", type: "table", descriptor_sha256: "b".repeat(64) }],
+		unmatched: { views: [], has_more: false, next_after: null } };
+	let current = true;
+	try {
+		await ready(f);
+		f.fetcher.mockImplementationOnce(async () => { if (stale) current = false; return response(registry); });
+		const result = f.channel.inspectInlineBase(id(5), id(10), id(9), source, () => current);
+		if (stale) await expect(result).rejects.toThrow("Inline Bases presence unavailable");
+		else expect(await result).toEqual(registry);
+		expect(f.fetcher).toHaveBeenLastCalledWith(`https://relay.example/v1/collaboration/shares/${id(5)}/entries/${id(10)}/bases/inline-inspect`,
+			expect.objectContaining({ method: "POST", body: JSON.stringify({ generation: id(9), source }),
+				headers: expect.objectContaining({ "Content-Type": "application/json" }) }));
+	} finally { f.channel.stop(); }
+});
