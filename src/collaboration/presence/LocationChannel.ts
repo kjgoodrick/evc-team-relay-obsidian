@@ -141,11 +141,13 @@ export class LocationChannel {
 		if (location.kind !== "image" || location.share_id !== shareId || location.entry_id !== entryId) throw new Error("Invalid image location");
 		return location;
 	}
-	async readBaseContext(shareId: string, entryId: string): Promise<BasePresenceContext> {
-		if (!this.supportsBaseContext || !locationId(shareId) || !locationId(entryId)) throw new Error("Bases presence unavailable");
-		const version = this.version, value = await this.request(`/base-context?share_id=${shareId}&entry_id=${entryId}${this.supportsBaseTargetsV3 ? "&base_target_version=3" : ""}`, version, false, 192 * 1024);
+	async readBaseContext(shareId: string, entryId: string, definitionId?: string): Promise<BasePresenceContext> {
+		if (!this.supportsBaseContext || !locationId(shareId) || !locationId(entryId) || definitionId !== undefined && !locationId(definitionId)) throw new Error("Bases presence unavailable");
+		const version = this.version, value = await this.request(`/base-context?share_id=${shareId}&entry_id=${entryId}${this.supportsBaseTargetsV3 ? "&base_target_version=3" : ""}${definitionId ? "&definition_id=" + definitionId : ""}`, version, false, 192 * 1024);
 		if (!this.current(version) || !this.supportsBaseContext) throw new Error("Bases presence unavailable");
-		return parseBasePresenceContext(value, shareId, entryId);
+		const context = parseBasePresenceContext(value, shareId, entryId);
+		if (definitionId && context.definition_id !== definitionId) throw new Error("Inline Bases definition changed");
+		return context;
 	}
 	async readBaseRecordContext(shareId: string, entryId: string): Promise<BaseRecordContext> {
 		if (!this.supportsBaseStates || !locationId(shareId) || !locationId(entryId)) throw new Error("Bases position unavailable");

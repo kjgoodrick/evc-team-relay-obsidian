@@ -675,3 +675,16 @@ test.each([false, true])("formula targets negotiate foreground/passive states an
 		} finally { f.channel.stop(); }
 	})();
 });
+
+
+test("inline presence requests select and verify the exact definition within a note", async () => {
+	const f = fixture(true), value = baseContext();
+	try {
+		await ready(f);
+		f.fetcher.mockResolvedValueOnce(response(value));
+		expect(await f.channel.readBaseContext(id(5), id(10), value.definition_id)).toEqual(value);
+		expect(f.fetcher.mock.calls.at(-1)![0]).toContain("&definition_id=" + value.definition_id);
+		f.fetcher.mockResolvedValueOnce(response(value));
+		await expect(f.channel.readBaseContext(id(5), id(10), id(99))).rejects.toThrow("Inline Bases definition changed");
+	} finally { f.channel.stop(); }
+});
