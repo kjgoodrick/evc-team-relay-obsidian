@@ -671,6 +671,7 @@
 					live.explorerDecorations?.refreshExistingRows();
 					new Notice(uiText("shareDetail.localFolder.connectedNotice"));
 					checkLocalConnection();
+					live.sharedPlugins?.open({serverId: share.serverId, id: share.id, name: share.path || "Vault"});
 				} catch (e: unknown) {
 					new Notice(uiText("shareDetail.localFolder.connectFailedNotice", { error: e instanceof Error ? e.message : uiText("shared.unknownError") }));
 				}
@@ -738,6 +739,12 @@
 				{#if canManagePermissions}
 					<button class="mod-cta" on:click={managePathPermissions}>Manage permissions</button>
 				{/if}
+			</div>
+		{/if}
+
+		{#if currentShare.managed}
+			<div class="evc-section">
+				<button on:click={() => live.sharedPlugins?.open({serverId: share.serverId, id: share.id, name: share.path || "Vault"})}>Shared plugins and configuration</button>
 			</div>
 		{/if}
 

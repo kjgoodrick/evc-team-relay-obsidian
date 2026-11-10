@@ -1,3 +1,4 @@
+import { SharedPluginSync } from "./sharedPlugins/SharedPluginSync";
 "use strict";
 
 import {
@@ -242,6 +243,7 @@ export default class TeamRelayPlugin extends Plugin {
 	presenceSettings!: SettingsScope<PresenceSettings>;
 	settingsPage!: RelaySettingsPage;
 	updater!: PluginUpdater;
+	sharedPlugins!: SharedPluginSync;
 	private updaterBlockedStartup = false;
 	private sourceStartupClosed = false;
 	pluginSettings!: Settings<StoredSettings>;
@@ -905,6 +907,8 @@ export default class TeamRelayPlugin extends Plugin {
 			}
 		}
 
+		this.sharedPlugins = this.addChild(new SharedPluginSync(this));
+		this.addCommand({id: "shared-plugin-setup", name: "Shared plugins and configuration", callback: () => this.sharedPlugins.open()});
 		this.basesSync = this.addChild(new BaseSyncHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId));
 		this.discussions = this.addChild(new DiscussionHost(this, this.authSession, this.shareRegistry, this.relayOnPremSettings, this.instanceAppId, this.basesSync));
 

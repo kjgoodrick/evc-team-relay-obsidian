@@ -473,6 +473,16 @@ export class RelayOnPremShareClient {
 		return await response.json() as PathRule[];
 	}
 
+	async sharedPluginSetup(shareId: string, publish?: { expected_revision: number; plugins: import("./sharedPlugins/protocol").Dependency[] }): Promise<import("./sharedPlugins/protocol").Setup> {
+		const response = await platformFetch(`${this.normalizedUrl}/v1/shared-plugins/shares/${encodeURIComponent(shareId)}`, {
+			method: publish ? "PUT" : "GET", headers: await this.getHeaders(),
+			...(publish ? {body: JSON.stringify(publish)} : {}),
+		});
+		if (!response.ok) throw new Error(response.status === 409 ? "Shared setup changed. Reload before publishing." : `Shared plugin setup unavailable (${response.status}).`);
+		const { parseSetup } = await import("./sharedPlugins/protocol");
+		return parseSetup(await response.json());
+	}
+
 	permissionEditor(shareId: string, actorId: string, current: () => boolean): PermissionPolicyClient {
 		return new PermissionPolicyClient(this.normalizedUrl, { shareId, actorId }, this.getAuthToken, current);
 	}

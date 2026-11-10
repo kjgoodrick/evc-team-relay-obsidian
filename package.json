@@ -16,7 +16,7 @@
     "typecheck:svelte": "bash scripts/check-svelte-types.sh",
     "typecheck:tests": "bash scripts/check-tests-types.sh",
     "check:svelte-events": "bash scripts/check-svelte-events.sh",
-    "build:preview": "tsc -noEmit -skipLibCheck && FORK_BUILD_VERSION=0.3.0 node esbuild.config.mjs production dist"
+    "build:preview": "tsc -noEmit -skipLibCheck && FORK_BUILD_VERSION=0.4.0 node esbuild.config.mjs production dist"
   },
   "keywords": [
     "obsidian",

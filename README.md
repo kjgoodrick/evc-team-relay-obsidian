@@ -1,3 +1,32 @@
+# Shared plugins and configuration — 0.4.0
+
+Update through **Settings → Team Relay Sync → Plugin updates** and restart.
+Then open **Shares → your share → Shared plugins and configuration**, or the
+**Team Relay Sync: Shared plugins and configuration** command.
+
+Owners choose public GitHub plugin releases, or use **Add installed plugins** to
+match installed community plugins to published releases. Review the exact versions
+and repositories, optionally capture Time & Line portable settings, and publish.
+Members review once and choose **Install and keep in sync** or **Apply once**.
+The join flow opens setup automatically. Approved setup changes are checked at
+startup and every five minutes. New plugins or changed repositories need fresh
+approval. Removing a requirement does not delete a member's installed plugin.
+
+Runtime downloads are pinned by SHA-256. Personal plugin settings, credentials,
+markers, local preferences, workspaces, and unrelated plugins are not uploaded.
+The first portable-settings adapter supports the Time & Line planning fork's
+week start, dependency/lock property names, and badge display/width. All other
+settings remain local. Other public plugins can be installed as dependencies,
+but sharing their settings requires a future explicit adapter.
+
+Conflicting requirements from connected shares block application. Desktop-only
+plugins are reported as incompatible on mobile. Relay itself must already be
+installed and continues to use its own updater. This does not mirror .obsidian
+or distribute unpublished/private/local plugin builds. Requires the matching
+0.4.0 server API and migration. See [shared setup design and validation](docs/shared-plugin-sync.md).
+
+---
+
 # Cursors and comments MVP — 0.3.0
 
 Install this fork through **Settings → Team Relay Sync → Plugin updates**, then
