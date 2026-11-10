@@ -36,11 +36,12 @@ export class SharedPluginSync extends Component {
     }).plugins; this.installer = new PluginInstaller(plugin.app.vault.adapter, plugin.app.vault.configDir, this.root, this.host); }
     onload() { this.register(this.plugin.shareRegistry.on(() => { void this.poll(); })); this.registerInterval(window.setInterval(() => { void this.poll(); }, 5 * 60000)); this.plugin.app.workspace.onLayoutReady(() => { void this.start(); }); }
     onunload() { this.stopped = true; }
-    private async start() { try {
+    private async start() { if (this.stopped) return; try {
         if (!this.host?.loadManifests || !this.host.enablePluginAndSave || !this.host.disablePluginAndSave)
             throw Error('Shared plugin installation is unavailable in this Obsidian version.');
         if (await this.plugin.app.vault.adapter.exists(`${this.root}/approvals.json`))
             this.approvals = JSON.parse(await this.plugin.app.vault.adapter.read(`${this.root}/approvals.json`));
+        if (this.stopped) return;
         await this.installer.recover();
         await this.poll();
     }
