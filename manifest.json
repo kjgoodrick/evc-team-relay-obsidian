@@ -1,9 +1,9 @@
 {
   "id": "team-relay-sync",
-  "name": "Team Relay Sync (permissions preview)",
-  "version": "0.2.0",
-  "minAppVersion": "1.8.7",
-  "description": "Self-hosted live collaboration with file permissions and Pocket ID sign-in. Experimental fork.",
+  "name": "Team Relay Sync",
+  "version": "0.3.0",
+  "minAppVersion": "1.13.7",
+  "description": "Self-hosted vault sync, live cursors, comments, and view-scoped Bases collaboration.",
   "author": "EVC Team",
   "authorUrl": "https://entire.vc",
   "isDesktopOnly": false

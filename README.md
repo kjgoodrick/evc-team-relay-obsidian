@@ -1,3 +1,23 @@
+# Cursors and comments MVP — 0.3.0
+
+Install this fork through **Settings → Team Relay Sync → Plugin updates**, then
+restart Obsidian. Requires **Obsidian 1.13.7 or newer** and the matching server
+collaboration capabilities. Preserve `data.json` when installing manually.
+
+Includes live cursors and selections, Jump/Follow, threaded comments, replies,
+reactions, mentions, edit history, inbox/search, queued offline comments, pictures,
+image pins/regions, and view-scoped Bases targets. Timeline collaboration uses
+[Time & Line (Planning)](https://github.com/kjgoodrick/obsidian-time-and-line-planning/releases).
+Comments and identity metadata remain outside Markdown.
+
+Desktop and desktop mobile-layout workflows were checked; physical iOS/Android
+acceptance remains outstanding. Full-note mouse pointers, suggested edits,
+OS-native notifications, and server-backup restore activation are not in this MVP.
+
+The historical installation and release notes below describe earlier previews.
+
+---
+
 # Team Relay permissions preview
 
 Experimental self-hosted fork of EVC Team Relay. It adds server-enforced file/folder permissions and a browser-based Pocket ID sign-in flow for Obsidian desktop/mobile APIs. It also recovers safe inventory conflicts automatically and provides a persisted conflict queue with verified local backups for decisions. Physical mobile validation is still pending.
