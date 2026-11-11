@@ -114,7 +114,7 @@ export class CommentComposer {
 		this.send.disabled = true;
 		this.discardButton = commentButton(actions, { text: "Discard draft", cls: "relay-comment-discard", attr: { type: "button" } });
 		this.discardButton.hidden = true; this.discardButton.onclick = () => { void this.reviewDiscard(); };
-		this.discardPanel = this.el.createDiv();
+		this.discardPanel = this.el.createDiv({ cls: "relay-comment-confirm-actions" });
 		this.refreshPictures = commentButton(actions, { text: "Refresh picture uploads", attr: { type: "button", title: "Keep the saved pictures and prepare fresh uploads for your next send." } });
 		this.refreshPictures.onclick = () => { void this.recover(true); };
 		this.recoverSend = commentButton(actions, { text: "Check delivery and edit", attr: { type: "button", title: "Check whether the reply was sent before making this draft editable again." } });
@@ -442,9 +442,8 @@ export class CommentComposer {
 			if (this.disposed) return;
 			if (!draft || draft.scopeId !== this.entryId || draft.revision !== this.revision || canonical(protocolJson(readCommentDraft(draft.body))) !== canonical(protocolJson(readCommentDraft(JSON.parse(this.savedValue))))) throw new Error("This draft changed in another view. Reopen it before discarding.");
 			this.discardReview = draft; this.discardPanel.empty();
-			this.discardPanel.createEl("p", { text: "Discard this saved draft? This cannot be undone here. Posted comments stay unchanged. Pictures used only by this draft are released; pictures used elsewhere or retained for a recovery copy stay available." });
 			const keep = commentButton(this.discardPanel, { text: "Keep editing", attr: { type: "button" } });
-			const discard = commentButton(this.discardPanel, { text: "Discard saved draft", attr: { type: "button" } });
+			const discard = this.discardPanel.createEl("button", { text: "Discard draft", attr: { type: "button" } });
 			keep.onclick = () => { if (this.busy) return; this.discardReview = undefined; this.discardPanel.empty(); this.update(); };
 			discard.onclick = () => { void this.discardSavedDraft(keep, discard); };
 		} catch (error) { if (!this.disposed) this.status.setText(error instanceof Error ? error.message : "Could not review this draft. Your saved work is retained."); }

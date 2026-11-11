@@ -42,10 +42,11 @@ async function fixture(rich = false, target?: Json) {
 test.each([false, true])("ordinary draft discard requires confirmation, allows cancel and supports a fresh draft afterward (rich %s)", async rich => {
 	const f = await fixture(rich);
 	try {
-		f.button("Discard draft").click(); await until(() => !!f.button("Discard saved draft"));
+		f.button("Discard draft").click(); await until(() => !!f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child"));
+		expect(f.composer.el.querySelector(".relay-comment-confirm-actions")!.textContent).toBe("Keep editingDiscard draft");
 		expect(f.button("Send").disabled).toBe(true); expect(f.composer.textarea.readOnly).toBe(true); expect(f.session.discardDraft).not.toHaveBeenCalled();
 		f.button("Keep editing").click(); expect(f.button("Send").disabled).toBe(false); expect(await f.store.getDraft(f.draft.id)).toBeDefined();
-		f.button("Discard draft").click(); await until(() => !!f.button("Discard saved draft")); f.button("Discard saved draft").click();
+		f.button("Discard draft").click(); await until(() => !!f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")); f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")!.click();
 		await until(() => f.finished.mock.calls.length === 1);
 		expect(await f.store.getDraft(f.draft.id)).toBeUndefined(); expect(f.composer.textarea.value).toBe(""); expect(f.session.queue).not.toHaveBeenCalled();
 		expect(f.button("Discard draft").hidden).toBe(true);
@@ -59,7 +60,7 @@ test.each([false, true])("ordinary draft discard requires confirmation, allows c
 test("another editor becomes read-only, retains text for copying and cannot resurrect a discarded draft", async () => {
 	const f = await fixture(), other = f.create(); await other.flush();
 	try {
-		f.button("Discard draft").click(); await until(() => !!f.button("Discard saved draft")); f.button("Discard saved draft").click();
+		f.button("Discard draft").click(); await until(() => !!f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")); f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")!.click();
 		await until(() => f.finished.mock.calls.length === 1);
 		expect(other.textarea.readOnly).toBe(true); expect(other.textarea.value).toBe("Saved plain text");
 		expect(other.el.querySelector("select")!.disabled).toBe(true);
@@ -71,7 +72,7 @@ test("another editor becomes read-only, retains text for copying and cannot resu
 test.each(["discard", "send"])("a completed target draft stays paused during navigation after %s", async action => {
 	const f = await fixture(false, { version: 1, type: "note" });
 	try {
-		if (action === "discard") { f.button("Discard draft").click(); await until(() => !!f.button("Discard saved draft")); f.button("Discard saved draft").click(); }
+		if (action === "discard") { f.button("Discard draft").click(); await until(() => !!f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")); f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")!.click(); }
 		else await f.composer.submit();
 		await until(() => f.finished.mock.calls.length === 1);
 		expect(f.composer.textarea.readOnly).toBe(true); expect(await f.composer.flush()).toBe(true);
@@ -84,9 +85,9 @@ test.each(["discard", "send"])("a completed target draft stays paused during nav
 test("a newer draft or changed target invalidates review before removing anything", async () => {
 	const f = await fixture();
 	try {
-		f.button("Discard draft").click(); await until(() => !!f.button("Discard saved draft"));
+		f.button("Discard draft").click(); await until(() => !!f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child"));
 		await f.store.saveDraft({ ...f.draft, revision: 1, body: { text: "Newer text", mentions: [] } }, 0);
-		f.button("Discard saved draft").click(); await until(() => f.composer.el.textContent!.includes("nothing was discarded"));
+		f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")!.click(); await until(() => f.composer.el.textContent!.includes("nothing was discarded"));
 		expect((await f.store.getDraft(f.draft.id))?.body).toMatchObject({ text: "Newer text" }); expect(f.finished).not.toHaveBeenCalled();
 	} finally { f.close(); }
 });
@@ -121,9 +122,9 @@ test("formatting a plain draft can be discarded without a false other-view confl
   f.button("Format comment").click();
   await f.composer.flush();
   f.button("Discard draft").click();
-  await until(() => !!f.button("Discard saved draft"));
+  await until(() => !!f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child"));
   expect(f.composer.el.textContent).not.toContain("changed in another view");
-  f.button("Discard saved draft").click();
+  f.composer.el.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")!.click();
   await until(() => f.finished.mock.calls.length === 1);
   expect(await f.store.getDraft(f.draft.id)).toBeUndefined();
  } finally { f.close(); }

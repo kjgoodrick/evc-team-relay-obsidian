@@ -40,7 +40,7 @@ test("actual presence components render pictures, recover from load failure and 
 		expect(image.getAttribute("referrerpolicy")).toBe("no-referrer");
 		image.dispatchEvent(new dom.window.Event("load")); flushSync();
 		expect(image.classList.contains("evc-picture-loaded")).toBe(true);
-		expect(target.querySelectorAll(".evc-user-initial")).toHaveLength(2);
+		expect(target.querySelectorAll(".evc-user-initial")).toHaveLength(1);
 		image.dispatchEvent(new dom.window.Event("error")); flushSync();
 		expect(target.querySelector("img")).toBeNull();
 		expect(target.textContent).toContain("A");
@@ -55,4 +55,28 @@ test("actual presence components render pictures, recover from load failure and 
 		expect(target.querySelector("img")).toBeNull();
 	} finally { component.destroy(); dom.window.close(); }
 	expect(listeners.size).toBe(0);
+});
+
+test("note rebinding retains the loaded self image, removes old peers and unsubscribes the old awareness", () => {
+ const { dom, default: Component, mountComponent, flushSync } = loadSvelteComponent(path.resolve(__dirname, "../src/components/CollaboratorAwareness.svelte"));
+ const self = { id: "alice", name: "Alice", avatarUrl: "https://id.example/a.png" };
+ const make = entries => { const states = new Map(entries), listeners = new Set(); return { states, listeners, getStates: () => states, getLocalState: () => states.get(1), on: (_, cb) => listeners.add(cb), off: (_, cb) => listeners.delete(cb) }; };
+ const old = make([[1, { user: self }], [2, { user: { id: "bob", name: "Bob" } }]]), next = make([]);
+ const target = dom.window.document.body, component = mountComponent(Component, { target, props: { collabAwareness: old, fallbackSelf: undefined } });
+ try {
+  const image = target.querySelector("img"); image.dispatchEvent(new dom.window.Event("load")); flushSync();
+  component.update({ collabAwareness: next, fallbackSelf: self }); flushSync();
+  expect(target.querySelector("img")).toBe(image);
+  expect(image.classList.contains("evc-picture-loaded")).toBe(true);
+  expect(target.querySelector('[aria-label="Bob"]')).toBeNull();
+  expect(old.listeners.size).toBe(0); expect(next.listeners.size).toBe(1);
+  next.states.set(1, { user: self }); next.listeners.forEach(cb => cb());
+  flushSync();
+  next.states.delete(1); next.listeners.forEach(cb => cb()); flushSync();
+  expect(target.querySelector("img")).toBe(image);
+  expect(target.querySelector(".evc-user-initial")).toBeNull();
+  component.update({ authorized: false, fallbackSelf: undefined }); flushSync();
+  expect(target.querySelector(".evc-avatar-stack")).toBeNull();
+ } finally { component.destroy(); dom.window.close(); }
+ expect(next.listeners.size).toBe(0);
 });

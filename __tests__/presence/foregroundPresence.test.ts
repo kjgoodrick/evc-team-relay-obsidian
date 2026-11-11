@@ -1321,3 +1321,22 @@ test("embedded Bases render precise peers and Jump/Follow without opening a stan
 		await until(() => f.controller.surfaceName !== "Bases view"); expect(f.controller.following).toBeUndefined();
 	} finally { m.close(); }
 });
+
+test("presence controls retain their DOM across note switches and temporary binding gaps", () => {
+ const f = fixture();
+ try {
+  f.controller.refresh();
+  const first = f.notes[0].view.containerEl.querySelector(".relay-presence-action");
+  expect(first).not.toBeNull();
+  f.select(f.notes[1].view); f.controller.refresh();
+  const second = f.notes[1].view.containerEl.querySelector(".relay-presence-action");
+  expect(second).not.toBeNull(); expect(first!.isConnected).toBe(true);
+  f.select(f.notes[0].view); f.controller.refresh();
+  expect(f.notes[0].view.containerEl.querySelector(".relay-presence-action")).toBe(first);
+  const bindings = f.registry.trackedViews;
+  f.registry.trackedViews = []; f.controller.refresh();
+  expect(f.notes[0].view.containerEl.querySelector(".relay-presence-action")).toBe(first);
+  f.registry.trackedViews = bindings; f.controller.refresh();
+  expect(f.notes[0].view.containerEl.querySelector(".relay-presence-action")).toBe(first);
+ } finally { f.close(); }
+});

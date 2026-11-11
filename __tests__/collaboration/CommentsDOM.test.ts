@@ -641,3 +641,26 @@ test("reaction picker searches the complete catalog and accepts system-keyboard 
  expect(picker.contentEl.querySelector("button[title]")).toBeNull();
  picker.onClose();
 });
+
+test("thread and message headers share author presentation with thread status below the author", async () => {
+ const { store, session, typed } = await fixture();
+ const thread = { id: id(4), author_id: id(1), state: "open", state_revision: 1, anchor_revision: 1, removed: false, created_sequence: 1, activity_sequence: 1, created_at: "2026-11-05T00:00:00Z" };
+ session.local.mockResolvedValue({ threads: [thread], pending: [], hasMore: false, nextAfter: 1 });
+ session.messages.mockResolvedValue({ messages: [{ id: id(5), author_id: id(1), revision: 1, deleted: false, body: bodyFromText("Header check"), created_sequence: 1, created_at: thread.created_at, edited_at: null, reactions: [] }], hasMore: false });
+ Object.assign(session, { inbox: { available: true, onChange: () => () => {}, loadSubscription: async () => {}, subscription: () => ({ following: true, muted: false }) } });
+ const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
+ const view = new CommentsView({} as WorkspaceLeaf, host);
+ try {
+  await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Header check"));
+  const heading = view.contentEl.querySelector(".relay-comment-thread-heading")!;
+  const message = view.contentEl.querySelector(".relay-comment-message")!;
+  expect(heading.querySelector(".relay-comment-author")!.textContent).toBe(message.querySelector(".relay-comment-author")!.textContent);
+  expect(heading.querySelector(".relay-comment-author")!.textContent).toMatch(/^You · /);
+  expect(heading.querySelector(".relay-comment-avatar")).not.toBeNull();
+  expect(heading.querySelector(".relay-comment-thread-state")!.textContent).toBe("Open");
+  const row = view.contentEl.querySelector(".relay-comment-thread-actions")!;
+  expect(row.querySelector('[aria-label="Resolve"]')).not.toBeNull();
+  expect(row.querySelector('[aria-label="Unfollow discussion"]')).not.toBeNull();
+  expect(row.querySelector('[aria-label="Mute discussion"]')).not.toBeNull();
+ } finally { await view.onClose(); store.close(); }
+});

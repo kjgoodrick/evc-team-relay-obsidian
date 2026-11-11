@@ -96,8 +96,9 @@ class ThreadCard {
 		private host: DiscussionHost) {
 		this.el = parent.createEl("article", { cls: "relay-comment-thread" });
 		this.summary = this.el.createDiv({ cls: "relay-comment-thread-heading" });
-		this.controls = this.el.createDiv({ cls: "relay-comment-thread-controls" });
-		this.subscription = new ThreadSubscription(this.el, session, entryId, thread.id);
+		const actions = this.el.createDiv({ cls: "relay-comment-thread-actions" });
+		this.controls = actions.createDiv({ cls: "relay-comment-thread-controls" });
+		this.subscription = new ThreadSubscription(actions, session, entryId, thread.id);
 		this.content = this.el.createDiv({ cls: "relay-comment-messages" });
 		this.error = this.el.createDiv({ attr: { role: "status" } });
 		this.composerContainer = this.el.createDiv();
@@ -111,7 +112,8 @@ class ThreadCard {
 		this.composer?.update();
 		if (key === this.renderedKey) return;
 		const generation = ++this.generation;
-		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}`);
+		this.summary.empty();
+		this.authorHeader(this.summary, thread.author_id, thread.created_at, false, thread.state === "resolved" ? "Resolved" : "Open");
 		this.controls.empty();
 		if (targetNeedsReview(this.targetStatus)) this.controls.createEl("p", { text: this.targetStatus.message, cls: "relay-comment-thread-target-status" });
 		this.copyLink(this.controls, "Copy discussion link");
@@ -226,19 +228,25 @@ class ThreadCard {
 				.finally(() => { if (!this.disposed) button.disabled = false; });
 		};
 	}
-	private message(message: DiscussionMessage): void {
-		const article = this.content.createDiv({ cls: "relay-comment-message" });
-		article.dataset.messageId = message.id;
-        const name = this.session.displayName(this.entryId, message.author_id);
-        const avatar = article.createDiv({ cls: "relay-comment-avatar", attr: { "aria-label": name } });
+	private authorHeader(parent: HTMLElement, authorId: string | null, createdAt: string, edited = false, status?: string): void {
+		const header = parent.createDiv({ cls: "relay-comment-author-header" });
+        const name = this.session.displayName(this.entryId, authorId);
+        const avatar = header.createDiv({ cls: "relay-comment-avatar", attr: { "aria-label": name } });
         avatar.setText(name.split(/\s+/).map(part => part[0]).slice(0, 2).join("").toUpperCase());
-        const picture = safeAvatarUrl(this.session.participants(this.entryId).find(person => person.id === message.author_id)?.picture);
+        const picture = safeAvatarUrl(this.session.participants(this.entryId).find(person => person.id === authorId)?.picture);
         if (picture) {
             const image = avatar.createEl("img", { attr: { src: picture, alt: name, referrerpolicy: "no-referrer" } });
             image.onerror = () => image.remove();
         }
 
-		article.createDiv({ cls: "relay-comment-author", text: `${message.author_id === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, message.author_id)} · ${new Date(message.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}${message.revision > 1 ? " · edited" : ""}` });
+		const metadata = header.createDiv({ cls: "relay-comment-author-meta" });
+		metadata.createDiv({ cls: "relay-comment-author", text: `${authorId === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, authorId)} · ${new Date(createdAt).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}${edited ? " · edited" : ""}` });
+		if (status) metadata.createDiv({ cls: "relay-comment-thread-state", text: status });
+	}
+	private message(message: DiscussionMessage): void {
+		const article = this.content.createDiv({ cls: "relay-comment-message" });
+		article.dataset.messageId = message.id;
+		this.authorHeader(article, message.author_id, message.created_at, message.revision > 1);
 		renderCommentBody(article, message.body, id => this.session.displayName(this.entryId, id),
 			(parent, picture) => this.pictures.push(new CommentPicture(parent, this.session, this.entryId, picture)));
 		const permission = this.session.permission(this.entryId), actions = article.createDiv({ cls: "relay-comment-message-actions" });

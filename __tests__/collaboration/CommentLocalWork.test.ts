@@ -201,8 +201,8 @@ test("local drafts can be discarded with review while uncertain sends remain loc
 	const f = await fixture();
 	try {
 		await f.store.saveDraft(draft()); await f.modal.onOpen(); f.button("Open saved draft").click();
-		await until(() => !f.button("Discard draft").hidden); f.button("Discard draft").click(); await until(() => !!f.button("Discard saved draft"));
-		f.button("Discard saved draft").click(); await until(() => f.modal.contentEl.textContent!.includes("No saved items")); expect(await f.store.getDraft(draft().id)).toBeUndefined();
+		await until(() => !f.button("Discard draft").hidden); f.button("Discard draft").click(); await until(() => !!f.modal.contentEl.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child"));
+		f.modal.contentEl.querySelector<HTMLButtonElement>(".relay-comment-confirm-actions button:last-child")!.click(); await until(() => f.modal.contentEl.textContent!.includes("No saved items")); expect(await f.store.getDraft(draft().id)).toBeUndefined();
 		await f.store.saveDraft(draft()); await f.store.setPreference("online:" + draft().id, "pending");
 		f.button("Refresh saved work").click(); await until(() => !!f.button("Inspect saved draft")); f.button("Inspect saved draft").click();
 		await until(() => !!f.modal.contentEl.querySelector("textarea") && !f.modal.contentEl.querySelector("textarea")!.disabled);

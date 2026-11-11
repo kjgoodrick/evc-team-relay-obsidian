@@ -193,9 +193,11 @@ function renderOfflineBanner(
  * that keeps it in sync. Both `DocumentViewBinding` and `CanvasViewBinding` hold one of
  * these instead of duplicating the mount/update/teardown logic.
  */
-class ViewActionsMount {
+export class ViewActionsMount {
 	private component?: MountedComponent<Record<string, unknown>>;
 	private unsubscribe?: () => void;
+	private document?: ProviderBacked;
+	private target?: TrackedViewBinding;
 
 	render(
 		containerEl: HTMLElement,
@@ -220,6 +222,9 @@ class ViewActionsMount {
 				anchor: actionsEl.firstChild,
 				props,
 			});
+		}
+		if (this.document !== doc || this.target !== target) {
+			this.unsubscribe?.(); this.document = doc; this.target = target;
 			this.unsubscribe = doc.subscribe(actionsEl, (state: ConnectionState) => {
 				this.component?.update({
 					liveView: target,
@@ -232,19 +237,16 @@ class ViewActionsMount {
 		this.component.update(props);
 	}
 
-	clear(containerEl: HTMLElement): void {
-		const actionsEl = containerEl.querySelector(".view-actions");
-		if (!actionsEl || !actionsEl.firstChild) return;
-		containerEl
-			.querySelectorAll(".evc-relay-view-action")
-			.forEach((el) => el.remove());
+	clear(_containerEl: HTMLElement): void {
+		// Only release this mount; an old binding must not remove its successor's UI.
+		this.destroy();
 	}
 
 	destroy(): void {
 		this.component?.destroy();
 		this.component = undefined;
 		this.unsubscribe?.();
-		this.unsubscribe = undefined;
+		this.unsubscribe = undefined; this.document = undefined; this.target = undefined;
 	}
 }
 
@@ -740,6 +742,18 @@ export class DocumentViewBinding<ViewType extends TextFileView>
 		});
 	}
 
+	/** Transfer only presentation within the same authenticated share and host view.
+	 * Old document subscriptions are rebound before the old binding is released. */
+	transferPresentationTo(next: DocumentViewBinding<TextFileView>): void {
+		if (next.hostView !== this.hostView || next.boundDocument.vaultShare !== this.boundDocument.vaultShare) return;
+		next._actions.destroy(); next._actions = this._actions; this._actions = new ViewActionsMount();
+		next.renderActionsPill();
+		if (this._presenceDecorator && next.hostView instanceof MarkdownView) {
+			next._presenceDecorator = this._presenceDecorator; this._presenceDecorator = undefined;
+			next._presenceDecorator.rebind(next as DocumentViewBinding<MarkdownView>);
+		}
+	}
+
 	beginConnect() {
 		void this.boundDocument.bringOnline();
 	}
@@ -1155,6 +1169,8 @@ export class ViewBindingRegistry {
 				(fresh) => fresh.boundDocument === oldView.boundDocument && fresh.hostView === oldView.hostView,
 			);
 			if (idx === -1) {
+				const successor = unclaimed.find(fresh => fresh.hostView === oldView.hostView);
+				if (oldView instanceof DocumentViewBinding && successor instanceof DocumentViewBinding) oldView.transferPresentationTo(successor);
 				stale.push(oldView);
 			} else {
 				matching.push(oldView);

@@ -43,6 +43,7 @@ export class PresenceController extends Component {
 	private listeners = new Set<() => void>();
 	private action?: HTMLElement;
 	private actionView?: FileView;
+	private actions = new Map<FileView, HTMLElement>();
 	private stopped = false;
 	private refreshing = false;
 	private surfaces!: NotePresenceSurfaces;
@@ -235,7 +236,9 @@ export class PresenceController extends Component {
 				!this.active || provider.awareness.getLocalState() === null ? "waiting" : provider.presence.availability;
 			if (this.locations?.surfaceActive) this.status = !this.visible ? "hidden" : !this.locations.ready ?
 				(this.locations.status === "connecting" ? "waiting" : this.locations.status === "reconnecting" ? "recovering" : "unavailable") : this.locations.surfaceState;
-			this.updateAction(this.candidate?.hostView ?? (this.locations?.surfaceActive ? view ?? undefined : undefined));
+			// Keep the control while a shared Markdown view is rebinding to its new note.
+			const sharedNote = noteView?.file?.extension === "md" && this.registry.shareRegistry.shareFor(noteView.file.path);
+			this.updateAction(this.candidate?.hostView ?? (sharedNote ? noteView : this.locations?.surfaceActive ? view ?? undefined : undefined));
 			this.refreshPeers();
 		} finally { this.refreshing = false; }
 	}
@@ -501,12 +504,21 @@ export class PresenceController extends Component {
 		});
 	}
 	private updateAction(view?: FileView): void {
-		if (view !== this.actionView) {
-			this.action?.remove(); this.action = undefined; this.actionView = view;
-			if (view) { this.action = view.addAction("users", "Presence controls", () => this.openControls()); this.action.classList.add("relay-presence-action"); }
+		for (const [host, action] of this.actions) {
+			if (!host.containerEl.isConnected || !host.file || !this.registry.shareRegistry.shareFor(host.file.path)) {
+				action.remove(); this.actions.delete(host);
+			}
+		}
+		if (!view && this.actionView) { this.actions.get(this.actionView)?.remove(); this.actions.delete(this.actionView); }
+		this.actionView = view;
+		this.action = view ? this.actions.get(view) : undefined;
+		if (view && !this.action) {
+			this.action = view.addAction("users", "Presence controls", () => this.openControls());
+			this.action.classList.add("relay-presence-action"); this.actions.set(view, this.action);
 		}
 		if (this.action) {
-			setIcon(this.action, this.visible ? "users" : "eye-off");
+			const icon = this.visible ? "users" : "eye-off";
+			if (this.action.dataset.presenceIcon !== icon) { setIcon(this.action, icon); this.action.dataset.presenceIcon = icon; }
 			this.action.setAttribute("aria-label", "Presence controls. " + this.description);
 			this.action.setAttribute("data-presence-status", this.status);
 		}
@@ -516,7 +528,8 @@ export class PresenceController extends Component {
 		this.stopFollowing(); this.locations?.unload(); this.surfaces?.unload();
 		this.stopped = true; this.clearActive(); this.observe();
 		for (const stop of this.windows.values()) stop(); this.windows.clear();
-		this.action?.remove(); this.action = undefined; this.actionView = undefined;
+		for (const action of this.actions.values()) action.remove(); this.actions.clear();
+		this.action = undefined; this.actionView = undefined;
 		this.peers = []; this.notify(); this.listeners.clear(); this.candidate = undefined;
 	}
 }

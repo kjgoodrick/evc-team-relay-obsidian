@@ -3,6 +3,9 @@
 	import { safeAvatarUrl } from "../presenceAvatar";
 	export let user: CollaboratorPresence;
 	export let size = "2em";
+	function checkCachedImage(image: HTMLImageElement) {
+		if (image.complete && image.naturalWidth > 0) loaded = true;
+	}
 	let previousUrl: string | undefined;
 	let loaded = false;
 	let failed = false;
@@ -15,13 +18,16 @@
 </script>
 
 <div class="evc-avatar-with-border" style="border-color: {user.avatarColor};">
-	<div class="evc-user-avatar" style="background-color: {user.avatarColor}; width: {size}; height: {size};">
-		<span class="evc-user-initial" aria-hidden="true">{user.displayName.charAt(0).toUpperCase()}</span>
+	<div class="evc-user-avatar" style="background-color: {imageUrl && !failed ? 'var(--background-secondary)' : user.avatarColor}; width: {size}; height: {size};">
+		{#if !imageUrl || failed}
+			<span class="evc-user-initial" aria-hidden="true">{user.displayName.charAt(0).toUpperCase()}</span>
+		{/if}
 		{#if imageUrl && !failed}
 			{#key imageUrl}
 				<img class="evc-user-picture" src={imageUrl} alt="" aria-hidden="true"
 					referrerpolicy="no-referrer" draggable="false"
 					class:evc-picture-loaded={loaded}
+					use:checkCachedImage
 					on:load={() => loaded = true} on:error={() => failed = true} />
 			{/key}
 		{/if}

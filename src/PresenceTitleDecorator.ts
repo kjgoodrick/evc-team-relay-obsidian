@@ -42,7 +42,7 @@ function wrapInlineTitle(containerEl: HTMLElement): HTMLElement | null {
 /** Undo wrapInlineTitle(): pull the inline-title back out and drop the wrapper. */
 function unwrapInlineTitle(avatarContainer: HTMLElement): void {
 	const wrapper = avatarContainer.parentElement;
-	if (wrapper?.className !== WRAPPER_CLASS) {
+	if (!wrapper?.classList.contains(WRAPPER_CLASS)) {
 		avatarContainer.remove();
 		return;
 	}
@@ -61,6 +61,8 @@ export class PresenceTitleDecorator extends Loggable {
 	documentBinding: DocumentViewBinding<MarkdownView>;
 	liveDocument: Document;
 	private dismantled = false;
+	private generation = 0;
+	private stopAuth?: () => void;
 	private avatarsComponent?: MountedComponent<Record<string, unknown>>;
 	private avatarsContainerEl?: HTMLElement;
 
@@ -69,7 +71,31 @@ export class PresenceTitleDecorator extends Loggable {
 		this.documentBinding = view;
 		this.liveDocument = view.boundDocument;
 		this.setLoggers(`[AwarenessView](${this.liveDocument.entryPath})`);
+		this.stopAuth = this.liveDocument.authSession.on(() => this.updateIdentity());
 		void this.attachAwareness();
+	}
+
+	rebind(view: DocumentViewBinding<MarkdownView>): void {
+		this.documentBinding = view; this.liveDocument = view.boundDocument;
+		this.generation++;
+		// Obsidian can replace the inline-title host when switching view modes.
+		// Move the existing image tree rather than remounting it in that case.
+		const title = view.hostView.containerEl.querySelector(".inline-title");
+		if (this.avatarsContainerEl && title && title.parentElement !== this.avatarsContainerEl.parentElement) {
+			const slot = wrapInlineTitle(view.hostView.containerEl);
+			if (slot) { unwrapInlineTitle(this.avatarsContainerEl); slot.replaceWith(this.avatarsContainerEl); }
+		}
+		// Never carry another note's remote participants into the destination.
+		this.updateIdentity();
+		void this.attachAwareness();
+	}
+
+	private identityProps() {
+		const user = this.liveDocument.authSession.getCurrentUserForServer(this.liveDocument.onpremServerId);
+		return { authorized: !!user, fallbackSelf: user ? { id: user.accountId, name: user.fullName, avatarUrl: user.avatarUrl } : undefined };
+	}
+	private updateIdentity(): void {
+		if (!this.dismantled) this.avatarsComponent?.update({ collabAwareness: this.liveDocument._liveProvider.awareness, ...this.identityProps() });
 	}
 
 	private async attachAwareness() {
@@ -78,8 +104,12 @@ export class PresenceTitleDecorator extends Loggable {
 		this.log("Installing awareness component for", this.documentBinding.hostView.file?.path);
 
 		// Wait for the document to be ready
+		const generation = this.generation;
 		await this.liveDocument.awaitFullyConnected();
-		if (this.dismantled) return;
+		if (this.dismantled || generation !== this.generation) return;
+		if (this.avatarsComponent && this.avatarsContainerEl?.isConnected) {
+			this.updateIdentity(); return;
+		}
 
 		// Set up the awareness component immediately - it will handle connection states
 		this.setupAwarenessComponent();
@@ -106,6 +136,7 @@ export class PresenceTitleDecorator extends Loggable {
 				target: avatarContainer,
 				props: {
 					collabAwareness: awareness,
+					...this.identityProps(),
 				},
 			});
 			this.log("Awareness component successfully mounted");
@@ -127,6 +158,7 @@ export class PresenceTitleDecorator extends Loggable {
 
 	dismantle() {
 		this.dismantled = true;
+		this.stopAuth?.(); this.stopAuth = undefined;
 
 		this.teardownAwarenessComponent();
 

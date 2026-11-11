@@ -7,29 +7,26 @@
 	import { presenceColorForUser } from "../presenceColor";
 
 	export let collabAwareness: Awareness;
+	export let authorized = true;
+	export let fallbackSelf: { id: string; name: string; avatarUrl?: string } | undefined = undefined;
 
 	const VISIBLE_AVATAR_COUNT = 4;
 
 	let showPopover = false;
 	let popoverElement: HTMLElement;
 
-	// Awareness has no store interface of its own -- it's an EventEmitter
-	// ("change" fires whenever any client's state updates). This tick
-	// counter is a bridge: bumping it is what makes `allUsers` below
-	// recompute on every awareness change, the same way a writable store
-	// update recomputes anything derived from it.
-	const awarenessTick = writable(0);
 	let stopListening: (() => void) | null = null;
-
-	$: if (collabAwareness) {
+	const allUsers = writable<CollaboratorPresence[]>([]);
+	function bindAwareness(observed: Awareness, fallback: typeof fallbackSelf) {
 		stopListening?.();
-		const onChange = () => awarenessTick.update((n) => n + 1);
-		collabAwareness.on("change", onChange);
-		awarenessTick.set(0);
-		stopListening = () => collabAwareness.off("change", onChange);
+		const onChange = () => allUsers.set(currentUserFirst(usersFromAwarenessStates(observed, fallback), observed.getLocalState()?.user?.id ?? fallback?.id));
+		observed.on("change", onChange);
+		stopListening = () => observed.off("change", onChange);
+		onChange();
 	}
+	$: bindAwareness(collabAwareness, fallbackSelf);
 
-	function usersFromAwarenessStates(live: Awareness): CollaboratorPresence[] {
+	function usersFromAwarenessStates(live: Awareness, fallback: typeof fallbackSelf): CollaboratorPresence[] {
 		const seen = new Set<string>();
 		const users: CollaboratorPresence[] = [];
 
@@ -47,6 +44,10 @@
 			});
 		});
 
+		if (fallback && !seen.has(fallback.id)) {
+			const { color, light } = presenceColorForUser(fallback);
+			users.push({ userId: fallback.id, displayName: fallback.name, avatarUrl: fallback.avatarUrl, avatarColor: color, avatarColorLight: light });
+		}
 		return users;
 	}
 
@@ -58,18 +59,11 @@
 		});
 	}
 
-	// Deduped by user id, ordered with the local user first.
-	const allUsers = derived(awarenessTick, () => {
-		if (!collabAwareness) return [];
-		const localUserId = collabAwareness.getLocalState()?.user?.id;
-		return currentUserFirst(usersFromAwarenessStates(collabAwareness), localUserId);
-	});
-
 	// Stack shows the local user last, capped to VISIBLE_AVATAR_COUNT total.
 	const displayUsers = derived(allUsers, ($allUsers) => {
 		if ($allUsers.length === 0) return [];
 
-		const localUserId = collabAwareness?.getLocalState()?.user?.id;
+		const localUserId = collabAwareness?.getLocalState()?.user?.id ?? fallbackSelf?.id;
 		const currentUser = $allUsers.find((user) => user.userId === localUserId);
 		const otherUsers = $allUsers.filter((user) => user.userId !== localUserId);
 
@@ -102,7 +96,7 @@
 	});
 </script>
 
-{#if $allUsers.length > 0}
+{#if authorized && $allUsers.length > 0}
 	<div class="evc-user-awareness" bind:this={popoverElement}>
 		<AvatarStack
 			users={$displayUsers}

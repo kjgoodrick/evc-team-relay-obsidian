@@ -924,3 +924,19 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-reaction-picker button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
 .relay-comments-view [hidden] { display: none; }
 .relay-comment-composer-actions .relay-comment-send-extra { order: 11; }
+
+/* Related controls always have breathing room, including confirmation rows. */
+.relay-comment-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.relay-comment-confirm-actions:empty { display: none; }
+.relay-comment-thread-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.relay-comment-thread-actions > .relay-comment-thread-controls,
+.relay-comment-thread-actions > .relay-inbox-controls { display: contents; }
+.relay-comment-author-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.relay-comment-author-header .relay-comment-avatar { float: none; margin: 0; flex-shrink: 0; }
+.relay-comment-author-meta { min-width: 0; }
+.relay-comment-thread-state { color: var(--text-muted); font-size: var(--font-ui-small); margin-top: 2px; }
+
+.relay-comment-thread-actions .relay-inbox-controls button { min-height: 30px; }
+.relay-comment-thread-controls, .relay-comment-message-actions, .relay-comment-composer-actions,
+.relay-comment-toolbar, .relay-comment-formatting { gap: 8px; }
+.is-mobile .relay-comment-thread-actions .relay-inbox-controls button { min-height: 44px; }
