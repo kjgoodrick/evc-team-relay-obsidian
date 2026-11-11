@@ -1,3 +1,5 @@
+import { Menu } from "obsidian";
+import { commentButton } from "./CommentControls";
 import { EditorState, NodeSelection, Plugin, Selection, TextSelection, type Command, type SelectionBookmark, type Transaction } from "prosemirror-state";
 import { EditorView, type NodeView } from "prosemirror-view";
 import { baseKeymap, chainCommands, exitCode, setBlockType, toggleMark } from "prosemirror-commands";
@@ -45,9 +47,9 @@ export class RichCommentEditor {
 		this.linkPanel = this.el.createDiv({ cls: "relay-comment-link-editor" }); this.linkPanel.hidden = true;
 		const linkLabel = this.linkPanel.createEl("label", { text: "Link address" });
 		this.linkInput = linkLabel.createEl("input", { attr: { type: "url", placeholder: "https://…", maxlength: "2048" } });
-		const apply = this.linkPanel.createEl("button", { text: "Apply link", attr: { type: "button" } }); apply.onclick = () => this.applyLink();
-		const remove = this.linkPanel.createEl("button", { text: "Remove link", attr: { type: "button" } }); remove.onclick = () => this.applyLink(true);
-		const cancel = this.linkPanel.createEl("button", { text: "Cancel link", attr: { type: "button" } }); cancel.onclick = () => this.closeLink();
+		const apply = commentButton(this.linkPanel, { text: "Apply link", attr: { type: "button" } }); apply.onclick = () => this.applyLink();
+		const remove = commentButton(this.linkPanel, { text: "Remove link", attr: { type: "button" } }); remove.onclick = () => this.applyLink(true);
+		const cancel = commentButton(this.linkPanel, { text: "Cancel link", attr: { type: "button" } }); cancel.onclick = () => this.closeLink();
 		this.linkInput.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); this.applyLink(); } if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); this.closeLink(); } };
 		this.languageLabel = this.el.createEl("label", { cls: "relay-comment-code-language", text: "Code language" });
 		this.language = this.languageLabel.createEl("input", { attr: { type: "text", maxlength: "32", placeholder: "Optional, for example: js" } });
@@ -63,7 +65,17 @@ export class RichCommentEditor {
 			dispatchTransaction: transaction => this.dispatch(transaction),
 			nodeViews: { picture: (node, _view, position) => this.picture(node, position) },
 			handlePaste: () => !this.enabled || this.composing,
-			handleDOMEvents: { paste: (_view, event) => {
+			handleDOMEvents: { keyup: (view, event) => {
+                if (event.key !== "@" || event.isComposing || this.composing || !this.enabled || this.localOnly || this.inNode("code_block")) return false;
+                const end = view.state.selection.from, start = end - 1;
+                if (start < 0 || view.state.doc.textBetween(start, end) !== "@") return false;
+                const menu = new Menu();
+                for (const person of this.session.participants(this.scopeId)) menu.addItem(item => item.setTitle(person.name).onClick(() => {
+                    if (!this.enabled || view.state.doc.textBetween(start, end) !== "@") return;
+                    view.dispatch(view.state.tr.delete(start, end)); this.insertMention(person.id, person.name);
+                }));
+                const rect = view.dom.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom }); return false;
+            }, paste: (_view, event) => {
 				if (!this.enabled || this.composing) { event.preventDefault(); return true; }
 				const data = event.clipboardData, files = Array.from(data?.files ?? []).filter(file => file.type.startsWith("image/"));
 				const text = data?.getData("text/plain") ?? "";
@@ -88,7 +100,7 @@ export class RichCommentEditor {
 		this.control("Bulleted list", this.list("bullet_list"), () => this.inNode("bullet_list"));
 		this.control("Numbered list", this.list("ordered_list"), () => this.inNode("ordered_list"));
 		this.control("Code block", this.codeBlock(), () => this.inNode("code_block"));
-		const link = this.toolbar.createEl("button", { text: "Link", attr: { type: "button" } });
+		const link = commentButton(this.toolbar, { text: "Link", attr: { type: "button" } });
 		link.onmousedown = event => event.preventDefault(); link.onclick = () => this.openLink();
 		this.controls.push({ button: link, command: () => !this.inNode("code_block") });
 		this.control("Undo", undo); this.control("Redo", redo);
@@ -128,7 +140,7 @@ export class RichCommentEditor {
 		this.update();
 	}
 	private control(label: string, command: Command, active?: () => boolean): void {
-		const button = this.toolbar.createEl("button", { text: label, attr: { type: "button" } });
+		const button = commentButton(this.toolbar, { text: label, attr: { type: "button" } });
 		button.onmousedown = event => event.preventDefault();
 		button.onclick = () => { if (this.enabled && !this.view.composing) { command(this.view.state, this.view.dispatch, this.view); this.view.focus(); } };
 		this.controls.push({ button, command, active });
@@ -252,10 +264,10 @@ export class RichCommentEditor {
 		const picture = new CommentPicture(dom, this.session, this.scopeId, { type: "picture", picture_id: node.attrs.picture_id, alt: node.attrs.alt }, this.localOnly ? "only" : true);
 		const alt = dom.createEl("input", { attr: { type: "text", maxlength: "1024", "aria-label": "Picture description", placeholder: "Picture description" } }); alt.value = node.attrs.alt;
 		alt.oninput = () => { const pos = position(); if (this.enabled && pos !== undefined) this.view.dispatch(this.view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, alt: alt.value })); };
-		const remove = dom.createEl("button", { text: "Remove picture", attr: { type: "button" } });
+		const remove = commentButton(dom, { text: "Remove picture", attr: { type: "button" } });
 		remove.onclick = () => { const pos = position(); if (this.enabled && !this.composing && pos !== undefined) this.view.dispatch(closeHistory(this.view.state.tr.delete(pos, pos + node.nodeSize))); };
-		const up = dom.createEl("button", { text: "Move picture up", attr: { type: "button" } });
-		const down = dom.createEl("button", { text: "Move picture down", attr: { type: "button" } });
+		const up = commentButton(dom, { text: "Move picture up", attr: { type: "button" } });
+		const down = commentButton(dom, { text: "Move picture down", attr: { type: "button" } });
 		const move = (direction: -1 | 1) => {
 			const pos = position(); if (!this.enabled || this.composing || pos === undefined) return;
 			const state = this.view.state, index = state.doc.resolve(pos).index(), sibling = state.doc.maybeChild(index + direction);

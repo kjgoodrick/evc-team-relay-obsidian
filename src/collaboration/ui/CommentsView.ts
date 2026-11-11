@@ -1,7 +1,9 @@
+import { safeAvatarUrl } from "../../presenceAvatar";
+import { commentButton } from "./CommentControls";
 import { DiscussionExportModal } from "./DiscussionExport";
 import { SavedDraftCopyModal } from "./SavedDraftCopy";
 import { targetNeedsReview, uncheckedTarget, type CommentTargetStatus } from "../CommentTargetStatus";
-import { ItemView, Modal, type App, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Modal, Menu, type App, type WorkspaceLeaf } from "obsidian";
 import { v4 as uuid } from "uuid";
 import type { DiscussionHost } from "../DiscussionHost";
 import type { AnchoredThread, DiscussionSession } from "../DiscussionSession";
@@ -39,7 +41,7 @@ class DeleteCommentModal extends AccountModal {
 		this.contentEl.createEl("p", { text: "The comment will be replaced by a removal marker. Its text, history and pictures will no longer be available through ordinary discussion views." });
 		const reason = this.contentEl.createEl("textarea", { attr: { rows: "2", placeholder: "Reason (required when removing someone else’s comment)", "aria-label": "Removal reason" } });
 		const status = this.contentEl.createDiv({ attr: { role: "status" } });
-		const button = this.contentEl.createEl("button", { text: "Remove comment", cls: "mod-warning" });
+		const button = commentButton(this.contentEl, { text: "Remove comment", cls: "mod-warning" });
 		button.onclick = () => {
 			if (this.message.author_id !== this.session.identity.accountId && !reason.value.trim()) { status.setText("Enter a reason for the removal."); return; }
 			this.operation ??= { ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, payload: {
@@ -108,24 +110,24 @@ class ThreadCard {
 		this.composer?.update();
 		if (key === this.renderedKey) return;
 		const generation = ++this.generation;
-		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString()}`);
+		this.summary.setText(`${thread.state === "resolved" ? "Resolved" : "Open"} · ${this.session.displayName(this.entryId, thread.author_id)} · ${new Date(thread.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}`);
 		this.controls.empty();
-		this.controls.createEl("p", { text: this.targetStatus.message, cls: "relay-comment-thread-target-status" });
+		if (targetNeedsReview(this.targetStatus)) this.controls.createEl("p", { text: this.targetStatus.message, cls: "relay-comment-thread-target-status" });
 		this.copyLink(this.controls, "Copy discussion link");
 		if (thread.anchor?.type === "image" || thread.anchor?.type === "image_file") {
-			const target = this.controls.createEl("button", { text: "Show image " + (thread.anchor.geometry.type === "whole" ? "discussion" : thread.anchor.geometry.type) });
+			const target = commentButton(this.controls, { text: "Show image " + (thread.anchor.geometry.type === "whole" ? "discussion" : thread.anchor.geometry.type) });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "text") {
-			const target = this.controls.createEl("button", { text: thread.anchor.structure ? "Show selected blocks" : thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
+			const target = commentButton(this.controls, { text: thread.anchor.structure ? "Show selected blocks" : thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
 			target.title = thread.anchor.context.quote;
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "base") {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
-			const target = this.controls.createEl("button", { text: (thread.anchor.target.type === "summary" || thread.anchor.target.type === "group_summary") ? "Show summary" : thread.anchor.target.type === "timeline_marker" ? "Show captured marker position" : "Show Bases target" });
+			const target = commentButton(this.controls, { text: (thread.anchor.target.type === "summary" || thread.anchor.target.type === "group_summary") ? "Show summary" : thread.anchor.target.type === "timeline_marker" ? "Show captured marker position" : "Show Bases target" });
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 			if (thread.anchor.target.type === "timeline_marker") {
 				const captured = thread.anchor, revision = thread.anchor_revision;
-				const compare = this.controls.createEl("button", { text: "Compare marker positions" });
+				const compare = commentButton(this.controls, { text: "Compare marker positions" });
 				compare.onclick = () => {
 					this.markerComparison?.close();
 					this.markerComparison = new TimelineMarkerComparisonModal(this.app, this.session, this.entryId, thread.id, revision, captured,
@@ -135,11 +137,12 @@ class ThreadCard {
 				};
 			}
 		}
-		const toggle = this.controls.createEl("button", { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
-		toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
+		const toggle = commentButton(this.controls, { text: this.expanded ? "Hide replies" : "Show replies", attr: { "aria-expanded": String(this.expanded) } });
+		toggle.createEl("span", { text: "Replies", cls: "relay-comment-replies-label" });
+        toggle.onclick = () => { this.expanded = !this.expanded; this.count = this.expanded ? 20 : 1; this.after = 0; this.pages = []; void this.update(this.thread); };
 		const permission = this.session.permission(this.entryId);
 		if (thread.anchor_revision > 1) {
-			const history = this.controls.createEl("button", { text: "Target history" }); history.disabled = !this.session.online;
+			const history = commentButton(this.controls, { text: "Target history" }); history.disabled = !this.session.online;
 			history.onclick = () => new TargetHistoryModal(this.app, this.session, this.entryId, thread.id,
 				anchor => this.host.targetLabel(this.session, this.entryId, anchor) ?? commentTargetDescription(anchor),
 				anchor => { void this.host.revealTarget(this.session, this.entryId, anchor); }).open();
@@ -148,12 +151,12 @@ class ThreadCard {
 			const pendingMove = this.session.canReattach ? undefined : await this.session.pendingReattachment(this.entryId, thread.id);
 			if (this.disposed || generation !== this.generation) return;
 			if (this.session.canReattach || pendingMove) {
-				const move = this.controls.createEl("button", { text: pendingMove ? "Review unconfirmed move" : "Move target" });
+				const move = commentButton(this.controls, { text: pendingMove ? "Review unconfirmed move" : "Move target" });
 				move.disabled = !this.session.online;
 				move.onclick = () => this.host.openReattachment(this.session, this.entryId, this.thread);
 			}
 			const state = thread.state === "open" ? "resolved" : "open";
-			const button = this.controls.createEl("button", { text: state === "resolved" ? "Resolve" : "Reopen" });
+			const button = commentButton(this.controls, { text: state === "resolved" ? "Resolve" : "Reopen" });
 			button.disabled = !this.session.online;
 			button.onclick = () => {
 				if (!this.stateOperation || !isRecord(this.stateOperation.payload) || this.stateOperation.payload.expected_state_revision !== thread.state_revision) {
@@ -188,11 +191,11 @@ class ThreadCard {
 		for (const message of result.messages) this.message(message);
 		if (!result.messages.length) this.content.createEl("p", { text: "Loading discussion…", cls: "relay-comment-muted" });
 		if (this.expanded && result.hasMore) {
-			const more = this.content.createEl("button", { text: "Next replies" });
+			const more = commentButton(this.content, { text: "Next replies" });
 			more.onclick = () => { this.pages.push(this.after); this.after = result.messages[result.messages.length - 1].created_sequence; void this.update(this.thread); };
 		}
 		if (this.expanded && this.pages.length) {
-			const previous = this.content.createEl("button", { text: "Previous replies" });
+			const previous = commentButton(this.content, { text: "Previous replies" });
 			previous.onclick = () => { this.after = this.pages.pop() ?? 0; void this.update(this.thread); };
 		}
 		this.renderedKey = key;
@@ -208,7 +211,7 @@ class ThreadCard {
 		return true;
 	}
 	private copyLink(parent: HTMLElement, label: string, messageId?: string): void {
-		const button = parent.createEl("button", { text: label });
+		const button = commentButton(parent, { text: label });
 		button.onclick = () => {
 			button.disabled = true;
 			void this.host.discussionUrl(this.session, this.entryId, this.thread.id, messageId).then(async url => {
@@ -221,15 +224,35 @@ class ThreadCard {
 	private message(message: DiscussionMessage): void {
 		const article = this.content.createDiv({ cls: "relay-comment-message" });
 		article.dataset.messageId = message.id;
-		article.createDiv({ cls: "relay-comment-author", text: `${message.author_id === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, message.author_id)} · ${new Date(message.created_at).toLocaleString()}${message.revision > 1 ? " · edited" : ""}` });
+        const name = this.session.displayName(this.entryId, message.author_id);
+        const avatar = article.createDiv({ cls: "relay-comment-avatar", attr: { "aria-label": name } });
+        avatar.setText(name.split(/\s+/).map(part => part[0]).slice(0, 2).join("").toUpperCase());
+        const picture = safeAvatarUrl(this.session.participants(this.entryId).find(person => person.id === message.author_id)?.picture);
+        if (picture) {
+            const image = avatar.createEl("img", { attr: { src: picture, alt: name, referrerpolicy: "no-referrer" } });
+            image.onerror = () => image.remove();
+        }
+
+		article.createDiv({ cls: "relay-comment-author", text: `${message.author_id === this.session.identity.accountId ? "You" : this.session.displayName(this.entryId, message.author_id)} · ${new Date(message.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}${message.revision > 1 ? " · edited" : ""}` });
 		renderCommentBody(article, message.body, id => this.session.displayName(this.entryId, id),
 			(parent, picture) => this.pictures.push(new CommentPicture(parent, this.session, this.entryId, picture)));
 		const permission = this.session.permission(this.entryId), actions = article.createDiv({ cls: "relay-comment-message-actions" });
 		this.copyLink(actions, "Copy comment link", message.id);
+        if (!message.deleted && permission?.comment) {
+            const picker = commentButton(actions, { text: "Add reaction" }); picker.disabled = !this.session.canQueue;
+            picker.onclick = event => { const menu = new Menu();
+                for (const [emoji, label] of Object.entries(REACTIONS)) menu.addItem(item => item.setTitle(label + " " + emoji.replace(/_/g, " ")).onClick(() => {
+                    const reaction = message.reactions.find(r => r.emoji === emoji);
+                    void this.session.queue({ ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, type: "reaction.set", dependsOn: [], payload: {
+                        type: "reaction.set", thread_id: this.thread.id, message_id: message.id, emoji, present: !reaction?.mine,
+                    } }).catch(() => this.error.setText("Reaction could not be saved. Check your connection and permissions."));
+                })); menu.showAtMouseEvent(event);
+            };
+        }
 		if (!message.deleted) for (const [emoji, label] of Object.entries(REACTIONS)) {
 			const reaction = message.reactions.find(r => r.emoji === emoji);
-			if (!permission?.comment && !reaction) continue;
-			const button = actions.createEl("button", { text: label + (reaction ? " " + reaction.count : ""), cls: "relay-comment-reaction",
+			if (!reaction) continue;
+			const button = commentButton(actions, { text: label + (reaction ? " " + reaction.count : ""), cls: "relay-comment-reaction",
 				attr: { "aria-label": emoji.replace(/_/g, " ") + (reaction ? `, ${reaction.count}` : ""), "aria-pressed": String(reaction?.mine ?? false) } });
 			button.disabled = !permission?.comment || !this.session.canQueue;
 			button.onclick = () => {
@@ -240,12 +263,12 @@ class ThreadCard {
 			};
 		}
 		if (!message.deleted) {
-			const history = actions.createEl("button", { text: "History" }); history.disabled = !this.session.online;
+			const history = commentButton(actions, { text: "History" }); history.disabled = !this.session.online;
 			history.title = this.session.online ? "Compare comment revisions" : "Reconnect to view comment history";
 			history.onclick = () => new CommentHistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();
 		}
 		if (message.deleted && this.session.canReviewRemoved?.(this.entryId)) {
-			const review = actions.createEl("button", { text: "Review removed comment", attr: { type: "button" } });
+			const review = commentButton(actions, { text: "Review removed comment", attr: { type: "button" } });
 			review.onclick = () => {
 				this.removedModal?.close();
 				this.removedModal = new RemovedCommentsModal(this.app, this.session, this.entryId, () => !this.disposed && this.host.current().session === this.session && this.host.current().entryId === this.entryId,
@@ -256,10 +279,10 @@ class ThreadCard {
 		if (!message.deleted && permission?.comment) {
 			const draft = message.body ? editableCommentDraft(message.body, id => this.session.displayName(this.entryId, id)) : undefined;
 			if (message.author_id === this.session.identity.accountId && draft !== undefined) {
-				const edit = actions.createEl("button", { text: "Edit" }); edit.onclick = () => new EditCommentModal(this.app, this.session, this.entryId, this.thread.id, message, draft).open();
+				const edit = commentButton(actions, { text: "Edit" }); edit.onclick = () => new EditCommentModal(this.app, this.session, this.entryId, this.thread.id, message, draft).open();
 			}
 			if (message.author_id === this.session.identity.accountId || permission.moderate) {
-				const remove = actions.createEl("button", { text: "Remove" }); remove.disabled = !this.session.online;
+				const remove = commentButton(actions, { text: "Remove" }); remove.disabled = !this.session.online;
 				remove.onclick = () => new DeleteCommentModal(this.app, this.session, this.entryId, this.thread.id, message).open();
 			}
 		}
@@ -296,7 +319,6 @@ export class CommentsView extends ItemView {
 	private targetCheck?: { key: string; epoch: number; pending: boolean };
 	private targetStatuses = new Map<string, CommentTargetStatus>();
 	private targetFilter?: HTMLSelectElement;
-	private targetSummary?: HTMLElement;
 	private closed = false;
 	constructor(leaf: WorkspaceLeaf, private host: DiscussionHost) { super(leaf); }
 	getViewType(): string { return COMMENTS_VIEW; }
@@ -328,7 +350,7 @@ export class CommentsView extends ItemView {
 		this.removedModal?.close(); this.removedModal = undefined; this.removedButton = undefined;
 		this.exportModal?.close(); this.exportModal = undefined; this.exportButton = undefined;
 		this.search?.dispose(); this.search = undefined;
-		this.targetWatch?.(); this.targetWatch = undefined; this.targetEpoch++; this.targetCheck = undefined; this.targetStatuses.clear(); this.targetFilter = undefined; this.targetSummary = undefined;
+		this.targetWatch?.(); this.targetWatch = undefined; this.targetEpoch++; this.targetCheck = undefined; this.targetStatuses.clear(); this.targetFilter = undefined;
 		this.generation++; this.session = undefined; this.entryId = undefined;
 		const watch = this.watch; this.watch = undefined; watch?.(); this.drafts?.dispose(); this.drafts = undefined; this.focusedSerial = 0;
 		for (const card of this.cards.values()) card.dispose(); this.cards.clear();
@@ -342,23 +364,25 @@ export class CommentsView extends ItemView {
 			this.reset();
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Bases comments" });
 			this.contentEl.createEl("p", { text: "Discussions belong to a saved view. Choose one to see its comments and drafts." });
-			const choose = this.contentEl.createEl("button", { text: "Choose discussion view" }); choose.onclick = () => this.host.chooseBaseView();
+			const choose = commentButton(this.contentEl, { text: "Choose discussion view" }); choose.onclick = () => this.host.chooseBaseView();
 			return;
 		}
 		if (!target.session || !target.entryId || target.session.status === "closed") {
 			this.reset(); this.session = undefined; this.entryId = undefined;
 			this.contentEl.createEl("p", { text: target.message ?? "Sign in to use comments." });
-			if (target.entryId) { const retry = this.contentEl.createEl("button", { text: "Retry opening comments" }); retry.onclick = () => this.host.retry(); }
+			if (target.entryId) { const retry = commentButton(this.contentEl, { text: "Retry opening comments" }); retry.onclick = () => this.host.retry(); }
 			return;
 		}
 		if (target.session !== this.session || target.entryId !== this.entryId) {
 			this.reset(); this.session = target.session; this.entryId = target.entryId;
 			this.contentEl.createEl("h2", { text: target.path.split("/").pop() ?? "Comments" });
 			if (target.message) this.contentEl.createEl("p", { cls: "relay-comment-target-status", text: target.message });
-			const inbox = this.contentEl.createEl("button", { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
-			const storage = this.contentEl.createEl("button", { text: "Storage on this device" }); storage.onclick = () => { if (this.session) this.host.openCommentStorage(this.session); };
-			this.exportButton = this.contentEl.createEl("button", { text: "Export discussions", attr: { type: "button" } });
-			this.removedButton = this.contentEl.createEl("button", { text: "Review removed comments", attr: { type: "button" } });
+			const toolbar = this.contentEl.createDiv({ cls: "relay-comment-toolbar" });
+			const overflow = this.contentEl.createDiv(); overflow.hidden = true;
+			const inbox = commentButton(toolbar, { text: "Comment inbox" }); inbox.onclick = () => { void this.host.openInbox(); };
+			const storage = commentButton(overflow, { text: "Storage on this device" }); storage.onclick = () => { if (this.session) this.host.openCommentStorage(this.session); };
+			this.exportButton = commentButton(overflow, { text: "Export discussions", attr: { type: "button" } });
+			this.removedButton = commentButton(overflow, { text: "Review removed comments", attr: { type: "button" } });
 			this.removedButton.onclick = () => {
 				const session = this.session, scopeId = this.entryId;
 				if (!session || !scopeId || !session.canReviewRemoved(scopeId)) return;
@@ -378,7 +402,7 @@ export class CommentsView extends ItemView {
 				this.exportModal.open();
 			};
 
-			const search = this.contentEl.createEl("button", { text: "Search and filter comments", attr: { "aria-expanded": "false" } });
+			const search = commentButton(toolbar, { text: "Search and filter comments", attr: { "aria-expanded": "false" } });
 			const searchContainer = this.contentEl.createDiv();
 			search.onclick = () => {
 				if (this.search) { this.search.dispose(); this.search = undefined; }
@@ -387,18 +411,28 @@ export class CommentsView extends ItemView {
 			};
 			if (target.kind === "base") {
 				this.contentEl.createEl("p", { cls: "relay-comment-base-view", text: "Discussion view: " + target.baseViewName });
-				const choose = this.contentEl.createEl("button", { text: "Change discussion view" }); choose.onclick = () => this.host.chooseBaseView();
+				const choose = commentButton(this.contentEl, { text: "Change discussion view" }); choose.onclick = () => this.host.chooseBaseView();
 			}
 			this.status = this.contentEl.createDiv({ cls: "relay-comment-status", attr: { role: "status", "aria-live": "polite" } });
 			this.moveSelection = this.contentEl.createDiv({ cls: "relay-comment-target-selection", attr: { role: "status", "aria-live": "polite" } });
-			const refresh = this.contentEl.createEl("button", { text: "Refresh comments" }); refresh.onclick = () => { this.targetEpoch++; this.schedule(); void this.session?.refresh(); };
+			const refresh = commentButton(overflow, { text: "Refresh comments" }); refresh.onclick = () => { this.targetEpoch++; this.schedule(); void this.session?.refresh(); };
 			this.pending = this.contentEl.createDiv({ cls: "relay-comment-pending" });
 			this.pendingView = new PendingComments(this.pending, this.session, this.entryId, operation => this.host.openCommandRecovery(this.session!, operation));
-			const targetLabel = this.contentEl.createEl("label", { text: "Target status " });
+			const more = commentButton(toolbar, { text: "More comment actions" });
+            more.onclick = event => { const menu = new Menu();
+                for (const button of [this.exportButton!, this.removedButton!, storage, refresh]) {
+                    if (button.hidden) continue;
+                    menu.addItem(item => item.setTitle(button === storage ? "Local drafts and recovery…" : button.textContent ?? "").setDisabled(button.disabled).onClick(() => button.click()));
+                } menu.showAtMouseEvent(event);
+            };
+            const filter = commentButton(toolbar, { text: "Filter comments", attr: { "aria-expanded": "false" } });
+            const targetLabel = this.contentEl.createEl("label", { text: "Comment location " }); targetLabel.hidden = true;
+            filter.onclick = () => { targetLabel.hidden = !targetLabel.hidden; filter.setAttribute("aria-expanded", String(!targetLabel.hidden)); };
+
 			this.targetFilter = targetLabel.createEl("select", { attr: { "aria-label": "Filter comment targets" } });
-			for (const [value, text] of [["all", "All targets"], ["review", "Targets needing review"], ["unanchored", "Unanchored targets"], ["unchecked", "Waiting or unchecked targets"]]) this.targetFilter.createEl("option", { text, attr: { value } });
+			for (const [value, text] of [["all", "All comment locations"], ["review", "Location needs attention"], ["unanchored", "Original content removed"], ["unchecked", "Location not yet verified"]]) this.targetFilter.createEl("option", { text, attr: { value } });
 			this.targetFilter.onchange = () => this.schedule();
-			this.targetSummary = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
+			// Target counts are internal bookkeeping, not a live announcement.
 			this.list = this.contentEl.createDiv({ cls: "relay-comment-thread-list" });
 			const session = this.session, entryId = this.entryId;
 			this.drafts = new DiscussionDrafts(this.contentEl, session, entryId, anchor => { void this.host.revealTarget(session, entryId, anchor); },
@@ -430,7 +464,7 @@ export class CommentsView extends ItemView {
 			this.moveSelection.empty(); this.moveSelection.hidden = !this.host.choosingReattachment;
 			if (this.host.choosingReattachment) {
 				this.moveSelection.createEl("p", { text: this.host.selectingReattachment(session, entryId) ? (this.host.choosingCommandRecovery ? "Recovering a saved comment: choose text, blocks, an image or a Bases target using its comment action. You will review the draft before sending." : "Moving a discussion: choose text, blocks, an image or a Bases target using its comment action. You will review the move before saving.") : "A discussion target selection is active in another note or saved view. Return there or cancel the selection." });
-				const cancel = this.moveSelection.createEl("button", { text: "Cancel target selection" }); cancel.onclick = () => this.host.cancelReattachmentSelection();
+				const cancel = commentButton(this.moveSelection, { text: "Cancel target selection" }); cancel.onclick = () => this.host.cancelReattachmentSelection();
 			}
 		}
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);
@@ -442,7 +476,7 @@ export class CommentsView extends ItemView {
 		const canRead = !!permission?.read && session.status !== "authentication_required" && session.status !== "unavailable";
 		if (this.targetFilter) this.targetFilter.disabled = !canRead;
 		if (!canRead) {
-			this.targetCheck = undefined; this.targetStatuses.clear(); this.targetSummary?.setText("");
+			this.targetCheck = undefined; this.targetStatuses.clear();
 			for (const card of this.cards.values()) card.dispose(); this.cards.clear(); this.list!.empty();
 		}
 		// Local authored work remains recoverable after read access is revoked;
@@ -464,22 +498,19 @@ export class CommentsView extends ItemView {
 		if (focus && focus.serial !== this.focusedSerial && this.targetFilter) this.targetFilter.value = "all";
 		const filter = this.targetFilter?.value ?? "all";
 		const matches = (status: CommentTargetStatus) => filter === "all" || filter === "review" && targetNeedsReview(status) || filter === "unanchored" && status.state === "unanchored" || filter === "unchecked" && (status.state === "waiting" || status.state === "unknown");
-		let shown = 0, unchecked = 0;
 		const retained = new Set(local.threads.map(thread => thread.id));
 		for (const [id, card] of this.cards) if (!retained.has(id)) { card.dispose(); this.cards.delete(id); }
 		for (const thread of local.threads) {
 			let card = this.cards.get(thread.id);
 			if (!card) { card = new ThreadCard(this.list!, this.app, session, entryId, thread, this.host); this.cards.set(thread.id, card); }
 			const targetStatus = targetStatuses.get(thread.id) ?? uncheckedTarget();
-			card.el.hidden = !matches(targetStatus); if (!card.el.hidden) shown++;
-			if (targetStatus.state === "waiting" || targetStatus.state === "unknown") unchecked++;
+			card.el.hidden = !matches(targetStatus);
 			await card.update(thread, targetStatus);
 			if (this.closed || generation !== this.generation) return;
 			if (focus?.threadId === thread.id && focus.serial !== this.focusedSerial) {
 				if (await card.focus(focus.messageId, focus.messageSequence, focus.notice, () => !this.closed && generation === this.generation)) this.focusedSerial = focus.serial;
 			}
 		}
-		this.targetSummary?.setText(`${shown} of ${local.threads.length} discussions on this page · ${unchecked} waiting or unchecked.${this.targetCheck?.pending ? " Updating target checks in the background." : ""} Hidden Bases records or properties are not treated as detached. Use Next discussions to check older pages.`);
 		this.list!.querySelectorAll(".relay-comment-more").forEach(el => el.remove());
 		if (local.hasMore) {
 			const more = this.list!.createEl("button", { text: "Next discussions", cls: "relay-comment-more" });

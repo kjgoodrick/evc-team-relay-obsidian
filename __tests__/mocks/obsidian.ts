@@ -169,3 +169,5 @@ export class Notice {
 		noticeHideMock();
 	}
 }
+
+export function setIcon(el: HTMLElement, icon: string): void { el.textContent = ""; el.setAttribute("data-icon", icon); }

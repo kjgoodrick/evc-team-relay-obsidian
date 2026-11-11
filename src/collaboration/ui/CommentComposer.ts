@@ -1,3 +1,5 @@
+import { Menu } from "obsidian";
+import { commentButton } from "./CommentControls";
 import type { RestoreBinding } from "../RestoreGeneration";
 import { timelineRangeLabel } from "../TimelineRange";
 import { parseLocalDiscussionAnchor, type LocalDiscussionAnchor } from "../LocalDiscussionAnchor";
@@ -76,7 +78,7 @@ export class CommentComposer {
 		this.targetEl = this.el.createDiv({ cls: "relay-comment-draft-target" });
 		this.textarea = this.el.createEl("textarea", { attr: { id: draftId, rows: "3", maxlength: "65536", "aria-label": label, placeholder: "Write a comment…" } });
 		this.textarea.disabled = true;
-		this.formatting = this.el.createEl("button", { text: "Format comment", attr: { type: "button", title: "Add formatting, links, lists or code" } });
+		this.formatting = commentButton(this.el, { text: "Format comment", attr: { type: "button", title: "Add formatting, links, lists or code" } });
 		this.richHost = this.el.createDiv(); this.richHost.hidden = true;
 		this.formatting.onclick = () => {
 			if (this.busy || this.onlinePending || this.saveFailed || this.textarea.disabled || this.composing) return;
@@ -88,7 +90,7 @@ export class CommentComposer {
 		};
 		this.pictureList = this.el.createDiv({ cls: "relay-comment-draft-pictures" });
 		const actions = this.el.createDiv({ cls: "relay-comment-composer-actions" });
-		this.attach = actions.createEl("button", { text: "Add pictures", attr: { type: "button" } });
+		this.attach = commentButton(actions, { text: "Add pictures", attr: { type: "button" } });
 		this.fileInput = actions.createEl("input", { attr: { type: "file", accept: "image/png,image/jpeg,image/webp,image/gif", multiple: "", "aria-label": "Choose comment pictures" } });
 		this.fileInput.hidden = true;
 		this.attach.onclick = () => this.fileInput.click();
@@ -106,14 +108,14 @@ export class CommentComposer {
 			this.textarea.focus(); this.textarea.setSelectionRange(start + label.length + 1, start + label.length + 1);
 			this.people.value = ""; this.persist();
 		});
-		this.send = actions.createEl("button", { text: "Send", cls: "mod-cta", attr: { type: "submit" } });
+		this.send = commentButton(actions, { text: "Send", cls: "mod-cta", attr: { type: "submit" } });
 		this.send.disabled = true;
-		this.discardButton = actions.createEl("button", { text: "Discard draft", attr: { type: "button" } });
+		this.discardButton = commentButton(actions, { text: "Discard draft", attr: { type: "button" } });
 		this.discardButton.hidden = true; this.discardButton.onclick = () => { void this.reviewDiscard(); };
 		this.discardPanel = this.el.createDiv();
-		this.refreshPictures = actions.createEl("button", { text: "Refresh picture uploads", attr: { type: "button", title: "Keep the saved pictures and prepare fresh uploads for your next send." } });
+		this.refreshPictures = commentButton(actions, { text: "Refresh picture uploads", attr: { type: "button", title: "Keep the saved pictures and prepare fresh uploads for your next send." } });
 		this.refreshPictures.onclick = () => { void this.recover(true); };
-		this.recoverSend = actions.createEl("button", { text: "Check delivery and edit", attr: { type: "button", title: "Check whether the reply was sent before making this draft editable again." } });
+		this.recoverSend = commentButton(actions, { text: "Check delivery and edit", attr: { type: "button", title: "Check whether the reply was sent before making this draft editable again." } });
 		this.recoverSend.onclick = () => { void this.recover(false); };
 		this.refreshPictures.hidden = this.recoverSend.hidden = true;
 		this.status = this.el.createDiv({ cls: "relay-comment-save-status", attr: { role: "status", "aria-live": "polite" } });
@@ -129,6 +131,18 @@ export class CommentComposer {
 			this.mentions = updateMentionSpans(this.previousText, this.textarea.value, this.mentions);
 			this.previousText = this.textarea.value; this.persist();
 		});
+        this.textarea.addEventListener("keyup", event => {
+            if (event.key !== "@" || event.isComposing || this.composing || this.textarea.disabled || this.localOptions) return;
+            const end = this.textarea.selectionStart, start = end - 1;
+            if (start < 0 || this.textarea.value[start] !== "@") return;
+            const menu = new Menu();
+            for (const person of this.session.participants(this.entryId)) menu.addItem(item => item.setTitle(person.name).onClick(() => {
+                if (this.textarea.disabled || this.textarea.value[start] !== "@") return;
+                this.textarea.focus(); this.textarea.setSelectionRange(start, end);
+                this.people.value = person.id; this.people.dispatchEvent(new Event("change"));
+            }));
+            const rect = this.textarea.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom });
+        });
 		this.textarea.addEventListener("paste", event => {
 			const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith("image/"));
 			if (!files.length || !this.session.canAttachPictures || this.busy || this.onlinePending || this.textarea.disabled || this.saveFailed) return;
@@ -161,7 +175,7 @@ export class CommentComposer {
 				const review = this.el.createDiv({ cls: "relay-comment-edit-review" });
 				review.createEl("p", { text: (restored.editBaseRevision === undefined ? "This older draft has no saved revision." : `Your draft started from revision ${restored.editBaseRevision}.`) + ` Compare your draft with revision ${initialText.editBaseRevision}, shown when this editor opened, before replacing it.` });
 				if (initialText.rich) renderCommentBody(review, initialText.rich, id => this.session.displayName(this.entryId, id));
-				this.reviewButton = review.createEl("button", { text: "Use this revision for my edit", attr: { type: "button" } });
+				this.reviewButton = commentButton(review, { text: "Use this revision for my edit", attr: { type: "button" } });
 				this.reviewButton.onclick = () => { if (this.busy || this.saveFailed || this.onlinePending) return; this.editBaseRevision = initialText.editBaseRevision; this.needsEditReview = false; review.remove(); this.reviewButton = undefined; this.persist(); this.update(); };
 			}
 			if (draft?.target !== undefined) {
@@ -232,8 +246,8 @@ export class CommentComposer {
 			this.people.value = selected;
 		}
 		this.people.disabled = paused || this.busy || this.onlinePending || this.saveFailed || this.textarea.disabled || !people.length;
-		this.people.hidden = !!this.localOptions;
-		this.attach.hidden = !!this.localOptions || !this.session.canAttachPictures;
+		this.people.hidden = true;
+		this.attach.hidden = true;
 		this.attach.disabled = blocked || this.onlinePending || this.textarea.disabled || this.pictures.length >= 10;
 		this.refreshPictures.hidden = !!this.localOptions || !this.pictures.length || this.onlinePending;
 		this.refreshPictures.disabled = blocked || this.textarea.disabled || !this.session.canAttachPictures;
@@ -250,7 +264,7 @@ export class CommentComposer {
 			this.targetEl.dataset.target = label; this.targetEl.empty();
 			if (label) {
 				this.targetEl.createEl("p", { text: label });
-				const reveal = this.targetEl.createEl("button", { text: (this.target?.type === "base" || this.target?.type === "base_group_pending") ? "Target details" : "Show selection", attr: { type: "button" } });
+				const reveal = commentButton(this.targetEl, { text: (this.target?.type === "base" || this.target?.type === "base_group_pending") ? "Target details" : "Show selection", attr: { type: "button" } });
 				reveal.hidden = !!this.localOptions;
 				reveal.onclick = () => { if (this.target) this.reveal?.(this.target); };
 			}
@@ -319,7 +333,7 @@ export class CommentComposer {
 				const alt = el.createEl("input", { attr: { type: "text", maxlength: "1024", placeholder: "Picture description", "aria-label": "Picture description" } });
 				alt.value = picture.alt ?? "";
 				alt.oninput = () => { picture.alt = alt.value; view.setAlt(alt.value); this.persist(); };
-				const remove = el.createEl("button", { text: "Remove picture", attr: { type: "button" } });
+				const remove = commentButton(el, { text: "Remove picture", attr: { type: "button" } });
 				remove.onclick = () => {
 					if (this.busy || this.onlinePending || this.saveFailed) return;
 					this.pictures = this.pictures.filter(p => p !== picture); this.persist(); this.update();
@@ -427,8 +441,8 @@ export class CommentComposer {
 			if (!draft || draft.scopeId !== this.entryId || draft.revision !== this.revision || JSON.stringify(readCommentDraft(draft.body)) !== this.savedValue) throw new Error("This draft changed in another view. Reopen it before discarding.");
 			this.discardReview = draft; this.discardPanel.empty();
 			this.discardPanel.createEl("p", { text: "Discard this saved draft? This cannot be undone here. Posted comments stay unchanged. Pictures used only by this draft are released; pictures used elsewhere or retained for a recovery copy stay available." });
-			const keep = this.discardPanel.createEl("button", { text: "Keep editing", attr: { type: "button" } });
-			const discard = this.discardPanel.createEl("button", { text: "Discard saved draft", attr: { type: "button" } });
+			const keep = commentButton(this.discardPanel, { text: "Keep editing", attr: { type: "button" } });
+			const discard = commentButton(this.discardPanel, { text: "Discard saved draft", attr: { type: "button" } });
 			keep.onclick = () => { if (this.busy) return; this.discardReview = undefined; this.discardPanel.empty(); this.update(); };
 			discard.onclick = () => { void this.discardSavedDraft(keep, discard); };
 		} catch (error) { if (!this.disposed) this.status.setText(error instanceof Error ? error.message : "Could not review this draft. Your saved work is retained."); }

@@ -22,7 +22,7 @@ Object.assign(HTMLElement.prototype, {
 Object.assign(Range.prototype, { getClientRects: () => [], getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }) });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const entry = id(3), identity = { serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "rich-editor" };
-const button = (el: HTMLElement, label: string) => [...el.querySelectorAll("button")].find(b => b.textContent === label)!;
+const button = (el: HTMLElement, label: string) => [...el.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") ?? b.textContent) === label)!;
 const select = (editor: RichCommentEditor, from: number, to = from) => editor.view.dispatch(editor.view.state.tr.setSelection(TextSelection.create(editor.view.state.doc, from, to)));
 const listeners = new Set<() => void>();
 const session = { identity, status: "offline", canQueue: true, online: false, canAttachPictures: true,

@@ -15,7 +15,7 @@ import { bodyFromText, protocolJson } from "../../src/collaboration/DiscussionPr
 import { editableCommentDraft } from "../../src/collaboration/ui/CommentDraft";
 import { copyToClipboard } from "../../src/utils/clipboard";
 jest.mock("../../src/utils/clipboard", () => ({ copyToClipboard: jest.fn().mockResolvedValue(undefined) }));
-jest.mock("obsidian", () => ({ Modal: class {
+jest.mock("obsidian", () => ({ setIcon: (el: HTMLElement, icon: string) => { el.textContent = ""; el.setAttribute("data-icon", icon); }, Modal: class {
 	contentEl = document.createElement("div"); setTitle() {}
 	close() { (this as unknown as { onClose(): void }).onClose(); }
 } }));
@@ -43,7 +43,7 @@ async function fixture() {
 		discardDraft: jest.fn(async (review: Draft, valid: () => boolean) => { if (!await store.removeDraft(review.id, review.revision, review, valid)) throw new Error("Draft changed"); }),
 	};
 	const modal = new CommentLocalWorkModal({} as App, session as unknown as DiscussionSession, () => current); document.body.append(modal.contentEl);
-	const button = (text: string) => Array.from(modal.contentEl.querySelectorAll("button")).find(item => item.textContent === text)!;
+	const button = (text: string) => Array.from(modal.contentEl.querySelectorAll("button")).find(item => (item.getAttribute("aria-label") ?? item.textContent) === text)!;
 	return { store, session, modal, button, listeners, notify: () => listeners.forEach(listener => listener()), invalidate: () => { current = false; modal.validate(); }, close: () => { modal.onClose(); modal.contentEl.remove(); store.close(); } };
 }
 

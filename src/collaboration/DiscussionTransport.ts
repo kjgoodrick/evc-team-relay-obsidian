@@ -1,3 +1,4 @@
+import { safeAvatarUrl } from "../presenceAvatar";
 import { parseBaseRegistry, parseBaseViewPage } from "../bases/BaseRegistryProtocol";
 import type { InlineBaseSourceRequest } from "../bases/InlineBaseAnchors";
 import { restoreContext, restoreGeneration, type RestoreBinding, type RestoreContext } from "./RestoreGeneration";
@@ -27,7 +28,7 @@ export { DiscussionFailure, type FailureAction } from "./DiscussionFailure";
 export interface DiscussionIdentity { serverId: string; accountId: string; shareId: string }
 export interface DiscussionCredential { accountId: string; accessToken: string }
 export interface DiscussionPermissions { read: boolean; comment: boolean; edit: boolean; moderate: boolean }
-export interface DiscussionParticipant { id: string; name: string }
+export interface DiscussionParticipant { id: string; name: string; picture?: string }
 export type CommandResult = {
 	operation_id: string; scope_id: string; thread_id: string; sequence: number;
 	state: "open" | "resolved"; state_revision: number; removed: boolean; changed: boolean;
@@ -463,7 +464,7 @@ export class DiscussionTransport implements DiscussionSender {
 		let previous = after ?? "";
 		const participants = value.participants.map(person => {
 			if (!object(person) || !isId(person.id) || person.id <= previous || typeof person.name !== "string" || !person.name || person.name.length > 320) throw new DiscussionFailure("pause", "invalid_read_response");
-			previous = person.id; return { id: person.id, name: person.name };
+			previous = person.id; return { id: person.id, name: person.name, ...(safeAvatarUrl(person.picture) ? { picture: safeAvatarUrl(person.picture) } : {}) };
 		});
 		if (value.next_after !== (previous || null) || value.has_more && !participants.length) throw new DiscussionFailure("pause", "invalid_read_response");
 		return { participants, hasMore: value.has_more, nextAfter: previous || undefined };

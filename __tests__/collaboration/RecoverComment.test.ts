@@ -11,7 +11,7 @@ import { RecoverCommentModal } from "../../src/collaboration/ui/RecoverComment";
 import { PendingComments } from "../../src/collaboration/ui/PendingComments";
 import { commentTargetDescription } from "../../src/collaboration/ui/ReattachComment";
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
-jest.mock("obsidian", () => ({ Modal: class {
+jest.mock("obsidian", () => ({ setIcon: (el: HTMLElement, icon: string) => { el.textContent = ""; el.setAttribute("data-icon", icon); }, Modal: class {
 	contentEl = document.createElement("div"); setTitle() {}
 	close() { (this as unknown as { onClose(): void }).onClose(); }
 } }));
@@ -45,7 +45,7 @@ async function fixture(type: "thread.create" | "reply.create" | "message.edit" =
 	};
 	const hooks = { current: () => true, choose: jest.fn(), reveal: jest.fn(), label: commentTargetDescription };
 	const modal = new RecoverCommentModal({} as App, session as unknown as DiscussionSession, original, hooks); document.body.append(modal.contentEl);
-	const button = (label: string) => [...modal.contentEl.querySelectorAll("button")].find(item => item.textContent === label)!;
+	const button = (label: string) => [...modal.contentEl.querySelectorAll("button")].find(item => (item.getAttribute("aria-label") ?? item.textContent) === label)!;
 	return { store, original, session, modal, hooks, button, listeners,
 		revoke: () => { readable = false; listeners.forEach(listener => listener()); },
 		close: () => { modal.onClose(); modal.contentEl.remove(); store.close(); } };
@@ -166,7 +166,7 @@ test("pending review cards resume offline and never expose the old picture-retry
 		view.update([{ ...f.original, state: "review", payload: { type: "thread.create", body: { version: 1, blocks: [{ type: "picture", picture_id: id(20), alt: "Saved" }] } } } as OutboxOperation]);
 		expect(parent.textContent).toContain("send it explicitly");
 		expect(parent.textContent).not.toContain("Refresh picture uploads and retry");
-		const button = [...parent.querySelectorAll("button")].find(item => item.textContent === "Continue editing saved change")!;
+		const button = [...parent.querySelectorAll("button")].find(item => (item.getAttribute("aria-label") ?? item.textContent) === "Continue editing saved change")!;
 		expect(button.disabled).toBe(false); button.click(); expect(review).toHaveBeenCalledTimes(1);
 	} finally { view.dispose(); f.close(); }
 });

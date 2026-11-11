@@ -35,7 +35,7 @@ async function fixture(rich = false, target?: Json) {
 	const create = () => new CommentComposer(parent, session as unknown as DiscussionSession, scope, draft.id,
 		body => ({ type: "thread.create", payload: { type: "thread.create", thread_id: id(8), message_id: id(9), body: protocolJson(body), anchor: { version: 1, type: "note" } } }), "Draft", "", finished);
 	const composer = create(); await composer.flush();
-	const button = (text: string, editor = composer) => Array.from(editor.el.querySelectorAll("button")).find(button => button.textContent === text)!;
+	const button = (text: string, editor = composer) => Array.from(editor.el.querySelectorAll("button")).find(button => (button.getAttribute("aria-label") ?? button.textContent) === text)!;
 	return { store, session, draft, composer, create, finished, button, listeners, close: () => { composer.dispose(); parent.remove(); store.close(); } };
 }
 

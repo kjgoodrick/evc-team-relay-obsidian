@@ -21,6 +21,14 @@ import { parseAnchor } from "../../src/collaboration/DiscussionProtocol";
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
 
 jest.mock("obsidian", () => ({
+    Menu: class {
+        items: any[] = [];
+        addItem(build: (item: any) => void) { const item: any = { setTitle(value: string) { this.title = value; return this; }, setDisabled(value: boolean) { this.disabled = value; return this; }, onClick(fn: () => void) { this.click = fn; return this; } }; build(item); this.items.push(item); return this; }
+        showAtPosition() { (globalThis as any).commentTestMenu = this; }
+        showAtMouseEvent() { this.showAtPosition(); }
+    },
+    setIcon: (el: HTMLElement, icon: string) => { el.textContent = ""; el.setAttribute("data-icon", icon); },
+
 	ItemView: class {
 		containerEl = document.createElement("div"); contentEl = document.createElement("div");
 		app = { workspace: { on: jest.fn() } };
@@ -151,7 +159,7 @@ test("retained local text is selectable without access, keeps selection on refre
 		session.permission = () => ({ read: false, comment: false, edit: false, moderate: false });
 		pending.update([operation]);
 		expect(parent.textContent).not.toContain("Not sent");
-		const find = (text: string) => [...parent.querySelectorAll("button")].find(button => button.textContent === text)!;
+		const find = (text: string) => [...parent.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === text)!;
 		expect(find("Retry original request").disabled).toBe(true);
 		find("Select text to copy").click(); const textarea = parent.querySelector("textarea")!;
 		expect(textarea.hidden).toBe(false); expect(textarea.value).toContain("@AliceLink (https://example.test)");
@@ -173,7 +181,7 @@ test("restored pending work offers receipt inspection without retrying or changi
 		type: "reply.create", thread_id: id(4), message_id: id(5), body: protocolJson(bodyFromText("Saved before restore")) } });
 	await store.observeRestoreContext({ supported: true, generation: id(90) }, 0);
 	const operation = (await store.getOperation(id(20)))!;
-	const find = (text: string) => [...parent.querySelectorAll("button")].find(button => button.textContent === text);
+	const find = (text: string) => [...parent.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === text);
 	try {
 		pending.update([operation]);
 		expect(parent.textContent).toContain("server was restored");
@@ -211,7 +219,7 @@ test("pending picture recovery is explicit, permission gated, and preserves the 
 	const op = (await store.getOperation(id(20)))!;
 	try {
 		session.canRepairPictures = false; pending.update([op]);
-		const find = () => [...parent.querySelectorAll("button")].find(button => button.textContent === "Refresh picture uploads and retry")!;
+		const find = () => [...parent.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Refresh picture uploads and retry")!;
 		expect(find().disabled).toBe(true); expect(parent.textContent).toContain("My saved diagram");
 		session.canRepairPictures = true; pending.update([op]); find().click();
 		await until(() => parent.textContent!.includes("queued again"));
@@ -279,7 +287,7 @@ test("direct message focus shows an older reply, preserves previous-page navigat
 		await view.onOpen(); await until(() => (document.activeElement as HTMLElement)?.dataset.messageId === id(5));
 		expect(session.messages).toHaveBeenCalledWith(entry, id(4), 800, 20);
 		expect(view.contentEl.textContent).toContain("The file is not present locally.");
-		const button = (text: string) => Array.from(view.contentEl.querySelectorAll("button")).find(button => button.textContent === text)!;
+		const button = (text: string) => Array.from(view.contentEl.querySelectorAll("button")).find(button => (button.getAttribute("aria-label") ?? button.textContent) === text)!;
 		expect(button("Previous replies")).toBeDefined();
 		button("Copy comment link").click(); await until(() => copy.mock.calls.length === 1);
 		expect(discussionUrl).toHaveBeenLastCalledWith(typed, entry, id(4), id(5));
@@ -300,8 +308,8 @@ test("closing the sidebar while a copied link resolves prevents a stale clipboar
 		onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
 	const copy = jest.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined), view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
-		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Copy discussion link"));
-		Array.from(view.contentEl.querySelectorAll("button")).find(button => button.textContent === "Copy discussion link")!.click();
+		await view.onOpen(); await until(() => !!view.contentEl.querySelector('[aria-label="Copy discussion link"]'));
+		Array.from(view.contentEl.querySelectorAll("button")).find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Copy discussion link")!.click();
 		await view.onClose(); release("obsidian://evc-team-relay-comment"); await Promise.resolve(); await Promise.resolve();
 		expect(copy).not.toHaveBeenCalled();
 	} finally { await view.onClose(); copy.mockRestore(); store.close(); }
@@ -323,7 +331,7 @@ test("permission loss immediately clears linked content and rejects a delayed me
 		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Remote private content"));
 		let release!: (value: typeof result) => void;
 		session.messages.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
-		Array.from(view.contentEl.querySelectorAll("button")).find(button => button.textContent === "Show replies")!.click();
+		Array.from(view.contentEl.querySelectorAll("button")).find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Show replies")!.click();
 		await until(() => !!release);
 		session.permission = () => ({ read: false, comment: false, edit: false, moderate: false }); notify();
 		expect(view.contentEl.textContent).not.toContain("Remote private content");
@@ -349,7 +357,7 @@ test("Send and reopen after recovery uses a fresh identity and the reviewed draf
 	Object.assign(typed, { canRecoverOnlineDraft: true, onlineDraft: send, recoverOnlineDraft: async () => ({ status: "editable", draft: await store.withdrawOnlineDraft(draftId, 0, original) }) });
 	const host = { targetStatuses: jest.fn().mockResolvedValue(new Map()), watchTargetStatus: () => () => {}, focusedThread: jest.fn(), onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
-	const find = (text: string) => [...view.contentEl.querySelectorAll("button")].find(button => button.textContent === text)!;
+	const find = (text: string) => [...view.contentEl.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === text)!;
 	try {
 		await view.onOpen(); await until(() => !!find("Show replies")); find("Show replies").click();
 		await until(() => !!view.contentEl.querySelector<HTMLTextAreaElement>('textarea[aria-label="Reply"]')?.readOnly);
@@ -381,7 +389,7 @@ test("definition status refreshes after registry changes without replacing the a
 	await store.setPreference("activeNewDraft:" + scope, draftId);
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
-		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("latest verified definition") && !!view.contentEl.querySelector("textarea:not([disabled])"));
+		await view.onOpen(); await until(() => !!view.contentEl.querySelector("textarea:not([disabled])"));
 		const draft = view.contentEl.querySelector("textarea")!; draft.value = "Keep this"; draft.dispatchEvent(new Event("input"));
 		session.baseRegistryRevision = () => 2; targetStatuses.mockResolvedValue(new Map([[id(4), { state: "changed", message: "The definition has changed. Original discussion retained." }]]));
 		notify(); await until(() => view.contentEl.textContent!.includes("definition has changed"));
@@ -412,7 +420,7 @@ test("selected drafts keep their exact targets and text across switching, restar
 		expect((await store.getDraft(first))?.target).toEqual(selection("alpha"));
 		drafts.dispose(); drafts = new DiscussionDrafts(parent, typed, entry, reveal);
 		await until(() => parent.querySelector("textarea")?.value === "Second draft" && !parent.querySelector("textarea")?.disabled);
-		[...parent.querySelectorAll("button")].find(button => button.textContent === "Show selection")!.click();
+		[...parent.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Show selection")!.click();
 		expect(reveal).toHaveBeenCalledWith(selection("beta"));
 		parent.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
 		await until(() => session.queue.mock.calls.length === 1 && parent.textContent!.includes("New discussion on this note"));
@@ -521,17 +529,17 @@ test("target filters separate unanchored from unchecked discussions without disc
 		onChange: () => () => {}, current: () => ({ path: "Note.md", entryId: entry, session: typed }) } as unknown as DiscussionHost;
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
-		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("3 of 3 discussions"));
+		await view.onOpen(); await until(() => view.contentEl.querySelectorAll(".relay-comment-thread").length === 3);
 		const filter = view.contentEl.querySelector<HTMLSelectElement>('select[aria-label="Filter comment targets"]')!;
 		const cards = Array.from(view.contentEl.querySelectorAll<HTMLElement>(".relay-comment-thread")); expect(cards).toHaveLength(3);
-		Array.from(cards[1].querySelectorAll("button")).find(button => button.textContent === "Show replies")!.click();
+		Array.from(cards[1].querySelectorAll("button")).find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Show replies")!.click();
 		await until(() => !!cards[1].querySelector("textarea:not([disabled])"));
 		const draft = cards[1].querySelector("textarea")!; draft.value = "Keep hidden draft"; draft.dispatchEvent(new Event("input"));
-		filter.value = "unanchored"; filter.dispatchEvent(new Event("change")); await until(() => view.contentEl.textContent!.includes("1 of 3 discussions"));
+		filter.value = "unanchored"; filter.dispatchEvent(new Event("change")); await until(() => cards.filter(card => !card.hidden).length === 1);
 		expect(cards.map(card => card.hidden)).toEqual([false, true, true]); expect(cards[1].querySelector("textarea")).toBe(draft);
 		const label = cards[0].querySelector<HTMLElement>(".relay-comment-thread-target-status")!;
 		expect(label.textContent).toBe("Deleted selection"); expect(label.hidden).toBe(false);
-		filter.value = "review"; filter.dispatchEvent(new Event("change")); await until(() => view.contentEl.textContent!.includes("2 of 3 discussions"));
+		filter.value = "review"; filter.dispatchEvent(new Event("change")); await until(() => cards.filter(card => !card.hidden).length === 2);
 		expect(cards.map(card => card.hidden)).toEqual([false, true, false]);
 		filter.value = "unchecked"; filter.dispatchEvent(new Event("change")); await until(() => cards[1].hidden === false);
 		expect(cards.map(card => card.hidden)).toEqual([true, false, true]); expect(draft.value).toBe("Keep hidden draft");
@@ -549,7 +557,7 @@ test("slow target verification does not delay cached comments and cannot restore
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
 		await view.onOpen(); await until(() => view.contentEl.textContent!.includes("Cached comment before target check")); expect(finish).toBeDefined();
-		expect(view.contentEl.textContent).toContain("background"); session.permission = () => ({ read: false, comment: false, edit: false, moderate: false }); notify();
+		expect(view.contentEl.textContent).not.toContain("discussions on this page"); session.permission = () => ({ read: false, comment: false, edit: false, moderate: false }); notify();
 		finish(new Map([[id(4), { state: "changed", message: "Private target label" }]])); await new Promise(resolve => setTimeout(resolve, 100));
 		expect(view.contentEl.textContent).not.toContain("Private target label"); expect(view.contentEl.textContent).not.toContain("Cached comment before target check");
 	} finally { await view.onClose(); store.close(); }
@@ -574,8 +582,8 @@ test("marker threads expose read-only comparison and close it when the discussio
 	const closed = jest.spyOn(TimelineMarkerComparisonModal.prototype, "close");
 	const view = new CommentsView({} as WorkspaceLeaf, host);
 	try {
-		await view.onOpen(); await until(() => !![...view.contentEl.querySelectorAll("button")].find(button => button.textContent === "Compare marker positions"));
-		[...view.contentEl.querySelectorAll("button")].find(button => button.textContent === "Compare marker positions")!.click();
+		await view.onOpen(); await until(() => !![...view.contentEl.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Compare marker positions"));
+		[...view.contentEl.querySelectorAll("button")].find(button => (button.getAttribute("aria-label") ?? button.textContent) === "Compare marker positions")!.click();
 		expect(opened).toHaveBeenCalledTimes(1); expect(closed).not.toHaveBeenCalled();
 		thread = { ...thread, activity_sequence: 2, anchor_revision: 2 }; notify(); await until(() => closed.mock.calls.length > 0);
 	} finally { await view.onClose(); store.close(); opened.mockRestore(); closed.mockRestore(); }
@@ -597,4 +605,23 @@ test.each([false, true])("removed author comments do not offer ordinary history 
 		const actions = view.contentEl.querySelector(".relay-comment-message-actions")!;
 		expect(actions.textContent).not.toContain("History"); expect(actions.textContent).not.toContain("Edit");
 	} finally { await view.onClose(); store.close(); }
+});
+
+
+test("typing @ opens a named member picker and preserves text when dismissed", async () => {
+    const { store, typed } = await fixture(), parent = document.createElement("div"); document.body.append(parent);
+    const composer = new CommentComposer(parent, typed, entry, "mention-picker", body => ({ type: "thread.create", payload: body }));
+    try {
+        await until(() => !composer.textarea.disabled);
+        composer.textarea.value = "Hi @"; composer.textarea.setSelectionRange(4, 4); composer.textarea.dispatchEvent(new Event("input"));
+        composer.textarea.dispatchEvent(new KeyboardEvent("keyup", { key: "@" }));
+        const menu = (globalThis as any).commentTestMenu;
+        expect(menu.items.map((item: any) => item.title)).toEqual(["Alice"]);
+        expect(composer.textarea.value).toBe("Hi @");
+        expect(parent.querySelector("select")!.hidden).toBe(true);
+        menu.items[0].click();
+        expect(composer.textarea.value).toBe("Hi @Alice ");
+        await until(() => parent.textContent!.includes("Draft saved"));
+        expect((await store.getDraft("mention-picker"))?.body).toMatchObject({ mentions: [{ start: 3, end: 9, userId: id(1) }] });
+    } finally { composer.dispose(); store.close(); parent.remove(); delete (globalThis as any).commentTestMenu; }
 });

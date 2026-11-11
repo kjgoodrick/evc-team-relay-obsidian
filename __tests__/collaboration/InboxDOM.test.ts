@@ -12,7 +12,7 @@ import type { WorkspaceLeaf } from "obsidian";
 import type { InboxItem } from "../../src/collaboration/InboxProtocol";
 
 jest.mock("../../src/platformFetch", () => ({ platformFetch: jest.fn() }));
-jest.mock("obsidian", () => ({ ItemView: class {
+jest.mock("obsidian", () => ({ setIcon: (el: HTMLElement, icon: string) => { el.textContent = ""; el.setAttribute("data-icon", icon); }, ItemView: class {
 	containerEl = document.createElement("div"); contentEl = document.createElement("div");
 	constructor() { this.containerEl.append(this.contentEl); document.body.append(this.containerEl); }
 } }));
@@ -31,7 +31,7 @@ async function until(check: () => boolean): Promise<void> {
 	throw new Error("Inbox DOM did not settle");
 }
 function button(root: HTMLElement, label: string): HTMLButtonElement {
-	const value = Array.from(root.querySelectorAll("button")).find(button => button.textContent === label);
+	const value = Array.from(root.querySelectorAll("button")).find(button => (button.getAttribute("aria-label") ?? button.textContent) === label);
 	if (!value) throw new Error("Missing button " + label); return value;
 }
 async function fixture() {

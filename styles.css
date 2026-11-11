@@ -888,3 +888,26 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .evc-restore-text-added { text-decoration: underline; background: var(--text-selection); }
 .evc-restore-text-removed { text-decoration: line-through; background: var(--background-modifier-error); }
 .is-mobile .evc-restore-text button { min-height: 44px; }
+
+/* Comment controls: keyboard and pointer feedback share the same affordance. */
+.relay-comment-icon { display: inline-flex; align-items: center; justify-content: center; padding: 6px; min-width: 30px; height: 30px; box-shadow: none; background: transparent; }
+.relay-comment-icon svg { width: 17px; height: 17px; }
+.relay-comment-thread-controls, .relay-comment-message-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.relay-comment-thread button:not(:disabled):hover, .relay-comment-icon:not(:disabled):hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.relay-comment-thread button:focus-visible, .relay-comment-icon:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.relay-comment-toolbar { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.relay-comment-message-actions .relay-comment-reaction { border-radius: 12px; background: var(--background-secondary); padding: 2px 8px; }
+.relay-comment-composer button:not(:disabled):hover, .relay-comment-toolbar button:not(:disabled):hover { background: var(--background-modifier-hover); }
+.relay-comment-composer button:focus-visible, .relay-comment-toolbar button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.relay-comment-avatar { position: relative; float: left; margin-right: 8px; width: 28px; height: 28px; border-radius: 50%; background: var(--background-modifier-border); display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.relay-comment-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+
+.evc-plugin-updates button:not(:disabled):hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.evc-plugin-updates button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.relay-comment-replies-label { margin-left: 4px; }
+.relay-comment-icon:has(.relay-comment-replies-label) { width: auto; }
+.relay-comment-save-status { min-height: 1.5em; }
+
+.relay-comments-view button:not(:disabled):hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.relay-comments-view button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.relay-comment-status { min-height: 1.5em; }

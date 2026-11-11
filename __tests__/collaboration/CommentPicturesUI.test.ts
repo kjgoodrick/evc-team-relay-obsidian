@@ -81,7 +81,7 @@ test("offline picker persists bytes before showing pictures, survives reload and
 
 test("rich attachment staging preserves its insertion point and keeps original bytes through Remove and Undo", async () => {
 	const { store, session, parent, make } = await setup(); let composer = make();
-	const button = (label: string) => [...parent.querySelectorAll("button")].find(b => b.textContent === label)!;
+	const button = (label: string) => [...parent.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") ?? b.textContent) === label)!;
 	try {
 		await composer.flush(); composer.textarea.value = "BeforeAfter"; composer.textarea.dispatchEvent(new Event("input"));
 		composer.textarea.setSelectionRange(6, 6); button("Format comment").click(); await composer.flush();
@@ -144,7 +144,7 @@ test("online-pending drafts keep picture controls locked until the exact send is
 		await composer.flush(); await composer.addPictures([file()]);
 		expect(parent.querySelectorAll("figure")).toHaveLength(1);
 		expect(parent.querySelector<HTMLInputElement>('input[aria-label="Picture description"]')!.disabled).toBe(true);
-		expect([...parent.querySelectorAll("button")].find(b => b.textContent === "Add pictures")!.disabled).toBe(true);
+		expect([...parent.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") ?? b.textContent) === "Add pictures")!.disabled).toBe(true);
 	} finally { composer.dispose(); store.close(); parent.remove(); }
 });
 
@@ -157,7 +157,7 @@ test("draft picture refresh preserves the visible text, descriptions and target 
 	const composer = make();
 	try {
 		await composer.flush();
-		const button = [...parent.querySelectorAll("button")].find(b => b.textContent === "Refresh picture uploads")!;
+		const button = [...parent.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") ?? b.textContent) === "Refresh picture uploads")!;
 		expect(button.disabled).toBe(false); button.click(); await until(() => parent.textContent!.includes("Pictures refreshed"));
 		expect(composer.textarea.value).toBe("My draft"); expect(composer.textarea.readOnly).toBe(false);
 		const alt = parent.querySelector<HTMLInputElement>('input[aria-label="Picture description"]')!;
@@ -179,7 +179,7 @@ test.each(["editable", "accepted"])("checking a pending reply keeps it locked on
 	Object.assign(typed, { canRecoverOnlineDraft: false, recoverOnlineDraft: recover });
 	const composer = make();
 	try {
-		await composer.flush(); const button = [...parent.querySelectorAll("button")].find(b => b.textContent === "Check delivery and edit")!;
+		await composer.flush(); const button = [...parent.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") ?? b.textContent) === "Check delivery and edit")!;
 		expect(button.disabled).toBe(true); expect(composer.textarea.readOnly).toBe(true);
 		Object.assign(typed, { canRecoverOnlineDraft: true }); composer.update(); button.click();
 		await until(() => parent.textContent!.includes("Recovery was not confirmed"));
