@@ -625,3 +625,19 @@ test("typing @ opens a named member picker and preserves text when dismissed", a
         expect((await store.getDraft("mention-picker"))?.body).toMatchObject({ mentions: [{ start: 3, end: 9, userId: id(1) }] });
     } finally { composer.dispose(); store.close(); parent.remove(); delete (globalThis as any).commentTestMenu; }
 });
+
+test("reaction picker searches the complete catalog and accepts system-keyboard emoji", () => {
+ const { ReactionPicker } = require("../../src/collaboration/ui/ReactionPicker");
+ const choose = jest.fn(), picker = new ReactionPicker({}, true, choose);
+ picker.onOpen();
+ const input = picker.contentEl.querySelector("input") as HTMLInputElement;
+ expect(picker.contentEl.querySelectorAll(".relay-reaction-grid button").length).toBe(80);
+ input.value = "👩🏽‍💻"; input.dispatchEvent(new Event("input"));
+ expect(picker.contentEl.querySelectorAll(".relay-reaction-grid button").length).toBe(1);
+ input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+ expect(choose).toHaveBeenCalledWith("👩🏽‍💻");
+ input.value = "fox"; input.dispatchEvent(new Event("input"));
+ expect(picker.contentEl.querySelector(".relay-reaction-grid").textContent).toContain("🦊");
+ expect(picker.contentEl.querySelector("button[title]")).toBeNull();
+ picker.onClose();
+});

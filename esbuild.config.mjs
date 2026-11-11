@@ -111,7 +111,7 @@ const YjsInternalsPlugin = {
 
 const context = await esbuild.context({
 	banner: {
-		js: banner,
+		js: banner + "\n/* Unicode emoji data: https://unicode.org/Public/emoji/16.0/emoji-test.txt\n" + fs.readFileSync(new URL("./licenses/Unicode-3.0.txt", import.meta.url), "utf8") + "\n*/",
 	},
 	entryPoints: ["src/main.ts"],
 	bundle: true,

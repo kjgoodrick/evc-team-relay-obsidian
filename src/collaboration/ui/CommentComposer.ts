@@ -1,3 +1,4 @@
+import { canonical } from "../storage/DiscussionStore";
 import { Menu } from "obsidian";
 import { commentButton } from "./CommentControls";
 import type { RestoreBinding } from "../RestoreGeneration";
@@ -90,6 +91,7 @@ export class CommentComposer {
 		};
 		this.pictureList = this.el.createDiv({ cls: "relay-comment-draft-pictures" });
 		const actions = this.el.createDiv({ cls: "relay-comment-composer-actions" });
+		actions.appendChild(this.formatting);
 		this.attach = commentButton(actions, { text: "Add pictures", attr: { type: "button" } });
 		this.fileInput = actions.createEl("input", { attr: { type: "file", accept: "image/png,image/jpeg,image/webp,image/gif", multiple: "", "aria-label": "Choose comment pictures" } });
 		this.fileInput.hidden = true;
@@ -108,9 +110,9 @@ export class CommentComposer {
 			this.textarea.focus(); this.textarea.setSelectionRange(start + label.length + 1, start + label.length + 1);
 			this.people.value = ""; this.persist();
 		});
-		this.send = commentButton(actions, { text: "Send", cls: "mod-cta", attr: { type: "submit" } });
+		this.send = commentButton(actions, { text: "Send", cls: ["mod-cta", "relay-comment-send"], attr: { type: "submit" } });
 		this.send.disabled = true;
-		this.discardButton = commentButton(actions, { text: "Discard draft", attr: { type: "button" } });
+		this.discardButton = commentButton(actions, { text: "Discard draft", cls: "relay-comment-discard", attr: { type: "button" } });
 		this.discardButton.hidden = true; this.discardButton.onclick = () => { void this.reviewDiscard(); };
 		this.discardPanel = this.el.createDiv();
 		this.refreshPictures = commentButton(actions, { text: "Refresh picture uploads", attr: { type: "button", title: "Keep the saved pictures and prepare fresh uploads for your next send." } });
@@ -222,7 +224,7 @@ export class CommentComposer {
 	async flush(): Promise<boolean> { await this.ready; await this.attachmentFlight; await this.chain; return !this.saveFailed; }
 	addOnlineAction(label: string, action: (body: MessageBody, draft: { id: string; revision: number }, binding: RestoreBinding) => Promise<void>, available: () => boolean = () => true): void {
 		this.extraAvailable = available;
-		this.extra = this.send.parentElement!.createEl("button", { text: label, attr: { type: "button" } });
+		this.extra = commentButton(this.send.parentElement!, { text: label, cls: "relay-comment-send-extra", attr: { type: "button" } });
 		this.extra.addEventListener("click", () => { void this.submit(action); });
 		this.update();
 	}
@@ -237,7 +239,7 @@ export class CommentComposer {
 		this.rich?.setEditable(!paused && !this.busy && !this.onlinePending && !this.textarea.disabled && !this.saveFailed);
 		if (this.reviewButton) this.reviewButton.disabled = paused || this.busy || this.onlinePending || this.saveFailed;
 		if (this.extra) { this.extra.hidden = !this.extraAvailable(); this.extra.disabled = blocked || !this.session.online || !this.extraAvailable();
-			this.extra.setText(this.onlinePending ? "Retry send and reopen" : "Send and reopen"); }
+			this.extra.setAttribute("aria-label", this.onlinePending ? "Retry send and reopen" : "Send and reopen"); }
 		const people = this.localOptions ? [] : this.session.participants(this.entryId), signature = JSON.stringify(people);
 		if (signature !== this.peopleSignature) {
 			const selected = this.people.value; this.peopleSignature = signature;
@@ -438,7 +440,7 @@ export class CommentComposer {
 			if (!await this.flush()) throw new Error("Save this draft before reviewing discard.");
 			const draft = await this.session.store.getDraft(this.draftId);
 			if (this.disposed) return;
-			if (!draft || draft.scopeId !== this.entryId || draft.revision !== this.revision || JSON.stringify(readCommentDraft(draft.body)) !== this.savedValue) throw new Error("This draft changed in another view. Reopen it before discarding.");
+			if (!draft || draft.scopeId !== this.entryId || draft.revision !== this.revision || canonical(protocolJson(readCommentDraft(draft.body))) !== canonical(protocolJson(readCommentDraft(JSON.parse(this.savedValue))))) throw new Error("This draft changed in another view. Reopen it before discarding.");
 			this.discardReview = draft; this.discardPanel.empty();
 			this.discardPanel.createEl("p", { text: "Discard this saved draft? This cannot be undone here. Posted comments stay unchanged. Pictures used only by this draft are released; pictures used elsewhere or retained for a recovery copy stay available." });
 			const keep = commentButton(this.discardPanel, { text: "Keep editing", attr: { type: "button" } });

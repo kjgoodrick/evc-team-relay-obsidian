@@ -102,3 +102,11 @@ test("text anchors round-trip the real Yjs selection and reject malformed metada
 			.rejects.toMatchObject({ action: "pause", code: "invalid_read_response" });
 	} finally { doc.destroy(); }
 });
+
+test("unicode reaction parsing permits more than eight choices while remaining bounded", () => {
+ const { EMOJI_CATALOG } = require("../../src/collaboration/DiscussionProtocol");
+ const reactions = EMOJI_CATALOG.slice(0, 64).map(([emoji]: [string]) => ({ emoji, count: 1, mine: false }));
+ expect(parseMessage({ ...message(), reactions }).reactions).toHaveLength(64);
+ expect(() => parseMessage({ ...message(), reactions: [...reactions, { emoji: "🦊", count: 1, mine: true }] })).toThrow();
+ expect(() => parseMessage({ ...message(), reactions: [{ emoji: "__proto__", count: 1, mine: true }] })).toThrow();
+});

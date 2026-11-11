@@ -9,6 +9,9 @@ import { CommentComposer } from "./CommentComposer";
  * Switching drafts never changes an anchor and never discards unsent text. */
 export class DiscussionDrafts {
 	private select: HTMLSelectElement;
+	private recoveryButton?: HTMLButtonElement;
+	get canRecoverSavedWork(): boolean { return !!this.recoveryButton && !this.recoveryButton.disabled; }
+	recoverSavedWork(): void { if (this.canRecoverSavedWork) this.recoveryButton!.click(); }
 	private controls: HTMLElement;
 	private editor: HTMLElement;
 	private status: HTMLElement;
@@ -109,7 +112,7 @@ export class DiscussionDrafts {
 		if (this.closed || navigation !== this.navigation || this.changing) return;
 		const drafts = [...page.drafts];
 		if (activeDraft && !drafts.some(d => d.id === activeDraft.id)) drafts.unshift(activeDraft);
-		const options: [string, string][] = [[this.wholeNoteId, this.baseView ? "New discussion on this view" : this.imageFile ? "New image comment" : "Whole-note draft"]];
+		const options: [string, string][] = [[this.wholeNoteId, this.baseView ? "New discussion on this view" : this.imageFile ? "New image comment" : "Entire note"]];
 		for (const draft of drafts) {
 			let label = "Selection needs review", prefix = "Selection";
 			try { const anchor = parseLocalDiscussionAnchor(draft.target); if (anchor.type === "text") {
@@ -132,11 +135,14 @@ export class DiscussionDrafts {
 			for (const [value, text] of options) this.select.createEl("option", { text, attr: { value } });
 		}
 		this.select.value = this.currentId;
+        this.select.hidden = options.length === 1;
 		this.controls.querySelectorAll("button").forEach(button => button.remove());
+		this.recoveryButton = undefined;
 		if (this.copyWork && this.composer && this.session.canCopySavedDraft?.(this.entryId)) {
 			try {
 				const anchor = active === this.wholeNoteId ? { version: 1 as const, type: "note" as const } : parseLocalDiscussionAnchor(activeDraft?.target);
-				const copy = this.controls.createEl("button", { text: "Use saved work at this target", attr: { type: "button" } });
+				const copy = this.controls.createEl("button", { text: "Recover a saved draft…", attr: { type: "button" } });
+				copy.hidden = true; this.recoveryButton = copy;
 				copy.disabled = !this.session.canCopySavedDraft(this.entryId, anchor);
 				copy.onclick = () => {
 					if (this.closed || this.changing || !this.session.canCopySavedDraft(this.entryId, anchor)) return;

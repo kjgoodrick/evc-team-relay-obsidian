@@ -1,3 +1,4 @@
+import { ReactionPicker } from "./ReactionPicker";
 import { safeAvatarUrl } from "../../presenceAvatar";
 import { commentButton } from "./CommentControls";
 import { DiscussionExportModal } from "./DiscussionExport";
@@ -119,7 +120,7 @@ class ThreadCard {
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "text") {
 			const target = commentButton(this.controls, { text: thread.anchor.structure ? "Show selected blocks" : thread.anchor.context.quote ? "Show selected text" : "Show selected position" });
-			target.title = thread.anchor.context.quote;
+
 			target.onclick = () => { if (thread.anchor) void this.host.revealTarget(this.session, this.entryId, thread.anchor); };
 		} else if (thread.anchor?.type === "base") {
 			this.controls.createEl("p", { text: this.host.targetLabel(this.session, this.entryId, thread.anchor) ?? "Saved view target" });
@@ -188,7 +189,11 @@ class ThreadCard {
 		const result = await this.session.messages(this.entryId, thread.id, this.after, this.count);
 		if (this.disposed || generation !== this.generation || !this.session.permission(this.entryId)?.read || ["closed", "authentication_required", "unavailable"].includes(this.session.status)) return;
 		this.pictures.forEach(p => p.dispose()); this.pictures = []; this.content.empty();
-		for (const message of result.messages) this.message(message);
+		for (const [index, message] of result.messages.entries()) {
+			this.message(message);
+			if (index === 0) this.content.appendChild(toggle);
+		}
+		if (!result.messages.length) this.content.appendChild(toggle);
 		if (!result.messages.length) this.content.createEl("p", { text: "Loading discussion…", cls: "relay-comment-muted" });
 		if (this.expanded && result.hasMore) {
 			const more = commentButton(this.content, { text: "Next replies" });
@@ -216,7 +221,7 @@ class ThreadCard {
 			button.disabled = true;
 			void this.host.discussionUrl(this.session, this.entryId, this.thread.id, messageId).then(async url => {
 				if (this.disposed || !this.session.permission(this.entryId)?.read || this.session.status === "closed") return;
-				await copyToClipboard(url); if (!this.disposed && this.session.permission(this.entryId)?.read) this.error.setText("Comment link copied.");
+				await copyToClipboard(url);
 			}).catch(() => { if (!this.disposed) this.error.setText("The comment link could not be copied. Check your access and try again."); })
 				.finally(() => { if (!this.disposed) button.disabled = false; });
 		};
@@ -240,18 +245,15 @@ class ThreadCard {
 		this.copyLink(actions, "Copy comment link", message.id);
         if (!message.deleted && permission?.comment) {
             const picker = commentButton(actions, { text: "Add reaction" }); picker.disabled = !this.session.canQueue;
-            picker.onclick = event => { const menu = new Menu();
-                for (const [emoji, label] of Object.entries(REACTIONS)) menu.addItem(item => item.setTitle(label + " " + emoji.replace(/_/g, " ")).onClick(() => {
-                    const reaction = message.reactions.find(r => r.emoji === emoji);
-                    void this.session.queue({ ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, type: "reaction.set", dependsOn: [], payload: {
-                        type: "reaction.set", thread_id: this.thread.id, message_id: message.id, emoji, present: !reaction?.mine,
-                    } }).catch(() => this.error.setText("Reaction could not be saved. Check your connection and permissions."));
-                })); menu.showAtMouseEvent(event);
-            };
+            picker.onclick = () => new ReactionPicker(this.app, this.session.unicodeReactions === true, emoji => {
+                const reaction = message.reactions.find(r => r.emoji === emoji);
+                void this.session.queue({ ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, type: "reaction.set", dependsOn: [], payload: {
+                    type: "reaction.set", thread_id: this.thread.id, message_id: message.id, emoji, present: !reaction?.mine,
+                } }).catch(() => this.error.setText("Reaction could not be saved. Check your connection and permissions."));
+            }).open();
         }
-		if (!message.deleted) for (const [emoji, label] of Object.entries(REACTIONS)) {
-			const reaction = message.reactions.find(r => r.emoji === emoji);
-			if (!reaction) continue;
+		if (!message.deleted) for (const reaction of message.reactions) {
+			const emoji = reaction.emoji, label = REACTIONS[emoji];
 			const button = commentButton(actions, { text: label + (reaction ? " " + reaction.count : ""), cls: "relay-comment-reaction",
 				attr: { "aria-label": emoji.replace(/_/g, " ") + (reaction ? `, ${reaction.count}` : ""), "aria-pressed": String(reaction?.mine ?? false) } });
 			button.disabled = !permission?.comment || !this.session.canQueue;
@@ -264,7 +266,7 @@ class ThreadCard {
 		}
 		if (!message.deleted) {
 			const history = commentButton(actions, { text: "History" }); history.disabled = !this.session.online;
-			history.title = this.session.online ? "Compare comment revisions" : "Reconnect to view comment history";
+
 			history.onclick = () => new CommentHistoryModal(this.app, this.session, this.entryId, this.thread.id, message.id).open();
 		}
 		if (message.deleted && this.session.canReviewRemoved?.(this.entryId)) {
@@ -423,9 +425,12 @@ export class CommentsView extends ItemView {
                 for (const button of [this.exportButton!, this.removedButton!, storage, refresh]) {
                     if (button.hidden) continue;
                     menu.addItem(item => item.setTitle(button === storage ? "Local drafts and recovery…" : button.textContent ?? "").setDisabled(button.disabled).onClick(() => button.click()));
-                } menu.showAtMouseEvent(event);
+                }
+                menu.addItem(item => item.setTitle("Recover a saved draft at this location…").setDisabled(!this.drafts?.canRecoverSavedWork).onClick(() => this.drafts?.recoverSavedWork()));
+                menu.showAtMouseEvent(event);
             };
             const filter = commentButton(toolbar, { text: "Filter comments", attr: { "aria-expanded": "false" } });
+            toolbar.appendChild(more);
             const targetLabel = this.contentEl.createEl("label", { text: "Comment location " }); targetLabel.hidden = true;
             filter.onclick = () => { targetLabel.hidden = !targetLabel.hidden; filter.setAttribute("aria-expanded", String(!targetLabel.hidden)); };
 
@@ -468,10 +473,11 @@ export class CommentsView extends ItemView {
 			}
 		}
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);
-		const statuses: Record<string, string> = { starting: "Connecting…", ready: "Comments are up to date", offline: "Offline — comments are saved to send when connected",
+		const statuses: Record<string, string> = { starting: "", ready: "", offline: "Offline — comments are saved to send when connected",
 			unavailable: "Comments are not enabled on this server.", authentication_required: "Sign in again to continue.", error: "Comments need attention. Refresh to retry." };
-		this.status!.setText(sync === "unavailable" ? "You no longer have access to this file’s comments." : sync === "syncing" ? "Updating comments…" :
-			statuses[session.status] + (permission?.read && !permission.comment ? " · You can read comments" : ""));
+		const statusText = sync === "unavailable" ? "You no longer have access to this file’s comments." : statuses[session.status] ?? "";
+		this.status!.setText(statusText);
+		this.status!.hidden = !statusText;
 		this.drafts?.update();
 		const canRead = !!permission?.read && session.status !== "authentication_required" && session.status !== "unavailable";
 		if (this.targetFilter) this.targetFilter.disabled = !canRead;
@@ -518,7 +524,6 @@ export class CommentsView extends ItemView {
 		}
 		if (this.pages.length) { const previous = this.list!.createEl("button", { text: "Previous discussions", cls: "relay-comment-more" });
 			previous.onclick = () => { this.after = this.pages.pop() ?? 0; this.schedule(); }; }
-		if (!local.threads.length && !local.pending.length && sync === "current") this.list!.createEl("p", { cls: "relay-comment-more", text: "No comments yet. Start a discussion below." });
 	}
 	private checkTargets(session: DiscussionSession, entryId: string, threads: AnchoredThread[]): Map<string, CommentTargetStatus> {
 		const key = JSON.stringify([entryId, session.baseRegistryRevision(entryId), threads.map(thread => [thread.id, thread.anchor_revision, thread.anchor !== undefined])]);

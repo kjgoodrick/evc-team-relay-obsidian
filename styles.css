@@ -911,3 +911,16 @@ button.relay-base-comment-marker { position: absolute; pointer-events: auto; min
 .relay-comments-view button:not(:disabled):hover { background: var(--background-modifier-hover); color: var(--text-normal); }
 .relay-comments-view button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
 .relay-comment-status { min-height: 1.5em; }
+.relay-comment-composer textarea, .relay-comment-composer .ProseMirror { box-sizing: border-box; width: 100%; min-height: 84px; padding: 10px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--background-primary); font: inherit; }
+.relay-comment-composer-actions { width: 100%; }
+.relay-comment-composer-actions .relay-comment-discard { order: -1; }
+.relay-comment-composer-actions .relay-comment-send { margin-left: auto; order: 10; }
+.relay-comments-view button:disabled { opacity: 0.3; color: var(--text-faint); cursor: default; }
+
+.relay-reaction-picker input { width: 100%; }
+.relay-reaction-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(36px, 1fr)); gap: 4px; max-height: 45vh; overflow: auto; margin-bottom: 12px; }
+.relay-reaction-grid button { font-size: 22px; padding: 4px; min-height: 36px; }
+.relay-reaction-picker button:hover { background: var(--background-modifier-hover); }
+.relay-reaction-picker button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.relay-comments-view [hidden] { display: none; }
+.relay-comment-composer-actions .relay-comment-send-extra { order: 11; }

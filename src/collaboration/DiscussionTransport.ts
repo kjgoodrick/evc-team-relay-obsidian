@@ -179,7 +179,7 @@ export class DiscussionTransport implements DiscussionSender {
 		return accepted(await this.request("/commands", body, { current, restoreGeneration: restoreGeneration(captured.restoreGeneration) }), captured);
 	}
 
-	async capabilities(): Promise<{ discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; inboxRestoreGuard?: boolean; timelineMarkerRestoreGuard?: boolean; timelineMarkerCommandStatus?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; snapshot?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
+	async capabilities(): Promise<{ unicodeReactions?: boolean; discussions: boolean; textAnchors: boolean; blockAnchors: boolean; imageOccurrences: boolean; imageFiles: boolean; pictures: boolean; recovery: boolean; restoreContext?: RestoreContext; pictureRestoreGuard?: boolean; baseGroupRestoreGuard?: boolean; inboxRestoreGuard?: boolean; timelineMarkerRestoreGuard?: boolean; timelineMarkerCommandStatus?: boolean; commandStatus?: boolean; moderationRecovery?: boolean; inbox?: boolean; search?: boolean; export?: boolean; snapshot?: boolean; exportCatalog?: boolean; reattach?: boolean; baseTargets: BaseTargetKind[]; baseRecordTypes: BaseRecordType[]; baseFileGroupProperties?: string[]; baseFormulaGroups?: boolean }> {
 		const value = await this.request("/capabilities?share_id=" + this.identity.shareId);
 		if (!object(value) || value.protocol_version !== 1 || !object(value.features) ||
 			typeof value.features.discussion_commands !== "boolean") throw new DiscussionFailure("pause", "invalid_read_response");
@@ -222,7 +222,8 @@ export class DiscussionTransport implements DiscussionSender {
 			...(value.features.discussion_timeline_marker_restore_guard === undefined ? {} : { timelineMarkerRestoreGuard: value.features.discussion_timeline_marker_restore_guard === true }),
 			...(value.features.discussion_inbox_restore_guard === undefined ? {} : { inboxRestoreGuard: value.features.discussion_inbox_restore_guard === true }),
 			...(value.features.discussion_picture_restore_guard === undefined ? {} : { pictureRestoreGuard: value.features.discussion_picture_restore_guard === true }),
-			...(value.features.discussion_base_group_restore_guard === undefined ? {} : { baseGroupRestoreGuard: value.features.discussion_base_group_restore_guard === true }), discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
+			...(value.features.discussion_base_group_restore_guard === undefined ? {} : { baseGroupRestoreGuard: value.features.discussion_base_group_restore_guard === true }), ...(value.reaction_catalog === "unicode-16.0" ? { unicodeReactions: true } : {}),
+			discussions: value.features.discussion_commands, textAnchors: value.features.discussion_text_anchors === true,
 			blockAnchors: value.features.discussion_block_anchors === true, imageOccurrences: value.features.discussion_image_occurrences === true,
 			imageFiles: value.features.discussion_image_files === true, pictures: value.features.discussion_pictures === true, recovery: value.features.discussion_recovery === true, baseTargets, baseRecordTypes,
 			...(baseFileGroupProperties ? { baseFileGroupProperties } : {}),
@@ -592,7 +593,7 @@ export class DiscussionTransport implements DiscussionSender {
 			let response: Response;
 			try {
 				response = await this.fetcher(this.identity.serverId + "/v1/collaboration" + path, { method: options.method ?? (body === undefined ? "GET" : "POST"), sensitive: true, ...(options.audited ? { cache: "no-store" as const } : {}),
-					headers: { ...(options.restoreGeneration ? { "X-Relay-Restore-Generation": options.restoreGeneration } : {}), Authorization: `Bearer ${credential.accessToken}`, "Content-Type": typeof body === "object" ? "application/octet-stream" : "application/json" }, body });
+					headers: { "X-Relay-Reaction-Catalog": "unicode-16.0", ...(options.restoreGeneration ? { "X-Relay-Restore-Generation": options.restoreGeneration } : {}), Authorization: `Bearer ${credential.accessToken}`, "Content-Type": typeof body === "object" ? "application/octet-stream" : "application/json" }, body });
 			} catch (error) {
 				if (error instanceof RelayHttpError) throw new DiscussionFailure("retry", "server_unavailable", error.status, error.retryAfterMs);
 				throw new DiscussionFailure("retry", "network_unavailable");

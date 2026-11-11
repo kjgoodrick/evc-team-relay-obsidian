@@ -82,8 +82,8 @@ test("the destination control flushes the active composer and passes a selection
 	const f = await fixture(), parent = document.createElement("div"), open = jest.fn();
 	const drafts = new DiscussionDrafts(parent, f.session as unknown as DiscussionSession, destination, () => {}, undefined, undefined, undefined, open);
 	try {
-		await until(() => !!Array.from(parent.querySelectorAll("button")).find(button => button.textContent === "Use saved work at this target"));
-		Array.from(parent.querySelectorAll("button")).find(button => button.textContent === "Use saved work at this target")!.click();
+		await until(() => drafts.canRecoverSavedWork);
+		drafts.recoverSavedWork();
 		await until(() => open.mock.calls.length === 1); expect(open.mock.calls[0].slice(0, 2)).toEqual([target, undefined]); expect(open.mock.calls[0][2]()).toBe(true);
 		expect(jest.mocked(CommentComposer).mock.results.at(-1)!.value.flush).toHaveBeenCalled();
 		drafts.dispose(); expect(open.mock.calls[0][2]()).toBe(false);

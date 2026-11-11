@@ -14,11 +14,11 @@ export function commentButton(parent: HTMLElement, options: DomElementInfo): HTM
  "Show replies": "chevron-right", "Hide replies": "chevron-down", "History": "history", "Edit": "pencil",
  "Remove": "trash-2", "Comment inbox": "inbox", "Search and filter comments": "search",
  "Follow discussion": "bell-plus", "Unfollow discussion": "bell-minus", "Mute discussion": "bell-off",
- "Unmute discussion": "bell", "Send": "send", "Discard draft": "trash-2", "Format comment": "text-cursor-input",
+ "Unmute discussion": "bell", "Send": "send", "Discard draft": "trash-2", "Format comment": "type",
  "Target history": "history", "Show captured marker position": "locate", "Compare marker positions": "git-compare", "Review unconfirmed move": "crosshair", "Target details": "info", "Refresh picture uploads": "refresh-cw", "Check delivery and edit": "mail-check", "Remove picture": "image-minus", "Move picture up": "arrow-up", "Move picture down": "arrow-down", "Apply link": "check", "Remove link": "unlink", "Cancel link": "x",
  "Send and reopen": "send", "Show selection": "focus"
  };
  const icon = icons[label];
- if (icon) { button.setAttribute("aria-label", label); button.title = button.title || label; button.classList.add("relay-comment-icon"); setIcon(button, icon); }
+ if (icon) { button.setAttribute("aria-label", label); button.removeAttribute("title"); button.classList.add("relay-comment-icon"); setIcon(button, icon); }
  return button;
 }

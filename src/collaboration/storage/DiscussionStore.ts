@@ -65,7 +65,7 @@ function completed(tx: IDBTransaction): Promise<void> {
 }
 
 /** Reject non-JSON values rather than lose them silently during persistence. */
-function canonical(value: Json, depth = 0): string {
+export function canonical(value: Json, depth = 0): string {
 	if (depth > 32) throw new Error("Local command nesting exceeds limit");
 	if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
 	if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);

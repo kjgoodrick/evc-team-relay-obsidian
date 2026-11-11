@@ -26,7 +26,7 @@ export class ThreadSubscription {
 		if (!value) this.el.createEl("span", { text: this.session.online ? "Loading notification preferences…" : "Reconnect to load notification preferences." });
 		else for (const [type, text] of [["follow", value.following ? "Unfollow discussion" : "Follow discussion"], ["mute", value.muted ? "Unmute discussion" : "Mute discussion"]]) {
 			const button = commentButton(this.el, { text }); button.dataset.subscription = type;
-            button.title = text + (type === "follow" ? " — receive replies and updates; unfollowing still allows mentions." : " — silence all notifications from this discussion, including mentions.");
+
 			button.onclick = () => {
 				button.disabled = true;
 				void inbox.queueSubscription(this.scopeId, this.threadId, value, type === "follow" ? !value.following : value.following, type === "mute" ? !value.muted : value.muted)

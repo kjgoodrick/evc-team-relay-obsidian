@@ -114,3 +114,17 @@ test("discard releases only the removed draft's picture ownership and rejects ch
 		await f.store.releaseLocalWork(id(30)); expect(await f.store.pictureSource(source.id, scope)).toBeUndefined();
 	} finally { f.close(); }
 });
+
+test("formatting a plain draft can be discarded without a false other-view conflict", async () => {
+ const f = await fixture();
+ try {
+  f.button("Format comment").click();
+  await f.composer.flush();
+  f.button("Discard draft").click();
+  await until(() => !!f.button("Discard saved draft"));
+  expect(f.composer.el.textContent).not.toContain("changed in another view");
+  f.button("Discard saved draft").click();
+  await until(() => f.finished.mock.calls.length === 1);
+  expect(await f.store.getDraft(f.draft.id)).toBeUndefined();
+ } finally { f.close(); }
+});

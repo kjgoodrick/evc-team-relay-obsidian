@@ -87,6 +87,7 @@ export class DiscussionSession {
 	private imagesEnabled = false;
 	private imageFilesEnabled = false;
 	private picturesEnabled = false;
+	unicodeReactions = false;
 	private baseGroupRestoreGuard = false;
 	private timelineMarkerRestoreGuard = false;
 	private timelineMarkerStatusEnabled = false;
@@ -424,6 +425,7 @@ export class DiscussionSession {
 			this.imagesEnabled = await this.store.preference("imageOccurrencesEnabled") === true;
 			this.imageFilesEnabled = await this.store.preference("imageFilesEnabled") === true;
 			this.picturesEnabled = await this.store.preference("picturesEnabled") === true;
+			this.unicodeReactions = await this.store.preference("unicodeReactions") === true;
 			this.baseGroupRestoreGuard = await this.store.preference("baseGroupRestoreGuard") === true;
 			this.inboxEnabled = await this.store.preference("inboxEnabled") === true;
 			const baseKinds = await this.store.preference("baseTargetKinds");
@@ -447,6 +449,8 @@ export class DiscussionSession {
 			if (this.restoreReconciling) await this.inbox.reload();
 			if (this.closed || authenticationEpoch !== this.authenticationEpoch) return;
 			this.enabled = capability.discussions;
+			this.unicodeReactions = capability.unicodeReactions === true;
+			await this.store.setPreference("unicodeReactions", this.unicodeReactions);
 			this.textEnabled = capability.textAnchors === true;
 			this.blocksEnabled = capability.blockAnchors === true;
 			this.imagesEnabled = capability.imageOccurrences === true;

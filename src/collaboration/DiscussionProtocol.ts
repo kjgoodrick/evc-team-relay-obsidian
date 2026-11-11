@@ -1,3 +1,4 @@
+import emojiCatalog from "./EmojiCatalog.json";
 import type { Json } from "./storage/DiscussionStore";
 import type { PictureBlock } from "./PictureProtocol";
 import { decodeBoundedBase64, type TextAnchor } from "./anchors/text";
@@ -15,9 +16,9 @@ export const isSequence = (value: unknown): value is number =>
 	typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 export const isRevision = (value: unknown): value is number => isSequence(value) && value > 0;
 
-export const REACTIONS = {
-	thumbs_up: "👍", thumbs_down: "👎", heart: "❤️", laugh: "😄", celebrate: "🎉", eyes: "👀", question: "❓", check: "✅",
-} as const;
+/** Unicode 16.0 fully-qualified emoji; legacy wire keys remain stable. */
+export const EMOJI_CATALOG = emojiCatalog as [string, string, string][];
+export const REACTIONS: Record<string, string> = Object.fromEntries(EMOJI_CATALOG.map(([key, glyph]) => [key, glyph]));
 export type ReactionKey = keyof typeof REACTIONS;
 export type TextMark = "bold" | "italic" | "code" | "strike";
 export type TextNode = { type: "text"; text: string; marks?: TextMark[] };
@@ -145,7 +146,7 @@ export function parseThread(value: unknown): ThreadSummary {
 export function parseMessage(value: unknown): DiscussionMessage {
 	requireValue(isRecord(value) && isId(value.id) && nullableId(value.author_id) && isRevision(value.revision) &&
 		typeof value.deleted === "boolean" && isRevision(value.created_sequence) && timestamp(value.created_at) &&
-		(value.edited_at === null || timestamp(value.edited_at)) && array(value.reactions, 8));
+		(value.edited_at === null || timestamp(value.edited_at)) && array(value.reactions, 64));
 	const reactions = value.reactions.map(r => {
 		requireValue(isRecord(r) && typeof r.emoji === "string" && Object.prototype.hasOwnProperty.call(REACTIONS, r.emoji) && isRevision(r.count) && typeof r.mine === "boolean");
 		return { emoji: r.emoji as ReactionKey, count: r.count, mine: r.mine };
