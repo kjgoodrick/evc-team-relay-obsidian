@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Smileys & Emotion",
+    "first": "😀"
+  },
+  {
+    "name": "People & Body",
+    "first": "👋"
+  },
+  {
+    "name": "Animals & Nature",
+    "first": "🐵"
+  },
+  {
+    "name": "Food & Drink",
+    "first": "🍇"
+  },
+  {
+    "name": "Travel & Places",
+    "first": "🌍"
+  },
+  {
+    "name": "Activities",
+    "first": "🎃"
+  },
+  {
+    "name": "Objects",
+    "first": "👓"
+  },
+  {
+    "name": "Symbols",
+    "first": "🏧"
+  },
+  {
+    "name": "Flags",
+    "first": "🏁"
+  }
+]

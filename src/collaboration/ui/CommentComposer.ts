@@ -458,7 +458,7 @@ export class CommentComposer {
 			this.discardReview = undefined; this.discardPanel.empty();
 			this.revision = -1; this.savedValue = ""; this.textarea.value = this.previousText = ""; this.mentions = []; this.pictures = [];
 			this.rich?.setBody(); this.retiredTarget = !!this.target;
-			this.status.setText("Draft discarded. Posted comments are unchanged."); this.onSent();
+			this.status.setText(""); this.onSent();
 		} catch (error) {
 			if (!this.disposed) { this.discardReview = undefined; this.discardPanel.empty(); this.saveFailed = true;
 				this.status.setText(error instanceof Error ? error.message : "The draft could not be discarded. Copy your text and reopen it before retrying."); }

@@ -1340,3 +1340,20 @@ test("presence controls retain their DOM across note switches and temporary bind
   expect(f.notes[0].view.containerEl.querySelector(".relay-presence-action")).toBe(first);
  } finally { f.close(); }
 });
+
+ test("presence chrome survives null active view/file during navigation without retaining publication", () => {
+ const f = fixture();
+ try {
+  f.controller.refresh();
+  const note = f.notes[0], button = note.view.containerEl.querySelector(".relay-presence-action"), file = note.view.file;
+  f.select(null); f.controller.refresh();
+  expect(button!.isConnected).toBe(true);
+  expect(note.doc._liveProvider.awareness.getLocalState()).toBeNull();
+  note.view.file = null; f.select(note.view); f.controller.refresh();
+  expect(button!.isConnected).toBe(true);
+  note.view.file = file; f.controller.refresh();
+  expect(note.view.containerEl.querySelector(".relay-presence-action")).toBe(button);
+  note.view.file!.path = "Private/Not-shared.md"; f.controller.refresh();
+  expect(button!.isConnected).toBe(false);
+ } finally { f.close(); }
+});

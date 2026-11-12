@@ -253,7 +253,7 @@ class ThreadCard {
 		this.copyLink(actions, "Copy comment link", message.id);
         if (!message.deleted && permission?.comment) {
             const picker = commentButton(actions, { text: "Add reaction" }); picker.disabled = !this.session.canQueue;
-            picker.onclick = () => new ReactionPicker(this.app, this.session.unicodeReactions === true, emoji => {
+            picker.onclick = () => new ReactionPicker(picker, this.session.unicodeReactions === true, emoji => {
                 const reaction = message.reactions.find(r => r.emoji === emoji);
                 void this.session.queue({ ...this.session.restoreBinding, operationId: uuid(), scopeId: this.entryId, type: "reaction.set", dependsOn: [], payload: {
                     type: "reaction.set", thread_id: this.thread.id, message_id: message.id, emoji, present: !reaction?.mine,

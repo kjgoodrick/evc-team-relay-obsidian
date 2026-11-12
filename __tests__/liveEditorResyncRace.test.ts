@@ -56,3 +56,40 @@ test("a stale keyframe cannot overwrite a keystroke entered while resync awaited
 	expect(f.editor.state.doc.toString()).toBe("first123");
 	f.ydoc.destroy();
 });
+
+function updateFixture(initial: string) {
+ const f = fixture(true), text = f.ydoc.getText("contents"); text.insert(0, initial);
+ Object.assign(f.document, { crdtText: text, setUnsavedFile: jest.fn(async () => ({})) });
+ Object.assign(f.plugin, { _ytext: text, getDocument: () => f.document, mergeBanner: jest.fn() });
+ const send = (before: string, from: number, to: number, insert: string) => {
+  const state = EditorState.create({ doc: before }), tr = state.update({ changes: { from, to, insert } });
+  f.plugin.update({ docChanged: true, transactions: [tr], changes: tr.changes, startState: state, state: tr.state } as any);
+ };
+ return { ...f, text, send };
+}
+
+test("repeated file-load transactions cannot append copies of an already synced Welcome note", () => {
+ const content = "This is your new vault.\nMake a note of something.\n";
+ const f = updateFixture(content);
+ for (let i = 0; i < 10; i++) f.send("", 0, 0, content);
+ expect(f.text.toString()).toBe(content);
+ expect((f.document as any).setUnsavedFile).not.toHaveBeenCalled();
+ f.send(content, content.length, content.length, "Actual edit");
+ expect(f.text.toString()).toBe(content + "Actual edit"); f.ydoc.destroy();
+});
+
+test("edits with a divergent base are preserved for review rather than replayed at invalid offsets", async () => {
+ const f = updateFixture("remote text"); f.send("local text", 10, 10, " changed");
+ await Promise.resolve();
+ expect(f.text.toString()).toBe("remote text");
+ expect((f.document as any).setUnsavedFile).toHaveBeenCalledWith("local text changed");
+ expect(f.plugin.mergeBanner).toHaveBeenCalled(); f.ydoc.destroy();
+});
+
+test("a stale plugin cannot forward the next note's load transaction", () => {
+ const f = updateFixture("old note"), next = new Y.Doc(); next.getText("contents").insert(0, "new note");
+ f.plugin.getDocument = () => ({ crdtText: next.getText("contents") }) as any;
+ f.send("", 0, 0, "new note");
+ expect(f.text.toString()).toBe("old note"); expect(next.getText("contents").toString()).toBe("new note");
+ f.ydoc.destroy(); next.destroy();
+});

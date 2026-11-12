@@ -526,9 +526,24 @@ export class LiveCMPluginValue implements PluginValue {
 		) {
 			return;
 		}
-		this.document = this.getDocument();
-		const ytext = this.document?.crdtText;
-		if (!ytext) {
+		const previous = this.document;
+		const doc = this.getDocument(), ytext = doc?.crdtText;
+		// A reused editor can deliver its file-loading transaction before the old
+		// plugin has been torn down. Never send it to either document's Y.Text.
+		if (!doc || !ytext || doc !== previous || ytext !== this._ytext) return;
+		const before = update.startState.doc.toString(), after = update.state.doc.toString();
+		if (before !== ytext.toString()) {
+			// Loading an already-synced file is not an insertion at offset zero.
+			if (after === ytext.toString()) return;
+			// Real edits on a divergent buffer must remain recoverable, but applying
+			// offsets against a different base corrupts or duplicates remote text.
+			if (isBoundMarkdown(this.view)) this.view.isTracking = false;
+			void doc.setUnsavedFile(after).then(() => {
+				if (!this.destroyed && this.document === doc && !this.banner) this.mergeBanner();
+			}).catch(error => {
+				this.warn("Could not persist divergent editor buffer", error);
+				new Notice("Your edit is still in this editor but could not be saved for merge review. Copy it before closing the note.");
+			});
 			return;
 		}
 		try {

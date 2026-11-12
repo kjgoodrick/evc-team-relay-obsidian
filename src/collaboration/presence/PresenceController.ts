@@ -505,11 +505,12 @@ export class PresenceController extends Component {
 	}
 	private updateAction(view?: FileView): void {
 		for (const [host, action] of this.actions) {
-			if (!host.containerEl.isConnected || !host.file || !this.registry.shareRegistry.shareFor(host.file.path)) {
+			if (!host.containerEl.isConnected || (host.file && !this.registry.shareRegistry.shareFor(host.file.path))) {
 				action.remove(); this.actions.delete(host);
 			}
 		}
-		if (!view && this.actionView) { this.actions.get(this.actionView)?.remove(); this.actions.delete(this.actionView); }
+		// A transient null active view/file is normal during navigation. Keep chrome
+		// owned by connected shared views; publication still stops immediately above.
 		this.actionView = view;
 		this.action = view ? this.actions.get(view) : undefined;
 		if (view && !this.action) {

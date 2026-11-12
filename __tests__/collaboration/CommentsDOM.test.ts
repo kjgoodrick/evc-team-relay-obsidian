@@ -628,18 +628,22 @@ test("typing @ opens a named member picker and preserves text when dismissed", a
 
 test("reaction picker searches the complete catalog and accepts system-keyboard emoji", () => {
  const { ReactionPicker } = require("../../src/collaboration/ui/ReactionPicker");
- const choose = jest.fn(), picker = new ReactionPicker({}, true, choose);
- picker.onOpen();
+ const anchor = document.body.appendChild(document.createElement("button"));
+ const choose = jest.fn(), picker = new ReactionPicker(anchor, true, choose);
+ picker.open();
  const input = picker.contentEl.querySelector("input") as HTMLInputElement;
  expect(picker.contentEl.querySelectorAll(".relay-reaction-grid button").length).toBe(80);
  input.value = "👩🏽‍💻"; input.dispatchEvent(new Event("input"));
  expect(picker.contentEl.querySelectorAll(".relay-reaction-grid button").length).toBe(1);
  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
  expect(choose).toHaveBeenCalledWith("👩🏽‍💻");
- input.value = "fox"; input.dispatchEvent(new Event("input"));
+ expect(picker.contentEl.isConnected).toBe(false);
+ picker.open();
+ const search = picker.contentEl.querySelector("input") as HTMLInputElement;
+ search.value = "fox"; search.dispatchEvent(new Event("input"));
  expect(picker.contentEl.querySelector(".relay-reaction-grid").textContent).toContain("🦊");
  expect(picker.contentEl.querySelector("button[title]")).toBeNull();
- picker.onClose();
+ picker.close(); anchor.remove();
 });
 
 test("thread and message headers share author presentation with thread status below the author", async () => {
@@ -663,4 +667,25 @@ test("thread and message headers share author presentation with thread status be
   expect(row.querySelector('[aria-label="Unfollow discussion"]')).not.toBeNull();
   expect(row.querySelector('[aria-label="Mute discussion"]')).not.toBeNull();
  } finally { await view.onClose(); store.close(); }
+});
+
+ test("reaction popover has category tabs, dismissal, focus return, and closes with its anchor", async () => {
+ const { ReactionPicker } = require("../../src/collaboration/ui/ReactionPicker");
+ const anchor = document.body.appendChild(document.createElement("button")), choose = jest.fn();
+ const picker = new ReactionPicker(anchor, true, choose); picker.open();
+ expect(picker.contentEl.getAttribute("role")).toBe("dialog");
+ expect(picker.contentEl.querySelectorAll('[role="tab"]')).toHaveLength(9);
+ const animals = picker.contentEl.querySelector('[aria-label="Animals & Nature"]') as HTMLButtonElement;
+ animals.click();
+ expect(animals.getAttribute("aria-selected")).toBe("true");
+ expect(picker.contentEl.querySelector(".relay-reaction-grid").textContent).toContain("🐵");
+ expect(picker.contentEl.querySelector(".relay-reaction-grid").textContent).not.toContain("😀");
+ animals.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+ expect(picker.contentEl.querySelector('[aria-label="Food & Drink"]').getAttribute("aria-selected")).toBe("true");
+ picker.contentEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+ expect(document.activeElement).toBe(anchor); expect(picker.contentEl.isConnected).toBe(false);
+ picker.open(); document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+ expect(picker.contentEl.isConnected).toBe(false); expect(choose).not.toHaveBeenCalled();
+ picker.open(); anchor.remove(); await Promise.resolve();
+ expect(picker.contentEl.isConnected).toBe(false);
 });

@@ -59,11 +59,11 @@
 <style>
 	button.notebook {
 		background-color: transparent;
-		color: var(--color-base-40);
+		color: var(--icon-color);
 	}
 
 	button.evc-notebook-synced {
-		color: var(--color-accent);
+		color: var(--icon-color);
 	}
 
 	button.evc-relay-connected {
