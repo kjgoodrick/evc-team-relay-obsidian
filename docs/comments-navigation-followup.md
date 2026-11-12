@@ -1,6 +1,6 @@
 # Comment layout and navigation follow-up
 
-Implementation is ready for native visual verification; no new release has been published.
+Validated for the 0.4.3 client release. Production server is unchanged.
 
 ## Requested changes
 
@@ -18,8 +18,6 @@ Full client regression: 321 suites and 4,788 tests passed, 27 fixture suites/41 
 
 Tests explicitly assert the same loaded image node survives awareness changes, old peers disappear, old listeners unsubscribe, presence controls retain DOM across views/binding gaps, and tracking controls transfer without DOM removal or old-owner cleanup removing their successor. Comment tests assert identical header presentation, shared action-row membership, and confirmation containing only the two requested labels.
 
-Native verification remains outstanding because the Mac is locked. Must inspect button spacing, headers, the single action row, and repeated note-switching for visible flicker before declaring completion or publishing.
+Native verification completed in Obsidian 1.15.0 using the disposable vault `/private/tmp/relay-comments-ui-20261110` and a loopback-only test server. Verified the two-button discard prompt with visible spacing, matching avatar/name/time headers with status below, and all five thread controls on one row. Repeated Note.md ↔ Second.md navigation retained the own-avatar image and tracking/presence controls in the observed native states; the saved draft returned intact. No routine sync or empty-comments status paragraph appeared. Fine-grained node-retention assertions above cover transitions between native observations; screenshots alone do not establish frame-by-frame timing.
 
-A disposable local fixture was started with inbox/presence enabled. Its log is `/private/tmp/comments-043-native.log`; fixture identity is `/var/folders/8c/wjjnpp396gs3yf079kl932xw0000gn/T/evc-managed-integration-c94f7alj/fixture.json`. Synthetic owner profile has a loopback image, and Note.md/Second.md are seeded. Do not use the fixture file's bearer tokens outside this local test stack. Revalidate process liveness before using/restarting the fixture.
-
-Scratch build is in `dist`, labeled 0.4.3 for testing. Release manifests/source remain at 0.4.2 until native validation is complete. Production server is unchanged.
+The resumed fixture log is `/private/tmp/comments-043-native-resumed.log`. All data and the synthetic avatar used for native testing belong to the disposable fixture. No production server changes or restart are required.
