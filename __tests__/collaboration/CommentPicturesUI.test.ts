@@ -28,7 +28,7 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 const entry = id(3), identity = { serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "pictures-ui" };
 const bytes = (format: keyof typeof fixtures = "png") => new Uint8Array(Buffer.from(fixtures[format], "base64")).buffer;
 const file = (format: keyof typeof fixtures = "png") => new File([bytes(format)], "picture", { type: "image/png" });
-async function until(check: () => boolean) { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); } throw new Error("UI did not settle"); }
+async function until(check: () => boolean | Promise<boolean>) { for (let i = 0; i < 100; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); } throw new Error("UI did not settle"); }
 async function setup() {
 	const factory = new IDBFactory(), store = await DiscussionStore.open(identity, factory), parent = document.createElement("div"); document.body.append(parent);
 	const listeners = new Set<() => void>();
@@ -63,7 +63,7 @@ test("offline picker persists bytes before showing pictures, survives reload and
 		await composer.flush();
 		const input = parent.querySelector<HTMLInputElement>('input[type="file"]')!;
 		Object.defineProperty(input, "files", { value: [file()] }); input.dispatchEvent(new Event("change"));
-		await until(() => parent.textContent!.includes("Draft and pictures saved"));
+		await until(async () => !!((await store.getDraft("draft"))?.body as { pictures?: unknown[] } | undefined)?.pictures?.length);
 		const draft = (await store.getDraft("draft"))!, pictureId = (draft.body as { pictures: { picture_id: string }[] }).pictures[0].picture_id;
 		expect((await store.pictureSource(pictureId, entry))?.bytes).toEqual(bytes());
 		const alt = parent.querySelector<HTMLInputElement>('input[aria-label="Picture description"]')!;
@@ -105,7 +105,7 @@ test("pasting an image preserves accompanying text; invalid picks do not lock or
 		const paste = new Event("paste", { cancelable: true });
 		Object.defineProperty(paste, "clipboardData", { value: { files: [file()], getData: () => "Caption" } });
 		composer.textarea.dispatchEvent(paste); expect(paste.defaultPrevented).toBe(true);
-		await until(() => parent.textContent!.includes("Draft and pictures saved"));
+		await until(async () => !!((await store.getDraft("draft"))?.body as { pictures?: unknown[] } | undefined)?.pictures?.length);
 		await composer.addPictures([file("animated_gif")]); expect(parent.textContent).toContain("Animated pictures");
 		expect(composer.textarea.value).toBe("Caption"); expect(composer.textarea.readOnly).toBe(false);
 		expect(parent.querySelectorAll("figure")).toHaveLength(1);

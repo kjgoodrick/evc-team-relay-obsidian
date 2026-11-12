@@ -49,10 +49,16 @@ test("real CodeMirror captures its bound Y.Text, clips highlights, navigates and
 		expect(parent.querySelector(".relay-comment-highlight")?.textContent).toBe("beta");
 		parent.querySelector<HTMLButtonElement>(".relay-comment-marker")!.click();
 		expect(host.openThread).toHaveBeenCalledWith(file, session, id(1), id(4));
-		text.insert(0, "prefix ");
-		expect(() => surface.capture()).toThrow("synchronizing"); // Y.Text updated before CM: no guessed offsets.
+		const marker = parent.querySelector(".relay-comment-marker");
+		// Local editor updates precede Y.Text publication. The mapped marker must
+		// survive a redraw while the binding is still one update behind.
 		view.dispatch({ changes: { from: 0, insert: "prefix " } });
+		expect(() => surface.capture()).toThrow("synchronizing");
+		await new Promise(resolve => setTimeout(resolve, 80));
+		expect(parent.querySelector(".relay-comment-marker")).toBe(marker);
+		text.insert(0, "prefix "); notifications.forEach(fn => fn());
 		await until(() => parent.querySelector(".relay-comment-highlight")?.textContent === "beta");
+		expect(parent.querySelector(".relay-comment-marker")).toBe(marker);
 		expect(surface.reveal(session, id(1), anchor)).toBe(true);
 		expect(view.state.selection.main.from).toBe(16); expect(view.state.selection.main.to).toBe(20);
 		expect(text.toString()).toBe("prefix alpha 🙂 beta gamma");

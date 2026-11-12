@@ -80,6 +80,8 @@ export class DiscussionHost extends Component {
 	private markerManager?: TimelineMarkerManager;
 	private reattachSelection?: { session: DiscussionSession; entryId: string; thread: AnchoredThread };
 	private reattachModal?: ReattachCommentModal;
+	private movePrompt?: { owner: object; element: HTMLElement; confirm: HTMLButtonElement; selection: CapturedCommentSelection<LocalDiscussionAnchor> };
+	private movingTarget = false;
 	private recoveryModal?: RecoverCommentModal | CancelReactionModal;
 	private storageModal?: CommentStorageModal;
 	private storagePicker?: CommentStoragePicker;
@@ -122,9 +124,9 @@ export class DiscussionHost extends Component {
 		} });
 		this.registerEvent(this.plugin.app.workspace.on("editor-menu", (menu, editor, info) => {
 			if (info.file?.extension === "md" && this.shares.shareFor(info.file.path)) {
-				menu.addItem(item => item.setTitle("Comment on selected text").setIcon("message-square").onClick(() => { void this.commentSelection(editor); }));
+				menu.addItem(item => item.setTitle(this.reattachSelection ? "Move discussion to selected text" : "Comment on selected text").setIcon("message-square").onClick(() => { void this.commentSelection(editor); }));
 				if (this.targetFor(info.file).session?.canAnchorBlocks) menu.addItem(item =>
-					item.setTitle("Comment on block(s)").setIcon("message-square").onClick(() => { void this.commentSelection(editor, true); }));
+					item.setTitle(this.reattachSelection ? "Move discussion to block(s)" : "Comment on block(s)").setIcon("message-square").onClick(() => { void this.commentSelection(editor, true); }));
 				if (this.targetFor(info.file).session?.canAnchorImages) menu.addItem(item => item.setTitle("Comment on image").setIcon("image").onClick(() => {
 					const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView); if (view) this.images?.comment(view);
 				}));
@@ -159,9 +161,11 @@ export class DiscussionHost extends Component {
 	private notify(): void {
 		this.rangeWorkflow?.validate(); this.markerPicker?.validate(); this.markerManager?.validate(); this.reattachModal?.validate(); this.recoveryModal?.validate();
 		this.storageModal?.validate();
+		if (!this.reattachSelection) this.clearMovePrompt();
 		this.storagePicker?.validate();
 		const move = this.reattachSelection;
-		if (move && (!this.sessionCurrent(move.session) || !move.session.canReattach || !move.session.permission(move.entryId)?.comment)) this.reattachSelection = undefined;
+		if (move && (this.current().session !== move.session || this.current().entryId !== move.entryId)) this.clearMovePrompt();
+		if (move && (!this.sessionCurrent(move.session) || !move.session.canReattach || !move.session.permission(move.entryId)?.comment)) { this.reattachSelection = undefined; this.clearMovePrompt(); }
 		const recovery = this.recoverySelection;
 		if (recovery && (!this.sessionCurrent(recovery.session) || !recovery.session.permission(recovery.entryId)?.comment)) this.recoverySelection = undefined;
 		for (const listener of this.listeners) { try { listener(); } catch { /* Isolate view failures. */ } }
@@ -918,7 +922,7 @@ export class DiscussionHost extends Component {
 				if (move.session !== session || move.entryId !== entryId) { new Notice("Return to the original note or saved view to move this discussion, or cancel target selection."); return false; }
 				this.reattachSelection = undefined;
 				this.lastFile = file;
-				this.openReattachment(session, entryId, move.thread, anchor); this.notify(); return true;
+				return await this.commitReattachment(session, entryId, move.thread, anchor);
 			}
 			const draftId = "selection:" + entryId + ":" + uuid();
 			await session.trackLocal(session.store.saveDraft({ id: draftId, scopeId: entryId, revision: 0,
@@ -935,7 +939,7 @@ export class DiscussionHost extends Component {
 	}
 	get choosingReattachment(): boolean { return this.reattachSelection !== undefined || this.recoverySelection !== undefined; }
 	get choosingCommandRecovery(): boolean { return this.recoverySelection !== undefined; }
-	cancelReattachmentSelection(): void { this.reattachSelection = undefined; this.recoverySelection = undefined; this.notify(); }
+	cancelReattachmentSelection(): void { this.reattachSelection = undefined; this.recoverySelection = undefined; this.clearMovePrompt(); this.notify(); }
 	openCommandRecovery(session: DiscussionSession, operation: OutboxOperation): void {
 		const entryId = operation.scopeId;
 		if (operation.type === "reaction.set") {
@@ -980,7 +984,69 @@ export class DiscussionHost extends Component {
 	private storageSources(): CommentStorageSource[] {
 		return this.inboxSources().filter(source => this.localStorageCurrent(source.session));
 	}
+	async useWholeReattachment(): Promise<void> {
+		const move = this.reattachSelection, target = this.current();
+		if (!move || target.session !== move.session || target.entryId !== move.entryId || target.kind === "image") return;
+		const file = this.plugin.app.vault.getFileByPath(target.path); if (!file) return;
+		try {
+			const anchor: LocalDiscussionAnchor = target.kind === "base" ? await move.session.captureBaseTarget(move.entryId, { type: "view" }) : { version: 1, type: "note" };
+			if (this.reattachSelection === move) await this.saveCommentSelection({ session: move.session, entryId: move.entryId, file, anchor });
+		} catch (error) { new Notice(error instanceof Error ? error.message : "The target is not available."); }
+	}
+	private clearMovePrompt(): void { this.movePrompt?.element.remove(); this.movePrompt = undefined; }
+	offerReattachment(owner: object, selection?: CapturedCommentSelection<LocalDiscussionAnchor>, rect?: DOMRect): void {
+		const move = this.reattachSelection;
+		if (!move || this.movingTarget || !selection || !rect || move.session !== selection.session || move.entryId !== selection.entryId) {
+			if (this.movePrompt?.owner === owner || !move) this.clearMovePrompt(); return;
+		}
+		const doc = this.plugin.app.workspace.getActiveViewOfType(MarkdownView)?.containerEl.ownerDocument;
+		if (!doc) return;
+		if (!this.movePrompt || this.movePrompt.owner !== owner || this.movePrompt.element.ownerDocument !== doc) {
+			this.clearMovePrompt();
+			const element = doc.body.createDiv({ cls: "relay-move-target-prompt", attr: { role: "toolbar", "aria-label": "Move discussion target" } });
+			const confirm = element.createEl("button", { text: "Move here", cls: "mod-cta" });
+			const cancel = element.createEl("button", { text: "Cancel" });
+			element.addEventListener("pointerdown", event => event.preventDefault());
+			confirm.onclick = () => { const captured = this.movePrompt?.selection; if (captured) void this.saveCommentSelection(captured); };
+			cancel.onclick = () => this.cancelReattachmentSelection();
+			element.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); this.cancelReattachmentSelection(); } });
+			this.movePrompt = { owner, element, confirm, selection };
+		}
+		this.movePrompt.selection = selection;
+		const element = this.movePrompt.element, win = doc.defaultView!;
+		element.style.left = `${Math.max(8, Math.min(rect.left, win.innerWidth - element.offsetWidth - 8))}px`;
+		element.style.top = `${Math.max(8, Math.min(rect.bottom + 8, win.innerHeight - element.offsetHeight - 8))}px`;
+	}
 	openReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected?: LocalDiscussionAnchor): void {
+		if (this.movingTarget) return;
+		if (selected) { void this.commitReattachment(session, entryId, thread, selected); return; }
+		if (!this.sessionCurrent(session) || !session.canReattach || !session.permission(entryId)?.comment) return;
+		this.recoveryModal?.close(); this.recoverySelection = undefined; this.reattachModal?.close(); this.clearMovePrompt();
+		const move = { session, entryId, thread }; this.reattachSelection = move; this.notify();
+		// A previous uncertain request must be recovered before creating a different one.
+		void session.pendingReattachment(entryId, thread.id).then(pending => {
+			if (this.reattachSelection !== move) return;
+			if (pending) { this.cancelReattachmentSelection(); this.reviewReattachment(session, entryId, thread); }
+		}).catch(() => { if (this.reattachSelection === move) { this.cancelReattachmentSelection(); new Notice("Could not check the previous move. Try again."); } });
+		if (this.current().kind === "image") this.commentCurrentImage(session, entryId);
+		else if (this.current().kind === "base") void this.commentCurrentBase(session, entryId);
+	}
+	private async commitReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected: LocalDiscussionAnchor): Promise<boolean> {
+		if (this.movingTarget) return false;
+		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId && session.canReattach && session.permission(entryId)?.comment === true;
+		if (!current()) return false;
+		this.movingTarget = true; this.clearMovePrompt();
+		try {
+			const operation = await session.prepareReattachment(entryId, thread.id, thread.anchor_revision, selected, current);
+			await session.sendReattachment(operation, current);
+			if (current()) { this.focus = { session, entryId, threadId: thread.id, serial: ++this.focusSerial }; this.notify(); }
+			return true;
+		} catch (error) {
+			if (current()) { new Notice(error instanceof Error ? error.message : "The move could not be confirmed."); this.reviewReattachment(session, entryId, thread); }
+			return false;
+		} finally { this.movingTarget = false; this.notify(); }
+	}
+	private reviewReattachment(session: DiscussionSession, entryId: string, thread: AnchoredThread, selected?: LocalDiscussionAnchor): void {
 		const current = () => this.sessionCurrent(session) && this.current().session === session && this.current().entryId === entryId;
 		if (!current() || !session.permission(entryId)?.read) return;
 		this.recoveryModal?.close(); this.recoverySelection = undefined;
@@ -1185,7 +1251,7 @@ export class DiscussionHost extends Component {
 	}
 	onunload(): void {
 		this.stopped = true;
-		this.reattachSelection = undefined; this.reattachModal?.close(); this.reattachModal = undefined;
+		this.reattachSelection = undefined; this.clearMovePrompt(); this.reattachModal?.close(); this.reattachModal = undefined;
 		this.recoverySelection = undefined; this.recoveryModal?.close(); this.recoveryModal = undefined;
 		this.storageModal?.close(); this.storageModal = undefined;
 		this.storagePicker?.close(); this.storagePicker = undefined;

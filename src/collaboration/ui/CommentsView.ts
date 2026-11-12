@@ -474,10 +474,19 @@ export class CommentsView extends ItemView {
 		this.contentEl.querySelector(".relay-comment-base-view")?.setText("Discussion view: " + target.baseViewName);
 		const session = this.session, entryId = this.entryId, generation = ++this.generation;
 		if (this.moveSelection) {
-			this.moveSelection.empty(); this.moveSelection.hidden = !this.host.choosingReattachment;
-			if (this.host.choosingReattachment) {
-				this.moveSelection.createEl("p", { text: this.host.selectingReattachment(session, entryId) ? (this.host.choosingCommandRecovery ? "Recovering a saved comment: choose text, blocks, an image or a Bases target using its comment action. You will review the draft before sending." : "Moving a discussion: choose text, blocks, an image or a Bases target using its comment action. You will review the move before saving.") : "A discussion target selection is active in another note or saved view. Return there or cancel the selection." });
-				const cancel = commentButton(this.moveSelection, { text: "Cancel target selection" }); cancel.onclick = () => this.host.cancelReattachmentSelection();
+			this.moveSelection.hidden = !this.host.choosingReattachment;
+			const moveKey = entryId + ":" + target.kind + ":" + String(this.host.choosingReattachment) + ":" + (this.host.choosingReattachment && this.host.selectingReattachment(session, entryId)) + ":" + this.host.choosingCommandRecovery;
+			if (this.moveSelection.dataset.moveKey !== moveKey) {
+				this.moveSelection.dataset.moveKey = moveKey; this.moveSelection.empty();
+				if (this.host.choosingReattachment) {
+					this.moveSelection.createEl("p", { text: this.host.selectingReattachment(session, entryId) ? (this.host.choosingCommandRecovery ? "Recovering a saved comment: choose text, blocks, an image or a Bases target using its comment action. You will review the draft before sending." : "Select text, then click Move here beside the selection. For blocks, images or Bases, use the target’s comment action.") : "A discussion target selection is active in another note or saved view. Return there or cancel the selection." });
+					const moveActions = this.moveSelection.createDiv({ cls: "relay-move-selection-actions" });
+					if (!this.host.choosingCommandRecovery && this.host.selectingReattachment(session, entryId) && target.kind !== "image") {
+						const whole = commentButton(moveActions, { text: target.kind === "base" ? "Move to entire saved view" : "Move to entire note" });
+						whole.onclick = () => { void this.host.useWholeReattachment(); };
+					}
+					const cancel = commentButton(moveActions, { text: "Cancel target selection" }); cancel.onclick = () => this.host.cancelReattachmentSelection();
+				}
 			}
 		}
 		const permission = session.permission(entryId), sync = session.syncStatus(entryId);

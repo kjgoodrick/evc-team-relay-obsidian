@@ -27,7 +27,7 @@ export interface CommentEditorSurface {
 class ThreadMarker extends WidgetType {
 	constructor(private threads: AnchoredThread[], private session: DiscussionSession, private open: (id: string) => void, private entryId: string) { super(); }
 	eq(other: ThreadMarker): boolean { return this.session === other.session && this.entryId === other.entryId &&
-		this.threads.map(t => t.id + ":" + t.activity_sequence).join() === other.threads.map(t => t.id + ":" + t.activity_sequence).join(); }
+		this.threads.map(t => t.id + ":" + t.state + ":" + t.author_id).join() === other.threads.map(t => t.id + ":" + t.state + ":" + t.author_id).join(); }
 	toDOM(view: EditorView): HTMLElement {
 		const button = view.dom.ownerDocument.createElement("button"); button.type = "button";
 		button.className = "relay-comment-marker"; button.textContent = "💬" + (this.threads.length > 1 ? " " + this.threads.length : "");
@@ -55,11 +55,12 @@ export function commentEditorExtension(host: DiscussionHost) {
 		private stopSurface: () => void;
 		private timer?: number;
 		private visual?: number;
+		private promptTimer?: number;
 		private closed = false;
 		private epoch = 0;
 		constructor(private view: EditorView) {
 			this.stopSurface = host.registerEditor(this);
-			this.stopHost = host.onChange(() => { this.checkContext(); this.schedule(); });
+			this.stopHost = host.onChange(() => { this.checkContext(); this.schedule(); this.schedulePrompt(); });
 			this.checkContext(); this.schedule();
 		}
 		get editor(): Editor | undefined { return this.view.state.field(editorInfoField, false)?.editor; }
@@ -93,17 +94,36 @@ export function commentEditorExtension(host: DiscussionHost) {
 			if (this.closed || this.visual !== undefined) return;
 			this.visual = this.win.setTimeout(() => { this.visual = undefined; if (!this.closed) this.view.dispatch({ effects: refreshComments.of(null) }); }, 0);
 		}
+		private schedulePrompt(): void {
+			if (this.closed || this.promptTimer !== undefined) return;
+			this.promptTimer = this.win.setTimeout(() => {
+				this.promptTimer = undefined;
+				if (this.closed) return;
+				const selection = this.view.state.selection.main;
+				if (!host.choosingReattachment || host.choosingCommandRecovery || selection.empty) { host.offerReattachment?.(this); return; }
+				if (!this.view.hasFocus) return;
+				try {
+					const captured = this.capture(), coords = this.view.coordsAtPos(selection.to);
+					if (coords) host.offerReattachment?.(this, captured, new DOMRect(coords.left, coords.top, coords.right - coords.left, coords.bottom - coords.top));
+					else host.offerReattachment?.(this);
+				} catch { host.offerReattachment?.(this); }
+			}, 0);
+		}
 		update(update: ViewUpdate): void {
 			this.checkContext();
+			if (update.selectionSet || update.docChanged || update.focusChanged || update.viewportChanged) this.schedulePrompt();
 			if (update.docChanged) { this.decorations = this.decorations.map(update.changes); this.redraw(); }
 			if (update.viewportChanged || update.transactions.some(tr => tr.effects.some(effect => effect.is(refreshComments)))) this.build();
 		}
 		private build(): void {
-			this.decorations = Decoration.none;
 			const bound = commentEditorBinding(this.view), session = this.session, id = this.entryId;
 			const generation = id ? session?.documentGeneration(id) : undefined;
-			if (!bound || !session || !id || !generation || !session.permission(id)?.read || bound.documentId !== id ||
-				bound.text.toString() !== this.view.state.doc.toString()) return;
+			if (!bound || !session || !id || !generation || !session.permission(id)?.read || bound.documentId !== id) {
+				this.decorations = Decoration.none; return;
+			}
+			// Editor updates and Y.Text notifications may land in adjacent turns.
+			// Keep the already-mapped decorations during that gap, not an empty frame.
+			if (bound.text.toString() !== this.view.state.doc.toString()) return;
 			this.view.dom.classList.remove("relay-comment-highlights-hidden");
 			const snapshot = Y.snapshot(bound.text.doc!), decorations: Range<Decoration>[] = [], groups = new Map<number, AnchoredThread[]>();
 			for (const thread of this.threads) {
@@ -157,9 +177,10 @@ export function commentEditorExtension(host: DiscussionHost) {
 			this.view.focus(); return true;
 		}
 		destroy(): void {
-			this.closed = true; this.epoch++; this.stopWatch?.(); this.stopHost(); this.stopSurface();
+			this.closed = true; host.offerReattachment?.(this); this.epoch++; this.stopWatch?.(); this.stopHost(); this.stopSurface();
 			if (this.timer !== undefined) this.win.clearTimeout(this.timer);
 			if (this.visual !== undefined) this.win.clearTimeout(this.visual);
+			if (this.promptTimer !== undefined) this.win.clearTimeout(this.promptTimer);
 			this.view.dom.classList.remove("relay-comment-highlights-hidden");
 		}
 	}, { decorations: value => value.decorations });

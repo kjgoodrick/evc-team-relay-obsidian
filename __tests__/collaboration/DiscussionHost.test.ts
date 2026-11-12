@@ -65,6 +65,8 @@ jest.mock("../../src/collaboration/DiscussionSession", () => ({
 		status = "ready";
 		identity: DiscussionStore["identity"];
 		close = jest.fn(() => { this.status = "closed"; return Promise.resolve(); });
+		pendingReattachment = jest.fn().mockResolvedValue(undefined);
+		prepareReattachment = jest.fn().mockResolvedValue({ operationId: "move" }); sendReattachment = jest.fn().mockResolvedValue(undefined);
 		onChange() {} setForeground() {} start() { return Promise.resolve(); } refresh() { return Promise.resolve(); }
 		trackLocal<T>(promise: Promise<T>) { return promise; }
 		constructor(readonly store: DiscussionStore) { this.identity = store.identity; mockSessions.push(this); }
@@ -117,7 +119,7 @@ test("local storage rejects a changed endpoint, disabled configuration or signed
 	} finally { f.close(); }
 });
 
-test("target selection opens a review for the existing discussion without consuming or creating a comment draft", async () => {
+test("target selection starts immediately and commits the existing discussion without a modal or comment draft", async () => {
 	const s = fixture(); await s.start();
 	const session = Object.assign(mockSessions[0], { canReattach: true, permission: () => ({ read: true, comment: true }), store: s.store });
 	const typed = session as unknown as DiscussionSession, anchor = { version: 1 as const, type: "note" as const };
@@ -127,16 +129,14 @@ test("target selection opens a review for the existing discussion without consum
 	const modal = jest.mocked(ReattachCommentModal);
 	try {
 		s.host.openReattachment(typed, id(3), thread);
-		modal.mock.calls.at(-1)![4].choose(thread);
 		expect(s.host.selectingReattachment(typed, id(3))).toBe(true);
 		const count = modal.mock.calls.length;
 		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(3), file: s.file, anchor })).toBe(true);
-		expect(modal.mock.calls).toHaveLength(count + 1);
-		expect(modal.mock.calls.at(-1)!.slice(1, 4)).toEqual([typed, id(3), thread]);
-		expect(modal.mock.calls.at(-1)![5]).toEqual(anchor);
+		expect(modal.mock.calls).toHaveLength(count);
+		expect(session.prepareReattachment).toHaveBeenCalledWith(id(3), thread.id, thread.anchor_revision, anchor, expect.any(Function));
+		expect(session.sendReattachment).toHaveBeenCalledTimes(1);
 		expect(s.host.choosingReattachment).toBe(false);
 		expect(saveDraft).not.toHaveBeenCalled(); expect(setPreference).not.toHaveBeenCalled();
-		modal.mock.calls.at(-1)![4].saved();
 		expect(s.host.focusedThread(typed, id(3))?.threadId).toBe(thread.id);
 	} finally { s.close(); }
 });
@@ -172,7 +172,7 @@ test("target selection rejects another note and cancellation restores ordinary d
 	const saveDraft = jest.fn().mockResolvedValue(undefined), setPreference = jest.fn().mockResolvedValue(undefined); Object.assign(s.store, { saveDraft, setPreference });
 	const open = jest.spyOn(s.host, "open").mockResolvedValue(undefined);
 	try {
-		s.host.openReattachment(typed, id(3), thread); jest.mocked(ReattachCommentModal).mock.calls.at(-1)![4].choose(thread);
+		s.host.openReattachment(typed, id(3), thread);
 		const other = Object.assign(new TFile(), { path: "Team/Other.md" });
 		Object.assign(s.folder.folderIndex, { recordFor: (path: string) => ({ id: path === "Other.md" ? id(99) : id(3), type: "markdown" }) });
 		Object.assign(s.folder, { toVirtualPath: (path: string) => path.slice(5) });
@@ -181,7 +181,7 @@ test("target selection rejects another note and cancellation restores ordinary d
 		s.host.cancelReattachmentSelection();
 		expect(await s.host.saveCommentSelection({ session: typed, entryId: id(3), file: s.file, anchor })).toBe(true);
 		expect(saveDraft).toHaveBeenCalledTimes(1); expect(open).toHaveBeenCalledTimes(1);
-		s.host.openReattachment(typed, id(3), thread); jest.mocked(ReattachCommentModal).mock.calls.at(-1)![4].choose(thread);
+		s.host.openReattachment(typed, id(3), thread);
 		s.account(id(90)); expect(s.host.choosingReattachment).toBe(false);
 	} finally { s.close(); }
 });
@@ -998,4 +998,38 @@ test.each([false, true])("inline sidebar view choice selects another scope witho
 		expect(s.session.captureBaseTarget).toHaveBeenCalledWith(baseDiscussionScope(id(3), id(5)), { type: "view" });
 		expect(save).toHaveBeenCalled();
 	} finally { s.close(); }
+});
+
+test("Move here retains its button across selection updates and commits the latest captured target", async () => {
+ const f = fixture(); await f.start();
+ const session = Object.assign(mockSessions[0], { canReattach: true, permission: () => ({ read: true, comment: true }) });
+ const typed = session as unknown as DiscussionSession;
+ const thread = { id: id(30), anchor_revision: 3, anchor: { version: 1, type: "note" } } as AnchoredThread;
+ Object.assign(f.plugin.app.workspace, { getActiveViewOfType: () => ({ containerEl: document.body }) });
+ const owner = {}, captured = { session: typed, entryId: id(3), file: f.file, anchor: { version: 1 as const, type: "note" as const } };
+ try {
+  f.host.openReattachment(typed, id(3), thread);
+  f.host.offerReattachment(owner, captured, new DOMRect(10, 20, 40, 20));
+  const button = document.querySelector<HTMLButtonElement>(".relay-move-target-prompt button")!;
+  expect(button.textContent).toBe("Move here");
+  f.host.offerReattachment(owner, captured, new DOMRect(20, 30, 40, 20));
+  expect(document.querySelector(".relay-move-target-prompt button")).toBe(button);
+  button.click(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  expect(session.sendReattachment).toHaveBeenCalledTimes(1);
+  expect(document.querySelector(".relay-move-target-prompt")).toBeNull();
+ } finally { f.close(); }
+});
+
+test("an unconfirmed move opens recovery rather than replacing its immutable request", async () => {
+ const f = fixture(); await f.start();
+ const session = Object.assign(mockSessions[0], { canReattach: true, permission: () => ({ read: true, comment: true }) });
+ const typed = session as unknown as DiscussionSession, thread = { id: id(30), anchor_revision: 2 } as AnchoredThread;
+ session.pendingReattachment.mockResolvedValue({ operationId: id(31) });
+ const count = jest.mocked(ReattachCommentModal).mock.calls.length;
+ try {
+  f.host.openReattachment(typed, id(3), thread); await Promise.resolve();
+  expect(f.host.choosingReattachment).toBe(false);
+  expect(jest.mocked(ReattachCommentModal).mock.calls).toHaveLength(count + 1);
+  expect(session.prepareReattachment).not.toHaveBeenCalled();
+ } finally { f.close(); }
 });

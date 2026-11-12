@@ -48,8 +48,8 @@ Object.assign(HTMLElement.prototype, {
 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const entry = id(3), identity = { serverId: "https://relay.test", accountId: id(1), shareId: id(2), vaultId: "dom" };
-async function until(check: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 200; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+async function until(check: () => boolean | Promise<boolean>): Promise<void> {
+	for (let attempt = 0; attempt < 200; attempt++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
 	throw new Error("DOM condition did not settle");
 }
 async function fixture() {
@@ -79,7 +79,8 @@ test("composer preserves explicit mention identities in durable drafts and atomi
 		composer.textarea.value = "Hi "; composer.textarea.dispatchEvent(new Event("input"));
 		composer.textarea.setSelectionRange(3, 3);
 		const select = parent.querySelector("select")!; select.value = id(1); select.dispatchEvent(new Event("change"));
-		await until(() => parent.textContent!.includes("Draft saved"));
+		await until(async () => !!(await store.getDraft("new")));
+		expect(parent.textContent).not.toMatch(/Saving draft|Draft saved on this device/);
 		expect((await store.getDraft("new"))?.body).toMatchObject({ text: "Hi @Alice ", mentions: [{ start: 3, end: 9, userId: id(1) }] });
 		await composer.submit();
 		expect(session.queue).toHaveBeenCalledTimes(1);
@@ -204,7 +205,8 @@ test("a composer captures restore binding at the click, before asynchronous draf
 	try {
 		await until(() => !composer.textarea.disabled);
 		composer.textarea.value = "Keep the clicked generation"; composer.textarea.dispatchEvent(new Event("input"));
-		await until(() => parent.textContent!.includes("Draft saved"));
+		await until(async () => !!(await store.getDraft("generation-draft")));
+		expect(parent.textContent).not.toMatch(/Saving draft|Draft saved on this device/);
 		const sending = composer.submit(); state.restoreBinding = { restoreGeneration: id(91) }; await sending;
 		expect(session.queue.mock.calls[0][0].restoreGeneration).toBe(id(90));
 		expect((await store.pending(entry))[0].restoreGeneration).toBe(id(90));
@@ -621,7 +623,8 @@ test("typing @ opens a named member picker and preserves text when dismissed", a
         expect(parent.querySelector("select")!.hidden).toBe(true);
         menu.items[0].click();
         expect(composer.textarea.value).toBe("Hi @Alice ");
-        await until(() => parent.textContent!.includes("Draft saved"));
+        await until(async () => !!(await store.getDraft("mention-picker")));
+		expect(parent.textContent).not.toMatch(/Saving draft|Draft saved on this device/);
         expect((await store.getDraft("mention-picker"))?.body).toMatchObject({ mentions: [{ start: 3, end: 9, userId: id(1) }] });
     } finally { composer.dispose(); store.close(); parent.remove(); delete (globalThis as any).commentTestMenu; }
 });

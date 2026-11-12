@@ -62,6 +62,10 @@ export class ReadingComments extends Component {
 					const range = selection.getRangeAt(0);
 					if (view.contentEl.contains(range.commonAncestorContainer)) {
 						if (range.collapsed) this.selections.delete(view); else this.selections.set(view, range.cloneRange());
+						if (this.host.choosingReattachment && !this.host.choosingCommandRecovery) {
+							try { this.host.offerReattachment?.(view, range.collapsed ? undefined : this.capture(view), range.getBoundingClientRect()); }
+							catch { this.host.offerReattachment?.(view); }
+						}
 						for (const section of this.scopes.get(view)!.sections) section.containerEl.classList.toggle("relay-reading-comment-active", !range.collapsed && range.intersectsNode(section.containerEl));
 					}
 				}
@@ -318,7 +322,7 @@ export class ReadingCommentSection extends MarkdownRenderChild {
 	controls(scope: Scope, threads: AnchoredThread[]): void {
 		this.containerEl.classList.add("relay-reading-comment-section");
 		const comment = !!scope.session.permission(scope.entryId)?.comment;
-		const signature = [scope.session.identity.accountId, scope.entryId, comment, scope.session.canAnchorBlocks, ...threads.map(thread => thread.id + ":" + thread.activity_sequence)].join("|");
+		const signature = [scope.session.identity.accountId, scope.entryId, comment, scope.session.canAnchorBlocks, ...threads.map(thread => thread.id + ":" + thread.state + ":" + thread.author_id)].join("|");
 		if (signature === this.signature && this.bar) return;
 		this.signature = signature; this.bar?.remove();
 		this.bar = this.containerEl.ownerDocument.createElement("span"); this.bar.className = "relay-reading-comment-controls";
@@ -339,18 +343,24 @@ export class ReadingCommentSection extends MarkdownRenderChild {
 		this.containerEl.classList.toggle("relay-reading-has-comments", threads.length > 0);
 		this.containerEl.classList.toggle("relay-reading-block-comment", threads.some(thread => thread.anchor?.type === "text" && thread.anchor.structure));
 	}
+	private overlayKey = "";
 	overlay(ranges: Range[]): void {
-		this.svg?.remove(); this.svg = undefined; if (!ranges.length) return;
+		if (!ranges.length) { this.svg?.remove(); this.svg = undefined; this.overlayKey = ""; return; }
 		const box = this.containerEl.getBoundingClientRect(); if (!box.width || !box.height) return;
-		const svg = this.containerEl.ownerDocument.createElementNS("http://www.w3.org/2000/svg", "svg");
+		const rects = ranges.flatMap(range => Array.from(range.getClientRects()).slice(0, 200)).map(rect => ({ x: rect.left - box.left, y: rect.top - box.top, width: rect.width, height: rect.height }));
+		const key = JSON.stringify([box.width, box.height, rects]);
+		if (this.svg?.isConnected && this.overlayKey === key) return;
+		const svg = this.svg ?? this.containerEl.ownerDocument.createElementNS("http://www.w3.org/2000/svg", "svg");
 		svg.classList.add("relay-reading-comment-overlay"); svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`); svg.setAttribute("aria-hidden", "true");
-		for (const range of ranges) for (const rect of Array.from(range.getClientRects()).slice(0, 200)) {
+		svg.replaceChildren();
+		for (const rect of rects) {
 			const mark = svg.ownerDocument.createElementNS("http://www.w3.org/2000/svg", "rect");
-			for (const [key, value] of Object.entries({ x: rect.left - box.left, y: rect.top - box.top, width: rect.width, height: rect.height })) mark.setAttribute(key, String(value));
+			for (const [name, value] of Object.entries(rect)) mark.setAttribute(name, String(value));
 			svg.append(mark);
 		}
-		this.svg = svg; this.containerEl.append(svg);
+		this.overlayKey = key; this.svg = svg; if (!svg.isConnected) this.containerEl.append(svg);
 	}
+
 	clear(): void {
 		this.bar?.remove(); this.bar = undefined; this.svg?.remove(); this.svg = undefined; this.signature = ""; this.mapped = undefined;
 		if (this.owner.owns(this)) this.containerEl.classList.remove("relay-reading-comment-section", "relay-reading-has-comments", "relay-reading-comment-active", "relay-reading-block-comment");

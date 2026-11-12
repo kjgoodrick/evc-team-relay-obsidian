@@ -136,3 +136,18 @@ test("an unsupported callout render keeps an explicit whole-block target and can
 		expect(f.comments.reveal(f.view, f.session, id(1), captured.anchor)).toBe(true);
 	} finally { f.close(); }
 });
+
+test("unchanged reading highlight geometry retains the overlay and its rectangle nodes", () => {
+ const f = fixture(), root = f.roots[0], section = f.sections[0];
+ const rect = new DOMRect(10, 20, 100, 20);
+ root.getBoundingClientRect = () => new DOMRect(0, 0, 500, 600);
+ const range = document.createRange(); range.selectNodeContents(root);
+ range.getClientRects = () => [rect] as unknown as DOMRectList;
+ try {
+  section.overlay([range]);
+  const svg = root.querySelector("svg"), mark = svg!.firstChild;
+  section.overlay([range]);
+  expect(root.querySelector("svg")).toBe(svg); expect(svg!.firstChild).toBe(mark);
+  section.overlay([]); expect(root.querySelector("svg")).toBeNull();
+ } finally { f.close(); }
+});

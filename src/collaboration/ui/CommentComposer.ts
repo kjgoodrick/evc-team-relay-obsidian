@@ -371,7 +371,7 @@ export class CommentComposer {
 					prepared?.apply();
 					if (!this.disposed) this.update();
 				}
-				if (!this.disposed) this.status.setText("Draft and pictures saved on this device");
+				if (!this.disposed) this.status.setText("");
 			} catch (error) {
 				if (this.disposed) return;
 				if (error instanceof PictureInputError) this.status.setText(error.message);
@@ -388,7 +388,7 @@ export class CommentComposer {
 		if (this.localOptions && !this.localOptions.current() || this.disposed || this.textarea.disabled || this.busy || this.discardReview || this.retiredTarget || !this.editingAvailable() || this.onlinePending || this.saveFailed) return;
 		const text = this.textarea.value;
 		const draft = this.snapshot(), value = JSON.stringify(draft);
-		this.status.setText("Saving draft…");
+
 		this.chain = this.session.trackLocal(this.chain.then(async () => {
 			if (this.saveFailed) return;
 			if (value !== this.savedValue || this.revision < 0) {
@@ -396,7 +396,7 @@ export class CommentComposer {
 					...(this.target ? { target: protocolJson(this.target) } : {}) }, this.revision < 0 ? null : this.revision, [], this.localOptions?.current);
 				this.revision++; this.savedValue = value;
 			}
-			if (!this.disposed && this.textarea.value === text) this.status.setText("Draft saved on this device");
+			if (!this.disposed && this.textarea.value === text) this.status.setText("");
 		}).catch(() => {
 			this.saveFailed = true;
 			if (!this.disposed) this.status.setText("Could not save, or this draft changed in another window. Copy your text before reopening comments.");
